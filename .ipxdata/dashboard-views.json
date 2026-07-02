@@ -1,0 +1,89 @@
+{
+  "8e61a737-76fe-4f96-9406-230291ca1b1f": {
+    "live": [
+      {
+        "id": "live_chart_minute",
+        "visible": true
+      },
+      {
+        "id": "live_chart_hour",
+        "visible": true
+      },
+      {
+        "id": "live_last_minute",
+        "visible": true
+      },
+      {
+        "id": "live_last_hour",
+        "visible": true
+      },
+      {
+        "id": "live_today_total",
+        "visible": true,
+        "size": "compact"
+      },
+      {
+        "id": "live_last_5_minutes",
+        "visible": true
+      },
+      {
+        "id": "live_scenario_detail",
+        "visible": true
+      }
+    ],
+    "occupancy": [
+      {
+        "id": "occupancy_current_total",
+        "visible": false
+      },
+      {
+        "id": "occupancy_average",
+        "visible": false
+      },
+      {
+        "id": "occupancy_minimum",
+        "visible": false
+      },
+      {
+        "id": "occupancy_peak",
+        "visible": false
+      },
+      {
+        "id": "occupancy_alerts",
+        "visible": false
+      },
+      {
+        "id": "occupancy_active_areas",
+        "visible": false
+      },
+      {
+        "id": "occupancy_chart_minute",
+        "visible": true
+      },
+      {
+        "id": "occupancy_chart_hour",
+        "visible": true
+      },
+      {
+        "id": "occupancy_chart_day",
+        "visible": true
+      },
+      {
+        "id": "occupancy_chart_week",
+        "visible": true
+      },
+      {
+        "id": "occupancy_chart_month",
+        "visible": true
+      },
+      {
+        "id": "occupancy_scenario_detail",
+        "visible": true
+      },
+      {
+        "id": "occupancy_alert_list",
+        "visible": true
+      }
+    ]
+  }
+}
