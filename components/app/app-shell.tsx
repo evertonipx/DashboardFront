@@ -10,6 +10,7 @@ import {
   ChevronRight,
   FileText,
   Filter,
+  Eye,
   LogOut,
   MapPinned,
   ServerCog,
@@ -59,6 +60,7 @@ type NavItem = {
 const managerNavItems: NavItem[] = [
   { href: "/manager/live", label: "Ao Vivo", icon: Activity },
   { href: "/manager/reports", label: "Relatórios", icon: FileText },
+  { href: "/manager/views", label: "Visões", icon: Eye },
   {
     href: "/manager/workers",
     label: "Workers",

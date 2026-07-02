@@ -7,6 +7,7 @@ import {
   type CardMenuKey,
   type CardPreference,
 } from "@/lib/view-preferences";
+import { permissionsAllowWidgetManagement } from "@/lib/permissions";
 import type { CurrentUser, UserPermission } from "@/lib/types";
 
 type DashboardViewStore = Partial<
@@ -118,7 +119,7 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
         authorization,
       )) ?? [];
 
-    if (!canManageWidgets(permissions)) {
+    if (!permissionsAllowWidgetManagement(permissions)) {
       return {
         response: NextResponse.json(
           { error: "Sem permissão para configurar widgets." },
@@ -169,53 +170,6 @@ async function writeStore(store: DashboardViewStore) {
 function hasMasterAccess(user: CurrentUser) {
   const role = normalizeRole(user.role);
   return Boolean(user.is_master || role === "super-admin");
-}
-
-function canManageWidgets(permissions: UserPermission[]) {
-  return permissions.some((permission) => {
-    const slug = permission.slug;
-    if (
-      slug === "dashboard_widgets_manage" ||
-      slug === "widget_manage" ||
-      slug === "widgets_manage" ||
-      slug === "dashboard_manage" ||
-      slug === "dashboard_layout_manage" ||
-      slug === "dashboard_view_manage" ||
-      slug === "counting_manage_widgets" ||
-      slug === "counting_widgets_manage" ||
-      slug === "dashboard_widgets_edit"
-    ) {
-      return true;
-    }
-
-    const text = normalizeRole(
-      [
-        permission.slug,
-        permission.action,
-        permission.module?.slug,
-        permission.module?.name,
-      ]
-        .filter(Boolean)
-        .join(" "),
-    );
-
-    return (
-      ["dashboard", "widget", "visual", "view", "layout"].some((term) =>
-        text.includes(term),
-      ) &&
-      [
-        "manage",
-        "admin",
-        "create",
-        "edit",
-        "update",
-        "delete",
-        "write",
-        "configure",
-        "config",
-      ].some((term) => text.includes(term))
-    );
-  });
 }
 
 function normalizeRole(value: string | undefined) {

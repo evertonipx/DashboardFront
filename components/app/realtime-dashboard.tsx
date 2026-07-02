@@ -47,6 +47,7 @@ import {
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
+import { pastelBarColor } from "@/lib/chart-palette";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -101,6 +102,8 @@ type ScenarioComparisonPoint = {
   name: string;
   total: number;
 };
+
+type TodayComparisonPoint = ScenarioComparisonPoint;
 
 type RealtimeScopeMode = "scenario" | "location" | "sub_location";
 
@@ -450,6 +453,40 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     () => buildScenarioTodayComparisonPoints(scenarios, hourRows, clock),
     [clock, hourRows, scenarios],
   );
+  const locationTodayComparisonPoints = React.useMemo(
+    () =>
+      buildScopeTodayComparisonPoints(
+        buildRealtimeScopeOptions({
+          cameras,
+          groups: cameraGroups,
+          locations,
+          manager,
+          mode: "location",
+          scenarios,
+          subLocations,
+        }),
+        hourRows,
+        clock,
+      ),
+    [cameraGroups, cameras, clock, hourRows, locations, manager, scenarios, subLocations],
+  );
+  const subLocationTodayComparisonPoints = React.useMemo(
+    () =>
+      buildScopeTodayComparisonPoints(
+        buildRealtimeScopeOptions({
+          cameras,
+          groups: cameraGroups,
+          locations,
+          manager,
+          mode: "sub_location",
+          scenarios,
+          subLocations,
+        }),
+        hourRows,
+        clock,
+      ),
+    [cameraGroups, cameras, clock, hourRows, locations, manager, scenarios, subLocations],
+  );
 
   const metricCards = [
     {
@@ -531,23 +568,59 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       <EmptyRealtimeCard title={definition.label} />
     ),
   }));
-  const comparisonCards =
+  const comparisonCards = [
     scenarioTodayComparisonPoints.length > 1
-      ? [
-          {
-            id: "live_today_scenario_comparison",
-            label: "Hoje por cenário",
-            defaultSize: "wide" as const,
-            className: "sm:col-span-2 xl:col-span-2",
-            node: (
-              <ScenarioTodayComparisonCard
-                loading={initialLoading}
-                points={scenarioTodayComparisonPoints}
-              />
-            ),
-          },
-        ]
-      : [];
+      ? {
+          id: "live_today_scenario_comparison",
+          label: "Hoje por cenário",
+          defaultSize: "wide" as const,
+          className: "sm:col-span-2 xl:col-span-2",
+          node: (
+            <TodayComparisonCard
+              description="Comparativo do acumulado do dia entre os cenários cadastrados."
+              emptyText="Nenhum cenário disponível para comparar."
+              loading={initialLoading}
+              points={scenarioTodayComparisonPoints}
+              title="Hoje por cenário"
+            />
+          ),
+        }
+      : null,
+    locationTodayComparisonPoints.length > 1
+      ? {
+          id: "live_today_location_comparison",
+          label: "Hoje por local",
+          defaultSize: "wide" as const,
+          className: "sm:col-span-2 xl:col-span-2",
+          node: (
+            <TodayComparisonCard
+              description="Comparativo do acumulado do dia entre os locais cadastrados."
+              emptyText="Nenhum local disponível para comparar."
+              loading={initialLoading}
+              points={locationTodayComparisonPoints}
+              title="Hoje por local"
+            />
+          ),
+        }
+      : null,
+    subLocationTodayComparisonPoints.length > 1
+      ? {
+          id: "live_today_sub_location_comparison",
+          label: "Hoje por sublocal",
+          defaultSize: "wide" as const,
+          className: "sm:col-span-2 xl:col-span-2",
+          node: (
+            <TodayComparisonCard
+              description="Comparativo do acumulado do dia entre os sublocais cadastrados."
+              emptyText="Nenhum sublocal disponível para comparar."
+              loading={initialLoading}
+              points={subLocationTodayComparisonPoints}
+              title="Hoje por sublocal"
+            />
+          ),
+        }
+      : null,
+  ].filter((card): card is NonNullable<typeof card> => Boolean(card));
 
   const detailCards = selectedScope
     ? [
@@ -779,12 +852,18 @@ function RealtimeChartCard({
   );
 }
 
-function ScenarioTodayComparisonCard({
+function TodayComparisonCard({
+  description,
+  emptyText,
   loading,
   points,
+  title,
 }: {
+  description: string;
+  emptyText: string;
   loading: boolean;
-  points: ScenarioComparisonPoint[];
+  points: TodayComparisonPoint[];
+  title: string;
 }) {
   const option = React.useMemo(
     () => buildScenarioComparisonOption(points),
@@ -796,11 +875,9 @@ function ScenarioTodayComparisonCard({
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2">
           <BarChart3 className="h-4 w-4 text-primary" />
-          Hoje por cenário
+          {title}
         </CardTitle>
-        <CardDescription>
-          Comparativo do acumulado do dia entre os cenários cadastrados.
-        </CardDescription>
+        <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -810,7 +887,7 @@ function ScenarioTodayComparisonCard({
             <EChart option={option} />
           </div>
         ) : (
-          <EmptyChartState text="Nenhum cenário disponível para comparar." />
+          <EmptyChartState text={emptyText} />
         )}
       </CardContent>
     </Card>
@@ -1392,6 +1469,26 @@ function buildScenarioTodayComparisonPoints(
     .sort((left, right) => right.total - left.total || left.name.localeCompare(right.name, "pt-BR"));
 }
 
+function buildScopeTodayComparisonPoints(
+  scopes: RealtimeScopeOption[],
+  rows: AggregateEventRow[],
+  now: Date,
+): TodayComparisonPoint[] {
+  const todayStart = startOfDay(now);
+  const tomorrowStart = addDays(todayStart, 1);
+
+  return scopes
+    .map((scope) => ({
+      id: scope.id,
+      name: scope.name,
+      total: sumScopeRowsInRange(rows, scope, todayStart, tomorrowStart),
+    }))
+    .sort(
+      (left, right) =>
+        right.total - left.total || left.name.localeCompare(right.name, "pt-BR"),
+    );
+}
+
 function sumScenarioRowsInRange(
   rows: AggregateEventRow[],
   scenario: Scenario,
@@ -1648,14 +1745,14 @@ function buildChartOption(
 function buildScenarioComparisonOption(
   points: ScenarioComparisonPoint[],
 ): EnterpriseChartOption {
-  const visiblePoints = points.slice(0, 12).reverse();
+  const visiblePoints = points.slice(0, 12);
 
   return {
     color: ["#1267C4"],
     grid: {
-      bottom: 18,
+      bottom: 72,
       containLabel: true,
-      left: 4,
+      left: 36,
       right: 18,
       top: 12,
     },
@@ -1682,6 +1779,27 @@ function buildScenarioComparisonOption(
       axisLabel: {
         color: "#66758A",
         fontSize: 11,
+        hideOverlap: true,
+        interval: 0,
+        overflow: "truncate",
+        rotate: 28,
+        width: 86,
+      },
+      axisLine: {
+        lineStyle: {
+          color: "#D8E3F2",
+        },
+      },
+      axisTick: {
+        show: false,
+      },
+      data: visiblePoints.map((point) => point.name),
+      type: "category",
+    },
+    yAxis: {
+      axisLabel: {
+        color: "#66758A",
+        fontSize: 11,
       },
       axisLine: {
         lineStyle: {
@@ -1696,47 +1814,23 @@ function buildScenarioComparisonOption(
       },
       type: "value",
     },
-    yAxis: {
-      axisLabel: {
-        color: "#66758A",
-        fontSize: 11,
-        overflow: "truncate",
-        width: 120,
-      },
-      axisLine: {
-        lineStyle: {
-          color: "#D8E3F2",
-        },
-      },
-      axisTick: {
-        show: false,
-      },
-      data: visiblePoints.map((point) => point.name),
-      type: "category",
-    },
     series: [
       {
-        barCategoryGap: "42%",
-        barMaxWidth: 18,
-        data: visiblePoints.map((point) => point.total),
+        barCategoryGap: "36%",
+        barMaxWidth: 34,
+        data: visiblePoints.map((point, index) => ({
+          itemStyle: {
+            color: pastelBarColor(index),
+          },
+          value: point.total,
+        })),
         emphasis: {
           itemStyle: {
             color: "#0B4EA2",
           },
         },
         itemStyle: {
-          borderRadius: [0, 2, 2, 0],
-          color: {
-            colorStops: [
-              { color: "#1267C4", offset: 0 },
-              { color: "#5AA8F5", offset: 1 },
-            ],
-            type: "linear",
-            x: 0,
-            x2: 1,
-            y: 0,
-            y2: 0,
-          },
+          borderRadius: [2, 2, 0, 0],
         },
         name: "Hoje",
         type: "bar",

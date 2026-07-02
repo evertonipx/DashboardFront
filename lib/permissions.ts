@@ -1,5 +1,5 @@
 import type { CurrentUser, UserPermission } from "@/lib/types";
-import { isMasterUser } from "@/lib/user-role";
+import { isMasterUser, normalizeRole } from "@/lib/user-role";
 
 export type OperationalPermissionDefinition = {
   slug: string;
@@ -23,6 +23,15 @@ export const OPERATIONAL_PERMISSIONS = [
       "dashboard_widgets_edit",
       "counting_manage_widgets",
       "counting_widgets_manage",
+      "counting_create_scenario",
+      "counting_edit_scenario",
+      "counting_delete_scenario",
+      "counting_create_camera",
+      "counting_edit_camera",
+      "counting_delete_camera",
+      "occupancy_create_scenario",
+      "occupancy_edit_scenario",
+      "occupancy_delete_scenario",
     ],
     terms: ["dashboard", "widget", "visual", "view", "layout"],
   },
@@ -59,6 +68,15 @@ export const OPERATIONAL_PERMISSIONS = [
       "counting_locations_manage",
       "counting_create_location",
       "counting_edit_location",
+      "counting_create_scenario",
+      "counting_edit_scenario",
+      "counting_delete_scenario",
+      "occupancy_create_scenario",
+      "occupancy_edit_scenario",
+      "occupancy_delete_scenario",
+      "counting_create_camera",
+      "counting_edit_camera",
+      "counting_delete_camera",
     ],
     terms: ["location", "locations", "sub location", "local", "locais", "place"],
   },
@@ -117,11 +135,13 @@ export function createOperationalPermissionState(
 }
 
 export function canManageWidgets(user: CurrentUser | null) {
-  return canManage(user, "dashboard_widgets_manage");
+  if (isPrivilegedUser(user)) return true;
+  return permissionsAllowWidgetManagement(user?.permissions);
 }
 
 export function canManageLocations(user: CurrentUser | null) {
-  return canManage(user, "locations_manage");
+  if (isPrivilegedUser(user)) return true;
+  return hasAnyOperationalPermission(user);
 }
 
 export function canManageOccupancy(user: CurrentUser | null) {
@@ -145,6 +165,21 @@ export function hasAnyOperationalPermission(user: CurrentUser | null) {
 
   return OPERATIONAL_PERMISSIONS.some((permission) =>
     userHasPermission(user, permission),
+  );
+}
+
+export function permissionsAllowWidgetManagement(
+  permissions: UserPermission[] = [],
+) {
+  const widgetPermission = OPERATIONAL_PERMISSIONS.find(
+    (permission) => permission.slug === "dashboard_widgets_manage",
+  );
+
+  return Boolean(
+    widgetPermission &&
+      permissions.some((permission) =>
+        userPermissionMatchesDefinition(permission, widgetPermission),
+      ),
   );
 }
 
@@ -261,5 +296,5 @@ function normalizePermissionText(value: string | undefined) {
 }
 
 function isPrivilegedUser(user: CurrentUser | null) {
-  return isMasterUser(user);
+  return isMasterUser(user) || normalizeRole(user?.role) === "admin";
 }

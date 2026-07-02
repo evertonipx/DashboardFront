@@ -153,6 +153,7 @@ type UserFormState = {
   password: string;
   active: string;
   isMaster: boolean;
+  isCompanyAdmin: boolean;
 };
 
 type PermissionGroup = {
@@ -168,7 +169,14 @@ type PermissionOption = {
   label: string;
   description: string;
   slugs: string[];
+  grants: PermissionGrantOption[];
   unavailable?: boolean;
+};
+
+type PermissionGrantOption = {
+  id: string;
+  module_id?: string;
+  slug: string;
 };
 
 type WorkerRow = WorkerScopeRow;
@@ -209,6 +217,7 @@ const emptyUserForm: UserFormState = {
   password: "",
   active: "true",
   isMaster: false,
+  isCompanyAdmin: false,
 };
 
 const planLabels: Record<string, string> = {
@@ -290,6 +299,7 @@ export function SuperAdminDashboard() {
   const [userForm, setUserForm] = React.useState<UserFormState>(emptyUserForm);
   const [masterUserForm, setMasterUserForm] =
     React.useState<UserFormState>(emptyUserForm);
+  const [userProfileDirty, setUserProfileDirty] = React.useState(false);
   const [permissionCatalog, setPermissionCatalog] = React.useState<Permission[]>([]);
   const [userPermissions, setUserPermissions] = React.useState<Record<string, boolean>>(
     {},
@@ -360,17 +370,20 @@ export function SuperAdminDashboard() {
   );
   const visiblePermissionOptions = React.useMemo(
     () =>
-      operationalPermissionOptions.map((option) => ({
-        ...option,
-        unavailable:
-          option.unavailable ||
-          !option.module_id ||
-          !enabledCompanyModuleIds.has(option.module_id),
-        description:
-          option.module_id && !enabledCompanyModuleIds.has(option.module_id)
-            ? `${option.description} Habilite o algoritmo para esta empresa antes de conceder este acesso.`
-            : option.description,
-      })),
+      operationalPermissionOptions.map((option) => {
+        const hasEnabledGrant = option.grants.some(
+          (grant) => grant.module_id && enabledCompanyModuleIds.has(grant.module_id),
+        );
+
+        return {
+          ...option,
+          unavailable: option.unavailable || !hasEnabledGrant,
+          description:
+            option.grants.length && !hasEnabledGrant
+              ? `${option.description} Habilite o algoritmo para esta empresa antes de conceder este acesso.`
+              : option.description,
+        };
+      }),
     [enabledCompanyModuleIds, operationalPermissionOptions],
   );
 
@@ -556,6 +569,7 @@ export function SuperAdminDashboard() {
 
     setEditingUser(user ?? null);
     setUserPermissions({});
+    setUserProfileDirty(false);
     setUserForm(
       user
         ? {
@@ -563,7 +577,8 @@ export function SuperAdminDashboard() {
             email: user.email,
             password: "",
             active: String(user.active),
-            isMaster: Boolean(user.is_master),
+            isMaster: false,
+            isCompanyAdmin: false,
           }
         : emptyUserForm,
     );
@@ -584,10 +599,33 @@ export function SuperAdminDashboard() {
             password: "",
             active: String(user.active),
             isMaster: true,
+            isCompanyAdmin: false,
           }
-        : { ...emptyUserForm, isMaster: true },
+        : { ...emptyUserForm, isMaster: true, isCompanyAdmin: false },
     );
     setMasterUserDialog(true);
+  }
+
+  function setCompanyAdminAccess(enabled: boolean) {
+    if (userForm.isMaster) return;
+
+    setUserForm((form) => ({ ...form, isCompanyAdmin: enabled }));
+    setUserPermissions((current) => ({
+      ...current,
+      ...Object.fromEntries(
+        visiblePermissionOptions
+          .filter((option) => !option.unavailable)
+        .map((option) => [option.slug, enabled]),
+      ),
+    }));
+  }
+
+  function setSuperAdminAccess(enabled: boolean) {
+    setUserForm((form) => ({
+      ...form,
+      isMaster: enabled,
+      isCompanyAdmin: enabled ? false : form.isCompanyAdmin,
+    }));
   }
 
   function selectCompanyScope(company: Company) {
@@ -631,9 +669,18 @@ export function SuperAdminDashboard() {
         `/users/${userId}/permissions`,
         { headers: companyScopeHeaders(selectedCompanyId) },
       );
-      setUserPermissions(
-        createPermissionState(permissions, visiblePermissionOptions),
+      const permissionState = createPermissionState(
+        permissions,
+        visiblePermissionOptions,
       );
+      setUserPermissions(permissionState);
+      setUserForm((form) => ({
+        ...form,
+        isCompanyAdmin: hasAllAvailablePermissions(
+          permissionState,
+          visiblePermissionOptions,
+        ),
+      }));
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -761,18 +808,15 @@ export function SuperAdminDashboard() {
       return;
     }
 
+    if (!selectedCompanyId) {
+      toast.error("Selecione uma empresa antes de salvar o usuário.");
+      return;
+    }
+
     setSaving(true);
     try {
-      let savedUser: ManagedUser | undefined;
-      const isMaster = userForm.isMaster;
-
-      if (isMaster) {
+      if (userForm.isMaster) {
         const companyId = selectedCompanyId.trim();
-        if (!companyId) {
-          toast.error("Selecione uma empresa para vincular o super-admin.");
-          return;
-        }
-
         const body = {
           name,
           email,
@@ -781,35 +825,39 @@ export function SuperAdminDashboard() {
           ...(editingUser ? { active: userForm.active === "true" } : undefined),
           ...(password ? { password } : undefined),
         };
-        const headers = companyScopeHeaders(companyId);
 
         if (editingUser) {
-          savedUser =
-            (await apiFetch<ManagedUser | undefined>(`/users/${editingUser.id}`, {
-              method: "PUT",
-              headers,
-              body,
-            })) ?? { ...editingUser, ...body };
-        } else {
-          savedUser = await apiFetch<ManagedUser | undefined>("/users", {
-            method: "POST",
-            headers,
+          await apiFetch(`/users/${editingUser.id}`, {
+            method: "PUT",
+            headers: companyScopeHeaders(companyId),
             body,
           });
+          toast.success("Usuário promovido a super-admin.");
+        } else {
+          await apiFetch("/users", {
+            method: "POST",
+            headers: companyScopeHeaders(companyId),
+            body,
+          });
+          toast.success("Super-admin criado.");
         }
-      } else if (editingUser) {
-        savedUser =
-          (await apiFetch<ManagedUser | undefined>(`/users/${editingUser.id}`, {
-            method: "PUT",
-            headers: companyScopeHeaders(selectedCompanyId),
-            body: {
-              name,
-              email,
-              is_master: false,
-              active: userForm.active === "true",
-              ...(password ? { password } : undefined),
-            },
-          })) ?? editingUser;
+
+        setUserDialog(false);
+        await loadCompanies();
+        await loadCompanyDetails();
+        return;
+      }
+
+      let savedUser: ManagedUser | undefined;
+      const profileChanged = editingUser ? userProfileDirty : true;
+
+      if (editingUser) {
+        savedUser = editingUser;
+        if (profileChanged) {
+          toast(
+            "Os acessos serão salvos, mas alterações de cadastro do usuário não foram enviadas porque a API não localiza usuários de outra empresa em /users/{id}.",
+          );
+        }
       } else {
         savedUser = await apiFetch<ManagedUser | undefined>(
           `/companies/${selectedCompanyId}/users`,
@@ -828,28 +876,26 @@ export function SuperAdminDashboard() {
       }
 
       let permissionSyncError = "";
-      if (!isMaster) {
-        const savedUserId = await resolveSavedCompanyUserId(savedUser, email);
-        if (savedUserId) {
-          try {
-            await syncUserPermissions(savedUserId);
-          } catch (error) {
-            permissionSyncError =
-              error instanceof Error
-                ? error.message
-                : "Não foi possível sincronizar os acessos do usuário.";
-          }
-        } else {
+      const savedUserId = await resolveSavedCompanyUserId(savedUser, email);
+      if (savedUserId) {
+        try {
+          await syncUserPermissions(savedUserId);
+        } catch (error) {
           permissionSyncError =
-            "A API salvou o usuário, mas não retornou nem permitiu localizar o ID para aplicar os acessos.";
+            error instanceof Error
+              ? error.message
+              : "Não foi possível sincronizar os acessos do usuário.";
         }
+      } else {
+        permissionSyncError =
+          "A API salvou o usuário, mas não retornou nem permitiu localizar o ID para aplicar os acessos.";
       }
 
       toast.success(
-        isMaster
+        userForm.isCompanyAdmin
           ? editingUser
-            ? "Usuário promovido a super-admin."
-            : "Super-admin criado."
+            ? "Admin da empresa atualizado."
+            : "Admin da empresa criado."
           : editingUser
             ? "Usuário atualizado."
             : "Usuário criado.",
@@ -860,12 +906,15 @@ export function SuperAdminDashboard() {
         );
       }
       setUserDialog(false);
-      if (isMaster) {
-        await loadCompanies();
-      }
       await loadCompanyDetails();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Falha ao salvar usuário.");
+      toast.error(
+        userForm.isMaster
+          ? masterSaveErrorMessage(error, selectedCompanyId)
+          : error instanceof Error
+            ? error.message
+            : "Falha ao salvar usuário.",
+      );
     } finally {
       setSaving(false);
     }
@@ -1018,6 +1067,16 @@ export function SuperAdminDashboard() {
       : "Falha ao excluir super-admin.";
   }
 
+  function masterSaveErrorMessage(error: unknown, companyId: string) {
+    if (error instanceof ApiError && error.status === 404) {
+      return `Não foi possível salvar como super-admin. A API não encontrou o usuário no escopo da empresa selecionada (${companyId}).`;
+    }
+
+    return error instanceof Error
+      ? error.message
+      : "Falha ao salvar super-admin.";
+  }
+
   async function resolveSavedCompanyUserId(
     savedUser: ManagedUser | undefined,
     email: string,
@@ -1040,11 +1099,8 @@ export function SuperAdminDashboard() {
   }
 
   async function syncUserPermissions(userId: string) {
-    const availableOptions = operationalPermissionOptions.filter(
-      (option) =>
-        option.module_id &&
-        !option.unavailable &&
-        enabledCompanyModuleIds.has(option.module_id),
+    const availableOptions = visiblePermissionOptions.filter(
+      (option) => !option.unavailable,
     );
     if (!availableOptions.length) return;
 
@@ -1053,40 +1109,52 @@ export function SuperAdminDashboard() {
       `/users/${userId}/permissions`,
       { headers: scopedHeaders },
     ).catch(() => []);
-    const operations: Array<Promise<unknown>> = [];
+    const grantedSlugs = new Set(
+      currentPermissions
+        .filter((permission) => permission.slug && permissionIsEnabled(permission))
+        .map((permission) => permission.slug),
+    );
+    const selectedOptions = availableOptions.filter(
+      (option) =>
+        isBackendGrantablePermissionOption(option) &&
+        Boolean(userPermissions[option.slug]),
+    );
 
     for (const option of availableOptions) {
-      if (!isConcretePermissionOption(option)) continue;
+      if (!isBackendGrantablePermissionOption(option)) continue;
 
       const shouldGrant = Boolean(userPermissions[option.slug]);
       const matchingPermissions = currentPermissions.filter((permission) =>
         userPermissionMatchesOption(permission, option),
       );
-      const hasEnabledGrant = matchingPermissions.some(permissionIsEnabled);
 
-      if (shouldGrant && !hasEnabledGrant) {
-        operations.push(grantUserPermission(userId, option, scopedHeaders));
-      }
-
-      if (!shouldGrant) {
-        matchingPermissions.forEach((permission) => {
-          const permissionId = getPermissionRecordId(permission);
-          if (!permissionId) return;
-          operations.push(revokeUserPermission(userId, permissionId, scopedHeaders));
-        });
-      }
-    }
-
-    try {
-      await Promise.all(operations);
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("module not enabled")) {
-        throw new Error(
-          "Habilite o módulo da permissão para esta empresa antes de salvar o acesso.",
+      if (shouldGrant) {
+        await grantUserPermission(
+          userId,
+          option,
+          scopedHeaders,
+          grantedSlugs,
+          enabledCompanyModuleIds,
         );
       }
 
-      throw error;
+      if (!shouldGrant) {
+        for (const permission of matchingPermissions) {
+          const isNeededBySelectedOption = selectedOptions.some(
+            (selectedOption) =>
+              selectedOption.slug !== option.slug &&
+              userPermissionMatchesOption(permission, selectedOption),
+          );
+          if (isNeededBySelectedOption) continue;
+
+          const permissionId = getPermissionRecordId(permission);
+          if (!permissionId) continue;
+          await revokeUserPermission(userId, permissionId, scopedHeaders);
+          if (permission.slug) {
+            grantedSlugs.delete(permission.slug);
+          }
+        }
+      }
     }
   }
 
@@ -1813,18 +1881,20 @@ export function SuperAdminDashboard() {
               <FormField label="Nome">
                 <Input
                   value={userForm.name}
-                  onChange={(event) =>
-                    setUserForm((form) => ({ ...form, name: event.target.value }))
-                  }
+                  onChange={(event) => {
+                    setUserProfileDirty(true);
+                    setUserForm((form) => ({ ...form, name: event.target.value }));
+                  }}
                 />
               </FormField>
               <FormField label="E-mail">
                 <Input
                   type="email"
                   value={userForm.email}
-                  onChange={(event) =>
-                    setUserForm((form) => ({ ...form, email: event.target.value }))
-                  }
+                  onChange={(event) => {
+                    setUserProfileDirty(true);
+                    setUserForm((form) => ({ ...form, email: event.target.value }));
+                  }}
                 />
               </FormField>
             </div>
@@ -1835,20 +1905,22 @@ export function SuperAdminDashboard() {
                   type="password"
                   value={userForm.password}
                   placeholder={editingUser ? "Deixe em branco para manter" : ""}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    setUserProfileDirty(true);
                     setUserForm((form) => ({
                       ...form,
                       password: event.target.value,
-                    }))
-                  }
+                    }));
+                  }}
                 />
               </FormField>
               {editingUser ? (
                 <StatusSelect
                   value={userForm.active}
-                  onValueChange={(active) =>
-                    setUserForm((form) => ({ ...form, active }))
-                  }
+                  onValueChange={(active) => {
+                    setUserProfileDirty(true);
+                    setUserForm((form) => ({ ...form, active }));
+                  }}
                 />
               ) : (
                 <div className="hidden md:block" />
@@ -1867,12 +1939,7 @@ export function SuperAdminDashboard() {
                 type="checkbox"
                 className="mt-1 h-4 w-4 accent-primary"
                 checked={userForm.isMaster}
-                onChange={(event) =>
-                  setUserForm((form) => ({
-                    ...form,
-                    isMaster: event.target.checked,
-                  }))
-                }
+                onChange={(event) => setSuperAdminAccess(event.target.checked)}
               />
               <span className="min-w-0">
                 <span className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -1880,8 +1947,36 @@ export function SuperAdminDashboard() {
                   Super-admin
                 </span>
                 <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                  Permite acesso global ao Master para gerenciar empresas,
-                  usuários e dashboards.
+                  Acesso global ao Master. Salva o usuário com is_master=true e
+                  não depende dos acessos operacionais.
+                </span>
+              </span>
+            </label>
+
+            <label
+              className={cn(
+                "flex cursor-pointer items-start gap-3 rounded-md border px-3 py-3 transition",
+                userForm.isMaster && "cursor-default opacity-60",
+                userForm.isCompanyAdmin
+                  ? "border-primary/30 bg-primary/10"
+                  : "border-border bg-card",
+              )}
+            >
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4 accent-primary"
+                checked={userForm.isCompanyAdmin}
+                disabled={userForm.isMaster}
+                onChange={(event) => setCompanyAdminAccess(event.target.checked)}
+              />
+              <span className="min-w-0">
+                <span className="flex items-center gap-2 text-sm font-medium text-foreground">
+                  <ShieldCheck className="h-4 w-4" />
+                  Administrador da empresa
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                  Usuário da empresa com todos os acessos operacionais
+                  disponíveis. Não é superadmin.
                 </span>
               </span>
             </label>
@@ -1902,9 +1997,9 @@ export function SuperAdminDashboard() {
               </div>
 
               {userForm.isMaster ? (
-                <div className="mt-3 rounded-md border border-primary/30 bg-primary/10 px-3 py-3 text-xs leading-5 text-muted-foreground">
-                  Super-admin não usa permissões operacionais por empresa; o
-                  acesso é global e será exibido na aba Super-admins.
+                <div className="mt-3 rounded-md border border-border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
+                  Super-admin usa is_master=true. O frontend não chama
+                  {` /users/{id}/permissions `}para este tipo de usuário.
                 </div>
               ) : permissionGroups.length ? (
                 <div className="mt-3 space-y-3">
@@ -1941,10 +2036,20 @@ export function SuperAdminDashboard() {
                               checked={Boolean(userPermissions[permission.slug])}
                               disabled={loadingUserPermissions || permission.unavailable}
                               onChange={(event) =>
-                                setUserPermissions((current) => ({
-                                  ...current,
-                                  [permission.slug]: event.target.checked,
-                                }))
+                                setUserPermissions((current) => {
+                                  const next = {
+                                    ...current,
+                                    [permission.slug]: event.target.checked,
+                                  };
+                                  setUserForm((form) => ({
+                                    ...form,
+                                    isCompanyAdmin: hasAllAvailablePermissions(
+                                      next,
+                                      visiblePermissionOptions,
+                                    ),
+                                  }));
+                                  return next;
+                                })
                               }
                             />
                             <span className="min-w-0">
@@ -2580,14 +2685,14 @@ function createPermissionState(
   );
   const hasGranularPermissionMatches = options.some(
     (option) =>
-      grantedPermissionIds.has(option.id) ||
+      option.grants.some((grant) => grantedPermissionIds.has(grant.id)) ||
       option.slugs.some((slug) => grantedSlugs.has(slug)),
   );
 
   return Object.fromEntries(
     options.map((option) => {
       const hasExactGrant =
-        grantedPermissionIds.has(option.id) ||
+        option.grants.some((grant) => grantedPermissionIds.has(grant.id)) ||
         option.slugs.some((slug) => grantedSlugs.has(slug));
       const hasModuleGrant =
         !hasGranularPermissionMatches &&
@@ -2596,6 +2701,17 @@ function createPermissionState(
 
       return [option.slug, Boolean(hasExactGrant || hasModuleGrant)];
     }),
+  );
+}
+
+function hasAllAvailablePermissions(
+  state: Record<string, boolean>,
+  options: PermissionOption[],
+) {
+  const availableOptions = options.filter((option) => !option.unavailable);
+  return (
+    availableOptions.length > 0 &&
+    availableOptions.every((option) => Boolean(state[option.slug]))
   );
 }
 
@@ -2621,8 +2737,12 @@ function permissionIsEnabled(permission: UserPermission) {
   return flags.length ? flags.some(Boolean) : true;
 }
 
-function isConcretePermissionOption(option: PermissionOption) {
-  return Boolean(option.id && !option.id.startsWith("operational:"));
+function isBackendGrantablePermissionOption(option: PermissionOption) {
+  return (
+    option.grants.length > 0 &&
+    option.slug !== "dashboard_widgets_manage" &&
+    option.slug !== "locations_manage"
+  );
 }
 
 function userPermissionMatchesOption(
@@ -2633,7 +2753,7 @@ function userPermissionMatchesOption(
   const permissionSlug = permission.slug?.trim();
 
   return Boolean(
-    (option.id && permissionId === option.id) ||
+    (permissionId && option.grants.some((grant) => grant.id === permissionId)) ||
       (permissionSlug && option.slugs.includes(permissionSlug)),
   );
 }
@@ -2642,45 +2762,49 @@ async function grantUserPermission(
   userId: string,
   option: PermissionOption,
   headers: HeadersInit,
+  existingSlugs: Set<string>,
+  enabledModuleIds: Set<string>,
 ) {
-  const slug = option.slugs[0] ?? option.slug;
-  const attempts = [
-    {
-      permission_id: option.id,
-      slug,
-      ...permissionFlags(true),
-    },
-    {
-      slug,
-      ...permissionFlags(true),
-    },
-    {
-      module_id: option.module_id,
-      slug,
-      ...permissionFlags(true),
-    },
-  ];
-  let lastError: unknown;
+  const grantSlugs = uniqueStrings(
+    option.grants
+      .filter((grant) => grant.module_id && enabledModuleIds.has(grant.module_id))
+      .map((grant) => grant.slug),
+  );
 
-  for (const body of attempts) {
+  for (const slug of grantSlugs) {
+    if (existingSlugs.has(slug)) continue;
+
     try {
-      return await apiFetch(`/users/${userId}/permissions`, {
+      await apiFetch(`/users/${userId}/permissions`, {
         method: "POST",
         headers,
-        body,
+        body: { slug },
       });
+      existingSlugs.add(slug);
     } catch (error) {
-      lastError = error;
-      if (error instanceof ApiError && error.status === 409) return;
-      if (!(error instanceof ApiError) || ![400, 404, 405, 422].includes(error.status)) {
-        throw error;
+      if (error instanceof ApiError && error.status === 409) {
+        existingSlugs.add(slug);
+        continue;
       }
+
+      if (error instanceof Error && error.message.includes("module not enabled")) {
+        throw new Error(
+          `Habilite o módulo da permissão "${option.label}" para esta empresa antes de salvar o acesso.`,
+        );
+      }
+
+      if (error instanceof ApiError && error.status === 500) {
+        throw new Error(
+          `Falha ao conceder "${option.label}" (${slug}). Este POST em /users/{id}/permissions é apenas para admin da empresa; super-admin deve ser salvo com is_master=true em /users. A API retornou erro interno e parece usar a empresa do token logado, não a empresa selecionada.`,
+        );
+      }
+
+      const detail = error instanceof Error ? error.message : "erro desconhecido";
+      throw new Error(
+        `Falha ao conceder "${option.label}" (${slug}). Backend retornou: ${detail}`,
+      );
     }
   }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Não foi possível conceder permissão ao usuário.");
 }
 
 async function revokeUserPermission(
@@ -2819,11 +2943,18 @@ function resolveOperationalPermissionOptions(
     const slugs = Array.from(
       new Set(selectedMatches.map((permission) => permission.slug).filter(Boolean)),
     );
+    const grants = uniquePermissionGrants(
+      selectedMatches.map((permission) => ({
+        id: permission.id,
+        module_id: getPermissionModuleId(permission) || undefined,
+        slug: permission.slug,
+      })),
+    );
     const primary = selectedMatches[0];
     const moduleId = primary ? getPermissionModuleId(primary) : "";
 
     return {
-      id: primary?.id ?? `operational:${definition.slug}`,
+      id: definition.slug,
       module_id: moduleId || undefined,
       slug: definition.slug,
       label: definition.label,
@@ -2831,9 +2962,23 @@ function resolveOperationalPermissionOptions(
         ? definition.description
         : `${definition.description} Módulo não encontrado no catálogo da API.`,
       slugs: slugs.length ? slugs : [definition.slug],
+      grants,
       unavailable: !moduleId,
     };
   });
+}
+
+function uniquePermissionGrants(grants: PermissionGrantOption[]) {
+  const bySlug = new Map<string, PermissionGrantOption>();
+  grants.forEach((grant) => {
+    if (!grant.slug || bySlug.has(grant.slug)) return;
+    bySlug.set(grant.slug, grant);
+  });
+  return Array.from(bySlug.values());
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)));
 }
 
 function permissionMatchesOperationalDefinition(
