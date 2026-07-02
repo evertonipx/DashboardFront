@@ -1049,56 +1049,33 @@ export function SuperAdminDashboard() {
     if (!availableOptions.length) return;
 
     const scopedHeaders = companyScopeHeaders(selectedCompanyId);
-    const concreteOptions = availableOptions.filter(isConcretePermissionOption);
+    const currentPermissions = await apiFetch<UserPermission[]>(
+      `/users/${userId}/permissions`,
+      { headers: scopedHeaders },
+    ).catch(() => []);
+    const operations: Array<Promise<unknown>> = [];
 
-    if (concreteOptions.length === availableOptions.length) {
-      try {
-        await Promise.all(
-          concreteOptions.map((option) =>
-            apiFetch(`/users/${userId}/permissions`, {
-              method: "PUT",
-              headers: scopedHeaders,
-              body: {
-                permission_id: option.id,
-                slug: option.slugs[0] ?? option.slug,
-                ...permissionFlags(Boolean(userPermissions[option.slug])),
-              },
-            }),
-          ),
-        );
-        return;
-      } catch {
-        // Some API versions only support module-level permission updates.
+    for (const option of availableOptions) {
+      if (!isConcretePermissionOption(option)) continue;
+
+      const shouldGrant = Boolean(userPermissions[option.slug]);
+      const matchingPermissions = currentPermissions.filter((permission) =>
+        userPermissionMatchesOption(permission, option),
+      );
+      const hasEnabledGrant = matchingPermissions.some(permissionIsEnabled);
+
+      if (shouldGrant && !hasEnabledGrant) {
+        operations.push(grantUserPermission(userId, option, scopedHeaders));
+      }
+
+      if (!shouldGrant) {
+        matchingPermissions.forEach((permission) => {
+          const permissionId = getPermissionRecordId(permission);
+          if (!permissionId) return;
+          operations.push(revokeUserPermission(userId, permissionId, scopedHeaders));
+        });
       }
     }
-
-    await syncModulePermissions(userId, availableOptions, scopedHeaders);
-  }
-
-  async function syncModulePermissions(
-    userId: string,
-    availableOptions: PermissionOption[],
-    scopedHeaders: HeadersInit,
-  ) {
-    const moduleStates = new Map<string, boolean>();
-    for (const option of availableOptions) {
-      if (!option.module_id) continue;
-      moduleStates.set(
-        option.module_id,
-        Boolean(moduleStates.get(option.module_id) || userPermissions[option.slug]),
-      );
-    }
-
-    const operations = Array.from(moduleStates.entries()).map(([moduleId, enabled]) =>
-      apiFetch(`/users/${userId}/permissions`, {
-        method: "PUT",
-        headers: scopedHeaders,
-        body: {
-          module_id: moduleId,
-          ...permissionFlags(enabled),
-        },
-      }),
-    );
 
     try {
       await Promise.all(operations);
@@ -2646,6 +2623,80 @@ function permissionIsEnabled(permission: UserPermission) {
 
 function isConcretePermissionOption(option: PermissionOption) {
   return Boolean(option.id && !option.id.startsWith("operational:"));
+}
+
+function userPermissionMatchesOption(
+  permission: UserPermission,
+  option: PermissionOption,
+) {
+  const permissionId = getPermissionRecordId(permission);
+  const permissionSlug = permission.slug?.trim();
+
+  return Boolean(
+    (option.id && permissionId === option.id) ||
+      (permissionSlug && option.slugs.includes(permissionSlug)),
+  );
+}
+
+async function grantUserPermission(
+  userId: string,
+  option: PermissionOption,
+  headers: HeadersInit,
+) {
+  const slug = option.slugs[0] ?? option.slug;
+  const attempts = [
+    {
+      permission_id: option.id,
+      slug,
+      ...permissionFlags(true),
+    },
+    {
+      slug,
+      ...permissionFlags(true),
+    },
+    {
+      module_id: option.module_id,
+      slug,
+      ...permissionFlags(true),
+    },
+  ];
+  let lastError: unknown;
+
+  for (const body of attempts) {
+    try {
+      return await apiFetch(`/users/${userId}/permissions`, {
+        method: "POST",
+        headers,
+        body,
+      });
+    } catch (error) {
+      lastError = error;
+      if (error instanceof ApiError && error.status === 409) return;
+      if (!(error instanceof ApiError) || ![400, 404, 405, 422].includes(error.status)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Não foi possível conceder permissão ao usuário.");
+}
+
+async function revokeUserPermission(
+  userId: string,
+  permissionId: string,
+  headers: HeadersInit,
+) {
+  try {
+    return await apiFetch(`/users/${userId}/permissions/${permissionId}`, {
+      method: "DELETE",
+      headers,
+    });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return;
+    throw error;
+  }
 }
 
 function permissionFlags(enabled: boolean) {
