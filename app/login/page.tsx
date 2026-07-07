@@ -19,14 +19,28 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/components/app/auth-provider";
 import { ThemeToggle } from "@/components/app/theme-provider";
 import { resolvePostLoginPath } from "@/lib/access";
+import {
+  DEFAULT_LOGIN_BRANDING,
+  type LoginBranding,
+  loginBrandInitials,
+  resolveLoginBranding,
+} from "@/lib/login-branding";
 
 export default function LoginPage() {
   const router = useRouter();
   const { login, user, loading } = useAuth();
+  const [branding, setBranding] = React.useState<LoginBranding>(
+    DEFAULT_LOGIN_BRANDING,
+  );
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [showPassword, setShowPassword] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
+  const isDefaultBrand = branding.key === DEFAULT_LOGIN_BRANDING.key;
+
+  React.useEffect(() => {
+    setBranding(resolveLoginBranding(window.location));
+  }, []);
 
   React.useEffect(() => {
     let mounted = true;
@@ -72,24 +86,37 @@ export default function LoginPage() {
       <div className="absolute right-4 top-4 z-10">
         <ThemeToggle />
       </div>
-      <section className="hidden min-h-screen bg-[#0B4EA2] p-8 text-white lg:flex lg:flex-col">
+      <section
+        className="hidden min-h-screen p-8 text-white lg:flex lg:flex-col"
+        style={{ backgroundColor: branding.accentColor }}
+      >
         <div className="flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-md bg-white text-sm font-black text-[#0B4EA2]">
-            IPX
-          </div>
+          <BrandMark branding={branding} />
           <div>
-            <div className="text-lg font-semibold">IPXData</div>
-            <div className="text-xs text-white/65">IPExtreme Analytics</div>
+            <div className="text-lg font-semibold">
+              {isDefaultBrand ? "IPXData" : branding.companyName}
+            </div>
+            <div className="text-xs text-white/65">
+              {isDefaultBrand ? branding.subtitle : `IPXData | ${branding.subtitle}`}
+            </div>
           </div>
         </div>
 
         <div className="my-auto max-w-xl">
           <div className="mb-4 inline-flex items-center rounded-md border border-white/15 bg-white/[0.08] px-3 py-1 text-xs text-white/75">
-            Enterprise Video Analytics
+            IPXData Dashboard
           </div>
-          <h1 className="text-4xl font-semibold tracking-normal text-balance">
-            Monitoramento limpo para dados ao vivo e cenários.
-          </h1>
+          <div className="flex flex-col items-start gap-5">
+            <BrandMark branding={branding} hero />
+            <div>
+              <div className="text-3xl font-semibold tracking-normal">
+                {isDefaultBrand ? "IPXData" : branding.companyName}
+              </div>
+              <div className="mt-2 text-base text-white/70">
+                {isDefaultBrand ? branding.subtitle : "IPXData"}
+              </div>
+            </div>
+          </div>
           <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
             {["Ao vivo", "Cenários", "Dashboard"].map((item) => (
               <div
@@ -108,12 +135,16 @@ export default function LoginPage() {
       <section className="flex min-h-screen items-center justify-center p-4 sm:p-8">
         <Card className="w-full max-w-md border-border bg-card shadow-soft">
           <CardHeader className="space-y-2">
-            <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-md bg-primary text-xs font-black text-primary-foreground lg:hidden">
-              IPX
-            </div>
-            <CardTitle className="text-2xl">Entrar no IPXData</CardTitle>
+            <BrandMark branding={branding} compact />
+            <CardTitle className="text-2xl">
+              {isDefaultBrand
+                ? "Entrar no IPXData"
+                : `Entrar no ${branding.companyName}`}
+            </CardTitle>
             <CardDescription>
-              Use suas credenciais para acessar o ambiente operacional.
+              {isDefaultBrand
+                ? "Use suas credenciais para acessar o ambiente operacional."
+                : "Use suas credenciais IPXData para acessar o dashboard da empresa."}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -175,5 +206,56 @@ export default function LoginPage() {
         </Card>
       </section>
     </main>
+  );
+}
+
+function BrandMark({
+  branding,
+  compact = false,
+  hero = false,
+}: {
+  branding: LoginBranding;
+  compact?: boolean;
+  hero?: boolean;
+}) {
+  const sizeClass = hero
+    ? "h-32 w-32 sm:h-40 sm:w-40"
+    : compact
+      ? "h-11 w-11 lg:hidden"
+      : "h-11 w-11";
+  const logoClass = hero
+    ? "h-24 w-24 sm:h-32 sm:w-32"
+    : compact
+      ? "h-8 w-8"
+      : "h-8 w-8";
+  const initialsClass = hero ? "text-4xl sm:text-5xl" : "text-xs";
+
+  if (branding.logoUrl) {
+    return (
+      <div
+        aria-label={`Logo ${branding.companyName}`}
+        className={`${sizeClass} flex shrink-0 items-center justify-center overflow-hidden rounded-md bg-white p-1.5 shadow-sm`}
+        role="img"
+      >
+        <div
+          className={logoClass}
+          style={{
+            backgroundImage: `url("${branding.logoUrl}")`,
+            backgroundPosition: "center",
+            backgroundRepeat: "no-repeat",
+            backgroundSize: "contain",
+          }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`${sizeClass} ${initialsClass} flex shrink-0 items-center justify-center rounded-md bg-white font-black shadow-sm`}
+      style={{ color: branding.accentColor }}
+    >
+      {loginBrandInitials(branding.companyName)}
+    </div>
   );
 }

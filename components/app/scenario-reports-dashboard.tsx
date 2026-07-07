@@ -5,8 +5,11 @@ import {
   BarChart3,
   Clock3,
   FileText,
+  Plus,
   RefreshCw,
   Route,
+  Settings2,
+  Trash2,
   TrendingUp,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -24,6 +27,16 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -59,6 +72,15 @@ import {
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
+import {
+  deleteReportCustomWidget,
+  loadReportCustomWidgets,
+  REPORT_CUSTOM_WIDGETS_UPDATED_EVENT,
+  upsertReportCustomWidget,
+  type ReportCustomWidget,
+  type ReportCustomWidgetGranularity,
+  type ReportCustomWidgetScopeMode,
+} from "@/lib/report-custom-widgets";
 import type { ReportPayload } from "@/lib/report-export";
 import type {
   AggregateEventRow,
@@ -111,12 +133,31 @@ type ReportScopeOption = {
   subLocation?: SubLocation;
 };
 
+type ReportCustomWidgetForm = {
+  granularity: ReportCustomWidgetGranularity;
+  scopeId: string;
+  scopeMode: ReportCustomWidgetScopeMode;
+  title: string;
+};
+
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 const DEFAULT_METRIC_TYPE = "count";
 const PREVIOUS_SUFFIX = "__previous";
 const CURRENT_MONTH_DAYS_ID = "report_current_month_days";
+const REPORT_CUSTOM_WIDGET_GRANULARITY_OPTIONS: {
+  label: string;
+  value: ReportCustomWidgetGranularity;
+}[] = [
+  { label: "Minuto a minuto", value: "minute" },
+  { label: "Hora a hora", value: "hour" },
+  { label: "Dia a dia", value: "day" },
+  { label: "Semana a semana", value: "week" },
+  { label: "Mês a mês", value: "month" },
+  { label: "Semestre a semestre", value: "semester" },
+  { label: "Ano a ano", value: "year" },
+];
 
 export function ScenarioReportsDashboard({
   manager = false,
@@ -146,6 +187,18 @@ export function ScenarioReportsDashboard({
   const [refreshing, setRefreshing] = React.useState(false);
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
   const [clock, setClock] = React.useState(() => new Date());
+  const [customWidgets, setCustomWidgets] = React.useState<ReportCustomWidget[]>(
+    [],
+  );
+  const [customWidgetDialogOpen, setCustomWidgetDialogOpen] =
+    React.useState(false);
+  const [customWidgetForm, setCustomWidgetForm] =
+    React.useState<ReportCustomWidgetForm>({
+      granularity: "hour",
+      scopeId: "",
+      scopeMode: "scenario",
+      title: "",
+    });
 
   const chartDefinitions = React.useMemo(
     () => buildScenarioAggregateDefinitions(clock),
@@ -181,6 +234,27 @@ export function ScenarioReportsDashboard({
       manager,
       scenarios,
       scopeMode,
+      subLocations,
+    ],
+  );
+  const customWidgetScopeOptions = React.useMemo(
+    () =>
+      buildReportScopeOptions({
+        cameras,
+        groups: cameraGroups,
+        locations,
+        manager,
+        mode: customWidgetForm.scopeMode,
+        scenarios,
+        subLocations,
+      }),
+    [
+      cameraGroups,
+      cameras,
+      customWidgetForm.scopeMode,
+      locations,
+      manager,
+      scenarios,
       subLocations,
     ],
   );
@@ -339,6 +413,51 @@ export function ScenarioReportsDashboard({
   }, [user]);
 
   React.useEffect(() => {
+    function syncCustomWidgets() {
+      setCustomWidgets(loadReportCustomWidgets(companyScopeId));
+    }
+
+    syncCustomWidgets();
+    window.addEventListener(
+      REPORT_CUSTOM_WIDGETS_UPDATED_EVENT,
+      syncCustomWidgets,
+    );
+    window.addEventListener("storage", syncCustomWidgets);
+    window.addEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCustomWidgets);
+
+    return () => {
+      window.removeEventListener(
+        REPORT_CUSTOM_WIDGETS_UPDATED_EVENT,
+        syncCustomWidgets,
+      );
+      window.removeEventListener("storage", syncCustomWidgets);
+      window.removeEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCustomWidgets);
+    };
+  }, [companyScopeId]);
+
+  React.useEffect(() => {
+    setCustomWidgetForm((current) => {
+      if (
+        current.scopeId &&
+        customWidgetScopeOptions.some((option) => option.id === current.scopeId)
+      ) {
+        return current;
+      }
+
+      const nextScope = customWidgetScopeOptions[0];
+      return {
+        ...current,
+        scopeId: nextScope?.id ?? "",
+        title:
+          current.title ||
+          (nextScope
+            ? buildReportCustomWidgetDefaultTitle(nextScope, current.granularity)
+            : ""),
+      };
+    });
+  }, [customWidgetScopeOptions]);
+
+  React.useEffect(() => {
     if (!availableModes.some((mode) => mode.value === scopeMode)) {
       setScopeMode(availableModes[0]?.value ?? "scenario");
     }
@@ -397,6 +516,120 @@ export function ScenarioReportsDashboard({
   const lastHourTotal = sumPoints(pointsByDefinition.report_chart_minute ?? []);
   const lastSevenDaysTotal = sumPoints(pointsByDefinition.report_chart_day ?? []);
   const activeScopeCount = scopeOptions.length;
+
+  function getScopeOptionsForMode(mode: ReportCustomWidgetScopeMode) {
+    return buildReportScopeOptions({
+      cameras,
+      groups: cameraGroups,
+      locations,
+      manager,
+      mode,
+      scenarios,
+      subLocations,
+    });
+  }
+
+  function openCustomWidgetDialog() {
+    const preferredMode = (selectedScope?.mode ??
+      availableModes[0]?.value ??
+      "scenario") as ReportCustomWidgetScopeMode;
+    const options = getScopeOptionsForMode(preferredMode);
+    const scope =
+      selectedScope?.mode === preferredMode ? selectedScope : options[0] ?? null;
+    const granularity: ReportCustomWidgetGranularity = "hour";
+
+    setCustomWidgetForm({
+      granularity,
+      scopeId: scope?.id ?? "",
+      scopeMode: (scope?.mode ?? preferredMode) as ReportCustomWidgetScopeMode,
+      title: scope ? buildReportCustomWidgetDefaultTitle(scope, granularity) : "",
+    });
+    setCustomWidgetDialogOpen(true);
+  }
+
+  function handleCustomWidgetModeChange(value: string) {
+    const scopeMode = value as ReportCustomWidgetScopeMode;
+    const nextScope = getScopeOptionsForMode(scopeMode)[0];
+
+    setCustomWidgetForm((current) => ({
+      ...current,
+      scopeId: nextScope?.id ?? "",
+      scopeMode,
+      title:
+        current.title ||
+        (nextScope
+          ? buildReportCustomWidgetDefaultTitle(nextScope, current.granularity)
+          : ""),
+    }));
+  }
+
+  function handleCustomWidgetScopeChange(value: string) {
+    const nextScope = customWidgetScopeOptions.find(
+      (option) => option.id === value,
+    );
+
+    setCustomWidgetForm((current) => ({
+      ...current,
+      scopeId: value,
+      title:
+        current.title ||
+        (nextScope
+          ? buildReportCustomWidgetDefaultTitle(nextScope, current.granularity)
+          : ""),
+    }));
+  }
+
+  function handleCustomWidgetGranularityChange(value: string) {
+    const granularity = value as ReportCustomWidgetGranularity;
+    const currentScope = customWidgetScopeOptions.find(
+      (option) => option.id === customWidgetForm.scopeId,
+    );
+
+    setCustomWidgetForm((current) => ({
+      ...current,
+      granularity,
+      title:
+        current.title ||
+        (currentScope
+          ? buildReportCustomWidgetDefaultTitle(currentScope, granularity)
+          : ""),
+    }));
+  }
+
+  function saveCustomWidget() {
+    const scope = getScopeOptionsForMode(customWidgetForm.scopeMode).find(
+      (option) => option.id === customWidgetForm.scopeId,
+    );
+
+    if (!scope) {
+      toast.error("Selecione uma visão válida para criar o widget.");
+      return;
+    }
+
+    const title =
+      customWidgetForm.title.trim() ||
+      buildReportCustomWidgetDefaultTitle(scope, customWidgetForm.granularity);
+    const nextWidgets = upsertReportCustomWidget(
+      {
+        granularity: customWidgetForm.granularity,
+        scopeId: scope.id,
+        scopeMode: scope.mode as ReportCustomWidgetScopeMode,
+        scopeName: scope.name,
+        title,
+      },
+      companyScopeId,
+    );
+
+    setCustomWidgets(nextWidgets);
+    setCustomWidgetDialogOpen(false);
+    toast.success("Widget adicionado aos relatórios.");
+  }
+
+  function removeCustomWidget(widgetId: string) {
+    const nextWidgets = deleteReportCustomWidget(widgetId, companyScopeId);
+    setCustomWidgets(nextWidgets);
+    toast.success("Widget removido.");
+  }
 
   const metricCards = [
     {
@@ -478,6 +711,62 @@ export function ScenarioReportsDashboard({
     ),
   }));
 
+  const customWidgetCards = customWidgets.map((widget) => {
+    const scope = getScopeOptionsForMode(widget.scopeMode).find(
+      (option) => option.id === widget.scopeId,
+    );
+    const definition = buildReportCustomWidgetDefinition(
+      widget,
+      chartDefinitions,
+      scope,
+    );
+    const state = chartStateForReportGranularity(chartData, widget.granularity);
+    const previousState = chartStateForReportGranularity(
+      chartData,
+      widget.granularity,
+      true,
+    );
+
+    return {
+      id: `report_custom_${widget.id}`,
+      label: widget.title,
+      defaultSize: "wide" as const,
+      className: "sm:col-span-2 xl:col-span-2",
+      node: scope ? (
+        <ScenarioAggregateChartCard
+          action={
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+              onClick={(event) => {
+                event.stopPropagation();
+                removeCustomWidget(widget.id);
+              }}
+              aria-label={`Remover widget ${widget.title}`}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          }
+          definition={definition}
+          loading={loadingCharts}
+          previousRows={previousState?.rows ?? []}
+          intradayComparison={intradayComparison}
+          rows={state?.rows ?? []}
+          scope={scope}
+          showPreviousPeriod={showPreviousPeriod}
+          state={state}
+        />
+      ) : (
+        <MissingReportCustomWidgetCard
+          title={widget.title}
+          onRemove={() => removeCustomWidget(widget.id)}
+        />
+      ),
+    };
+  });
+
   const detailCards = selectedScope
     ? [
         {
@@ -502,6 +791,35 @@ export function ScenarioReportsDashboard({
         },
       ]
     : [];
+  const customReportCharts = customWidgets
+    .map((widget) => {
+      const scope = getScopeOptionsForMode(widget.scopeMode).find(
+        (option) => option.id === widget.scopeId,
+      );
+      if (!scope) return null;
+
+      const definition = buildReportCustomWidgetDefinition(
+        widget,
+        chartDefinitions,
+        scope,
+      );
+      const state = chartStateForReportGranularity(chartData, widget.granularity);
+      const previousState = chartStateForReportGranularity(
+        chartData,
+        widget.granularity,
+        true,
+      );
+
+      return buildScenarioReportChart(
+        definition,
+        state?.rows ?? [],
+        previousState?.rows ?? [],
+        scope,
+        showPreviousPeriod,
+        intradayComparison,
+      );
+    })
+    .filter((chart): chart is ReportPayload["charts"][number] => Boolean(chart));
   const scenarioReportPayload: ReportPayload = {
     title: selectedScope
       ? `Relatório de Contagem - ${selectedScope.name}`
@@ -539,17 +857,20 @@ export function ScenarioReportsDashboard({
       },
     ],
     charts: selectedScope
-      ? chartDefinitions.map((definition) =>
-          buildScenarioReportChart(
-            definition,
-            chartData[definition.id]?.rows ?? [],
-            chartData[previousId(definition.id)]?.rows ?? [],
-            selectedScope,
-            showPreviousPeriod,
-            intradayComparison,
+      ? [
+          ...chartDefinitions.map((definition) =>
+            buildScenarioReportChart(
+              definition,
+              chartData[definition.id]?.rows ?? [],
+              chartData[previousId(definition.id)]?.rows ?? [],
+              selectedScope,
+              showPreviousPeriod,
+              intradayComparison,
+            ),
           ),
-        )
-      : [],
+          ...customReportCharts,
+        ]
+      : customReportCharts,
     tables: selectedScope
       ? [
           {
@@ -670,6 +991,15 @@ export function ScenarioReportsDashboard({
               <Button
                 type="button"
                 variant="outline"
+                onClick={openCustomWidgetDialog}
+                disabled={!availableModes.length}
+              >
+                <Plus className="h-4 w-4" />
+                Widget
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
                 onClick={() => {
                   if (selectedScope) loadCharts(selectedScope, true);
                   loadScenarios();
@@ -700,9 +1030,133 @@ export function ScenarioReportsDashboard({
       {scopeOptions.length ? (
         <CardLayout
           menuKey="reports"
-          cards={[...metricCards, ...chartCards, ...detailCards]}
+          editActions={
+            <Button type="button" variant="outline" size="sm" onClick={openCustomWidgetDialog}>
+              <Settings2 className="h-3.5 w-3.5" />
+              Novo widget
+            </Button>
+          }
+          cards={[
+            ...metricCards,
+            ...customWidgetCards,
+            ...chartCards,
+            ...detailCards,
+          ]}
         />
       ) : null}
+
+      <Dialog
+        open={customWidgetDialogOpen}
+        onOpenChange={setCustomWidgetDialogOpen}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Novo widget de relatório</DialogTitle>
+            <DialogDescription>
+              Escolha a visão, o período do gráfico e o título exibido no card.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="report-custom-widget-title">Título</Label>
+              <Input
+                id="report-custom-widget-title"
+                value={customWidgetForm.title}
+                onChange={(event) =>
+                  setCustomWidgetForm((current) => ({
+                    ...current,
+                    title: event.target.value,
+                  }))
+                }
+                placeholder="Entradas hora a hora"
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Tipo de visão</Label>
+                <Select
+                  value={customWidgetForm.scopeMode}
+                  onValueChange={handleCustomWidgetModeChange}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableModes.map((mode) => (
+                      <SelectItem key={mode.value} value={mode.value}>
+                        {mode.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label>{scopeModeLabel(customWidgetForm.scopeMode)}</Label>
+                <Select
+                  value={customWidgetForm.scopeId}
+                  onValueChange={handleCustomWidgetScopeChange}
+                  disabled={!customWidgetScopeOptions.length}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Selecione" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {customWidgetScopeOptions.map((option) => (
+                      <SelectItem key={option.id} value={option.id}>
+                        {option.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Gráfico</Label>
+              <Select
+                value={customWidgetForm.granularity}
+                onValueChange={handleCustomWidgetGranularityChange}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {REPORT_CUSTOM_WIDGET_GRANULARITY_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              Se o comparativo de período anterior estiver ativo, ele será aplicado
+              também aos widgets personalizados.
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setCustomWidgetDialogOpen(false)}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              onClick={saveCustomWidget}
+              disabled={!customWidgetForm.scopeId}
+            >
+              Adicionar widget
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
@@ -745,6 +1199,7 @@ function ReportMetricCard({
 }
 
 function ScenarioAggregateChartCard({
+  action,
   definition,
   intradayComparison,
   loading,
@@ -754,6 +1209,7 @@ function ScenarioAggregateChartCard({
   showPreviousPeriod,
   state,
 }: {
+  action?: React.ReactNode;
   definition: ScenarioAggregateDefinition;
   intradayComparison: IntradayComparisonMode;
   loading: boolean;
@@ -790,11 +1246,18 @@ function ScenarioAggregateChartCard({
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2">
-          <BarChart3 className="h-4 w-4 text-primary" />
-          {definition.label}
-        </CardTitle>
-        <CardDescription>{definition.description}</CardDescription>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <BarChart3 className="h-4 w-4 text-primary" />
+              {definition.label}
+            </CardTitle>
+            <CardDescription className="mt-1">
+              {definition.description}
+            </CardDescription>
+          </div>
+          {action}
+        </div>
         {showPreviousPeriod ? (
           <div className="max-w-full break-words rounded-md border border-primary/20 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">
             {comparisonDescription(definition, intradayComparison)}
@@ -813,6 +1276,45 @@ function ScenarioAggregateChartCard({
         ) : (
           <EmptyChartState text="Sem eventos desta visão no período." />
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function MissingReportCustomWidgetCard({
+  onRemove,
+  title,
+}: {
+  onRemove: () => void;
+  title: string;
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <BarChart3 className="h-4 w-4 text-primary" />
+              {title || "Widget personalizado"}
+            </CardTitle>
+            <CardDescription>
+              A visão vinculada a este widget não está mais disponível.
+            </CardDescription>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+            onClick={onRemove}
+            aria-label="Remover widget"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <EmptyChartState text="Selecione outro widget ou remova este card." />
       </CardContent>
     </Card>
   );
@@ -1153,6 +1655,70 @@ function buildCurrentMonthDaysDefinition(now: Date): ScenarioAggregateDefinition
     from: startOfMonth(now),
     to: addDays(todayStart, 1),
   };
+}
+
+function buildReportCustomWidgetDefinition(
+  widget: ReportCustomWidget,
+  definitions: ScenarioAggregateDefinition[],
+  scope?: ReportScopeOption,
+): ScenarioAggregateDefinition {
+  const base =
+    definitions.find((definition) => definition.granularity === widget.granularity) ??
+    definitions.find((definition) => definition.id === "report_chart_hour") ??
+    buildScenarioAggregateDefinitions(new Date())[1];
+  const scopeName = scope?.name ?? widget.scopeName;
+
+  return {
+    ...base,
+    description: `${reportGranularityLabel(widget.granularity)} em ${scopeModeLabel(
+      widget.scopeMode,
+    ).toLowerCase()}: ${scopeName}.`,
+    id: `report_custom_${widget.id}`,
+    label:
+      widget.title ||
+      buildReportCustomWidgetDefaultTitleFromName(scopeName, widget.granularity),
+  };
+}
+
+function chartStateForReportGranularity(
+  data: Record<string, ScenarioChartState>,
+  granularity: ReportCustomWidgetGranularity,
+  previous = false,
+) {
+  const idByGranularity: Record<ReportCustomWidgetGranularity, string> = {
+    day: "report_chart_day",
+    hour: "report_chart_hour",
+    minute: "report_chart_minute",
+    month: "report_chart_month",
+    semester: "report_chart_semester",
+    week: "report_chart_week",
+    year: "report_chart_year",
+  };
+  const id = idByGranularity[granularity];
+
+  return data[previous ? previousId(id) : id];
+}
+
+function buildReportCustomWidgetDefaultTitle(
+  scope: ReportScopeOption,
+  granularity: ReportCustomWidgetGranularity,
+) {
+  return buildReportCustomWidgetDefaultTitleFromName(scope.name, granularity);
+}
+
+function buildReportCustomWidgetDefaultTitleFromName(
+  scopeName: string,
+  granularity: ReportCustomWidgetGranularity,
+) {
+  return `${scopeName} - ${reportGranularityLabel(granularity)}`;
+}
+
+function reportGranularityLabel(granularity: ReportCustomWidgetGranularity) {
+  return (
+    REPORT_CUSTOM_WIDGET_GRANULARITY_OPTIONS.find(
+      (option) => option.value === granularity,
+    )?.label ?? "Hora a hora"
+  );
 }
 
 function buildComparisonDefinition(

@@ -33,6 +33,7 @@ import {
   canManageCameras,
   canManageLocations,
   canManageScenarios,
+  canManageViews,
   canManageWorkers,
 } from "@/lib/permissions";
 import { cn, initials } from "@/lib/utils";
@@ -60,7 +61,12 @@ type NavItem = {
 const managerNavItems: NavItem[] = [
   { href: "/manager/live", label: "Ao Vivo", icon: Activity },
   { href: "/manager/reports", label: "Relatórios", icon: FileText },
-  { href: "/manager/views", label: "Visões", icon: Eye },
+  {
+    href: "/manager/views",
+    label: "Visões",
+    icon: Eye,
+    canShow: canManageViews,
+  },
   {
     href: "/manager/workers",
     label: "Workers",

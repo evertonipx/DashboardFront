@@ -36,6 +36,25 @@ export const OPERATIONAL_PERMISSIONS = [
     terms: ["dashboard", "widget", "visual", "view", "layout"],
   },
   {
+    slug: "views_manage",
+    label: "Visões",
+    description: "Acessar e configurar URLs de visões para exibição externa.",
+    aliases: [
+      "view_manage",
+      "views_create",
+      "views_edit",
+      "dashboard_views_manage",
+      "dashboard_view_manage",
+      "dashboard_views_edit",
+      "display_views_manage",
+      "counting_manage_views",
+      "counting_views_manage",
+      "counting_create_view",
+      "counting_edit_view",
+    ],
+    terms: ["views", "view", "visao", "visoes", "visualizacao", "url"],
+  },
+  {
     slug: "occupancy_manage",
     label: "Ocupação",
     description: "Acessar e configurar áreas de ocupação por fotografia.",
@@ -158,6 +177,10 @@ export function canManageCameras(user: CurrentUser | null) {
 
 export function canManageWorkers(user: CurrentUser | null) {
   return canManage(user, "workers_manage");
+}
+
+export function canManageViews(user: CurrentUser | null) {
+  return canManage(user, "views_manage");
 }
 
 export function hasAnyOperationalPermission(user: CurrentUser | null) {

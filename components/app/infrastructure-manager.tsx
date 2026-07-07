@@ -53,8 +53,11 @@ import {
   CAMERA_GROUPS_UPDATED_EVENT,
   type CameraGroup,
   type CameraGroupScopeType,
+  type WorkerLocationAssignments,
   readCameraGroups,
+  readWorkerLocationAssignments,
   resolveCameraGroupCompanyScope,
+  setWorkerLocationAssignment,
   upsertCameraGroup,
 } from "@/lib/camera-groups";
 import {
@@ -69,13 +72,21 @@ import type {
   CameraLineCount,
   Location,
   SubLocation,
+  Worker,
 } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
+import {
+  annotateWorkerCompanyScope,
+  normalizeWorkerRows,
+  partitionWorkersByCompanyScope,
+  sortWorkersByActivity,
+} from "@/lib/worker-scope";
 
 type LocationFormState = {
   name: string;
   description: string;
   active: string;
+  worker_id: string;
 };
 
 type SubLocationFormState = {
@@ -112,6 +123,7 @@ const emptyLocationForm: LocationFormState = {
   name: "",
   description: "",
   active: "true",
+  worker_id: "",
 };
 
 const emptySubLocationForm: SubLocationFormState = {
@@ -149,7 +161,10 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
   const [locations, setLocations] = React.useState<Location[]>([]);
   const [subLocations, setSubLocations] = React.useState<SubLocation[]>([]);
   const [cameras, setCameras] = React.useState<Camera[]>([]);
+  const [workers, setWorkers] = React.useState<Worker[]>([]);
   const [cameraGroups, setCameraGroups] = React.useState<CameraGroup[]>([]);
+  const [workerLocationAssignments, setWorkerLocationAssignments] =
+    React.useState<WorkerLocationAssignments>({});
   const [cameraGroupScopeId, setCameraGroupScopeId] = React.useState(() =>
     resolveCameraGroupCompanyScope(null),
   );
@@ -191,6 +206,10 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
   const [cameraGroupForm, setCameraGroupForm] =
     React.useState<CameraGroupFormState>(emptyCameraGroupForm);
   const [saving, setSaving] = React.useState(false);
+  const workersById = React.useMemo(
+    () => new Map(workers.map((worker) => [worker.id, worker])),
+    [workers],
+  );
 
   const selectedLocation = React.useMemo(
     () => locations.find((location) => location.id === selectedLocationId) ?? null,
@@ -221,6 +240,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
       const scopeId = resolveCameraGroupCompanyScope(user);
       setCameraGroupScopeId(scopeId);
       setCameraGroups(readCameraGroups(scopeId));
+      setWorkerLocationAssignments(readWorkerLocationAssignments(scopeId));
     }
 
     syncCameraGroups();
@@ -236,14 +256,16 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
   const loadBase = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [locationRows, cameraRows] = await Promise.all([
+      const [locationRows, cameraRows, workerRows] = await Promise.all([
         apiFetch<Location[]>("/locations"),
         apiFetch<Camera[]>("/cameras"),
+        fetchInfrastructureWorkers(companyScopeId).catch(() => []),
       ]);
       const scopedLocations = filterScopedApiRows(locationRows, companyScopeId);
       const scopedCameras = filterScopedApiRows(cameraRows, companyScopeId);
       setLocations(scopedLocations);
       setCameras(scopedCameras);
+      setWorkers(workerRows);
       setSelectedLocationId((current) =>
         current && scopedLocations.some((row) => row.id === current)
           ? current
@@ -417,8 +439,13 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
             name: location.name,
             description: location.description ?? "",
             active: String(location.active),
+            worker_id:
+              workerLocationAssignments[location.id] ?? workers[0]?.id ?? "",
           }
-        : emptyLocationForm,
+        : {
+            ...emptyLocationForm,
+            worker_id: workers[0]?.id ?? "",
+          },
     );
     setLocationDialog(true);
   }
@@ -548,6 +575,14 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
       toast.error("Nome obrigatório");
       return;
     }
+    if (!workers.length) {
+      toast.error("Cadastre um worker antes de salvar uma location.");
+      return;
+    }
+    if (!locationForm.worker_id) {
+      toast.error("Selecione o worker vinculado a esta location.");
+      return;
+    }
 
     setSaving(true);
     try {
@@ -556,22 +591,42 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
         description: locationForm.description.trim() || undefined,
         active: locationForm.active === "true",
       };
+      let savedLocationId = editingLocation?.id ?? "";
 
       if (editingLocation) {
-        await apiFetch(`/locations/${editingLocation.id}`, {
-          method: "PUT",
-          body: withCompanyScope(body, companyScopeId),
-        });
+        const updated = await apiFetch<Partial<Location> | null>(
+          `/locations/${editingLocation.id}`,
+          {
+            method: "PUT",
+            body: withCompanyScope(body, companyScopeId),
+          },
+        );
+        savedLocationId = updated?.id || editingLocation.id;
         toast.success("Location atualizada");
       } else {
-        await apiFetch("/locations", {
+        const created = await apiFetch<Partial<Location> | null>("/locations", {
           method: "POST",
           body: withCompanyScope({
             name,
             description: locationForm.description.trim() || undefined,
           }, companyScopeId),
         });
+        savedLocationId = created?.id ?? "";
         toast.success("Location criada");
+      }
+
+      if (savedLocationId) {
+        setWorkerLocationAssignments(
+          setWorkerLocationAssignment(
+            cameraGroupScopeId,
+            savedLocationId,
+            locationForm.worker_id,
+          ),
+        );
+      } else {
+        toast.warning(
+          "Location salva, mas a API não retornou o id para gravar o vínculo com o worker.",
+        );
       }
 
       setLocationDialog(false);
@@ -761,7 +816,12 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
     }
 
     if (!window.confirm(`Excluir a location "${location.name}"?`)) return;
-    await removeResource(`/locations/${location.id}`, "Location excluída", loadBase);
+    await removeResource(`/locations/${location.id}`, "Location excluída", async () => {
+      setWorkerLocationAssignments(
+        setWorkerLocationAssignment(cameraGroupScopeId, location.id, ""),
+      );
+      await loadBase();
+    });
   }
 
   async function removeSubLocation(subLocation: SubLocation) {
@@ -909,6 +969,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
                       <TableHeader>
                         <TableRow>
                           <TableHead>Nome</TableHead>
+                          <TableHead>Worker</TableHead>
                           <TableHead>Status</TableHead>
                           <TableHead>Criado em</TableHead>
                           {canEditLocations ? (
@@ -917,60 +978,79 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {locations.map((location) => (
-                          <TableRow
-                            key={location.id}
-                            className={
-                              selectedLocationId === location.id
-                                ? "bg-primary/10"
-                                : ""
-                            }
-                            onClick={() => setSelectedLocationId(location.id)}
-                          >
-                            <TableCell>
-                              <div className="font-medium">{location.name}</div>
-                              <div className="mt-1 text-xs text-muted-foreground">
-                                {location.description || location.id}
-                              </div>
-                            </TableCell>
-                            <TableCell>
-                              <StatusBadge active={location.active} />
-                            </TableCell>
-                            <TableCell className="text-muted-foreground">
-                              {formatDateTime(location.created_at)}
-                            </TableCell>
-                            {canEditLocations ? (
+                        {locations.map((location) => {
+                          const workerId = workerLocationAssignments[location.id] ?? "";
+                          const worker = workerId ? workersById.get(workerId) : null;
+
+                          return (
+                            <TableRow
+                              key={location.id}
+                              className={
+                                selectedLocationId === location.id
+                                  ? "bg-primary/10"
+                                  : ""
+                              }
+                              onClick={() => setSelectedLocationId(location.id)}
+                            >
                               <TableCell>
-                                <div className="flex flex-wrap justify-end gap-2">
-                                  <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      openLocation(location);
-                                    }}
-                                  >
-                                    <Edit className="h-3.5 w-3.5" />
-                                    Editar
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    variant="destructive"
-                                    size="sm"
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      removeLocation(location);
-                                    }}
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                    Excluir
-                                  </Button>
+                                <div className="font-medium">{location.name}</div>
+                                <div className="mt-1 text-xs text-muted-foreground">
+                                  {location.description || location.id}
                                 </div>
                               </TableCell>
-                            ) : null}
-                          </TableRow>
-                        ))}
+                              <TableCell>
+                                {worker ? (
+                                  <div className="space-y-1">
+                                    <div className="font-medium">{worker.name}</div>
+                                    <div className="text-xs text-muted-foreground">
+                                      {worker.description || worker.id}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <Badge variant="warning">
+                                    {workerId ? "Worker não encontrado" : "Sem worker"}
+                                  </Badge>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                <StatusBadge active={location.active} />
+                              </TableCell>
+                              <TableCell className="text-muted-foreground">
+                                {formatDateTime(location.created_at)}
+                              </TableCell>
+                              {canEditLocations ? (
+                                <TableCell>
+                                  <div className="flex flex-wrap justify-end gap-2">
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        openLocation(location);
+                                      }}
+                                    >
+                                      <Edit className="h-3.5 w-3.5" />
+                                      Editar
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="destructive"
+                                      size="sm"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        removeLocation(location);
+                                      }}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                      Excluir
+                                    </Button>
+                                  </div>
+                                </TableCell>
+                              ) : null}
+                            </TableRow>
+                          );
+                        })}
                       </TableBody>
                     </Table>
                   ) : (
@@ -1319,6 +1399,40 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
               }
             />
           </FormField>
+          <FormField label="Worker vinculado">
+            <Select
+              value={locationForm.worker_id}
+              onValueChange={(workerId) =>
+                setLocationForm((form) => ({
+                  ...form,
+                  worker_id: workerId,
+                }))
+              }
+              disabled={!workers.length}
+            >
+              <SelectTrigger>
+                <SelectValue
+                  placeholder={
+                    workers.length
+                      ? "Selecione o worker"
+                      : "Nenhum worker disponível"
+                  }
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {workers.map((worker) => (
+                  <SelectItem key={worker.id} value={worker.id}>
+                    {worker.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {!workers.length ? (
+              <p className="text-xs text-muted-foreground">
+                Cadastre um worker da empresa antes de criar locations.
+              </p>
+            ) : null}
+          </FormField>
           <FormField label="Descrição">
             <Textarea
               value={locationForm.description}
@@ -1626,6 +1740,22 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
       </Dialog>
     </section>
   );
+}
+
+function companyScopeHeaders(companyId?: string | null) {
+  const cleanCompanyId = companyId?.trim();
+  return cleanCompanyId ? { "X-Company-ID": cleanCompanyId } : undefined;
+}
+
+async function fetchInfrastructureWorkers(companyId?: string | null) {
+  const headers = companyScopeHeaders(companyId);
+  const rows = await apiFetch<unknown>("/workers", { headers }).then((response) =>
+    normalizeWorkerRows(response).map((row) =>
+      annotateWorkerCompanyScope(row, companyId, "GET /workers"),
+    ),
+  );
+  const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
+  return sortWorkersByActivity(scopedRows);
 }
 
 function FormField({

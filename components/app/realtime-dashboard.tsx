@@ -6,8 +6,11 @@ import {
   BarChart3,
   Clock3,
   Gauge,
+  Plus,
   RefreshCw,
   Route,
+  Settings2,
+  Trash2,
   Zap,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -25,6 +28,16 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -36,9 +49,11 @@ import { apiFetch } from "@/lib/api";
 import {
   CAMERA_GROUPS_UPDATED_EVENT,
   type CameraGroup,
-  buildLocationCameraOptions,
+  type WorkerLocationAssignments,
+  buildWorkerBackedLocationOptions,
   buildSubLocationCameraOptions,
   readCameraGroups,
+  readWorkerLocationAssignments,
   resolveCameraGroupCompanyScope,
 } from "@/lib/camera-groups";
 import {
@@ -47,6 +62,15 @@ import {
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
+import {
+  deleteRealtimeCustomWidget,
+  loadRealtimeCustomWidgets,
+  REALTIME_CUSTOM_WIDGETS_UPDATED_EVENT,
+  upsertRealtimeCustomWidget,
+  type RealtimeCustomWidget,
+  type RealtimeCustomWidgetGranularity,
+  type RealtimeCustomWidgetScopeMode,
+} from "@/lib/realtime-custom-widgets";
 import { pastelBarColor } from "@/lib/chart-palette";
 import type {
   AggregateEventRow,
@@ -56,8 +80,15 @@ import type {
   Location,
   Scenario,
   SubLocation,
+  Worker,
 } from "@/lib/types";
 import { cn, formatNumber, formatTime } from "@/lib/utils";
+import {
+  annotateWorkerCompanyScope,
+  normalizeWorkerRows,
+  partitionWorkersByCompanyScope,
+  sortWorkersByActivity,
+} from "@/lib/worker-scope";
 
 type RealtimeDashboardProps = {
   manager?: boolean;
@@ -118,6 +149,15 @@ type RealtimeScopeOption = {
   parentName?: string;
   scenario?: Scenario;
   subLocation?: SubLocation;
+  worker?: Worker;
+  workerId?: string;
+};
+
+type RealtimeCustomWidgetForm = {
+  granularity: RealtimeCustomWidgetGranularity;
+  scopeId: string;
+  scopeMode: RealtimeCustomWidgetScopeMode;
+  title: string;
 };
 
 const REFRESH_MS = 5_000;
@@ -126,6 +166,16 @@ const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 const DEFAULT_METRIC_TYPE = "count";
 const CURRENT_MONTH_DAYS_ID = "live_current_month_days";
+const CUSTOM_WIDGET_GRANULARITY_OPTIONS: {
+  label: string;
+  value: RealtimeCustomWidgetGranularity;
+}[] = [
+  { label: "Minuto a minuto", value: "minute" },
+  { label: "Hora a hora", value: "hour" },
+  { label: "Dia a dia", value: "day" },
+  { label: "Semana a semana", value: "week" },
+  { label: "Mês a mês", value: "month" },
+];
 
 export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const { user } = useAuth();
@@ -137,7 +187,10 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const [cameras, setCameras] = React.useState<Camera[]>([]);
   const [locations, setLocations] = React.useState<Location[]>([]);
   const [subLocations, setSubLocations] = React.useState<SubLocation[]>([]);
+  const [workers, setWorkers] = React.useState<Worker[]>([]);
   const [cameraGroups, setCameraGroups] = React.useState<CameraGroup[]>([]);
+  const [workerLocationAssignments, setWorkerLocationAssignments] =
+    React.useState<WorkerLocationAssignments>({});
   const [scopeMode, setScopeMode] =
     React.useState<RealtimeScopeMode>("scenario");
   const [selectedId, setSelectedId] = React.useState("");
@@ -150,6 +203,18 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const [hasLoadedCharts, setHasLoadedCharts] = React.useState(false);
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
   const [clock, setClock] = React.useState(() => new Date());
+  const [customWidgets, setCustomWidgets] = React.useState<
+    RealtimeCustomWidget[]
+  >([]);
+  const [customWidgetDialogOpen, setCustomWidgetDialogOpen] =
+    React.useState(false);
+  const [customWidgetForm, setCustomWidgetForm] =
+    React.useState<RealtimeCustomWidgetForm>({
+      granularity: "hour",
+      scopeId: "",
+      scopeMode: "scenario",
+      title: "",
+    });
 
   const requestRef = React.useRef<AbortController | null>(null);
   const runningRef = React.useRef(false);
@@ -168,6 +233,8 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         manager,
         scenarios,
         subLocations,
+        workerLocationAssignments,
+        workers,
       }),
     [
       cameraGroups,
@@ -176,6 +243,8 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       manager,
       scenarios,
       subLocations,
+      workerLocationAssignments,
+      workers,
     ],
   );
   const scopeOptions = React.useMemo(
@@ -188,6 +257,8 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         mode: scopeMode,
         scenarios,
         subLocations,
+        workerLocationAssignments,
+        workers,
       }),
     [
       cameraGroups,
@@ -197,6 +268,33 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       scenarios,
       scopeMode,
       subLocations,
+      workerLocationAssignments,
+      workers,
+    ],
+  );
+  const customWidgetScopeOptions = React.useMemo(
+    () =>
+      buildRealtimeScopeOptions({
+        cameras,
+        groups: cameraGroups,
+        locations,
+        manager,
+        mode: customWidgetForm.scopeMode,
+        scenarios,
+        subLocations,
+        workerLocationAssignments,
+        workers,
+      }),
+    [
+      cameraGroups,
+      cameras,
+      customWidgetForm.scopeMode,
+      locations,
+      manager,
+      scenarios,
+      subLocations,
+      workerLocationAssignments,
+      workers,
     ],
   );
   const selectedScope = React.useMemo(
@@ -209,10 +307,11 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const loadScenarios = React.useCallback(async () => {
     setLoadingScenarios(true);
     try {
-      const [data, cameraRows, locationRows] = await Promise.all([
+      const [data, cameraRows, locationRows, workerRows] = await Promise.all([
         apiFetch<Scenario[]>("/scenarios"),
         apiFetch<Camera[]>("/cameras").catch(() => []),
         apiFetch<Location[]>("/locations").catch(() => []),
+        fetchRealtimeWorkers(companyScopeId).catch(() => []),
       ]);
       const scopedScenarios = filterScopedApiRows(data, companyScopeId);
       const scopedCameras = filterScopedApiRows(cameraRows, companyScopeId);
@@ -229,6 +328,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       setCameras(scopedCameras);
       setLocations(scopedLocations);
       setSubLocations(subLocationRows);
+      setWorkers(workerRows);
       const modes = buildRealtimeScopeModes({
         cameras: scopedCameras,
         groups: cameraGroups,
@@ -236,6 +336,8 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         manager,
         scenarios: visible,
         subLocations: subLocationRows,
+        workerLocationAssignments,
+        workers: workerRows,
       });
       const nextMode = modes.some((mode) => mode.value === scopeMode)
         ? scopeMode
@@ -248,6 +350,8 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         mode: nextMode,
         scenarios: visible,
         subLocations: subLocationRows,
+        workerLocationAssignments,
+        workers: workerRows,
       });
 
       if (nextMode !== scopeMode) setScopeMode(nextMode);
@@ -267,7 +371,14 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     } finally {
       setLoadingScenarios(false);
     }
-  }, [cameraGroups, companyScopeId, manager, scopeMode, masterScopeId]);
+  }, [
+    cameraGroups,
+    companyScopeId,
+    manager,
+    scopeMode,
+    masterScopeId,
+    workerLocationAssignments,
+  ]);
 
   const loadCharts = React.useCallback(
     async ({ force = false, silent = false }: LoadOptions = {}) => {
@@ -363,6 +474,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       const scopeId = resolveCameraGroupCompanyScope(user);
       setMasterScopeId(getStoredMasterCompanyScope()?.id ?? "");
       setCameraGroups(readCameraGroups(scopeId));
+      setWorkerLocationAssignments(readWorkerLocationAssignments(scopeId));
     }
 
     syncCameraGroups();
@@ -376,15 +488,61 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   }, [user]);
 
   React.useEffect(() => {
+    function syncCustomWidgets() {
+      setCustomWidgets(loadRealtimeCustomWidgets(companyScopeId));
+    }
+
+    syncCustomWidgets();
+    window.addEventListener(
+      REALTIME_CUSTOM_WIDGETS_UPDATED_EVENT,
+      syncCustomWidgets,
+    );
+    window.addEventListener("storage", syncCustomWidgets);
+    window.addEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCustomWidgets);
+
+    return () => {
+      window.removeEventListener(
+        REALTIME_CUSTOM_WIDGETS_UPDATED_EVENT,
+        syncCustomWidgets,
+      );
+      window.removeEventListener("storage", syncCustomWidgets);
+      window.removeEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCustomWidgets);
+    };
+  }, [companyScopeId]);
+
+  React.useEffect(() => {
     setScenarios([]);
     setCameras([]);
     setLocations([]);
     setSubLocations([]);
+    setWorkers([]);
     setSelectedId("");
     setChartData({});
     setHasLoadedCharts(false);
     hasLoadedChartsRef.current = false;
   }, [masterScopeId]);
+
+  React.useEffect(() => {
+    setCustomWidgetForm((current) => {
+      if (
+        current.scopeId &&
+        customWidgetScopeOptions.some((option) => option.id === current.scopeId)
+      ) {
+        return current;
+      }
+
+      const nextScope = customWidgetScopeOptions[0];
+      return {
+        ...current,
+        scopeId: nextScope?.id ?? "",
+        title:
+          current.title ||
+          (nextScope
+            ? buildCustomWidgetDefaultTitle(nextScope, current.granularity)
+            : ""),
+      };
+    });
+  }, [customWidgetScopeOptions]);
 
   React.useEffect(() => {
     if (!availableModes.some((mode) => mode.value === scopeMode)) {
@@ -464,11 +622,24 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
           mode: "location",
           scenarios,
           subLocations,
+          workerLocationAssignments,
+          workers,
         }),
         hourRows,
         clock,
       ),
-    [cameraGroups, cameras, clock, hourRows, locations, manager, scenarios, subLocations],
+    [
+      cameraGroups,
+      cameras,
+      clock,
+      hourRows,
+      locations,
+      manager,
+      scenarios,
+      subLocations,
+      workerLocationAssignments,
+      workers,
+    ],
   );
   const subLocationTodayComparisonPoints = React.useMemo(
     () =>
@@ -478,15 +649,144 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
           groups: cameraGroups,
           locations,
           manager,
-          mode: "sub_location",
-          scenarios,
-          subLocations,
-        }),
-        hourRows,
-        clock,
-      ),
-    [cameraGroups, cameras, clock, hourRows, locations, manager, scenarios, subLocations],
+        mode: "sub_location",
+        scenarios,
+        subLocations,
+        workerLocationAssignments,
+        workers,
+      }),
+      hourRows,
+      clock,
+    ),
+    [
+      cameraGroups,
+      cameras,
+      clock,
+      hourRows,
+      locations,
+      manager,
+      scenarios,
+      subLocations,
+      workerLocationAssignments,
+      workers,
+    ],
   );
+
+  function getScopeOptionsForMode(mode: RealtimeCustomWidgetScopeMode) {
+    return buildRealtimeScopeOptions({
+      cameras,
+      groups: cameraGroups,
+      locations,
+      manager,
+      mode,
+      scenarios,
+      subLocations,
+      workerLocationAssignments,
+      workers,
+    });
+  }
+
+  function openCustomWidgetDialog() {
+    const preferredMode = (selectedScope?.mode ??
+      availableModes[0]?.value ??
+      "scenario") as RealtimeCustomWidgetScopeMode;
+    const options = getScopeOptionsForMode(preferredMode);
+    const scope =
+      selectedScope?.mode === preferredMode ? selectedScope : options[0] ?? null;
+    const granularity: RealtimeCustomWidgetGranularity = "hour";
+
+    setCustomWidgetForm({
+      granularity,
+      scopeId: scope?.id ?? "",
+      scopeMode: (scope?.mode ?? preferredMode) as RealtimeCustomWidgetScopeMode,
+      title: scope ? buildCustomWidgetDefaultTitle(scope, granularity) : "",
+    });
+    setCustomWidgetDialogOpen(true);
+  }
+
+  function handleCustomWidgetModeChange(value: string) {
+    const scopeMode = value as RealtimeCustomWidgetScopeMode;
+    const nextScope = getScopeOptionsForMode(scopeMode)[0];
+
+    setCustomWidgetForm((current) => ({
+      ...current,
+      scopeId: nextScope?.id ?? "",
+      scopeMode,
+      title:
+        current.title ||
+        (nextScope
+          ? buildCustomWidgetDefaultTitle(nextScope, current.granularity)
+          : ""),
+    }));
+  }
+
+  function handleCustomWidgetScopeChange(value: string) {
+    const nextScope = customWidgetScopeOptions.find(
+      (option) => option.id === value,
+    );
+
+    setCustomWidgetForm((current) => ({
+      ...current,
+      scopeId: value,
+      title:
+        current.title ||
+        (nextScope
+          ? buildCustomWidgetDefaultTitle(nextScope, current.granularity)
+          : ""),
+    }));
+  }
+
+  function handleCustomWidgetGranularityChange(value: string) {
+    const granularity = value as RealtimeCustomWidgetGranularity;
+    const currentScope = customWidgetScopeOptions.find(
+      (option) => option.id === customWidgetForm.scopeId,
+    );
+
+    setCustomWidgetForm((current) => ({
+      ...current,
+      granularity,
+      title:
+        current.title ||
+        (currentScope
+          ? buildCustomWidgetDefaultTitle(currentScope, granularity)
+          : ""),
+    }));
+  }
+
+  function saveCustomWidget() {
+    const scope = getScopeOptionsForMode(customWidgetForm.scopeMode).find(
+      (option) => option.id === customWidgetForm.scopeId,
+    );
+
+    if (!scope) {
+      toast.error("Selecione uma visão válida para criar o widget.");
+      return;
+    }
+
+    const title =
+      customWidgetForm.title.trim() ||
+      buildCustomWidgetDefaultTitle(scope, customWidgetForm.granularity);
+    const nextWidgets = upsertRealtimeCustomWidget(
+      {
+        granularity: customWidgetForm.granularity,
+        scopeId: scope.id,
+        scopeMode: scope.mode as RealtimeCustomWidgetScopeMode,
+        scopeName: scope.name,
+        title,
+      },
+      companyScopeId,
+    );
+
+    setCustomWidgets(nextWidgets);
+    setCustomWidgetDialogOpen(false);
+    toast.success("Widget adicionado ao Ao Vivo.");
+  }
+
+  function removeCustomWidget(widgetId: string) {
+    const nextWidgets = deleteRealtimeCustomWidget(widgetId, companyScopeId);
+    setCustomWidgets(nextWidgets);
+    toast.success("Widget removido.");
+  }
 
   const metricCards = [
     {
@@ -622,6 +922,54 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       : null,
   ].filter((card): card is NonNullable<typeof card> => Boolean(card));
 
+  const customWidgetCards = customWidgets.map((widget) => {
+    const scope = getScopeOptionsForMode(widget.scopeMode).find(
+      (option) => option.id === widget.scopeId,
+    );
+    const definition = buildCustomWidgetDefinition(
+      widget,
+      chartDefinitions,
+      scope,
+    );
+    const state = chartStateForGranularity(chartData, widget.granularity);
+
+    return {
+      id: `live_custom_${widget.id}`,
+      label: widget.title,
+      defaultSize: "wide" as const,
+      className: "sm:col-span-2 xl:col-span-2",
+      node: scope ? (
+        <RealtimeChartCard
+          action={
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+              onClick={(event) => {
+                event.stopPropagation();
+                removeCustomWidget(widget.id);
+              }}
+              aria-label={`Remover widget ${widget.title}`}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          }
+          definition={definition}
+          loading={initialLoading}
+          rows={state?.rows ?? []}
+          scope={scope}
+          state={state}
+        />
+      ) : (
+        <MissingCustomWidgetCard
+          title={widget.title}
+          onRemove={() => removeCustomWidget(widget.id)}
+        />
+      ),
+    };
+  });
+
   const detailCards = selectedScope
     ? [
         {
@@ -706,6 +1054,15 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
               <Button
                 type="button"
                 variant="outline"
+                onClick={openCustomWidgetDialog}
+                disabled={!availableModes.length}
+              >
+                <Plus className="h-4 w-4" />
+                Widget
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
                 onClick={() => {
                   loadScenarios();
                   loadCharts({ force: true, silent: true });
@@ -733,9 +1090,133 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       {scopeOptions.length ? (
         <CardLayout
           menuKey="live"
-          cards={[...metricCards, ...comparisonCards, ...chartCards, ...detailCards]}
+          editActions={
+            <Button type="button" variant="outline" size="sm" onClick={openCustomWidgetDialog}>
+              <Settings2 className="h-3.5 w-3.5" />
+              Novo widget
+            </Button>
+          }
+          cards={[
+            ...metricCards,
+            ...comparisonCards,
+            ...customWidgetCards,
+            ...chartCards,
+            ...detailCards,
+          ]}
         />
       ) : null}
+
+      <Dialog
+        open={customWidgetDialogOpen}
+        onOpenChange={setCustomWidgetDialogOpen}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Novo widget ao vivo</DialogTitle>
+            <DialogDescription>
+              Escolha a visão, o período do gráfico e o título exibido no card.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="custom-widget-title">Título</Label>
+              <Input
+                id="custom-widget-title"
+                value={customWidgetForm.title}
+                onChange={(event) =>
+                  setCustomWidgetForm((current) => ({
+                    ...current,
+                    title: event.target.value,
+                  }))
+                }
+                placeholder="Entradas hora a hora"
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Tipo de visão</Label>
+                <Select
+                  value={customWidgetForm.scopeMode}
+                  onValueChange={handleCustomWidgetModeChange}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableModes.map((mode) => (
+                      <SelectItem key={mode.value} value={mode.value}>
+                        {mode.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label>{scopeModeLabel(customWidgetForm.scopeMode)}</Label>
+                <Select
+                  value={customWidgetForm.scopeId}
+                  onValueChange={handleCustomWidgetScopeChange}
+                  disabled={!customWidgetScopeOptions.length}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Selecione" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {customWidgetScopeOptions.map((option) => (
+                      <SelectItem key={option.id} value={option.id}>
+                        {option.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Gráfico</Label>
+              <Select
+                value={customWidgetForm.granularity}
+                onValueChange={handleCustomWidgetGranularityChange}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {CUSTOM_WIDGET_GRANULARITY_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              Os widgets do Ao Vivo usam atualização automática a cada 5 segundos.
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setCustomWidgetDialogOpen(false)}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              onClick={saveCustomWidget}
+              disabled={!customWidgetForm.scopeId}
+            >
+              Adicionar widget
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
@@ -795,12 +1276,14 @@ function MetricCard({
 }
 
 function RealtimeChartCard({
+  action,
   definition,
   loading,
   rows,
   scope,
   state,
 }: {
+  action?: React.ReactNode;
   definition: RealtimeChartDefinition;
   loading: boolean;
   rows: AggregateEventRow[];
@@ -830,9 +1313,12 @@ function RealtimeChartCard({
               {definition.description}
             </CardDescription>
           </div>
-          <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
-            {scope.name}
-          </Badge>
+          <div className="flex shrink-0 items-center gap-2">
+            <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
+              {scope.name}
+            </Badge>
+            {action}
+          </div>
         </div>
       </CardHeader>
       <CardContent>
@@ -847,6 +1333,45 @@ function RealtimeChartCard({
         ) : (
           <EmptyChartState text="Sem eventos ao vivo nesta visão." />
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function MissingCustomWidgetCard({
+  onRemove,
+  title,
+}: {
+  onRemove: () => void;
+  title: string;
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <BarChart3 className="h-4 w-4 text-primary" />
+              {title || "Widget personalizado"}
+            </CardTitle>
+            <CardDescription>
+              A visão vinculada a este widget não está mais disponível.
+            </CardDescription>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+            onClick={onRemove}
+            aria-label="Remover widget"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <EmptyChartState text="Selecione outro widget ou remova este card." />
       </CardContent>
     </Card>
   );
@@ -918,7 +1443,7 @@ function ScopeDetailCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-4">
           <SmallInfo label="Tipo" value={scopeModeLabel(scope.mode)} />
           <SmallInfo
             label={scope.mode === "scenario" ? "Linhas ativas" : "Câmeras"}
@@ -936,6 +1461,15 @@ function ScopeDetailCard({
                   : "Location"
             }
           />
+          {scope.mode === "location" ? (
+            <SmallInfo
+              label="Worker"
+              value={
+                scope.worker?.name ??
+                (scope.workerId ? "Não retornado pela API" : "Não vinculado")
+              }
+            />
+          ) : null}
         </div>
         <div className="max-h-[210px] space-y-2 overflow-y-auto pr-1">
           {scope.scenario?.lines?.length ? (
@@ -1092,6 +1626,63 @@ function buildCurrentMonthDaysDefinition(now: Date): RealtimeChartDefinition {
     from: startOfMonth(now),
     to: addDays(todayStart, 1),
   };
+}
+
+function buildCustomWidgetDefinition(
+  widget: RealtimeCustomWidget,
+  definitions: RealtimeChartDefinition[],
+  scope?: RealtimeScopeOption,
+): RealtimeChartDefinition {
+  const base =
+    definitions.find((definition) => definition.granularity === widget.granularity) ??
+    definitions.find((definition) => definition.id === "live_chart_hour") ??
+    buildRealtimeChartDefinitions(new Date())[1];
+  const scopeName = scope?.name ?? widget.scopeName;
+
+  return {
+    ...base,
+    description: `${granularityLabel(widget.granularity)} em ${scopeModeLabel(
+      widget.scopeMode,
+    ).toLowerCase()}: ${scopeName}.`,
+    id: `live_custom_${widget.id}`,
+    label: widget.title || buildCustomWidgetDefaultTitleFromName(scopeName, widget.granularity),
+  };
+}
+
+function chartStateForGranularity(
+  data: Record<string, RealtimeChartState>,
+  granularity: RealtimeCustomWidgetGranularity,
+) {
+  const idByGranularity: Record<RealtimeCustomWidgetGranularity, string> = {
+    day: "live_chart_day",
+    hour: "live_chart_hour",
+    minute: "live_chart_minute",
+    month: "live_chart_month",
+    week: "live_chart_week",
+  };
+
+  return data[idByGranularity[granularity]];
+}
+
+function buildCustomWidgetDefaultTitle(
+  scope: RealtimeScopeOption,
+  granularity: RealtimeCustomWidgetGranularity,
+) {
+  return buildCustomWidgetDefaultTitleFromName(scope.name, granularity);
+}
+
+function buildCustomWidgetDefaultTitleFromName(
+  scopeName: string,
+  granularity: RealtimeCustomWidgetGranularity,
+) {
+  return `${scopeName} - ${granularityLabel(granularity)}`;
+}
+
+function granularityLabel(granularity: RealtimeCustomWidgetGranularity) {
+  return (
+    CUSTOM_WIDGET_GRANULARITY_OPTIONS.find((option) => option.value === granularity)
+      ?.label ?? "Hora a hora"
+  );
 }
 
 function aggregatePath(definition: RealtimeChartDefinition) {
@@ -1320,6 +1911,22 @@ async function fetchSubLocations(
   return filterScopedApiRows(rows.flat(), companyScopeId);
 }
 
+function companyScopeHeaders(companyId?: string | null) {
+  const cleanCompanyId = companyId?.trim();
+  return cleanCompanyId ? { "X-Company-ID": cleanCompanyId } : undefined;
+}
+
+async function fetchRealtimeWorkers(companyId?: string | null) {
+  const headers = companyScopeHeaders(companyId);
+  const rows = await apiFetch<unknown>("/workers", { headers }).then((response) =>
+    normalizeWorkerRows(response).map((row) =>
+      annotateWorkerCompanyScope(row, companyId, "GET /workers"),
+    ),
+  );
+  const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
+  return sortWorkersByActivity(scopedRows);
+}
+
 function buildRealtimeScopeOptions({
   cameras,
   groups,
@@ -1328,6 +1935,8 @@ function buildRealtimeScopeOptions({
   mode,
   scenarios,
   subLocations,
+  workerLocationAssignments,
+  workers,
 }: {
   cameras: Camera[];
   groups: CameraGroup[];
@@ -1336,12 +1945,16 @@ function buildRealtimeScopeOptions({
   mode: RealtimeScopeMode;
   scenarios: Scenario[];
   subLocations: SubLocation[];
+  workerLocationAssignments: WorkerLocationAssignments;
+  workers: Worker[];
 }) {
   if (mode === "location") {
-    return buildLocationCameraOptions({
+    return buildWorkerBackedLocationOptions({
+      assignments: workerLocationAssignments,
       cameras,
       locations,
       manager,
+      workers,
     }).map<RealtimeScopeOption>((option) => ({
         cameraIds: option.cameraIds,
         description: option.description,
@@ -1349,6 +1962,8 @@ function buildRealtimeScopeOptions({
         location: option.location,
         mode: "location",
         name: option.name,
+        worker: option.worker,
+        workerId: option.workerId,
       }));
   }
 
@@ -1388,6 +2003,8 @@ function buildRealtimeScopeModes({
   manager,
   scenarios,
   subLocations,
+  workerLocationAssignments,
+  workers,
 }: {
   cameras: Camera[];
   groups: CameraGroup[];
@@ -1395,6 +2012,8 @@ function buildRealtimeScopeModes({
   manager: boolean;
   scenarios: Scenario[];
   subLocations: SubLocation[];
+  workerLocationAssignments: WorkerLocationAssignments;
+  workers: Worker[];
 }) {
   const modes: Array<{ label: string; value: RealtimeScopeMode }> = [];
   if (scenarios.length) modes.push({ label: "Cenário", value: "scenario" });
@@ -1407,6 +2026,8 @@ function buildRealtimeScopeModes({
       mode: "location",
       scenarios,
       subLocations,
+      workerLocationAssignments,
+      workers,
     }).length
   ) {
     modes.push({ label: "Location", value: "location" });
@@ -1420,6 +2041,8 @@ function buildRealtimeScopeModes({
       mode: "sub_location",
       scenarios,
       subLocations,
+      workerLocationAssignments,
+      workers,
     }).length
   ) {
     modes.push({ label: "Sub-location", value: "sub_location" });

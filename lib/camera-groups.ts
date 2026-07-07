@@ -12,6 +12,7 @@ import type {
 export type CameraGroupScopeType = "location" | "sub_location" | "worker";
 
 export type CameraWorkerAssignments = Record<string, string>;
+export type WorkerLocationAssignments = Record<string, string>;
 
 export type CameraGroup = {
   camera_ids: string[];
@@ -41,10 +42,13 @@ export const CAMERA_GROUPS_UPDATED_EVENT = "ipxdata:camera-groups-updated";
 const CAMERA_GROUP_STORAGE_KEY = "ipxdata.camera-groups.v1";
 const CAMERA_WORKER_ASSIGNMENT_STORAGE_KEY =
   "ipxdata.camera-worker-assignments.v1";
+const WORKER_LOCATION_ASSIGNMENT_STORAGE_KEY =
+  "ipxdata.worker-location-assignments.v1";
 const DEFAULT_COMPANY_SCOPE = "default";
 
 type CameraGroupStore = Record<string, CameraGroup[]>;
 type CameraWorkerAssignmentStore = Record<string, CameraWorkerAssignments>;
+type WorkerLocationAssignmentStore = Record<string, WorkerLocationAssignments>;
 
 export function resolveCameraGroupCompanyScope(user: CurrentUser | null) {
   return getEffectiveCompanyScopeId(user) || DEFAULT_COMPANY_SCOPE;
@@ -141,6 +145,46 @@ export function setWorkerCameraAssignments(
   return writeCameraWorkerAssignments(companyScopeId, assignments);
 }
 
+export function readWorkerLocationAssignments(
+  companyScopeId: string | null | undefined,
+) {
+  const scopeId = companyScopeId || DEFAULT_COMPANY_SCOPE;
+  return normalizeWorkerLocationAssignments(
+    readWorkerLocationAssignmentStore()[scopeId] ?? {},
+  );
+}
+
+export function writeWorkerLocationAssignments(
+  companyScopeId: string | null | undefined,
+  assignments: WorkerLocationAssignments,
+) {
+  const scopeId = companyScopeId || DEFAULT_COMPANY_SCOPE;
+  const store = readWorkerLocationAssignmentStore();
+  store[scopeId] = normalizeWorkerLocationAssignments(assignments);
+  writeWorkerLocationAssignmentStore(store);
+  dispatchCameraGroupsUpdated();
+  return store[scopeId];
+}
+
+export function setWorkerLocationAssignment(
+  companyScopeId: string | null | undefined,
+  locationId: string,
+  workerId: string,
+) {
+  const cleanLocationId = locationId.trim();
+  if (!cleanLocationId) return readWorkerLocationAssignments(companyScopeId);
+
+  const assignments = readWorkerLocationAssignments(companyScopeId);
+  const cleanWorkerId = workerId.trim();
+  if (cleanWorkerId) {
+    assignments[cleanLocationId] = cleanWorkerId;
+  } else {
+    delete assignments[cleanLocationId];
+  }
+
+  return writeWorkerLocationAssignments(companyScopeId, assignments);
+}
+
 export function assignedCameraIdsForWorker({
   assignments,
   cameras,
@@ -182,6 +226,43 @@ export function buildWorkerLocationOptions({
       worker,
     }))
     .filter((option) => option.cameraIds.length > 0);
+}
+
+export function buildWorkerBackedLocationOptions({
+  assignments,
+  cameras,
+  locations,
+  manager,
+  workers,
+}: {
+  assignments: WorkerLocationAssignments;
+  cameras: Camera[];
+  locations: Location[];
+  manager: boolean;
+  workers: Worker[];
+}) {
+  const workersById = new Map(workers.map((worker) => [worker.id, worker]));
+
+  return buildLocationCameraOptions({
+    cameras,
+    locations,
+    manager,
+  }).map((option) => {
+    const workerId = assignments[option.id] ?? "";
+    const worker = workerId ? workersById.get(workerId) : undefined;
+    const workerDescription = worker
+      ? `Worker vinculado: ${worker.name}.`
+      : workerId
+        ? "Worker vinculado não foi retornado pela API."
+        : "Worker ainda não vinculado.";
+
+    return {
+      ...option,
+      description: `${option.description} ${workerDescription}`,
+      worker,
+      workerId,
+    };
+  });
 }
 
 export function buildLocationCameraOptions({
@@ -442,12 +523,48 @@ function writeAssignmentStore(store: CameraWorkerAssignmentStore) {
   );
 }
 
+function readWorkerLocationAssignmentStore(): WorkerLocationAssignmentStore {
+  if (typeof window === "undefined") return {};
+
+  try {
+    const raw = window.localStorage.getItem(
+      WORKER_LOCATION_ASSIGNMENT_STORAGE_KEY,
+    );
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as WorkerLocationAssignmentStore;
+  } catch {
+    return {};
+  }
+}
+
+function writeWorkerLocationAssignmentStore(
+  store: WorkerLocationAssignmentStore,
+) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(
+    WORKER_LOCATION_ASSIGNMENT_STORAGE_KEY,
+    JSON.stringify(store),
+  );
+}
+
 function normalizeCameraWorkerAssignments(assignments: CameraWorkerAssignments) {
   return Object.fromEntries(
     Object.entries(assignments)
       .map(([cameraId, workerId]) => [cameraId.trim(), workerId.trim()])
       .filter(([cameraId, workerId]) => cameraId && workerId),
   ) as CameraWorkerAssignments;
+}
+
+function normalizeWorkerLocationAssignments(
+  assignments: WorkerLocationAssignments,
+) {
+  return Object.fromEntries(
+    Object.entries(assignments)
+      .map(([locationId, workerId]) => [locationId.trim(), workerId.trim()])
+      .filter(([locationId, workerId]) => locationId && workerId),
+  ) as WorkerLocationAssignments;
 }
 
 function uniqueStringList(values: unknown[]) {

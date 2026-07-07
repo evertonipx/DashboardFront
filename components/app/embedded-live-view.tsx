@@ -9,9 +9,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import { hasMasterAccess } from "@/lib/access";
 import {
-  buildLocationCameraOptions,
+  buildWorkerBackedLocationOptions,
   buildSubLocationCameraOptions,
   readCameraGroups,
+  readWorkerLocationAssignments,
 } from "@/lib/camera-groups";
 import { pastelBarColor } from "@/lib/chart-palette";
 import {
@@ -26,8 +27,15 @@ import type {
   Location,
   Scenario,
   SubLocation,
+  Worker,
 } from "@/lib/types";
 import { formatNumber } from "@/lib/utils";
+import {
+  annotateWorkerCompanyScope,
+  normalizeWorkerRows,
+  partitionWorkersByCompanyScope,
+  sortWorkersByActivity,
+} from "@/lib/worker-scope";
 
 type ViewChart =
   | "today-scenario"
@@ -39,6 +47,19 @@ type ChartPoint = {
   id: string;
   name: string;
   total: number;
+};
+
+type EmbeddedWidgetConfig = {
+  chart: ViewChart;
+  id: string;
+  scopeId: string;
+  title: string;
+};
+
+type EmbeddedWidgetState = {
+  config: EmbeddedWidgetConfig;
+  error: string;
+  points: ChartPoint[];
 };
 
 type AggregateIdentityTotal = {
@@ -53,6 +74,12 @@ type AggregateDefinition = {
   granularity: AggregateGranularity;
   from: Date;
   to: Date;
+};
+
+type ScopeComparisonOption = {
+  cameraIds: string[];
+  id: string;
+  name: string;
 };
 
 const DEFAULT_METRIC_TYPE = "count";
@@ -74,17 +101,24 @@ export function EmbeddedLiveView() {
   const companyScopeId = queryCompanyId || storedCompanyScopeId;
   const scopeId = searchParams.get("scope_id")?.trim() ?? "";
   const title = searchParams.get("title")?.trim() || chartLabels[chart];
-  const [points, setPoints] = React.useState<ChartPoint[]>([]);
+  const widgetsParam = searchParams.get("widgets");
+  const widgetConfigs = React.useMemo(
+    () =>
+      parseWidgetConfigs(widgetsParam, {
+        chart,
+        id: "single",
+        scopeId,
+        title,
+      }),
+    [chart, scopeId, title, widgetsParam],
+  );
+  const multiWidgetMode = Boolean(widgetsParam);
+  const [widgetStates, setWidgetStates] = React.useState<EmbeddedWidgetState[]>(
+    [],
+  );
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
-  const option = React.useMemo(
-    () =>
-      chart === "scenario-hour"
-        ? buildHourlyChartOption(points)
-        : buildComparisonChartOption(points),
-    [chart, points],
-  );
 
   const load = React.useCallback(async () => {
     if (hasMasterAccess(user) && !companyScopeId) {
@@ -101,11 +135,19 @@ export function EmbeddedLiveView() {
       const headers = companyScopeId
         ? ({ "X-Company-ID": companyScopeId } satisfies HeadersInit)
         : undefined;
-      const [scenarioRows, cameraRows, locationRows, hourRows, minuteRows] =
+      const [
+        scenarioRows,
+        cameraRows,
+        locationRows,
+        workerRows,
+        hourRows,
+        minuteRows,
+      ] =
         await Promise.all([
           apiFetch<Scenario[]>("/scenarios", { headers }),
           apiFetch<Camera[]>("/cameras", { headers }).catch(() => []),
           apiFetch<Location[]>("/locations", { headers }).catch(() => []),
+          fetchEmbeddedWorkers(companyScopeId).catch(() => []),
           fetchAggregateRows(buildAggregateDefinition(now, "hour"), headers),
           fetchAggregateRows(buildAggregateDefinition(now, "minute"), headers),
         ]);
@@ -116,52 +158,46 @@ export function EmbeddedLiveView() {
       const scopedCameras = filterScopedApiRows(cameraRows, companyScopeId);
       const scopedLocations = filterScopedApiRows(locationRows, companyScopeId);
       const liveHourRows = hydrateCurrentHourRows(hourRows, minuteRows, now);
+      const needsLocation = widgetConfigs.some(
+        (widget) => widget.chart === "today-location",
+      );
+      const needsSubLocation = widgetConfigs.some(
+        (widget) => widget.chart === "today-sub-location",
+      );
+      const locationOptions = needsLocation
+        ? buildWorkerBackedLocationOptions({
+            assignments: readWorkerLocationAssignments(companyScopeId),
+            cameras: scopedCameras,
+            locations: scopedLocations,
+            manager: false,
+            workers: workerRows,
+          })
+        : [];
+      const subLocationOptions = needsSubLocation
+        ? buildSubLocationCameraOptions({
+            cameras: scopedCameras,
+            groups: readCameraGroups(companyScopeId),
+            locations: scopedLocations,
+            manager: false,
+            subLocations: filterScopedApiRows(
+              await fetchSubLocations(scopedLocations, headers),
+              companyScopeId,
+            ),
+          })
+        : [];
 
-      if (chart === "scenario-hour") {
-        const scenario =
-          scopedScenarios.find((item) => item.id === scopeId) ??
-          scopedScenarios[0] ??
-          null;
-        if (!scenario) {
-          setPoints([]);
-          setError("Nenhum cenário disponível para esta visão.");
-          return;
-        }
-
-        setPoints(buildScenarioHourlyPoints(scenario, liveHourRows, now));
-        setLastUpdated(now);
-        return;
-      }
-
-      if (chart === "today-scenario") {
-        setPoints(
-          buildScenarioTodayComparisonPoints(scopedScenarios, liveHourRows, now),
-        );
-        setLastUpdated(now);
-        return;
-      }
-
-      if (chart === "today-location") {
-        const options = buildLocationCameraOptions({
-          cameras: scopedCameras,
-          locations: scopedLocations,
-          manager: false,
-        });
-        setPoints(buildScopeTodayComparisonPoints(options, liveHourRows, now));
-        setLastUpdated(now);
-        return;
-      }
-
-      const subLocations = await fetchSubLocations(scopedLocations, headers);
-      const scopedSubLocations = filterScopedApiRows(subLocations, companyScopeId);
-      const options = buildSubLocationCameraOptions({
-        cameras: scopedCameras,
-        groups: readCameraGroups(companyScopeId),
-        locations: scopedLocations,
-        manager: false,
-        subLocations: scopedSubLocations,
-      });
-      setPoints(buildScopeTodayComparisonPoints(options, liveHourRows, now));
+      setWidgetStates(
+        widgetConfigs.map((config) =>
+          buildEmbeddedWidgetState({
+            config,
+            liveHourRows,
+            locationOptions,
+            now,
+            scenarios: scopedScenarios,
+            subLocationOptions,
+          }),
+        ),
+      );
       setLastUpdated(now);
     } catch (loadError) {
       setError(
@@ -172,7 +208,7 @@ export function EmbeddedLiveView() {
     } finally {
       setLoading(false);
     }
-  }, [chart, companyScopeId, scopeId, user]);
+  }, [companyScopeId, user, widgetConfigs]);
 
   React.useEffect(() => {
     load();
@@ -187,6 +223,11 @@ export function EmbeddedLiveView() {
 
     return () => window.clearInterval(interval);
   }, [load]);
+
+  const visibleStates = widgetStates.length
+    ? widgetStates
+    : widgetConfigs.map((config) => ({ config, error: "", points: [] }));
+  const firstState = visibleStates[0];
 
   return (
     <main className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
@@ -211,18 +252,48 @@ export function EmbeddedLiveView() {
       ) : null}
 
       <div className="min-h-0 flex-1 p-3 pt-1">
-        {loading && !points.length ? (
+        {loading && !widgetStates.length ? (
           <Skeleton className="h-full w-full" />
         ) : error ? (
           <EmbeddedState text={error} />
-        ) : points.length ? (
-          <EChart option={option} />
+        ) : multiWidgetMode ? (
+          <div className="grid h-full min-h-0 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {visibleStates.map((state) => (
+              <section
+                key={state.config.id}
+                className="flex min-h-[260px] min-w-0 flex-col rounded-md border bg-card"
+              >
+                <header className="shrink-0 border-b px-3 py-2">
+                  <h2 className="truncate text-sm font-semibold">
+                    {state.config.title}
+                  </h2>
+                </header>
+                <div className="min-h-0 flex-1 p-2">
+                  <EmbeddedChartContent state={state} />
+                </div>
+              </section>
+            ))}
+          </div>
+        ) : firstState ? (
+          <EmbeddedChartContent state={firstState} />
         ) : (
           <EmbeddedState text="Sem dados disponíveis para esta visão." />
         )}
       </div>
     </main>
   );
+}
+
+function EmbeddedChartContent({ state }: { state: EmbeddedWidgetState }) {
+  if (state.error) {
+    return <EmbeddedState text={state.error} />;
+  }
+
+  if (state.points.length) {
+    return <EChart option={buildOptionForChart(state.config.chart, state.points)} />;
+  }
+
+  return <EmbeddedState text="Sem dados disponíveis para esta visão." />;
 }
 
 function EmbeddedState({ text }: { text: string }) {
@@ -243,6 +314,114 @@ function normalizeChart(value: string | null): ViewChart {
   }
 
   return "today-scenario";
+}
+
+function parseWidgetConfigs(
+  value: string | null,
+  fallback: EmbeddedWidgetConfig,
+): EmbeddedWidgetConfig[] {
+  if (!value) return [fallback];
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [fallback];
+
+    const widgets = parsed
+      .map((item, index): EmbeddedWidgetConfig | null => {
+        if (!item || typeof item !== "object") return null;
+
+        const record = item as Record<string, unknown>;
+        const chart = normalizeChart(
+          typeof record.chart === "string" ? record.chart : null,
+        );
+        const scopeId =
+          typeof record.scope_id === "string"
+            ? record.scope_id
+            : typeof record.scopeId === "string"
+              ? record.scopeId
+              : "";
+        const title =
+          typeof record.title === "string" && record.title.trim()
+            ? record.title.trim()
+            : chartLabels[chart];
+
+        return {
+          chart,
+          id: `widget-${index}-${chart}-${scopeId || "all"}`,
+          scopeId,
+          title,
+        };
+      })
+      .filter((widget): widget is EmbeddedWidgetConfig => Boolean(widget));
+
+    return widgets.length ? widgets : [fallback];
+  } catch {
+    return [fallback];
+  }
+}
+
+function buildEmbeddedWidgetState({
+  config,
+  liveHourRows,
+  locationOptions,
+  now,
+  scenarios,
+  subLocationOptions,
+}: {
+  config: EmbeddedWidgetConfig;
+  liveHourRows: AggregateEventRow[];
+  locationOptions: ScopeComparisonOption[];
+  now: Date;
+  scenarios: Scenario[];
+  subLocationOptions: ScopeComparisonOption[];
+}): EmbeddedWidgetState {
+  if (config.chart === "scenario-hour") {
+    const scenario =
+      scenarios.find((item) => item.id === config.scopeId) ??
+      (!config.scopeId ? scenarios[0] : null) ??
+      null;
+
+    return {
+      config,
+      error: scenario ? "" : "Nenhum cenário disponível para esta visão.",
+      points: scenario ? buildScenarioHourlyPoints(scenario, liveHourRows, now) : [],
+    };
+  }
+
+  if (config.chart === "today-scenario") {
+    return {
+      config,
+      error: "",
+      points: buildScenarioTodayComparisonPoints(scenarios, liveHourRows, now),
+    };
+  }
+
+  if (config.chart === "today-location") {
+    return {
+      config,
+      error: "",
+      points: buildScopeTodayComparisonPoints(locationOptions, liveHourRows, now),
+    };
+  }
+
+  return {
+    config,
+    error: "",
+    points: buildScopeTodayComparisonPoints(
+      subLocationOptions,
+      liveHourRows,
+      now,
+    ),
+  };
+}
+
+function buildOptionForChart(
+  chart: ViewChart,
+  points: ChartPoint[],
+): EnterpriseChartOption {
+  return chart === "scenario-hour"
+    ? buildHourlyChartOption(points)
+    : buildComparisonChartOption(points);
 }
 
 function buildAggregateDefinition(
@@ -282,6 +461,22 @@ async function fetchAggregateRows(
   );
 
   return response.data ?? [];
+}
+
+async function fetchEmbeddedWorkers(
+  companyId?: string | null,
+): Promise<Worker[]> {
+  const cleanCompanyId = companyId?.trim();
+  const headers = cleanCompanyId
+    ? ({ "X-Company-ID": cleanCompanyId } satisfies HeadersInit)
+    : undefined;
+  const rows = await apiFetch<unknown>("/workers", { headers }).then((response) =>
+    normalizeWorkerRows(response).map((row) =>
+      annotateWorkerCompanyScope(row, companyId, "GET /workers"),
+    ),
+  );
+  const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
+  return sortWorkersByActivity(scopedRows);
 }
 
 async function fetchSubLocations(locations: Location[], headers?: HeadersInit) {
