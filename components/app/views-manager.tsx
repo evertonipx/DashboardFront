@@ -40,6 +40,7 @@ import {
 import { apiFetch } from "@/lib/api";
 import { canManageViews } from "@/lib/permissions";
 import type { Scenario } from "@/lib/types";
+import { cn, toDateTimeLocalValue } from "@/lib/utils";
 
 const viewOptions = [
   {
@@ -58,13 +59,22 @@ const viewOptions = [
     value: "today-sub-location",
   },
   {
-    description: "Hora a hora do dia atual para um cenário específico.",
-    label: "Hora a hora por cenário",
+    description: "Comparativo flexível entre cenários por hora, dia, semana ou mês.",
+    label: "Cenários por período",
     value: "scenario-hour",
   },
 ] as const;
 
 type ViewChart = (typeof viewOptions)[number]["value"];
+type ScenarioCompareGranularity = "hour" | "day" | "week" | "month";
+type ScenarioComparePeriod =
+  | "today"
+  | "yesterday"
+  | "last_24h"
+  | "last_7d"
+  | "last_30d"
+  | "custom";
+type ScenarioSelectionMode = "all" | "custom";
 
 type ViewWidget = {
   chart: ViewChart;
@@ -72,6 +82,28 @@ type ViewWidget = {
   scenarioId: string;
   title: string;
 };
+
+const scenarioCompareGranularityOptions: Array<{
+  label: string;
+  value: ScenarioCompareGranularity;
+}> = [
+  { label: "Hora a hora", value: "hour" },
+  { label: "Dia a dia", value: "day" },
+  { label: "Semana a semana", value: "week" },
+  { label: "Mês a mês", value: "month" },
+];
+
+const scenarioComparePeriodOptions: Array<{
+  label: string;
+  value: ScenarioComparePeriod;
+}> = [
+  { label: "Hoje", value: "today" },
+  { label: "Ontem", value: "yesterday" },
+  { label: "Últimas 24h", value: "last_24h" },
+  { label: "Últimos 7 dias", value: "last_7d" },
+  { label: "Últimos 30 dias", value: "last_30d" },
+  { label: "Personalizado", value: "custom" },
+];
 
 export function ViewsManager() {
   const { user } = useAuth();
@@ -81,7 +113,23 @@ export function ViewsManager() {
   const [chart, setChart] = React.useState<ViewChart>("today-scenario");
   const [title, setTitle] = React.useState("Hoje por cenário");
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
-  const [selectedScenarioId, setSelectedScenarioId] = React.useState("");
+  const [scenarioCompareGranularity, setScenarioCompareGranularity] =
+    React.useState<ScenarioCompareGranularity>("hour");
+  const [scenarioComparePeriod, setScenarioComparePeriod] =
+    React.useState<ScenarioComparePeriod>("today");
+  const [scenarioSelectionMode, setScenarioSelectionMode] =
+    React.useState<ScenarioSelectionMode>("all");
+  const [selectedScenarioIds, setSelectedScenarioIds] = React.useState<string[]>(
+    [],
+  );
+  const [scenarioCompareFrom, setScenarioCompareFrom] = React.useState(() => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return toDateTimeLocalValue(start);
+  });
+  const [scenarioCompareTo, setScenarioCompareTo] = React.useState(() =>
+    toDateTimeLocalValue(new Date()),
+  );
   const [widgetChart, setWidgetChart] =
     React.useState<ViewChart>("scenario-hour");
   const [widgetScenarioId, setWidgetScenarioId] = React.useState("");
@@ -89,9 +137,9 @@ export function ViewsManager() {
   const [viewWidgets, setViewWidgets] = React.useState<ViewWidget[]>([]);
   const [loadingScenarios, setLoadingScenarios] = React.useState(false);
   const selectedView = viewOptions.find((option) => option.value === chart);
-  const selectedScenario = scenarios.find(
-    (scenario) => scenario.id === selectedScenarioId,
-  );
+  const selectedScenarioNames = selectedScenarioIds
+    .map((id) => scenarios.find((scenario) => scenario.id === id)?.name)
+    .filter(Boolean);
   const selectedWidgetView = viewOptions.find(
     (option) => option.value === widgetChart,
   );
@@ -117,17 +165,45 @@ export function ViewsManager() {
         JSON.stringify(
           viewWidgets.map((widget) => ({
             chart: widget.chart,
+            granularity: widget.chart === "scenario-hour" ? "hour" : undefined,
+            period: widget.chart === "scenario-hour" ? "today" : undefined,
+            scenario_ids:
+              widget.chart === "scenario-hour" && widget.scenarioId
+                ? [widget.scenarioId]
+                : undefined,
             scope_id: widget.scenarioId || undefined,
             title: widget.title,
           })),
         ),
       );
-    } else if (chart === "scenario-hour" && selectedScenarioId) {
-      params.set("scope_id", selectedScenarioId);
+    } else if (chart === "scenario-hour") {
+      params.set("granularity", scenarioCompareGranularity);
+      params.set("period", scenarioComparePeriod);
+      if (scenarioSelectionMode === "custom") {
+        params.set("scenario_ids", selectedScenarioIds.join(",") || "__none");
+      }
+      if (scenarioComparePeriod === "custom") {
+        const from = parseLocalDateTimeInput(scenarioCompareFrom);
+        const to = parseLocalDateTimeInput(scenarioCompareTo);
+        if (from) params.set("from", from.toISOString());
+        if (to) params.set("to", to.toISOString());
+      }
     }
 
     return `${origin}/views/live?${params.toString()}`;
-  }, [chart, companyScopeId, origin, selectedScenarioId, title, viewWidgets]);
+  }, [
+    chart,
+    companyScopeId,
+    origin,
+    scenarioCompareFrom,
+    scenarioCompareGranularity,
+    scenarioComparePeriod,
+    scenarioCompareTo,
+    scenarioSelectionMode,
+    selectedScenarioIds,
+    title,
+    viewWidgets,
+  ]);
 
   React.useEffect(() => {
     setOrigin(window.location.origin);
@@ -144,10 +220,8 @@ export function ViewsManager() {
         });
         const scopedRows = filterScopedApiRows(rows, companyScopeId);
         setScenarios(scopedRows);
-        setSelectedScenarioId((current) =>
-          current && scopedRows.some((scenario) => scenario.id === current)
-            ? current
-            : scopedRows[0]?.id ?? "",
+        setSelectedScenarioIds((current) =>
+          current.filter((id) => scopedRows.some((scenario) => scenario.id === id)),
         );
         setWidgetScenarioId((current) =>
           current && scopedRows.some((scenario) => scenario.id === current)
@@ -156,7 +230,6 @@ export function ViewsManager() {
         );
       } catch {
         setScenarios([]);
-        setSelectedScenarioId("");
         setWidgetScenarioId("");
       } finally {
         setLoadingScenarios(false);
@@ -170,6 +243,14 @@ export function ViewsManager() {
     setChart(value);
     const nextView = viewOptions.find((option) => option.value === value);
     if (nextView) setTitle(nextView.label);
+  }
+
+  function toggleScenarioSelection(scenarioId: string) {
+    setSelectedScenarioIds((current) =>
+      current.includes(scenarioId)
+        ? current.filter((id) => id !== scenarioId)
+        : [...current, scenarioId],
+    );
   }
 
   function addWidget() {
@@ -275,31 +356,168 @@ export function ViewsManager() {
               </FormField>
             </div>
 
+            {chart === "scenario-hour" ? (
+              <div className="rounded-md border border-border bg-muted/20 p-3">
+                <div className="mb-3">
+                  <div className="text-sm font-semibold">Comparação de cenários</div>
+                  <div className="text-xs text-muted-foreground">
+                    Configure granularidade, período e quais cenários entram no
+                    mesmo gráfico.
+                  </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <FormField label="Granularidade">
+                    <Select
+                      value={scenarioCompareGranularity}
+                      onValueChange={(value) =>
+                        setScenarioCompareGranularity(
+                          value as ScenarioCompareGranularity,
+                        )
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {scenarioCompareGranularityOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </FormField>
+
+                  <FormField label="Período">
+                    <Select
+                      value={scenarioComparePeriod}
+                      onValueChange={(value) =>
+                        setScenarioComparePeriod(value as ScenarioComparePeriod)
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {scenarioComparePeriodOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </FormField>
+
+                  <FormField label="Cenários">
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        type="button"
+                        variant={
+                          scenarioSelectionMode === "all" ? "default" : "outline"
+                        }
+                        onClick={() => setScenarioSelectionMode("all")}
+                      >
+                        Todos
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={
+                          scenarioSelectionMode === "custom"
+                            ? "default"
+                            : "outline"
+                        }
+                        onClick={() => setScenarioSelectionMode("custom")}
+                      >
+                        Escolher
+                      </Button>
+                    </div>
+                  </FormField>
+                </div>
+
+                {scenarioComparePeriod === "custom" ? (
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <FormField label="De">
+                      <Input
+                        type="datetime-local"
+                        value={scenarioCompareFrom}
+                        onChange={(event) =>
+                          setScenarioCompareFrom(event.target.value)
+                        }
+                      />
+                    </FormField>
+                    <FormField label="Até">
+                      <Input
+                        type="datetime-local"
+                        value={scenarioCompareTo}
+                        onChange={(event) =>
+                          setScenarioCompareTo(event.target.value)
+                        }
+                      />
+                    </FormField>
+                  </div>
+                ) : null}
+
+                {scenarioSelectionMode === "custom" ? (
+                  <div className="mt-3 max-h-[220px] overflow-y-auto rounded-md border bg-background p-2">
+                    {loadingScenarios ? (
+                      <div className="px-2 py-3 text-sm text-muted-foreground">
+                        Carregando cenários...
+                      </div>
+                    ) : scenarios.length ? (
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {scenarios.map((scenario) => {
+                          const selected = selectedScenarioIds.includes(
+                            scenario.id,
+                          );
+
+                          return (
+                            <button
+                              key={scenario.id}
+                              type="button"
+                              className={cn(
+                                "min-w-0 rounded-md border px-3 py-2 text-left text-sm transition",
+                                selected
+                                  ? "border-primary bg-primary/10 text-primary"
+                                  : "border-border bg-card hover:border-primary/40",
+                              )}
+                              onClick={() => toggleScenarioSelection(scenario.id)}
+                            >
+                              <span className="block truncate font-medium">
+                                {scenario.name}
+                              </span>
+                              <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                                {scenario.lines?.length ?? 0} linhas
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="px-2 py-3 text-sm text-muted-foreground">
+                        Nenhum cenário disponível.
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="grid gap-4 md:grid-cols-2">
-              {chart === "scenario-hour" ? (
-                <FormField label="Cenário">
-                  <Select
-                    value={selectedScenarioId}
-                    onValueChange={setSelectedScenarioId}
-                    disabled={loadingScenarios || !scenarios.length}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Selecione um cenário" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {scenarios.map((scenario) => (
-                        <SelectItem key={scenario.id} value={scenario.id}>
-                          {scenario.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </FormField>
-              ) : (
-                <FormField label="Cenário">
-                  <Input readOnly value="Não se aplica a este gráfico" />
-                </FormField>
-              )}
+              <FormField label="Cenário">
+                <Input
+                  readOnly
+                  value={
+                    chart === "scenario-hour"
+                      ? scenarioSelectionMode === "all"
+                        ? "Todos os cenários"
+                        : selectedScenarioNames.length
+                          ? selectedScenarioNames.join(", ")
+                          : "Nenhum cenário selecionado"
+                      : "Não se aplica a este gráfico"
+                  }
+                />
+              </FormField>
 
               <FormField label="Atualização automática">
                 <Select value="5" onValueChange={() => undefined}>
@@ -527,8 +745,22 @@ export function ViewsManager() {
               />
             ) : chart === "scenario-hour" ? (
               <SummaryRow
-                label="Cenário"
-                value={selectedScenario?.name ?? "Nenhum cenário selecionado"}
+                label="Cenários"
+                value={
+                  scenarioSelectionMode === "all"
+                    ? "Todos"
+                    : selectedScenarioNames.length
+                      ? selectedScenarioNames.join(", ")
+                      : "Nenhum cenário selecionado"
+                }
+              />
+            ) : null}
+            {chart === "scenario-hour" && !viewWidgets.length ? (
+              <SummaryRow
+                label="Período"
+                value={`${scenarioCompareGranularityLabel(
+                  scenarioCompareGranularity,
+                )} · ${scenarioComparePeriodLabel(scenarioComparePeriod)}`}
               />
             ) : null}
             <SummaryRow
@@ -585,4 +817,25 @@ function createWidgetId() {
   }
 
   return `view-widget-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function parseLocalDateTimeInput(value: string) {
+  if (!value) return null;
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function scenarioCompareGranularityLabel(value: ScenarioCompareGranularity) {
+  return (
+    scenarioCompareGranularityOptions.find((option) => option.value === value)
+      ?.label ?? "Hora a hora"
+  );
+}
+
+function scenarioComparePeriodLabel(value: ScenarioComparePeriod) {
+  return (
+    scenarioComparePeriodOptions.find((option) => option.value === value)?.label ??
+    "Hoje"
+  );
 }

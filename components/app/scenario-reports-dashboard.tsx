@@ -18,6 +18,7 @@ import { useAuth } from "@/components/app/auth-provider";
 import { CardLayout } from "@/components/app/card-layout";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
 import { ReportExportActions } from "@/components/app/report-export-actions";
+import { ScenarioComparisonCard } from "@/components/app/scenario-comparison-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -690,6 +691,25 @@ export function ScenarioReportsDashboard({
     },
   ];
 
+  const scenarioComparisonCards = scenarios.length
+    ? [
+        {
+          id: "report_scenario_period_comparison",
+          label: "Cenários por período",
+          defaultSize: "full" as const,
+          className: "sm:col-span-2 xl:col-span-4",
+          node: (
+            <ScenarioComparisonCard
+              companyId={companyScopeId}
+              description="Compare todos os cenários ou apenas os escolhidos para análise de relatório."
+              scenarios={scenarios}
+              storageKey="reports"
+            />
+          ),
+        },
+      ]
+    : [];
+
   const chartCards = chartDefinitions.map((definition) => ({
     id: definition.id,
     label: definition.label,
@@ -1038,6 +1058,7 @@ export function ScenarioReportsDashboard({
           }
           cards={[
             ...metricCards,
+            ...scenarioComparisonCards,
             ...customWidgetCards,
             ...chartCards,
             ...detailCards,

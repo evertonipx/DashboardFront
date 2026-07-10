@@ -29,7 +29,7 @@ import type {
   SubLocation,
   Worker,
 } from "@/lib/types";
-import { formatNumber } from "@/lib/utils";
+import { formatNumber, formatTime } from "@/lib/utils";
 import {
   annotateWorkerCompanyScope,
   normalizeWorkerRows,
@@ -49,17 +49,38 @@ type ChartPoint = {
   total: number;
 };
 
+type ScenarioCompareGranularity = "hour" | "day" | "week" | "month";
+type ScenarioComparePeriod =
+  | "today"
+  | "yesterday"
+  | "last_24h"
+  | "last_7d"
+  | "last_30d"
+  | "custom";
+
+type ScenarioComparisonSeries = {
+  id: string;
+  name: string;
+  points: ChartPoint[];
+};
+
 type EmbeddedWidgetConfig = {
   chart: ViewChart;
+  from?: string;
+  granularity: ScenarioCompareGranularity;
   id: string;
+  period: ScenarioComparePeriod;
+  scenarioIds: string[];
   scopeId: string;
   title: string;
+  to?: string;
 };
 
 type EmbeddedWidgetState = {
   config: EmbeddedWidgetConfig;
   error: string;
   points: ChartPoint[];
+  scenarioSeries?: ScenarioComparisonSeries[];
 };
 
 type AggregateIdentityTotal = {
@@ -84,9 +105,10 @@ type ScopeComparisonOption = {
 
 const DEFAULT_METRIC_TYPE = "count";
 const REFRESH_SECONDS = 5;
+const MAX_SCENARIO_SERIES = 12;
 
 const chartLabels: Record<ViewChart, string> = {
-  "scenario-hour": "Hora a hora por cenário",
+  "scenario-hour": "Cenários por período",
   "today-location": "Hoje por local",
   "today-scenario": "Hoje por cenário",
   "today-sub-location": "Hoje por sublocal",
@@ -100,17 +122,41 @@ export function EmbeddedLiveView() {
   const queryCompanyId = searchParams.get("company_id")?.trim() ?? "";
   const companyScopeId = queryCompanyId || storedCompanyScopeId;
   const scopeId = searchParams.get("scope_id")?.trim() ?? "";
+  const scenarioIdsParam = searchParams.get("scenario_ids");
+  const granularityParam = searchParams.get("granularity");
+  const periodParam = searchParams.get("period");
+  const fromParam = searchParams.get("from")?.trim() || undefined;
+  const toParam = searchParams.get("to")?.trim() || undefined;
+  const scenarioIds = React.useMemo(
+    () => parseScenarioIdList(scenarioIdsParam),
+    [scenarioIdsParam],
+  );
   const title = searchParams.get("title")?.trim() || chartLabels[chart];
   const widgetsParam = searchParams.get("widgets");
   const widgetConfigs = React.useMemo(
     () =>
       parseWidgetConfigs(widgetsParam, {
         chart,
+        from: fromParam,
+        granularity: normalizeScenarioGranularity(granularityParam),
         id: "single",
+        period: normalizeScenarioPeriod(periodParam),
+        scenarioIds: scenarioIds.length ? scenarioIds : scopeId ? [scopeId] : [],
         scopeId,
         title,
+        to: toParam,
       }),
-    [chart, scopeId, title, widgetsParam],
+    [
+      chart,
+      fromParam,
+      granularityParam,
+      periodParam,
+      scenarioIds,
+      scopeId,
+      title,
+      toParam,
+      widgetsParam,
+    ],
   );
   const multiWidgetMode = Boolean(widgetsParam);
   const [widgetStates, setWidgetStates] = React.useState<EmbeddedWidgetState[]>(
@@ -185,6 +231,16 @@ export function EmbeddedLiveView() {
             ),
           })
         : [];
+      const scenarioRowsByConfigId = new Map(
+        await Promise.all(
+          widgetConfigs
+            .filter((config) => config.chart === "scenario-hour")
+            .map(async (config) => [
+              config.id,
+              await fetchScenarioComparisonRows(config, now, headers),
+            ] as const),
+        ),
+      );
 
       setWidgetStates(
         widgetConfigs.map((config) =>
@@ -193,6 +249,7 @@ export function EmbeddedLiveView() {
             liveHourRows,
             locationOptions,
             now,
+            scenarioRows: scenarioRowsByConfigId.get(config.id) ?? [],
             scenarios: scopedScenarios,
             subLocationOptions,
           }),
@@ -289,6 +346,17 @@ function EmbeddedChartContent({ state }: { state: EmbeddedWidgetState }) {
     return <EmbeddedState text={state.error} />;
   }
 
+  if (state.scenarioSeries?.length) {
+    return (
+      <EChart
+        option={buildScenarioComparisonChartOption(
+          state.scenarioSeries,
+          state.config.granularity,
+        )}
+      />
+    );
+  }
+
   if (state.points.length) {
     return <EChart option={buildOptionForChart(state.config.chart, state.points)} />;
   }
@@ -316,6 +384,43 @@ function normalizeChart(value: string | null): ViewChart {
   return "today-scenario";
 }
 
+function normalizeScenarioGranularity(
+  value: string | null,
+): ScenarioCompareGranularity {
+  if (
+    value === "day" ||
+    value === "week" ||
+    value === "month" ||
+    value === "hour"
+  ) {
+    return value;
+  }
+
+  return "hour";
+}
+
+function normalizeScenarioPeriod(value: string | null): ScenarioComparePeriod {
+  if (
+    value === "yesterday" ||
+    value === "last_24h" ||
+    value === "last_7d" ||
+    value === "last_30d" ||
+    value === "custom" ||
+    value === "today"
+  ) {
+    return value;
+  }
+
+  return "today";
+}
+
+function parseScenarioIdList(value: string | null) {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function parseWidgetConfigs(
   value: string | null,
   fallback: EmbeddedWidgetConfig,
@@ -340,6 +445,17 @@ function parseWidgetConfigs(
             : typeof record.scopeId === "string"
               ? record.scopeId
               : "";
+        const scenarioIds = parseScenarioIdList(
+          typeof record.scenario_ids === "string"
+            ? record.scenario_ids
+            : typeof record.scenarioIds === "string"
+              ? record.scenarioIds
+              : Array.isArray(record.scenario_ids)
+                ? record.scenario_ids.join(",")
+                : Array.isArray(record.scenarioIds)
+                  ? record.scenarioIds.join(",")
+                  : "",
+        );
         const title =
           typeof record.title === "string" && record.title.trim()
             ? record.title.trim()
@@ -347,9 +463,18 @@ function parseWidgetConfigs(
 
         return {
           chart,
+          from: typeof record.from === "string" ? record.from : undefined,
+          granularity: normalizeScenarioGranularity(
+            typeof record.granularity === "string" ? record.granularity : null,
+          ),
           id: `widget-${index}-${chart}-${scopeId || "all"}`,
+          period: normalizeScenarioPeriod(
+            typeof record.period === "string" ? record.period : null,
+          ),
+          scenarioIds: scenarioIds.length ? scenarioIds : scopeId ? [scopeId] : [],
           scopeId,
           title,
+          to: typeof record.to === "string" ? record.to : undefined,
         };
       })
       .filter((widget): widget is EmbeddedWidgetConfig => Boolean(widget));
@@ -365,6 +490,7 @@ function buildEmbeddedWidgetState({
   liveHourRows,
   locationOptions,
   now,
+  scenarioRows,
   scenarios,
   subLocationOptions,
 }: {
@@ -372,19 +498,32 @@ function buildEmbeddedWidgetState({
   liveHourRows: AggregateEventRow[];
   locationOptions: ScopeComparisonOption[];
   now: Date;
+  scenarioRows: AggregateEventRow[];
   scenarios: Scenario[];
   subLocationOptions: ScopeComparisonOption[];
 }): EmbeddedWidgetState {
   if (config.chart === "scenario-hour") {
-    const scenario =
-      scenarios.find((item) => item.id === config.scopeId) ??
-      (!config.scopeId ? scenarios[0] : null) ??
-      null;
+    const selectedScenarios = selectScenarioComparisonScenarios(
+      scenarios,
+      config.scenarioIds,
+    );
+    const definition = buildScenarioComparisonDefinition(config, now);
 
     return {
       config,
-      error: scenario ? "" : "Nenhum cenário disponível para esta visão.",
-      points: scenario ? buildScenarioHourlyPoints(scenario, liveHourRows, now) : [],
+      error: selectedScenarios.length
+        ? ""
+        : "Nenhum cenário disponível para esta visão.",
+      points: [],
+      scenarioSeries: selectedScenarios.map((scenario) => ({
+        id: scenario.id,
+        name: scenario.name,
+        points: buildScenarioComparisonPoints(
+          scenario,
+          scenarioRows,
+          definition,
+        ),
+      })),
     };
   }
 
@@ -463,6 +602,44 @@ async function fetchAggregateRows(
   return response.data ?? [];
 }
 
+async function fetchScenarioComparisonRows(
+  config: EmbeddedWidgetConfig,
+  now: Date,
+  headers?: HeadersInit,
+) {
+  const definition = buildScenarioComparisonDefinition(config, now);
+  const rows = await fetchAggregateRows(definition, headers);
+  const openBucket = currentOpenBucket(definition.granularity, now);
+  const sourceGranularity = sourceGranularityForOpenBucket(
+    definition.granularity,
+  );
+
+  if (
+    !sourceGranularity ||
+    !rangesOverlap(definition.from, definition.to, openBucket.from, openBucket.to)
+  ) {
+    return rows;
+  }
+
+  const sourceRows = await fetchAggregateRows(
+    {
+      granularity: sourceGranularity,
+      from: openBucket.from,
+      to: openBucket.to,
+    },
+    headers,
+  );
+
+  return replaceOpenBucketRowsFromSource(
+    rows,
+    definition.granularity,
+    openBucket.from,
+    sourceRows,
+    openBucket.from,
+    openBucket.to,
+  );
+}
+
 async function fetchEmbeddedWorkers(
   companyId?: string | null,
 ): Promise<Worker[]> {
@@ -510,6 +687,34 @@ function hydrateCurrentHourRows(
   );
 
   return [...stableRows, ...currentRows];
+}
+
+function replaceOpenBucketRowsFromSource(
+  rows: AggregateEventRow[],
+  targetGranularity: AggregateGranularity,
+  bucketStart: Date,
+  sourceRows: AggregateEventRow[],
+  sourceFrom: Date,
+  sourceTo: Date,
+) {
+  const targetKey = bucketKeyForGranularity(bucketStart, targetGranularity);
+  const replacementRows = aggregateRowsIntoBucket(
+    sourceRows,
+    sourceFrom,
+    sourceTo,
+  ).map((row) => ({
+    ...row,
+    bucket: bucketStart.toISOString(),
+  }));
+
+  return [
+    ...rows.filter((row) => {
+      const rowDate = new Date(row.bucket);
+      if (Number.isNaN(rowDate.getTime())) return true;
+      return bucketKeyForGranularity(rowDate, targetGranularity) !== targetKey;
+    }),
+    ...replacementRows,
+  ];
 }
 
 function aggregateRowsIntoBucket(
@@ -603,33 +808,173 @@ function buildScopeTodayComparisonPoints(
     .sort(compareChartPoints);
 }
 
-function buildScenarioHourlyPoints(
-  scenario: Scenario,
-  rows: AggregateEventRow[],
+function buildScenarioComparisonDefinition(
+  config: EmbeddedWidgetConfig,
   now: Date,
-): ChartPoint[] {
-  const todayStart = startOfDay(now);
-  const end = addHours(startOfHour(now), 1);
-  const points: ChartPoint[] = [];
-  let cursor = todayStart;
-  let index = 0;
+): AggregateDefinition {
+  const range = scenarioComparisonRange(config, now);
 
-  while (cursor < end && index < 24) {
-    const next = addHours(cursor, 1);
-    points.push({
-      id: cursor.toISOString(),
-      name: `${String(cursor.getHours()).padStart(2, "0")}h`,
-      total: sumScenarioRowsInRange(rows, scenario, cursor, next),
-    });
-    cursor = next;
-    index += 1;
+  return {
+    granularity: config.granularity,
+    from: alignToGranularity(range.from, config.granularity),
+    to: alignEndToGranularity(range.to, config.granularity),
+  };
+}
+
+function scenarioComparisonRange(config: EmbeddedWidgetConfig, now: Date) {
+  if (config.period === "custom") {
+    const from = parseIsoDate(config.from);
+    const to = parseIsoDate(config.to);
+    if (from && to && from < to) return { from, to };
   }
 
-  return points;
+  if (config.period === "yesterday") {
+    const todayStart = startOfDay(now);
+    return { from: addDays(todayStart, -1), to: todayStart };
+  }
+
+  if (config.period === "last_24h") {
+    return { from: addHours(now, -24), to: now };
+  }
+
+  if (config.period === "last_7d") {
+    return { from: startOfDay(addDays(now, -6)), to: now };
+  }
+
+  if (config.period === "last_30d") {
+    return { from: startOfDay(addDays(now, -29)), to: now };
+  }
+
+  return { from: startOfDay(now), to: now };
+}
+
+function selectScenarioComparisonScenarios(
+  scenarios: Scenario[],
+  scenarioIds: string[],
+) {
+  if (!scenarioIds.length) return scenarios.slice(0, MAX_SCENARIO_SERIES);
+
+  const selectedIds = new Set(scenarioIds);
+  return scenarios
+    .filter((scenario) => selectedIds.has(scenario.id))
+    .slice(0, MAX_SCENARIO_SERIES);
+}
+
+function buildScenarioComparisonPoints(
+  scenario: Scenario,
+  rows: AggregateEventRow[],
+  definition: AggregateDefinition,
+): ChartPoint[] {
+  return listBucketStarts(definition).map((bucketStart) => {
+    const next = addGranularity(bucketStart, definition.granularity);
+
+    return {
+      id: bucketStart.toISOString(),
+      name: bucketLabel(bucketStart, definition.granularity),
+      total: sumScenarioRowsInRange(rows, scenario, bucketStart, next),
+    };
+  });
 }
 
 function compareChartPoints(left: ChartPoint, right: ChartPoint) {
   return right.total - left.total || left.name.localeCompare(right.name, "pt-BR");
+}
+
+function listBucketStarts(definition: AggregateDefinition) {
+  const starts: Date[] = [];
+  let cursor = alignToGranularity(definition.from, definition.granularity);
+  const end = alignEndToGranularity(definition.to, definition.granularity);
+  let guard = 0;
+
+  while (cursor < end && guard < 1000) {
+    const bucketStart = new Date(cursor);
+    starts.push(bucketStart);
+    cursor = addGranularity(bucketStart, definition.granularity);
+    guard += 1;
+  }
+
+  return starts;
+}
+
+function alignToGranularity(date: Date, granularity: AggregateGranularity) {
+  if (granularity === "minute") return startOfMinute(date);
+  if (granularity === "hour") return startOfHour(date);
+  if (granularity === "day") return startOfDay(date);
+  if (granularity === "week") return startOfWeek(date);
+  if (granularity === "month") return startOfMonth(date);
+  return startOfDay(date);
+}
+
+function alignEndToGranularity(date: Date, granularity: AggregateGranularity) {
+  const aligned = alignToGranularity(date, granularity);
+  if (aligned.getTime() === date.getTime()) return aligned;
+  return addGranularity(aligned, granularity);
+}
+
+function addGranularity(date: Date, granularity: AggregateGranularity) {
+  if (granularity === "minute") return addMinutes(date, 1);
+  if (granularity === "hour") return addHours(date, 1);
+  if (granularity === "day") return addDays(date, 1);
+  if (granularity === "week") return addDays(date, 7);
+  if (granularity === "month") return addMonths(date, 1);
+  return addDays(date, 1);
+}
+
+function bucketKeyForGranularity(date: Date, granularity: AggregateGranularity) {
+  return alignToGranularity(date, granularity).getTime();
+}
+
+function bucketLabel(date: Date, granularity: AggregateGranularity) {
+  if (granularity === "minute") return formatTime(date);
+  if (granularity === "hour") return `${String(date.getHours()).padStart(2, "0")}h`;
+  if (granularity === "day") {
+    return new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+    }).format(date);
+  }
+  if (granularity === "week") {
+    const end = addDays(date, 6);
+    return `${new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+    }).format(date)}-${new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+    }).format(end)}`;
+  }
+  return new Intl.DateTimeFormat("pt-BR", {
+    month: "short",
+    year: "2-digit",
+  }).format(date);
+}
+
+function currentOpenBucket(granularity: AggregateGranularity, now: Date) {
+  const from = alignToGranularity(now, granularity);
+  return {
+    from,
+    to: addGranularity(from, granularity),
+  };
+}
+
+function sourceGranularityForOpenBucket(
+  granularity: AggregateGranularity,
+): AggregateGranularity | null {
+  if (granularity === "hour") return "minute";
+  if (granularity === "day") return "hour";
+  if (granularity === "week" || granularity === "month") return "day";
+  return null;
+}
+
+function rangesOverlap(leftFrom: Date, leftTo: Date, rightFrom: Date, rightTo: Date) {
+  return leftFrom < rightTo && rightFrom < leftTo;
+}
+
+function parseIsoDate(value?: string) {
+  if (!value) return null;
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function sumScenarioRowsInRange(
@@ -691,8 +1036,8 @@ function buildComparisonChartOption(points: ChartPoint[]): EnterpriseChartOption
   const visiblePoints = points.slice(0, 12);
 
   return buildBarChartOption(visiblePoints, {
-    bottom: 72,
-    labelRotate: 28,
+    bottom: 24,
+    labelRotate: visiblePoints.length > 6 ? 18 : 0,
     maxBarWidth: 44,
   });
 }
@@ -703,6 +1048,113 @@ function buildHourlyChartOption(points: ChartPoint[]): EnterpriseChartOption {
     labelRotate: 0,
     maxBarWidth: 34,
   });
+}
+
+function buildScenarioComparisonChartOption(
+  series: ScenarioComparisonSeries[],
+  granularity: ScenarioCompareGranularity,
+): EnterpriseChartOption {
+  const bucketLabels = series[0]?.points.map((point) => point.name) ?? [];
+  const dense = bucketLabels.length > 12;
+
+  return {
+    color: series.map((item, index) => pastelBarColor(index)),
+    grid: {
+      bottom: dense ? 34 : 18,
+      containLabel: true,
+      left: 42,
+      right: 18,
+      top: series.length > 1 ? 58 : 28,
+    },
+    legend:
+      series.length > 1
+        ? {
+            left: 0,
+            right: 0,
+            top: 0,
+            type: "scroll",
+            itemGap: 12,
+            itemHeight: 10,
+            itemWidth: 10,
+            textStyle: {
+              color: "#526477",
+              fontSize: 12,
+            },
+          }
+        : undefined,
+    tooltip: {
+      axisPointer: {
+        shadowStyle: {
+          color: "rgba(18, 103, 196, 0.06)",
+        },
+        type: "shadow",
+      },
+      backgroundColor: "#ffffff",
+      borderColor: "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      padding: [10, 12],
+      textStyle: {
+        color: "#13233A",
+        fontSize: 12,
+      },
+      trigger: "axis",
+      valueFormatter: (value) =>
+        value === null || value === undefined
+          ? "-"
+          : `${formatNumber(Number(value))} eventos`,
+    },
+    xAxis: {
+      axisLabel: {
+        color: "#66758A",
+        fontSize: 11,
+        hideOverlap: true,
+        interval: 0,
+        rotate: dense ? 24 : 0,
+      },
+      axisLine: {
+        lineStyle: {
+          color: "#D8E3F2",
+        },
+      },
+      axisTick: {
+        show: false,
+      },
+      data: bucketLabels,
+      type: "category",
+    },
+    yAxis: {
+      axisLabel: {
+        color: "#66758A",
+        fontSize: 11,
+      },
+      minInterval: 1,
+      splitLine: {
+        lineStyle: {
+          color: "#E8EEF6",
+        },
+      },
+      type: "value",
+    },
+    series: series.map((item, index) => ({
+      barCategoryGap: series.length > 4 ? "28%" : "38%",
+      barGap: "8%",
+      barMaxWidth: granularity === "hour" ? 18 : 28,
+      data: item.points.map((point) => point.total),
+      emphasis: {
+        focus: "series",
+        itemStyle: {
+          color: pastelBarColor(index),
+        },
+      },
+      itemStyle: {
+        borderRadius: [3, 3, 0, 0],
+        color: pastelBarColor(index),
+      },
+      name: item.name,
+      type: "bar",
+    })),
+  };
 }
 
 function buildBarChartOption(
@@ -822,6 +1274,18 @@ function startOfDay(date: Date) {
   return next;
 }
 
+function startOfWeek(date: Date) {
+  const next = startOfDay(date);
+  const day = next.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  next.setDate(next.getDate() + diff);
+  return next;
+}
+
+function startOfMonth(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60_000);
 }
@@ -833,5 +1297,11 @@ function addHours(date: Date, hours: number) {
 function addDays(date: Date, days: number) {
   const next = new Date(date);
   next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addMonths(date: Date, months: number) {
+  const next = new Date(date);
+  next.setMonth(next.getMonth() + months);
   return next;
 }

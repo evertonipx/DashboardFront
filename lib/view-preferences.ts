@@ -56,6 +56,11 @@ export const cardViewMenus: CardMenuDefinition[] = [
         description: "Movimento dos últimos 60 minutos.",
       },
       {
+        id: "live_scenario_period_comparison",
+        label: "Cenários por período",
+        description: "Comparação flexível de cenários por período.",
+      },
+      {
         id: "live_chart_minute",
         label: "Minuto a minuto",
         description: "Eventos agregados por minuto.",
@@ -111,6 +116,11 @@ export const cardViewMenus: CardMenuDefinition[] = [
         id: "report_scenario_count",
         label: "Cenários ativos",
         description: "Total de cenários disponíveis para relatório.",
+      },
+      {
+        id: "report_scenario_period_comparison",
+        label: "Cenários por período",
+        description: "Comparação flexível de cenários nos relatórios.",
       },
       {
         id: "report_chart_minute",

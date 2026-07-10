@@ -18,6 +18,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/components/app/auth-provider";
 import { CardLayout } from "@/components/app/card-layout";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import { ScenarioComparisonCard } from "@/components/app/scenario-comparison-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -851,6 +852,26 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     },
   ];
 
+  const scenarioComparisonCards = scenarios.length
+    ? [
+        {
+          id: "live_scenario_period_comparison",
+          label: "Cenários por período",
+          defaultSize: "full" as const,
+          className: "sm:col-span-2 xl:col-span-4",
+          node: (
+            <ScenarioComparisonCard
+              autoRefresh
+              companyId={companyScopeId}
+              description="Compare todos os cenários ou apenas os escolhidos, com período e granularidade próprios."
+              scenarios={scenarios}
+              storageKey="live"
+            />
+          ),
+        },
+      ]
+    : [];
+
   const chartCards = chartDefinitions.map((definition) => ({
     id: definition.id,
     label: definition.label,
@@ -1098,6 +1119,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
           }
           cards={[
             ...metricCards,
+            ...scenarioComparisonCards,
             ...comparisonCards,
             ...customWidgetCards,
             ...chartCards,
