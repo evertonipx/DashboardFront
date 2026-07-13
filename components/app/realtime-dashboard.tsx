@@ -2449,12 +2449,13 @@ function buildChartOption(
 function buildScenarioComparisonOption(
   points: ScenarioComparisonPoint[],
 ): EnterpriseChartOption {
-  const visiblePoints = points.slice(0, 12);
+  const dense = points.length > 12;
+  const veryDense = points.length > 24;
 
   return {
     color: ["#1267C4"],
     grid: {
-      bottom: 72,
+      bottom: veryDense ? 88 : dense ? 72 : 42,
       containLabel: true,
       left: 36,
       right: 18,
@@ -2486,8 +2487,8 @@ function buildScenarioComparisonOption(
         hideOverlap: true,
         interval: 0,
         overflow: "truncate",
-        rotate: 28,
-        width: 86,
+        rotate: veryDense ? 45 : dense ? 28 : 0,
+        width: dense ? 92 : undefined,
       },
       axisLine: {
         lineStyle: {
@@ -2497,7 +2498,7 @@ function buildScenarioComparisonOption(
       axisTick: {
         show: false,
       },
-      data: visiblePoints.map((point) => point.name),
+      data: points.map((point) => point.name),
       type: "category",
     },
     yAxis: {
@@ -2520,9 +2521,9 @@ function buildScenarioComparisonOption(
     },
     series: [
       {
-        barCategoryGap: "36%",
-        barMaxWidth: 34,
-        data: visiblePoints.map((point, index) => ({
+        barCategoryGap: veryDense ? "18%" : dense ? "28%" : "36%",
+        barMaxWidth: veryDense ? 24 : dense ? 30 : 34,
+        data: points.map((point, index) => ({
           itemStyle: {
             color: pastelBarColor(index),
           },

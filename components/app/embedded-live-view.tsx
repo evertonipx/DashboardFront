@@ -110,7 +110,6 @@ type ScopeComparisonOption = {
 
 const DEFAULT_METRIC_TYPE = "count";
 const REFRESH_SECONDS = 5;
-const MAX_SCENARIO_SERIES = 12;
 
 const chartLabels: Record<ViewChart, string> = {
   "scenario-hour": "Cenários por período",
@@ -866,12 +865,10 @@ function selectScenarioComparisonScenarios(
   scenarios: Scenario[],
   scenarioIds: string[],
 ) {
-  if (!scenarioIds.length) return scenarios.slice(0, MAX_SCENARIO_SERIES);
+  if (!scenarioIds.length) return scenarios;
 
   const selectedIds = new Set(scenarioIds);
-  return scenarios
-    .filter((scenario) => selectedIds.has(scenario.id))
-    .slice(0, MAX_SCENARIO_SERIES);
+  return scenarios.filter((scenario) => selectedIds.has(scenario.id));
 }
 
 function buildScenarioComparisonPoints(
@@ -1047,12 +1044,10 @@ function scenarioMultiplierMap(scenario: Scenario) {
 }
 
 function buildComparisonChartOption(points: ChartPoint[]): EnterpriseChartOption {
-  const visiblePoints = points.slice(0, 12);
-
-  return buildBarChartOption(visiblePoints, {
-    bottom: 24,
-    labelRotate: visiblePoints.length > 6 ? 18 : 0,
-    maxBarWidth: 44,
+  return buildBarChartOption(points, {
+    bottom: points.length > 18 ? 44 : 24,
+    labelRotate: points.length > 18 ? 32 : points.length > 6 ? 18 : 0,
+    maxBarWidth: points.length > 24 ? 26 : 44,
   });
 }
 
@@ -1070,6 +1065,8 @@ function buildScenarioComparisonChartOption(
 ): EnterpriseChartOption {
   const bucketLabels = series[0]?.points.map((point) => point.name) ?? [];
   const dense = bucketLabels.length > 12;
+  const manySeries = series.length > 12;
+  const veryManySeries = series.length > 24;
 
   return {
     color: series.map((item, index) => pastelBarColor(index)),
@@ -1078,7 +1075,7 @@ function buildScenarioComparisonChartOption(
       containLabel: true,
       left: 42,
       right: 18,
-      top: series.length > 1 ? 58 : 28,
+      top: series.length > 1 ? (manySeries ? 76 : 58) : 28,
     },
     legend:
       series.length > 1
@@ -1151,9 +1148,9 @@ function buildScenarioComparisonChartOption(
       type: "value",
     },
     series: series.map((item, index) => ({
-      barCategoryGap: series.length > 4 ? "28%" : "38%",
-      barGap: "8%",
-      barMaxWidth: granularity === "hour" ? 18 : 28,
+      barCategoryGap: manySeries ? "18%" : series.length > 4 ? "28%" : "38%",
+      barGap: veryManySeries ? "2%" : manySeries ? "4%" : "8%",
+      barMaxWidth: veryManySeries ? 10 : manySeries ? 14 : granularity === "hour" ? 18 : 28,
       data: item.points.map((point) => point.total),
       emphasis: {
         focus: "series",

@@ -8,11 +8,13 @@ import {
   MonitorUp,
   Plus,
   RefreshCw,
+  Settings2,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,7 +42,7 @@ import {
 import { apiFetch } from "@/lib/api";
 import { canManageViews } from "@/lib/permissions";
 import type { Scenario } from "@/lib/types";
-import { cn, toDateTimeLocalValue } from "@/lib/utils";
+import { toDateTimeLocalValue } from "@/lib/utils";
 
 const viewOptions = [
   {
@@ -119,6 +121,8 @@ export function ViewsManager() {
     React.useState<ScenarioComparePeriod>("today");
   const [scenarioSelectionMode, setScenarioSelectionMode] =
     React.useState<ScenarioSelectionMode>("all");
+  const [scenarioSettingsOpen, setScenarioSettingsOpen] =
+    React.useState(false);
   const [selectedScenarioIds, setSelectedScenarioIds] = React.useState<string[]>(
     [],
   );
@@ -140,6 +144,15 @@ export function ViewsManager() {
   const selectedScenarioNames = selectedScenarioIds
     .map((id) => scenarios.find((scenario) => scenario.id === id)?.name)
     .filter(Boolean);
+  const scenarioSelectionSummary =
+    scenarioSelectionMode === "all"
+      ? "Todos os cenários"
+      : selectedScenarioNames.length
+        ? `${selectedScenarioNames.length} cenário(s)`
+        : "Nenhum cenário";
+  const scenarioCompareSummary = `${scenarioCompareGranularityLabel(
+    scenarioCompareGranularity,
+  )} · ${scenarioComparePeriodLabel(scenarioComparePeriod)} · ${scenarioSelectionSummary}`;
   const selectedWidgetView = viewOptions.find(
     (option) => option.value === widgetChart,
   );
@@ -210,6 +223,10 @@ export function ViewsManager() {
   }, []);
 
   React.useEffect(() => {
+    if (chart !== "scenario-hour") setScenarioSettingsOpen(false);
+  }, [chart]);
+
+  React.useEffect(() => {
     async function loadScenarios() {
       setLoadingScenarios(true);
       try {
@@ -243,14 +260,6 @@ export function ViewsManager() {
     setChart(value);
     const nextView = viewOptions.find((option) => option.value === value);
     if (nextView) setTitle(nextView.label);
-  }
-
-  function toggleScenarioSelection(scenarioId: string) {
-    setSelectedScenarioIds((current) =>
-      current.includes(scenarioId)
-        ? current.filter((id) => id !== scenarioId)
-        : [...current, scenarioId],
-    );
   }
 
   function addWidget() {
@@ -358,166 +367,131 @@ export function ViewsManager() {
 
             {chart === "scenario-hour" ? (
               <div className="rounded-md border border-border bg-muted/20 p-3">
-                <div className="mb-3">
-                  <div className="text-sm font-semibold">Comparação de cenários</div>
-                  <div className="text-xs text-muted-foreground">
-                    Configure granularidade, período e quais cenários entram no
-                    mesmo gráfico.
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold">
+                      Comparação de cenários
+                    </div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {scenarioCompareSummary}
+                    </div>
                   </div>
+                  <Button
+                    type="button"
+                    variant={scenarioSettingsOpen ? "default" : "outline"}
+                    size="sm"
+                    className="w-full sm:w-auto"
+                    onClick={() =>
+                      setScenarioSettingsOpen((current) => !current)
+                    }
+                  >
+                    <Settings2 className="h-3.5 w-3.5" />
+                    {scenarioSettingsOpen ? "Ocultar" : "Configurar"}
+                  </Button>
                 </div>
 
-                <div className="grid gap-3 md:grid-cols-3">
-                  <FormField label="Granularidade">
-                    <Select
-                      value={scenarioCompareGranularity}
-                      onValueChange={(value) =>
-                        setScenarioCompareGranularity(
-                          value as ScenarioCompareGranularity,
-                        )
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {scenarioCompareGranularityOptions.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </FormField>
+                {scenarioSettingsOpen ? (
+                  <div className="mt-3 grid gap-3 md:grid-cols-3">
+                    <FormField label="Granularidade">
+                      <Select
+                        value={scenarioCompareGranularity}
+                        onValueChange={(value) =>
+                          setScenarioCompareGranularity(
+                            value as ScenarioCompareGranularity,
+                          )
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {scenarioCompareGranularityOptions.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FormField>
 
-                  <FormField label="Período">
-                    <Select
-                      value={scenarioComparePeriod}
-                      onValueChange={(value) =>
-                        setScenarioComparePeriod(value as ScenarioComparePeriod)
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {scenarioComparePeriodOptions.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </FormField>
+                    <FormField label="Período">
+                      <Select
+                        value={scenarioComparePeriod}
+                        onValueChange={(value) =>
+                          setScenarioComparePeriod(
+                            value as ScenarioComparePeriod,
+                          )
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {scenarioComparePeriodOptions.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FormField>
 
-                  <FormField label="Cenários">
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="md:col-span-3">
+                      <ScenarioPicker
+                        loading={loadingScenarios}
+                        mode={scenarioSelectionMode}
+                        onModeChange={setScenarioSelectionMode}
+                        onSelectedIdsChange={setSelectedScenarioIds}
+                        scenarios={scenarios}
+                        selectedIds={selectedScenarioIds}
+                      />
+                    </div>
+
+                    {scenarioComparePeriod === "custom" ? (
+                      <>
+                        <FormField label="De">
+                          <Input
+                            type="datetime-local"
+                            value={scenarioCompareFrom}
+                            onChange={(event) =>
+                              setScenarioCompareFrom(event.target.value)
+                            }
+                          />
+                        </FormField>
+                        <FormField label="Até">
+                          <Input
+                            type="datetime-local"
+                            value={scenarioCompareTo}
+                            onChange={(event) =>
+                              setScenarioCompareTo(event.target.value)
+                            }
+                          />
+                        </FormField>
+                      </>
+                    ) : null}
+
+                    <div className="flex justify-end md:col-span-3">
                       <Button
                         type="button"
-                        variant={
-                          scenarioSelectionMode === "all" ? "default" : "outline"
-                        }
-                        onClick={() => setScenarioSelectionMode("all")}
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => setScenarioSettingsOpen(false)}
                       >
-                        Todos
-                      </Button>
-                      <Button
-                        type="button"
-                        variant={
-                          scenarioSelectionMode === "custom"
-                            ? "default"
-                            : "outline"
-                        }
-                        onClick={() => setScenarioSelectionMode("custom")}
-                      >
-                        Escolher
+                        Concluir
                       </Button>
                     </div>
-                  </FormField>
-                </div>
-
-                {scenarioComparePeriod === "custom" ? (
-                  <div className="mt-3 grid gap-3 md:grid-cols-2">
-                    <FormField label="De">
-                      <Input
-                        type="datetime-local"
-                        value={scenarioCompareFrom}
-                        onChange={(event) =>
-                          setScenarioCompareFrom(event.target.value)
-                        }
-                      />
-                    </FormField>
-                    <FormField label="Até">
-                      <Input
-                        type="datetime-local"
-                        value={scenarioCompareTo}
-                        onChange={(event) =>
-                          setScenarioCompareTo(event.target.value)
-                        }
-                      />
-                    </FormField>
                   </div>
                 ) : null}
 
-                {scenarioSelectionMode === "custom" ? (
-                  <div className="mt-3 max-h-[220px] overflow-y-auto rounded-md border bg-background p-2">
-                    {loadingScenarios ? (
-                      <div className="px-2 py-3 text-sm text-muted-foreground">
-                        Carregando cenários...
-                      </div>
-                    ) : scenarios.length ? (
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        {scenarios.map((scenario) => {
-                          const selected = selectedScenarioIds.includes(
-                            scenario.id,
-                          );
-
-                          return (
-                            <button
-                              key={scenario.id}
-                              type="button"
-                              className={cn(
-                                "min-w-0 rounded-md border px-3 py-2 text-left text-sm transition",
-                                selected
-                                  ? "border-primary bg-primary/10 text-primary"
-                                  : "border-border bg-card hover:border-primary/40",
-                              )}
-                              onClick={() => toggleScenarioSelection(scenario.id)}
-                            >
-                              <span className="block truncate font-medium">
-                                {scenario.name}
-                              </span>
-                              <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                                {scenario.lines?.length ?? 0} linhas
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="px-2 py-3 text-sm text-muted-foreground">
-                        Nenhum cenário disponível.
-                      </div>
-                    )}
-                  </div>
-                ) : null}
               </div>
             ) : null}
 
             <div className="grid gap-4 md:grid-cols-2">
-              <FormField label="Cenário">
-                <Input
-                  readOnly
-                  value={
-                    chart === "scenario-hour"
-                      ? scenarioSelectionMode === "all"
-                        ? "Todos os cenários"
-                        : selectedScenarioNames.length
-                          ? selectedScenarioNames.join(", ")
-                          : "Nenhum cenário selecionado"
-                      : "Não se aplica a este gráfico"
-                  }
-                />
-              </FormField>
+              {chart === "scenario-hour" ? null : (
+                <FormField label="Cenário">
+                  <Input readOnly value="Não se aplica a este gráfico" />
+                </FormField>
+              )}
 
               <FormField label="Atualização automática">
                 <Select value="5" onValueChange={() => undefined}>
@@ -750,7 +724,7 @@ export function ViewsManager() {
                   scenarioSelectionMode === "all"
                     ? "Todos"
                     : selectedScenarioNames.length
-                      ? selectedScenarioNames.join(", ")
+                      ? `${selectedScenarioNames.length} cenário(s) selecionado(s)`
                       : "Nenhum cenário selecionado"
                 }
               />

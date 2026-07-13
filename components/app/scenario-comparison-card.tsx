@@ -1,9 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { BarChart3, Clock3, RefreshCw } from "lucide-react";
+import { BarChart3, Clock3, RefreshCw, Settings2 } from "lucide-react";
 
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -94,7 +95,6 @@ const DEFAULT_METRIC_TYPE = "count";
 const REFRESH_MS = 5_000;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
-const MAX_SCENARIO_SERIES = 12;
 
 const granularityOptions: Array<{
   label: string;
@@ -127,6 +127,7 @@ export function ScenarioComparisonCard({
   const [settings, setSettings] = React.useState<ScenarioComparisonSettings>(
     () => defaultSettings(),
   );
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [rows, setRows] = React.useState<AggregateEventRow[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -155,6 +156,9 @@ export function ScenarioComparisonCard({
     () => buildScenarioComparisonChartOption(series, settings.granularity),
     [series, settings.granularity],
   );
+  const configurationSummary = `${periodLabel(settings.period)} · ${granularityLabel(
+    settings.granularity,
+  )} · ${scenarioSelectionLabel(settings, selectedScenarios)}`;
 
   const load = React.useCallback(
     async (silent = false) => {
@@ -238,17 +242,12 @@ export function ScenarioComparisonCard({
     return () => window.clearInterval(interval);
   }, [autoRefresh, load]);
 
+  React.useEffect(() => {
+    if (monitorMode) setSettingsOpen(false);
+  }, [monitorMode]);
+
   function updateSettings(next: Partial<ScenarioComparisonSettings>) {
     setSettings((current) => ({ ...current, ...next }));
-  }
-
-  function toggleScenario(scenarioId: string) {
-    setSettings((current) => ({
-      ...current,
-      selectedScenarioIds: current.selectedScenarioIds.includes(scenarioId)
-        ? current.selectedScenarioIds.filter((id) => id !== scenarioId)
-        : [...current.selectedScenarioIds, scenarioId],
-    }));
   }
 
   return (
@@ -261,11 +260,7 @@ export function ScenarioComparisonCard({
               {title}
             </CardTitle>
             <CardDescription className="mt-1">
-              {monitorMode
-                ? `${periodLabel(settings.period)} · ${granularityLabel(
-                    settings.granularity,
-                  )} · ${scenarioSelectionLabel(settings, selectedScenarios)}`
-                : description}
+              {settingsOpen && !monitorMode ? description : configurationSummary}
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -276,149 +271,131 @@ export function ScenarioComparisonCard({
               </Badge>
             ) : null}
             {monitorMode ? null : (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => load(true)}
-                disabled={loading}
-              >
-                <RefreshCw
-                  className={cn("h-3.5 w-3.5", loading && "animate-spin")}
-                />
-                Atualizar
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  variant={settingsOpen ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setSettingsOpen((current) => !current)}
+                >
+                  <Settings2 className="h-3.5 w-3.5" />
+                  {settingsOpen ? "Ocultar" : "Configurar"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => load(true)}
+                  disabled={loading}
+                >
+                  <RefreshCw
+                    className={cn("h-3.5 w-3.5", loading && "animate-spin")}
+                  />
+                  Atualizar
+                </Button>
+              </>
             )}
           </div>
         </div>
       </CardHeader>
       <CardContent className={cn("space-y-4", monitorMode && "space-y-2")}>
-        {monitorMode ? null : (
-        <div className="grid gap-3 lg:grid-cols-[160px_170px_180px_minmax(0,1fr)]">
-          <Field label="Granularidade">
-            <Select
-              value={settings.granularity}
-              onValueChange={(value) =>
-                updateSettings({ granularity: value as ScenarioCompareGranularity })
-              }
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {granularityOptions.map((optionItem) => (
-                  <SelectItem key={optionItem.value} value={optionItem.value}>
-                    {optionItem.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-
-          <Field label="Período">
-            <Select
-              value={settings.period}
-              onValueChange={(value) =>
-                updateSettings({ period: value as ScenarioComparePeriod })
-              }
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {periodOptions.map((optionItem) => (
-                  <SelectItem key={optionItem.value} value={optionItem.value}>
-                    {optionItem.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-
-          <Field label="Cenários">
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                type="button"
-                variant={settings.selectionMode === "all" ? "default" : "outline"}
-                onClick={() => updateSettings({ selectionMode: "all" })}
-              >
-                Todos
-              </Button>
-              <Button
-                type="button"
-                variant={settings.selectionMode === "custom" ? "default" : "outline"}
-                onClick={() => updateSettings({ selectionMode: "custom" })}
-              >
-                Escolher
-              </Button>
-            </div>
-          </Field>
-
-          {settings.period === "custom" ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="De">
-                <Input
-                  type="datetime-local"
-                  value={settings.customFrom}
-                  onChange={(event) =>
-                    updateSettings({ customFrom: event.target.value })
+        {!monitorMode && settingsOpen ? (
+          <div className="rounded-md border bg-muted/20 p-3">
+            <div className="grid gap-3 lg:grid-cols-[160px_170px_minmax(0,1fr)]">
+              <Field label="Granularidade">
+                <Select
+                  value={settings.granularity}
+                  onValueChange={(value) =>
+                    updateSettings({
+                      granularity: value as ScenarioCompareGranularity,
+                    })
                   }
-                />
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {granularityOptions.map((optionItem) => (
+                      <SelectItem key={optionItem.value} value={optionItem.value}>
+                        {optionItem.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </Field>
-              <Field label="Até">
-                <Input
-                  type="datetime-local"
-                  value={settings.customTo}
-                  onChange={(event) =>
-                    updateSettings({ customTo: event.target.value })
+
+              <Field label="Período">
+                <Select
+                  value={settings.period}
+                  onValueChange={(value) =>
+                    updateSettings({ period: value as ScenarioComparePeriod })
                   }
-                />
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {periodOptions.map((optionItem) => (
+                      <SelectItem key={optionItem.value} value={optionItem.value}>
+                        {optionItem.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </Field>
-            </div>
-          ) : (
-            <div className="flex items-end">
-              <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                {periodLabel(settings.period)} · {granularityLabel(settings.granularity)}
-              </div>
-            </div>
-          )}
-        </div>
-        )}
 
-        {!monitorMode && settings.selectionMode === "custom" ? (
-          <div className="max-h-[190px] overflow-y-auto rounded-md border bg-background p-2">
-            {scenarios.length ? (
-              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                {scenarios.map((scenario) => {
-                  const selected = settings.selectedScenarioIds.includes(scenario.id);
+              <ScenarioPicker
+                className="lg:row-span-2"
+                mode={settings.selectionMode}
+                onModeChange={(selectionMode) => updateSettings({ selectionMode })}
+                onSelectedIdsChange={(selectedScenarioIds) =>
+                  updateSettings({ selectedScenarioIds })
+                }
+                scenarios={scenarios}
+                selectedIds={settings.selectedScenarioIds}
+              />
 
-                  return (
-                    <button
-                      key={scenario.id}
-                      type="button"
-                      className={cn(
-                        "min-w-0 rounded-md border px-3 py-2 text-left text-sm transition",
-                        selected
-                          ? "border-primary bg-primary/10 text-primary"
-                          : "border-border bg-card hover:border-primary/40",
-                      )}
-                      onClick={() => toggleScenario(scenario.id)}
-                    >
-                      <span className="block truncate font-medium">
-                        {scenario.name}
-                      </span>
-                      <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                        {formatNumber(scenario.lines?.length ?? 0)} linhas
-                      </span>
-                    </button>
-                  );
-                })}
+              {settings.period === "custom" ? (
+                <div className="grid gap-3 sm:grid-cols-2 lg:col-span-2">
+                  <Field label="De">
+                    <Input
+                      type="datetime-local"
+                      value={settings.customFrom}
+                      onChange={(event) =>
+                        updateSettings({ customFrom: event.target.value })
+                      }
+                    />
+                  </Field>
+                  <Field label="Até">
+                    <Input
+                      type="datetime-local"
+                      value={settings.customTo}
+                      onChange={(event) =>
+                        updateSettings({ customTo: event.target.value })
+                      }
+                    />
+                  </Field>
+                </div>
+              ) : (
+                <div className="flex items-end lg:col-span-2">
+                  <div className="rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
+                    {periodLabel(settings.period)} ·{" "}
+                    {granularityLabel(settings.granularity)}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end lg:col-span-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setSettingsOpen(false)}
+                >
+                  Concluir
+                </Button>
               </div>
-            ) : (
-              <div className="px-2 py-3 text-sm text-muted-foreground">
-                Nenhum cenário disponível.
-              </div>
-            )}
+            </div>
           </div>
         ) : null}
 
@@ -571,13 +548,11 @@ export function selectScenarioComparisonScenarios(
   settings: ScenarioComparisonSettings,
 ) {
   if (settings.selectionMode === "all") {
-    return scenarios.slice(0, MAX_SCENARIO_SERIES);
+    return scenarios;
   }
 
   const selectedIds = new Set(settings.selectedScenarioIds);
-  return scenarios
-    .filter((scenario) => selectedIds.has(scenario.id))
-    .slice(0, MAX_SCENARIO_SERIES);
+  return scenarios.filter((scenario) => selectedIds.has(scenario.id));
 }
 
 export function buildScenarioComparisonPoints(
@@ -602,6 +577,8 @@ export function buildScenarioComparisonChartOption(
 ): EnterpriseChartOption {
   const bucketLabels = series[0]?.points.map((point) => point.name) ?? [];
   const dense = bucketLabels.length > 12;
+  const manySeries = series.length > 12;
+  const veryManySeries = series.length > 24;
 
   return {
     color: series.map((_, index) => pastelBarColor(index)),
@@ -610,7 +587,7 @@ export function buildScenarioComparisonChartOption(
       containLabel: true,
       left: 42,
       right: 18,
-      top: series.length > 1 ? 58 : 28,
+      top: series.length > 1 ? (manySeries ? 76 : 58) : 28,
     },
     legend:
       series.length > 1
@@ -683,9 +660,9 @@ export function buildScenarioComparisonChartOption(
       type: "value",
     },
     series: series.map((item, index) => ({
-      barCategoryGap: series.length > 4 ? "28%" : "38%",
-      barGap: "8%",
-      barMaxWidth: granularity === "hour" ? 18 : 28,
+      barCategoryGap: manySeries ? "18%" : series.length > 4 ? "28%" : "38%",
+      barGap: veryManySeries ? "2%" : manySeries ? "4%" : "8%",
+      barMaxWidth: veryManySeries ? 10 : manySeries ? 14 : granularity === "hour" ? 18 : 28,
       data: item.points.map((point) => point.total),
       emphasis: {
         focus: "series",
