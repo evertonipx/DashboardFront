@@ -18,6 +18,11 @@ import { toast } from "sonner";
 import { useAuth } from "@/components/app/auth-provider";
 import { CardLayout } from "@/components/app/card-layout";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import {
+  MonitorModeButton,
+  MonitorModeExitHint,
+  useMonitorMode,
+} from "@/components/app/monitor-mode";
 import { ScenarioComparisonCard } from "@/components/app/scenario-comparison-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -180,6 +185,7 @@ const CUSTOM_WIDGET_GRANULARITY_OPTIONS: {
 
 export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const { user } = useAuth();
+  const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const companyScopeId = useEffectiveCompanyScopeId(user);
   const [masterScopeId, setMasterScopeId] = React.useState(
     () => getStoredMasterCompanyScope()?.id ?? "",
@@ -864,6 +870,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
               autoRefresh
               companyId={companyScopeId}
               description="Compare todos os cenários ou apenas os escolhidos, com período e granularidade próprios."
+              monitorMode={monitorMode}
               scenarios={scenarios}
               storageKey="live"
             />
@@ -962,19 +969,21 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       node: scope ? (
         <RealtimeChartCard
           action={
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={(event) => {
-                event.stopPropagation();
-                removeCustomWidget(widget.id);
-              }}
-              aria-label={`Remover widget ${widget.title}`}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
+            monitorMode ? null : (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  removeCustomWidget(widget.id);
+                }}
+                aria-label={`Remover widget ${widget.title}`}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            )
           }
           definition={definition}
           loading={initialLoading}
@@ -985,7 +994,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       ) : (
         <MissingCustomWidgetCard
           title={widget.title}
-          onRemove={() => removeCustomWidget(widget.id)}
+          onRemove={monitorMode ? undefined : () => removeCustomWidget(widget.id)}
         />
       ),
     };
@@ -1006,7 +1015,47 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     : [];
 
   return (
-    <section id="ao-vivo" className="scroll-mt-6 space-y-4">
+    <section
+      id="ao-vivo"
+      className={cn(
+        monitorMode
+          ? "fixed inset-0 z-[100] h-screen overflow-y-auto bg-background p-3 text-foreground lg:p-4"
+          : "scroll-mt-6 space-y-4",
+      )}
+    >
+      {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
+
+      {monitorMode ? (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
+          <div className="min-w-0">
+            <div className="text-xs font-medium uppercase text-muted-foreground">
+              Ao vivo
+            </div>
+            <div className="truncate text-lg font-semibold">
+              {selectedScope?.name ?? "Visão selecionada"}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge
+              variant="outline"
+              className="gap-1 border-primary/30 bg-primary/10 text-primary"
+            >
+              <Zap className="h-3.5 w-3.5" />
+              5 segundos
+            </Badge>
+            <Badge variant="outline" className="gap-1 bg-card">
+              <Route className="h-3.5 w-3.5" />
+              {scopeModeLabel(scopeMode)}
+            </Badge>
+            {lastUpdated ? (
+              <Badge variant="outline" className="gap-1 bg-card">
+                <Clock3 className="h-3.5 w-3.5" />
+                {formatTime(lastUpdated)}
+              </Badge>
+            ) : null}
+          </div>
+        </div>
+      ) : (
       <div className="rounded-md border border-border bg-card p-4 shadow-soft">
         {loadingScenarios ? (
           <div className="grid gap-3 lg:grid-cols-[1fr_auto_auto]">
@@ -1098,6 +1147,10 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
                 />
                 Atualizar
               </Button>
+              <MonitorModeButton
+                onClick={enterMonitorMode}
+                disabled={!scopeOptions.length}
+              />
             </div>
           </div>
         ) : (
@@ -1107,10 +1160,12 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
           </div>
         )}
       </div>
+      )}
 
       {scopeOptions.length ? (
         <CardLayout
           menuKey="live"
+          monitorMode={monitorMode}
           editActions={
             <Button type="button" variant="outline" size="sm" onClick={openCustomWidgetDialog}>
               <Settings2 className="h-3.5 w-3.5" />
@@ -1123,11 +1178,12 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
             ...comparisonCards,
             ...customWidgetCards,
             ...chartCards,
-            ...detailCards,
+            ...(monitorMode ? [] : detailCards),
           ]}
         />
       ) : null}
 
+      {monitorMode ? null : (
       <Dialog
         open={customWidgetDialogOpen}
         onOpenChange={setCustomWidgetDialogOpen}
@@ -1239,6 +1295,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      )}
     </section>
   );
 }
@@ -1364,7 +1421,7 @@ function MissingCustomWidgetCard({
   onRemove,
   title,
 }: {
-  onRemove: () => void;
+  onRemove?: () => void;
   title: string;
 }) {
   return (
@@ -1380,16 +1437,18 @@ function MissingCustomWidgetCard({
               A visão vinculada a este widget não está mais disponível.
             </CardDescription>
           </div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-            onClick={onRemove}
-            aria-label="Remover widget"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
+          {onRemove ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+              onClick={onRemove}
+              aria-label="Remover widget"
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          ) : null}
         </div>
       </CardHeader>
       <CardContent>

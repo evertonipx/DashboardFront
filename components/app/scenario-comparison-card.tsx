@@ -26,6 +26,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import { pastelBarColor } from "@/lib/chart-palette";
 import { getScopedStorageKey } from "@/lib/master-company-scope";
+import type { ReportPayload } from "@/lib/report-export";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -38,13 +39,14 @@ type ScenarioComparisonCardProps = {
   autoRefresh?: boolean;
   companyId?: string | null;
   description?: string;
+  monitorMode?: boolean;
   scenarios: Scenario[];
   storageKey: string;
   title?: string;
 };
 
-type ScenarioCompareGranularity = "hour" | "day" | "week" | "month";
-type ScenarioComparePeriod =
+export type ScenarioCompareGranularity = "hour" | "day" | "week" | "month";
+export type ScenarioComparePeriod =
   | "today"
   | "yesterday"
   | "last_24h"
@@ -53,7 +55,7 @@ type ScenarioComparePeriod =
   | "custom";
 type ScenarioSelectionMode = "all" | "custom";
 
-type ScenarioComparisonSettings = {
+export type ScenarioComparisonSettings = {
   customFrom: string;
   customTo: string;
   granularity: ScenarioCompareGranularity;
@@ -62,7 +64,7 @@ type ScenarioComparisonSettings = {
   selectionMode: ScenarioSelectionMode;
 };
 
-type AggregateDefinition = {
+export type ScenarioComparisonDefinition = {
   granularity: AggregateGranularity;
   from: Date;
   to: Date;
@@ -74,7 +76,7 @@ type ChartPoint = {
   total: number;
 };
 
-type ScenarioComparisonSeries = {
+export type ScenarioComparisonSeries = {
   id: string;
   name: string;
   points: ChartPoint[];
@@ -117,6 +119,7 @@ export function ScenarioComparisonCard({
   autoRefresh = false,
   companyId,
   description = "Compare os cenários escolhidos no mesmo gráfico.",
+  monitorMode = false,
   scenarios,
   storageKey,
   title = "Cenários por período",
@@ -129,11 +132,11 @@ export function ScenarioComparisonCard({
   const [error, setError] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
   const [settingsReady, setSettingsReady] = React.useState(false);
-  const [definition, setDefinition] = React.useState<AggregateDefinition>(() =>
+  const [definition, setDefinition] = React.useState<ScenarioComparisonDefinition>(() =>
     buildScenarioComparisonDefinition(defaultSettings(), new Date()),
   );
   const selectedScenarios = React.useMemo(
-    () => selectScenarios(scenarios, settings),
+    () => selectScenarioComparisonScenarios(scenarios, settings),
     [scenarios, settings],
   );
   const series = React.useMemo(
@@ -249,15 +252,21 @@ export function ScenarioComparisonCard({
   }
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
+    <Card className={cn(monitorMode && "h-full shadow-none")}>
+      <CardHeader className={cn("pb-3", monitorMode && "pb-2")}>
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
               {title}
             </CardTitle>
-            <CardDescription className="mt-1">{description}</CardDescription>
+            <CardDescription className="mt-1">
+              {monitorMode
+                ? `${periodLabel(settings.period)} · ${granularityLabel(
+                    settings.granularity,
+                  )} · ${scenarioSelectionLabel(settings, selectedScenarios)}`
+                : description}
+            </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {lastUpdated ? (
@@ -266,20 +275,25 @@ export function ScenarioComparisonCard({
                 {formatTime(lastUpdated)}
               </Badge>
             ) : null}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => load(true)}
-              disabled={loading}
-            >
-              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-              Atualizar
-            </Button>
+            {monitorMode ? null : (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => load(true)}
+                disabled={loading}
+              >
+                <RefreshCw
+                  className={cn("h-3.5 w-3.5", loading && "animate-spin")}
+                />
+                Atualizar
+              </Button>
+            )}
           </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className={cn("space-y-4", monitorMode && "space-y-2")}>
+        {monitorMode ? null : (
         <div className="grid gap-3 lg:grid-cols-[160px_170px_180px_minmax(0,1fr)]">
           <Field label="Granularidade">
             <Select
@@ -369,8 +383,9 @@ export function ScenarioComparisonCard({
             </div>
           )}
         </div>
+        )}
 
-        {settings.selectionMode === "custom" ? (
+        {!monitorMode && settings.selectionMode === "custom" ? (
           <div className="max-h-[190px] overflow-y-auto rounded-md border bg-background p-2">
             {scenarios.length ? (
               <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
@@ -407,7 +422,14 @@ export function ScenarioComparisonCard({
           </div>
         ) : null}
 
-        <div className="h-[360px] w-full">
+        <div
+          className={cn(
+            "w-full",
+            monitorMode
+              ? "h-[clamp(320px,42vh,620px)]"
+              : "h-[360px]",
+          )}
+        >
           {loading && !rows.length ? (
             <Skeleton className="h-full w-full" />
           ) : error ? (
@@ -451,8 +473,8 @@ function ChartState({ text }: { text: string }) {
   );
 }
 
-async function fetchScenarioComparisonRows(
-  definition: AggregateDefinition,
+export async function fetchScenarioComparisonRows(
+  definition: ScenarioComparisonDefinition,
   companyId?: string | null,
 ) {
   const headers = companyHeaders(companyId);
@@ -487,7 +509,7 @@ async function fetchScenarioComparisonRows(
 }
 
 async function fetchAggregateRows(
-  definition: AggregateDefinition,
+  definition: ScenarioComparisonDefinition,
   headers?: HeadersInit,
 ) {
   const params = new URLSearchParams({
@@ -504,10 +526,10 @@ async function fetchAggregateRows(
   return response.data ?? [];
 }
 
-function buildScenarioComparisonDefinition(
+export function buildScenarioComparisonDefinition(
   settings: ScenarioComparisonSettings,
   now: Date,
-): AggregateDefinition {
+): ScenarioComparisonDefinition {
   const range = scenarioComparisonRange(settings, now);
 
   return {
@@ -544,7 +566,7 @@ function scenarioComparisonRange(settings: ScenarioComparisonSettings, now: Date
   return { from: startOfDay(now), to: now };
 }
 
-function selectScenarios(
+export function selectScenarioComparisonScenarios(
   scenarios: Scenario[],
   settings: ScenarioComparisonSettings,
 ) {
@@ -558,10 +580,10 @@ function selectScenarios(
     .slice(0, MAX_SCENARIO_SERIES);
 }
 
-function buildScenarioComparisonPoints(
+export function buildScenarioComparisonPoints(
   scenario: Scenario,
   rows: AggregateEventRow[],
-  definition: AggregateDefinition,
+  definition: ScenarioComparisonDefinition,
 ): ChartPoint[] {
   return listBucketStarts(definition).map((bucketStart) => {
     const next = addGranularity(bucketStart, definition.granularity);
@@ -574,7 +596,7 @@ function buildScenarioComparisonPoints(
   });
 }
 
-function buildScenarioComparisonChartOption(
+export function buildScenarioComparisonChartOption(
   series: ScenarioComparisonSeries[],
   granularity: ScenarioCompareGranularity,
 ): EnterpriseChartOption {
@@ -678,6 +700,72 @@ function buildScenarioComparisonChartOption(
       name: item.name,
       type: "bar",
     })),
+  };
+}
+
+export function buildScenarioComparisonReportChart({
+  definition,
+  rows,
+  scenarios,
+  settings,
+  title = "Cenários por período",
+}: {
+  definition: ScenarioComparisonDefinition;
+  rows: AggregateEventRow[];
+  scenarios: Scenario[];
+  settings: ScenarioComparisonSettings;
+  title?: string;
+}): ReportPayload["charts"][number] {
+  const selectedScenarios = selectScenarioComparisonScenarios(scenarios, settings);
+  const series = selectedScenarios.map((scenario) => ({
+    id: scenario.id,
+    name: scenario.name,
+    points: buildScenarioComparisonPoints(scenario, rows, definition),
+  }));
+  const buckets =
+    series[0]?.points ??
+    listBucketStarts(definition).map((bucketStart) => ({
+      id: bucketStart.toISOString(),
+      name: bucketLabel(bucketStart, definition.granularity),
+      total: 0,
+    }));
+
+  return {
+    comparison: `${formatReportDateTime(definition.from)} até ${formatReportDateTime(
+      definition.to,
+    )}`,
+    description: [
+      `Configuração salva: ${periodLabel(settings.period)}`,
+      granularityLabel(settings.granularity),
+      scenarioSelectionLabel(settings, selectedScenarios),
+    ].join(" · "),
+    option: buildScenarioComparisonChartOption(series, settings.granularity),
+    table: {
+      title: `Dados - ${title}`,
+      columns: [
+        { key: "period", label: "Período", width: 20 },
+        { key: "period_start", label: "Início do período", width: 22 },
+        ...selectedScenarios.map((scenario) => ({
+          key: scenarioColumnKey(scenario.id),
+          label: scenario.name,
+          numeric: true,
+          width: 18,
+        })),
+      ],
+      rows: buckets.map((bucket, index) => {
+        const row: Record<string, string | number> = {
+          period: bucket.name,
+          period_start: formatReportDateTime(new Date(bucket.id)),
+        };
+
+        for (const item of series) {
+          row[scenarioColumnKey(item.id)] = item.points[index]?.total ?? 0;
+        }
+
+        return row;
+      }),
+    },
+    title,
   };
 }
 
@@ -799,7 +887,7 @@ function createAggregateRow(
   };
 }
 
-function listBucketStarts(definition: AggregateDefinition) {
+function listBucketStarts(definition: ScenarioComparisonDefinition) {
   const starts: Date[] = [];
   let cursor = alignToGranularity(definition.from, definition.granularity);
   const end = alignEndToGranularity(definition.to, definition.granularity);
@@ -966,6 +1054,13 @@ function defaultSettings(): ScenarioComparisonSettings {
   };
 }
 
+export function loadScenarioComparisonSettings(
+  storageKey: string,
+  companyId?: string | null,
+) {
+  return loadSettings(storageKey, companyId);
+}
+
 function loadSettings(storageKey: string, companyId?: string | null) {
   if (typeof window === "undefined") return defaultSettings();
 
@@ -1053,4 +1148,26 @@ function granularityLabel(value: ScenarioCompareGranularity) {
     granularityOptions.find((option) => option.value === value)?.label ??
     "Hora a hora"
   );
+}
+
+function scenarioColumnKey(scenarioId: string) {
+  return `scenario_${scenarioId}`;
+}
+
+function formatReportDateTime(value: Date) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(value);
+}
+
+function scenarioSelectionLabel(
+  settings: ScenarioComparisonSettings,
+  scenarios: Scenario[],
+) {
+  if (settings.selectionMode === "all") return "Todos os cenários";
+  if (!scenarios.length) return "Nenhum cenário selecionado";
+  if (scenarios.length === 1) return scenarios[0]?.name ?? "1 cenário";
+
+  return `${formatNumber(scenarios.length)} cenários`;
 }

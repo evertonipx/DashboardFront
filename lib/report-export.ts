@@ -130,7 +130,9 @@ export async function exportReportToExcel(
     completeCell.alignment = { vertical: "top", wrapText: true };
 
     if (mode !== "data") {
-      const dataUrl = await renderEChartToDataUrl(chart.option);
+      const dataUrl = await renderEChartToDataUrl(
+        withExportBarValueLabels(chart.option),
+      );
       const imageId = workbook.addImage({
         base64: dataUrl,
         extension: "png",
@@ -181,10 +183,13 @@ export async function exportReportToPdf(
         chartTop = 122 + drawPdfNoteBox(doc, chart.comparison, 42, 122) + 12;
       }
 
-      const image = await renderEChartToDataUrl(chart.option, {
-        height: 340,
-        width: 980,
-      });
+      const image = await renderEChartToDataUrl(
+        withExportBarValueLabels(chart.option),
+        {
+          height: 340,
+          width: 980,
+        },
+      );
       doc.addImage(image, "PNG", 42, chartTop, 758, 265);
 
       if (mode === "complete") {
@@ -529,6 +534,67 @@ function drawPdfNoteBox(
   doc.text(lines, x + 10, y + 14);
 
   return height;
+}
+
+function withExportBarValueLabels(
+  option: EnterpriseChartOption,
+): EnterpriseChartOption {
+  const series = (option as { series?: unknown }).series;
+  if (!series) return option;
+
+  return {
+    ...option,
+    grid:
+      option.grid && !Array.isArray(option.grid)
+        ? {
+            ...option.grid,
+            top: exportGridTop(option.grid.top),
+          }
+        : option.grid,
+    series: Array.isArray(series)
+      ? series.map(addExportBarValueLabel)
+      : addExportBarValueLabel(series),
+  } as EnterpriseChartOption;
+}
+
+function exportGridTop(value: unknown) {
+  const numericValue =
+    typeof value === "number" ? value : Number(String(value ?? ""));
+
+  return Number.isFinite(numericValue) ? Math.max(numericValue, 42) : 42;
+}
+
+function addExportBarValueLabel(series: unknown) {
+  if (!series || typeof series !== "object") return series;
+
+  const record = series as Record<string, unknown>;
+  if (record.type !== "bar") return series;
+
+  return {
+    ...record,
+    label: {
+      ...(record.label && typeof record.label === "object" ? record.label : {}),
+      color: "#13233A",
+      fontSize: 10,
+      fontWeight: 600,
+      formatter: (params: { value?: unknown }) =>
+        formatBarLabelValue(params.value),
+      position: "top",
+      show: true,
+    },
+  };
+}
+
+function formatBarLabelValue(value: unknown) {
+  const rawValue = Array.isArray(value) ? value[value.length - 1] : value;
+  const numericValue =
+    typeof rawValue === "number" ? rawValue : Number(String(rawValue ?? ""));
+
+  if (!Number.isFinite(numericValue)) return "";
+  if (numericValue === 0) return "";
+  return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(
+    numericValue,
+  );
 }
 
 function downloadBlob(blob: Blob, filename: string) {

@@ -15,6 +15,11 @@ import { toast } from "sonner";
 import { useAuth } from "@/components/app/auth-provider";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
 import {
+  MonitorModeButton,
+  MonitorModeExitHint,
+  useMonitorMode,
+} from "@/components/app/monitor-mode";
+import {
   getOccupancyChartPalette,
   type OccupancyChartPalette,
 } from "@/components/app/occupancy-chart-palette";
@@ -152,6 +157,7 @@ const DEFAULT_OCCUPANCY_METRIC_VISIBILITY: OccupancyMetricVisibility = {
 
 export function OccupancyReportsDashboard({ manager = false }: { manager?: boolean }) {
   const { user } = useAuth();
+  const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const companyScopeId = useEffectiveCompanyScopeId(user);
   const [scenarios, setScenarios] = React.useState<OccupancyScenario[]>([]);
   const [cameras, setCameras] = React.useState<Camera[]>([]);
@@ -463,7 +469,47 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
   ];
 
   return (
-    <section className="space-y-4">
+    <section
+      className={cn(
+        monitorMode
+          ? "fixed inset-0 z-[100] h-screen overflow-y-auto bg-background p-3 text-foreground lg:p-4"
+          : "space-y-4",
+      )}
+    >
+      {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
+
+      {monitorMode ? (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
+          <div className="min-w-0">
+            <div className="text-xs font-medium uppercase text-muted-foreground">
+              Relatórios de ocupação
+            </div>
+            <div className="truncate text-lg font-semibold">
+              {selectedScope?.name ?? "Visão selecionada"}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className="gap-1 bg-card">
+              <MapPinned className="h-3.5 w-3.5" />
+              {scopeModeLabel(scopeMode)}
+            </Badge>
+            {showPreviousPeriod ? (
+              <Badge
+                variant="outline"
+                className="gap-1 border-primary/30 bg-primary/10 text-primary"
+              >
+                Comparativo ativo
+              </Badge>
+            ) : null}
+            {lastUpdated ? (
+              <Badge variant="outline" className="gap-1 bg-card">
+                <Clock3 className="h-3.5 w-3.5" />
+                {formatTime(lastUpdated)}
+              </Badge>
+            ) : null}
+          </div>
+        </div>
+      ) : (
       <div className="rounded-md border border-border bg-card p-4 shadow-soft">
         {loadingScopes ? (
           <div className="grid gap-4 md:grid-cols-[180px_1fr_auto]">
@@ -553,6 +599,10 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
                 />
                 Atualizar
               </Button>
+              <MonitorModeButton
+                onClick={enterMonitorMode}
+                disabled={!scopeOptions.length}
+              />
             </div>
           </div>
         ) : (
@@ -561,10 +611,16 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
           </div>
         )}
       </div>
+      )}
 
       {scopeOptions.length ? (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div
+            className={cn(
+              "grid sm:grid-cols-2 xl:grid-cols-4",
+              monitorMode ? "gap-3" : "gap-4",
+            )}
+          >
             {metricCards.map((card) => (
               <MetricCard
                 key={card.label}
@@ -577,7 +633,7 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
               />
             ))}
           </div>
-          <div className="grid gap-4 xl:grid-cols-2">
+          <div className={cn("grid xl:grid-cols-2", monitorMode ? "mt-3 gap-3" : "gap-4")}>
             {definitions.map((definition) => (
               <OccupancyReportChartCard
                 key={definition.id}

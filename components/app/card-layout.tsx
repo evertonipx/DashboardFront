@@ -52,9 +52,15 @@ type CardLayoutProps = {
   cards: LayoutCard[];
   menuKey: CardMenuKey;
   editActions?: React.ReactNode;
+  monitorMode?: boolean;
 };
 
-export function CardLayout({ cards, menuKey, editActions }: CardLayoutProps) {
+export function CardLayout({
+  cards,
+  menuKey,
+  editActions,
+  monitorMode = false,
+}: CardLayoutProps) {
   const { user } = useAuth();
   const [draggingId, setDraggingId] = React.useState<string | null>(null);
   const [overId, setOverId] = React.useState<string | null>(null);
@@ -68,7 +74,7 @@ export function CardLayout({ cards, menuKey, editActions }: CardLayoutProps) {
   const cardIds = React.useMemo(() => cards.map((card) => card.id), [cards]);
   const companyId = useEffectiveCompanyScopeId(user) || null;
   const preferences = useCardPreferences(menuKey, cardIds, companyId);
-  const canEditLayout = hasVisualAdminAccess(user);
+  const canEditLayout = hasVisualAdminAccess(user) && !monitorMode;
   const orderedCards = orderByCardPreferences(cards, preferences);
   const organizerCards = orderByAllCardPreferences(cards, preferences);
   const hiddenCards = cards.filter(
@@ -82,6 +88,12 @@ export function CardLayout({ cards, menuKey, editActions }: CardLayoutProps) {
       setOrganizerOpen(false);
     }
   }, [canEditLayout]);
+
+  React.useEffect(() => {
+    if (!monitorMode) return;
+    setEditing(false);
+    setOrganizerOpen(false);
+  }, [monitorMode]);
 
   function flashSaved() {
     setSaved(true);
@@ -213,7 +225,7 @@ export function CardLayout({ cards, menuKey, editActions }: CardLayoutProps) {
   }
 
   return (
-    <div className="space-y-4">
+    <div className={cn(monitorMode ? "space-y-0" : "space-y-4")}>
       {canEditLayout ? (
         <div
           className={cn(
@@ -307,47 +319,54 @@ export function CardLayout({ cards, menuKey, editActions }: CardLayoutProps) {
         </div>
       ) : null}
 
-      <WidgetOrganizerDialog
-        cards={organizerCards}
-        draggingId={organizerDraggingId}
-        onDragEnd={() => {
-          setOrganizerDraggingId(null);
-          setOrganizerOverId(null);
-        }}
-        onDragLeave={() => setOrganizerOverId(null)}
-        onDragOver={(event, cardId) => {
-          event.preventDefault();
-          setOrganizerOverId(cardId);
-        }}
-        onDragStart={(event, cardId) => {
-          setOrganizerDraggingId(cardId);
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", cardId);
-        }}
-        onDrop={(event, cardId) => {
-          event.preventDefault();
-          const sourceId =
-            event.dataTransfer.getData("text/plain") || organizerDraggingId;
-          if (sourceId) moveOrganizerCard(sourceId, cardId);
-          setOrganizerDraggingId(null);
-          setOrganizerOverId(null);
-        }}
-        onMoveDown={(cardId, index) => moveOrganizerCardTo(cardId, index + 1)}
-        onMoveToBottom={(cardId) =>
-          moveOrganizerCardTo(cardId, organizerCards.length - 1)
-        }
-        onMoveToTop={(cardId) => moveOrganizerCardTo(cardId, 0)}
-        onMoveUp={(cardId, index) => moveOrganizerCardTo(cardId, index - 1)}
-        onOpenChange={setOrganizerOpen}
-        onResize={resizeCard}
-        onRestoreDefault={restoreDefaultOrder}
-        onToggleVisibility={toggleCardVisibility}
-        open={organizerOpen}
-        overId={organizerOverId}
-        preferences={preferences}
-      />
+      {monitorMode ? null : (
+        <WidgetOrganizerDialog
+          cards={organizerCards}
+          draggingId={organizerDraggingId}
+          onDragEnd={() => {
+            setOrganizerDraggingId(null);
+            setOrganizerOverId(null);
+          }}
+          onDragLeave={() => setOrganizerOverId(null)}
+          onDragOver={(event, cardId) => {
+            event.preventDefault();
+            setOrganizerOverId(cardId);
+          }}
+          onDragStart={(event, cardId) => {
+            setOrganizerDraggingId(cardId);
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", cardId);
+          }}
+          onDrop={(event, cardId) => {
+            event.preventDefault();
+            const sourceId =
+              event.dataTransfer.getData("text/plain") || organizerDraggingId;
+            if (sourceId) moveOrganizerCard(sourceId, cardId);
+            setOrganizerDraggingId(null);
+            setOrganizerOverId(null);
+          }}
+          onMoveDown={(cardId, index) => moveOrganizerCardTo(cardId, index + 1)}
+          onMoveToBottom={(cardId) =>
+            moveOrganizerCardTo(cardId, organizerCards.length - 1)
+          }
+          onMoveToTop={(cardId) => moveOrganizerCardTo(cardId, 0)}
+          onMoveUp={(cardId, index) => moveOrganizerCardTo(cardId, index - 1)}
+          onOpenChange={setOrganizerOpen}
+          onResize={resizeCard}
+          onRestoreDefault={restoreDefaultOrder}
+          onToggleVisibility={toggleCardVisibility}
+          open={organizerOpen}
+          overId={organizerOverId}
+          preferences={preferences}
+        />
+      )}
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div
+        className={cn(
+          "grid sm:grid-cols-2 xl:grid-cols-4",
+          monitorMode ? "gap-3" : "gap-4",
+        )}
+      >
         {orderedCards.map((card) => (
           <CardLayoutItem
             key={card.id}

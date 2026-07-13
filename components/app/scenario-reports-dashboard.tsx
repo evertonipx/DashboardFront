@@ -17,8 +17,20 @@ import { toast } from "sonner";
 import { useAuth } from "@/components/app/auth-provider";
 import { CardLayout } from "@/components/app/card-layout";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import {
+  MonitorModeButton,
+  MonitorModeExitHint,
+  useMonitorMode,
+} from "@/components/app/monitor-mode";
 import { ReportExportActions } from "@/components/app/report-export-actions";
-import { ScenarioComparisonCard } from "@/components/app/scenario-comparison-card";
+import {
+  ScenarioComparisonCard,
+  buildScenarioComparisonDefinition,
+  buildScenarioComparisonReportChart,
+  fetchScenarioComparisonRows,
+  loadScenarioComparisonSettings,
+} from "@/components/app/scenario-comparison-card";
+import { useCardPreferences } from "@/components/app/use-card-preferences";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -82,7 +94,7 @@ import {
   type ReportCustomWidgetGranularity,
   type ReportCustomWidgetScopeMode,
 } from "@/lib/report-custom-widgets";
-import type { ReportPayload } from "@/lib/report-export";
+import type { ReportMetric, ReportPayload, ReportTable } from "@/lib/report-export";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -164,6 +176,7 @@ export function ScenarioReportsDashboard({
   manager = false,
 }: ScenarioReportsDashboardProps) {
   const { user } = useAuth();
+  const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const companyScopeId = useEffectiveCompanyScopeId(user);
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
   const [cameras, setCameras] = React.useState<Camera[]>([]);
@@ -637,6 +650,11 @@ export function ScenarioReportsDashboard({
       id: "report_today_total",
       label: "Resultado hoje",
       defaultSize: "compact" as const,
+      reportMetric: {
+        label: "Resultado hoje",
+        value: formatNumber(todayTotal),
+        description: "00:00 até agora",
+      } satisfies ReportMetric,
       node: (
         <ReportMetricCard
           icon={TrendingUp}
@@ -651,6 +669,11 @@ export function ScenarioReportsDashboard({
       id: "report_last_hour",
       label: "Última hora",
       defaultSize: "compact" as const,
+      reportMetric: {
+        label: "Última hora",
+        value: formatNumber(lastHourTotal),
+        description: "Últimos 60 minutos",
+      } satisfies ReportMetric,
       node: (
         <ReportMetricCard
           icon={Clock3}
@@ -665,6 +688,11 @@ export function ScenarioReportsDashboard({
       id: "report_last_7d",
       label: "Últimos 7 dias",
       defaultSize: "compact" as const,
+      reportMetric: {
+        label: "Últimos 7 dias",
+        value: formatNumber(lastSevenDaysTotal),
+        description: "Inclui hoje",
+      } satisfies ReportMetric,
       node: (
         <ReportMetricCard
           icon={BarChart3}
@@ -679,6 +707,11 @@ export function ScenarioReportsDashboard({
       id: "report_scenario_count",
       label: "Visões disponíveis",
       defaultSize: "compact" as const,
+      reportMetric: {
+        label: "Visões disponíveis",
+        value: formatNumber(activeScopeCount),
+        description: scopeModeLabel(scopeMode),
+      } satisfies ReportMetric,
       node: (
         <ReportMetricCard
           icon={Route}
@@ -702,6 +735,7 @@ export function ScenarioReportsDashboard({
             <ScenarioComparisonCard
               companyId={companyScopeId}
               description="Compare todos os cenários ou apenas os escolhidos para análise de relatório."
+              monitorMode={monitorMode}
               scenarios={scenarios}
               storageKey="reports"
             />
@@ -755,19 +789,21 @@ export function ScenarioReportsDashboard({
       node: scope ? (
         <ScenarioAggregateChartCard
           action={
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={(event) => {
-                event.stopPropagation();
-                removeCustomWidget(widget.id);
-              }}
-              aria-label={`Remover widget ${widget.title}`}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
+            monitorMode ? null : (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  removeCustomWidget(widget.id);
+                }}
+                aria-label={`Remover widget ${widget.title}`}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            )
           }
           definition={definition}
           loading={loadingCharts}
@@ -781,7 +817,7 @@ export function ScenarioReportsDashboard({
       ) : (
         <MissingReportCustomWidgetCard
           title={widget.title}
-          onRemove={() => removeCustomWidget(widget.id)}
+          onRemove={monitorMode ? undefined : () => removeCustomWidget(widget.id)}
         />
       ),
     };
@@ -811,8 +847,93 @@ export function ScenarioReportsDashboard({
         },
       ]
     : [];
-  const customReportCharts = customWidgets
-    .map((widget) => {
+
+  const scenarioDetailTable: ReportTable | null = selectedScope
+    ? {
+        title: "Visão selecionada",
+        columns: [
+          { key: "label", label: "Item", width: 22 },
+          { key: "value", label: "Valor", width: 36 },
+        ],
+        rows: [
+          { label: "Nome", value: selectedScope.name },
+          {
+            label: "Descrição",
+            value: selectedScope.description || "Sem descrição",
+          },
+          {
+            label: "Tipo",
+            value: scopeModeLabel(selectedScope.mode),
+          },
+          {
+            label: selectedScope.scenario ? "Linhas" : "Câmeras",
+            value: formatNumber(
+              selectedScope.scenario
+                ? selectedScope.scenario.lines?.length ?? 0
+                : selectedScope.cameraIds.length,
+            ),
+          },
+        ],
+      }
+    : null;
+  const scopeListTable: ReportTable | null = selectedScope
+    ? {
+        title: "Visões disponíveis",
+        columns: [
+          { key: "name", label: "Visão", width: 34 },
+          { key: "type", label: "Tipo", width: 16 },
+          { key: "items", label: "Itens", width: 12, numeric: true },
+        ],
+        rows: scopeOptions.map((scope) => ({
+          name: scope.name,
+          type: scopeModeLabel(scope.mode),
+          items: scope.scenario
+            ? scope.scenario.lines?.length ?? 0
+            : scope.cameraIds.length,
+        })),
+      }
+    : null;
+  const reportLayoutCards = [
+    ...metricCards,
+    ...scenarioComparisonCards,
+    ...customWidgetCards,
+    ...chartCards,
+    ...detailCards,
+  ];
+  const reportCardIds = reportLayoutCards.map((card) => card.id);
+  const reportCardIdsKey = reportCardIds.join("|");
+  const reportPreferences = useCardPreferences(
+    "reports",
+    reportCardIds,
+    companyScopeId,
+  );
+  const visibleReportCardIds = React.useMemo(() => {
+    const cardIdSet = new Set(reportCardIdsKey ? reportCardIdsKey.split("|") : []);
+    const preferenceIds = new Set(reportPreferences.map((preference) => preference.id));
+    const ordered = reportPreferences
+      .filter((preference) => preference.visible && cardIdSet.has(preference.id))
+      .map((preference) => preference.id);
+    const missing = Array.from(cardIdSet).filter((id) => !preferenceIds.has(id));
+
+    return [...ordered, ...missing];
+  }, [reportCardIdsKey, reportPreferences]);
+  const defaultReportChartEntries: Array<
+    readonly [string, ReportPayload["charts"][number]]
+  > = selectedScope
+    ? chartDefinitions.map((definition) => [
+        definition.id,
+        buildScenarioReportChart(
+          definition,
+          chartData[definition.id]?.rows ?? [],
+          chartData[previousId(definition.id)]?.rows ?? [],
+          selectedScope,
+          showPreviousPeriod,
+          intradayComparison,
+        ),
+      ] as const)
+    : [];
+  const customReportChartEntries = customWidgets
+    .map((widget): readonly [string, ReportPayload["charts"][number]] | null => {
       const scope = getScopeOptionsForMode(widget.scopeMode).find(
         (option) => option.id === widget.scopeId,
       );
@@ -830,116 +951,163 @@ export function ScenarioReportsDashboard({
         true,
       );
 
-      return buildScenarioReportChart(
-        definition,
-        state?.rows ?? [],
-        previousState?.rows ?? [],
-        scope,
-        showPreviousPeriod,
-        intradayComparison,
-      );
+      return [
+        `report_custom_${widget.id}`,
+        buildScenarioReportChart(
+          definition,
+          state?.rows ?? [],
+          previousState?.rows ?? [],
+          scope,
+          showPreviousPeriod,
+          intradayComparison,
+        ),
+      ] as const;
     })
-    .filter((chart): chart is ReportPayload["charts"][number] => Boolean(chart));
-  const scenarioReportPayload: ReportPayload = {
-    title: selectedScope
-      ? `Relatório de Contagem - ${selectedScope.name}`
-      : "Relatório de Contagem",
-    subtitle: "Resultados de contagem por visão e períodos agregados.",
-    filename: `ipxdata-relatorio-contagem-${reportDateSlug(lastUpdated ?? clock)}`,
-    generatedAt: lastUpdated ?? clock,
-    dataCompleteUntil: clock,
-    context: [
-      selectedScope ? `${scopeModeLabel(selectedScope.mode)}: ${selectedScope.name}` : "",
-      showPreviousPeriod
-        ? `Comparativo: ${intradayComparison === "last_week" ? "semana passada" : "ontem"}`
-        : "Sem período anterior",
-    ].filter(Boolean),
-    metrics: [
-      {
-        label: "Resultado hoje",
-        value: formatNumber(todayTotal),
-        description: "00:00 até agora",
-      },
-      {
-        label: "Última hora",
-        value: formatNumber(lastHourTotal),
-        description: "Últimos 60 minutos",
-      },
-      {
-        label: "Últimos 7 dias",
-        value: formatNumber(lastSevenDaysTotal),
-        description: "Inclui hoje",
-      },
-      {
-        label: "Visões disponíveis",
-        value: formatNumber(activeScopeCount),
-        description: scopeModeLabel(scopeMode),
-      },
-    ],
+    .filter(
+      (entry): entry is readonly [string, ReportPayload["charts"][number]] =>
+        Boolean(entry),
+    );
+  const customReportCharts = customReportChartEntries.map(([, chart]) => chart);
+  const visibleMetricByCardId = new Map<string, ReportMetric>(
+    metricCards.map((card) => [card.id, card.reportMetric] as const),
+  );
+  const visibleTableEntries: Array<readonly [string, ReportTable]> = [];
+  if (scenarioDetailTable) {
+    visibleTableEntries.push(["report_scenario_detail", scenarioDetailTable]);
+  }
+  if (scopeListTable) {
+    visibleTableEntries.push(["report_scenario_table", scopeListTable]);
+  }
+  const visibleTableByCardId = new Map<string, ReportTable>(
+    visibleTableEntries,
+  );
+
+  function composeScenarioReportPayload({
+    charts,
+    metrics,
+    tables,
+  }: {
+    charts: ReportPayload["charts"];
+    metrics: ReportMetric[];
+    tables: ReportTable[];
+  }): ReportPayload {
+    return {
+      title: selectedScope
+        ? `Relatório de Contagem - ${selectedScope.name}`
+        : "Relatório de Contagem",
+      subtitle: "Resultados de contagem por visão e períodos agregados.",
+      filename: `ipxdata-relatorio-contagem-${reportDateSlug(lastUpdated ?? clock)}`,
+      generatedAt: lastUpdated ?? clock,
+      dataCompleteUntil: clock,
+      context: [
+        selectedScope
+          ? `${scopeModeLabel(selectedScope.mode)}: ${selectedScope.name}`
+          : "",
+        showPreviousPeriod
+          ? `Comparativo: ${intradayComparison === "last_week" ? "semana passada" : "ontem"}`
+          : "Sem período anterior",
+        "Exportação seguindo os widgets visíveis e ordenados em Relatórios.",
+      ].filter(Boolean),
+      metrics,
+      charts,
+      tables,
+    };
+  }
+
+  async function buildConfiguredScenarioReportPayload() {
+    const chartByCardId = new Map<string, ReportPayload["charts"][number]>([
+      ...defaultReportChartEntries,
+      ...customReportChartEntries,
+    ]);
+
+    if (
+      visibleReportCardIds.includes("report_scenario_period_comparison") &&
+      scenarios.length
+    ) {
+      try {
+        const settings = loadScenarioComparisonSettings("reports", companyScopeId);
+        const definition = buildScenarioComparisonDefinition(settings, new Date());
+        const rows = await fetchScenarioComparisonRows(definition, companyScopeId);
+        chartByCardId.set(
+          "report_scenario_period_comparison",
+          buildScenarioComparisonReportChart({
+            definition,
+            rows,
+            scenarios,
+            settings,
+          }),
+        );
+      } catch {
+        // Mantem a exportação dos demais widgets mesmo se este gráfico falhar.
+      }
+    }
+
+    return composeScenarioReportPayload({
+      charts: visibleReportCardIds
+        .map((id) => chartByCardId.get(id))
+        .filter((chart): chart is ReportPayload["charts"][number] => Boolean(chart)),
+      metrics: visibleReportCardIds
+        .map((id) => visibleMetricByCardId.get(id))
+        .filter((metric): metric is ReportMetric => Boolean(metric)),
+      tables: visibleReportCardIds
+        .map((id) => visibleTableByCardId.get(id))
+        .filter((table): table is ReportTable => Boolean(table)),
+    });
+  }
+
+  const scenarioReportPayload = composeScenarioReportPayload({
     charts: selectedScope
-      ? [
-          ...chartDefinitions.map((definition) =>
-            buildScenarioReportChart(
-              definition,
-              chartData[definition.id]?.rows ?? [],
-              chartData[previousId(definition.id)]?.rows ?? [],
-              selectedScope,
-              showPreviousPeriod,
-              intradayComparison,
-            ),
-          ),
-          ...customReportCharts,
-        ]
+      ? [...defaultReportChartEntries.map(([, chart]) => chart), ...customReportCharts]
       : customReportCharts,
-    tables: selectedScope
-      ? [
-          {
-            title: "Visão selecionada",
-            columns: [
-              { key: "label", label: "Item", width: 22 },
-              { key: "value", label: "Valor", width: 36 },
-            ],
-            rows: [
-              { label: "Nome", value: selectedScope.name },
-              {
-                label: "Descrição",
-                value: selectedScope.description || "Sem descrição",
-              },
-              {
-                label: "Tipo",
-                value: scopeModeLabel(selectedScope.mode),
-              },
-              {
-                label: selectedScope.scenario ? "Linhas" : "Câmeras",
-                value: formatNumber(
-                  selectedScope.scenario
-                    ? selectedScope.scenario.lines?.length ?? 0
-                    : selectedScope.cameraIds.length,
-                ),
-              },
-            ],
-          },
-          {
-            title: "Visões disponíveis",
-            columns: [
-              { key: "name", label: "Visão", width: 34 },
-              { key: "type", label: "Tipo", width: 16 },
-              { key: "items", label: "Itens", width: 12, numeric: true },
-            ],
-            rows: scopeOptions.map((scope) => ({
-              name: scope.name,
-              type: scopeModeLabel(scope.mode),
-              items: scope.scenario
-                ? scope.scenario.lines?.length ?? 0
-                : scope.cameraIds.length,
-            })),
-          },
-        ]
-      : [],
-  };
+    metrics: metricCards.map((card) => card.reportMetric),
+    tables: [scenarioDetailTable, scopeListTable].filter(
+      (table): table is ReportTable => Boolean(table),
+    ),
+  });
 
   return (
-    <section id="relatorios" className="scroll-mt-6 space-y-4">
+    <section
+      id="relatorios"
+      className={cn(
+        monitorMode
+          ? "fixed inset-0 z-[100] h-screen overflow-y-auto bg-background p-3 text-foreground lg:p-4"
+          : "scroll-mt-6 space-y-4",
+      )}
+    >
+      {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
+
+      {monitorMode ? (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
+          <div className="min-w-0">
+            <div className="text-xs font-medium uppercase text-muted-foreground">
+              Relatórios
+            </div>
+            <div className="truncate text-lg font-semibold">
+              {selectedScope?.name ?? "Visão selecionada"}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className="gap-1 bg-card">
+              <BarChart3 className="h-3.5 w-3.5" />
+              {scopeModeLabel(scopeMode)}
+            </Badge>
+            {showPreviousPeriod ? (
+              <Badge
+                variant="outline"
+                className="gap-1 border-primary/30 bg-primary/10 text-primary"
+              >
+                Comparativo ativo
+              </Badge>
+            ) : null}
+            {lastUpdated ? (
+              <Badge variant="outline" className="gap-1 bg-card">
+                <Clock3 className="h-3.5 w-3.5" />
+                {formatTime(lastUpdated)}
+              </Badge>
+            ) : null}
+          </div>
+        </div>
+      ) : (
       <div className="rounded-md border border-border bg-card p-4 shadow-soft">
         {loadingScenarios ? (
           <div className="grid gap-4 md:grid-cols-[1fr_auto_auto]">
@@ -1036,7 +1204,12 @@ export function ScenarioReportsDashboard({
               </Button>
               <ReportExportActions
                 payload={scenarioReportPayload}
+                getPayload={buildConfiguredScenarioReportPayload}
                 disabled={loadingCharts || loadingScenarios || !selectedScope}
+              />
+              <MonitorModeButton
+                onClick={enterMonitorMode}
+                disabled={!scopeOptions.length}
               />
             </div>
           </div>
@@ -1046,26 +1219,31 @@ export function ScenarioReportsDashboard({
           </div>
         )}
       </div>
+      )}
 
       {scopeOptions.length ? (
         <CardLayout
           menuKey="reports"
+          monitorMode={monitorMode}
           editActions={
             <Button type="button" variant="outline" size="sm" onClick={openCustomWidgetDialog}>
               <Settings2 className="h-3.5 w-3.5" />
               Novo widget
             </Button>
           }
-          cards={[
-            ...metricCards,
-            ...scenarioComparisonCards,
-            ...customWidgetCards,
-            ...chartCards,
-            ...detailCards,
-          ]}
+          cards={
+            monitorMode
+              ? reportLayoutCards.filter(
+                  (card) =>
+                    card.id !== "report_scenario_detail" &&
+                    card.id !== "report_scenario_table",
+                )
+              : reportLayoutCards
+          }
         />
       ) : null}
 
+      {monitorMode ? null : (
       <Dialog
         open={customWidgetDialogOpen}
         onOpenChange={setCustomWidgetDialogOpen}
@@ -1178,6 +1356,7 @@ export function ScenarioReportsDashboard({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      )}
     </section>
   );
 }
@@ -1306,7 +1485,7 @@ function MissingReportCustomWidgetCard({
   onRemove,
   title,
 }: {
-  onRemove: () => void;
+  onRemove?: () => void;
   title: string;
 }) {
   return (
@@ -1322,16 +1501,18 @@ function MissingReportCustomWidgetCard({
               A visão vinculada a este widget não está mais disponível.
             </CardDescription>
           </div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-            onClick={onRemove}
-            aria-label="Remover widget"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
+          {onRemove ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+              onClick={onRemove}
+              aria-label="Remover widget"
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          ) : null}
         </div>
       </CardHeader>
       <CardContent>

@@ -91,14 +91,9 @@ export default function LoginPage() {
         style={{ backgroundColor: branding.accentColor }}
       >
         <div className="flex items-center gap-3">
-          <BrandMark branding={branding} />
+          <IPXDataMark />
           <div>
-            <div className="text-lg font-semibold">
-              {isDefaultBrand ? "IPXData" : branding.companyName}
-            </div>
-            <div className="text-xs text-white/65">
-              {isDefaultBrand ? branding.subtitle : `IPXData | ${branding.subtitle}`}
-            </div>
+            <div className="text-lg font-semibold">IPXData</div>
           </div>
         </div>
 
@@ -108,25 +103,9 @@ export default function LoginPage() {
           </div>
           <div className="flex flex-col items-start gap-5">
             <BrandMark branding={branding} hero />
-            <div>
-              <div className="text-3xl font-semibold tracking-normal">
-                {isDefaultBrand ? "IPXData" : branding.companyName}
-              </div>
-              <div className="mt-2 text-base text-white/70">
-                {isDefaultBrand ? branding.subtitle : "IPXData"}
-              </div>
+            <div className="max-w-lg text-3xl font-semibold leading-tight tracking-normal sm:text-4xl">
+              Business Intelligence.
             </div>
-          </div>
-          <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
-            {["Ao vivo", "Cenários", "Dashboard"].map((item) => (
-              <div
-                key={item}
-                className="rounded-md border border-white/15 bg-white/[0.08] p-4"
-              >
-                <div className="h-1.5 w-8 rounded-full bg-sky-200" />
-                <div className="mt-4 text-sm font-medium">{item}</div>
-              </div>
-            ))}
           </div>
         </div>
 
@@ -206,6 +185,18 @@ export default function LoginPage() {
         </Card>
       </section>
     </main>
+  );
+}
+
+function IPXDataMark() {
+  return (
+    <div
+      aria-label="Logo IPXData"
+      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-white text-xs font-black text-[#0B4EA2] shadow-sm"
+      role="img"
+    >
+      IPX
+    </div>
   );
 }
 

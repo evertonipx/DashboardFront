@@ -10,6 +10,7 @@ export const DEFAULT_LOGIN_BRANDING: LoginBranding = {
   accentColor: "#0B4EA2",
   companyName: "IPXData",
   key: "default",
+  logoUrl: "/jk.png",
   subtitle: "IPExtreme Analytics",
 };
 

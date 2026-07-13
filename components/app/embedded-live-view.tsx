@@ -5,6 +5,11 @@ import { useSearchParams } from "next/navigation";
 
 import { useAuth } from "@/components/app/auth-provider";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import {
+  MonitorModeButton,
+  MonitorModeExitHint,
+  useMonitorMode,
+} from "@/components/app/monitor-mode";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import { hasMasterAccess } from "@/lib/access";
@@ -117,6 +122,7 @@ const chartLabels: Record<ViewChart, string> = {
 export function EmbeddedLiveView() {
   const searchParams = useSearchParams();
   const { user } = useAuth();
+  const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const storedCompanyScopeId = useEffectiveCompanyScopeId(user);
   const chart = normalizeChart(searchParams.get("chart"));
   const queryCompanyId = searchParams.get("company_id")?.trim() ?? "";
@@ -288,6 +294,14 @@ export function EmbeddedLiveView() {
 
   return (
     <main className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+      {monitorMode ? (
+        <MonitorModeExitHint onExit={exitMonitorMode} />
+      ) : (
+        <div className="fixed right-3 top-3 z-[120] opacity-0 transition-opacity hover:opacity-100 focus-within:opacity-100">
+          <MonitorModeButton onClick={enterMonitorMode} />
+        </div>
+      )}
+
       {title ? (
         <header className="shrink-0 px-4 pb-2 pt-3 text-center">
           <h1

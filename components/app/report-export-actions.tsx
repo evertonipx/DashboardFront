@@ -22,11 +22,13 @@ import {
 type ReportExportActionsProps = {
   payload: ReportPayload;
   disabled?: boolean;
+  getPayload?: () => Promise<ReportPayload> | ReportPayload;
 };
 
 export function ReportExportActions({
   payload,
   disabled = false,
+  getPayload,
 }: ReportExportActionsProps) {
   const [exporting, setExporting] = React.useState<"excel" | "pdf" | null>(null);
   const [mode, setMode] = React.useState<ReportExportMode>("complete");
@@ -34,11 +36,13 @@ export function ReportExportActions({
   async function exportFile(format: "excel" | "pdf") {
     setExporting(format);
     try {
+      const exportPayload = getPayload ? await getPayload() : payload;
+
       if (format === "excel") {
-        await exportReportToExcel(payload, { mode });
+        await exportReportToExcel(exportPayload, { mode });
         toast.success("Excel gerado.");
       } else {
-        await exportReportToPdf(payload, { mode });
+        await exportReportToPdf(exportPayload, { mode });
         toast.success("PDF gerado.");
       }
     } catch (error) {
