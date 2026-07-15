@@ -4222,9 +4222,9 @@ function buildOperationalTrendOption(
         data: valuesByDay((point) => point.average30),
         lineStyle: {
           color: directionColor(direction30),
-          opacity: 0.72,
-          type: "dashed",
-          width: 1.5,
+          opacity: 0.9,
+          type: "solid",
+          width: 2.5,
         },
         name: "Média móvel 30 dias",
         showSymbol: false,
@@ -4233,7 +4233,12 @@ function buildOperationalTrendOption(
       },
       {
         data: valuesByDay((point) => point.average7),
-        lineStyle: { color: directionColor(direction7), width: 2.25 },
+        lineStyle: {
+          color: directionColor(direction7),
+          opacity: 0.76,
+          type: "dashed",
+          width: 1.25,
+        },
         name: "Média móvel 7 dias",
         showSymbol: false,
         smooth: 0.18,
