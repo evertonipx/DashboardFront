@@ -58,9 +58,12 @@ type CardLayoutProps = {
   editActions?: React.ReactNode;
   monitorMode?: boolean;
   onOrganizerOpenChange?: (open: boolean) => void;
+  onReorderModeChange?: (enabled: boolean) => void;
   organizerOpen?: boolean;
   preferenceScopeId?: string | null;
+  reorderMode?: boolean;
   showOrganizerTrigger?: boolean;
+  showReorderTrigger?: boolean;
 };
 
 export function CardLayout({
@@ -69,18 +72,27 @@ export function CardLayout({
   editActions,
   monitorMode = false,
   onOrganizerOpenChange,
+  onReorderModeChange,
   organizerOpen: controlledOrganizerOpen,
   preferenceScopeId,
+  reorderMode: controlledReorderMode,
   showOrganizerTrigger = true,
+  showReorderTrigger = true,
 }: CardLayoutProps) {
   const { user } = useAuth();
   const [organizerDraggingId, setOrganizerDraggingId] = React.useState<string | null>(
     null,
   );
   const [organizerOverId, setOrganizerOverId] = React.useState<string | null>(null);
+  const [screenDraggingId, setScreenDraggingId] = React.useState<string | null>(
+    null,
+  );
+  const [screenOverId, setScreenOverId] = React.useState<string | null>(null);
+  const [internalReorderMode, setInternalReorderMode] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [internalOrganizerOpen, setInternalOrganizerOpen] = React.useState(false);
   const organizerOpen = controlledOrganizerOpen ?? internalOrganizerOpen;
+  const screenReorderEnabled = controlledReorderMode ?? internalReorderMode;
   const setOrganizerOpen = React.useCallback(
     (open: boolean) => {
       if (controlledOrganizerOpen === undefined) {
@@ -89,6 +101,15 @@ export function CardLayout({
       onOrganizerOpenChange?.(open);
     },
     [controlledOrganizerOpen, onOrganizerOpenChange],
+  );
+  const setScreenReorderEnabled = React.useCallback(
+    (enabled: boolean) => {
+      if (controlledReorderMode === undefined) {
+        setInternalReorderMode(enabled);
+      }
+      onReorderModeChange?.(enabled);
+    },
+    [controlledReorderMode, onReorderModeChange],
   );
   const cardIds = React.useMemo(() => cards.map((card) => card.id), [cards]);
   const companyId = useEffectiveCompanyScopeId(user) || null;
@@ -104,13 +125,32 @@ export function CardLayout({
   React.useEffect(() => {
     if (!canEditLayout) {
       setOrganizerOpen(false);
+      setScreenReorderEnabled(false);
     }
-  }, [canEditLayout, setOrganizerOpen]);
+  }, [canEditLayout, setOrganizerOpen, setScreenReorderEnabled]);
 
   React.useEffect(() => {
     if (!monitorMode) return;
     setOrganizerOpen(false);
-  }, [monitorMode, setOrganizerOpen]);
+    setScreenReorderEnabled(false);
+  }, [monitorMode, setOrganizerOpen, setScreenReorderEnabled]);
+
+  React.useEffect(() => {
+    if (screenReorderEnabled) return;
+    setScreenDraggingId(null);
+    setScreenOverId(null);
+  }, [screenReorderEnabled]);
+
+  React.useEffect(() => {
+    if (!screenReorderEnabled) return;
+
+    const finishOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setScreenReorderEnabled(false);
+    };
+
+    window.addEventListener("keydown", finishOnEscape);
+    return () => window.removeEventListener("keydown", finishOnEscape);
+  }, [screenReorderEnabled, setScreenReorderEnabled]);
 
   function flashSaved() {
     setSaved(true);
@@ -210,19 +250,28 @@ export function CardLayout({
         monitorMode ? "space-y-0" : "space-y-4",
       )}
     >
-      {canEditLayout && showOrganizerTrigger ? (
-        <div className="flex justify-end">
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="h-8 w-8 bg-card shadow-sm"
-            onClick={() => setOrganizerOpen(true)}
-            aria-label="Configurar widgets"
-            title="Configurar widgets"
-          >
-            <Settings2 className="h-4 w-4" />
-          </Button>
+      {canEditLayout && (showReorderTrigger || showOrganizerTrigger) ? (
+        <div className="flex justify-end gap-1.5">
+          {showReorderTrigger ? (
+            <ReorderModeButton
+              className="h-8 w-8 bg-card shadow-sm"
+              enabled={screenReorderEnabled}
+              onChange={setScreenReorderEnabled}
+            />
+          ) : null}
+          {showOrganizerTrigger ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-8 w-8 bg-card shadow-sm"
+              onClick={() => setOrganizerOpen(true)}
+              aria-label="Configurar widgets"
+              title="Configurar widgets"
+            >
+              <Settings2 className="h-4 w-4" />
+            </Button>
+          ) : null}
         </div>
       ) : null}
 
@@ -277,7 +326,35 @@ export function CardLayout({
           <CardLayoutItem
             key={card.id}
             card={card}
+            draggingId={screenDraggingId}
+            onDragEnd={() => {
+              setScreenDraggingId(null);
+              setScreenOverId(null);
+            }}
+            onDragOver={(event) => {
+              if (!screenReorderEnabled) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              setScreenOverId(card.id);
+            }}
+            onDragStart={(event) => {
+              if (!screenReorderEnabled) return;
+              setScreenDraggingId(card.id);
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/plain", card.id);
+            }}
+            onDrop={(event) => {
+              if (!screenReorderEnabled) return;
+              event.preventDefault();
+              const sourceId =
+                event.dataTransfer.getData("text/plain") || screenDraggingId;
+              if (sourceId) moveOrganizerCard(sourceId, card.id);
+              setScreenDraggingId(null);
+              setScreenOverId(null);
+            }}
+            overId={screenOverId}
             preference={preferences.find((preference) => preference.id === card.id)}
+            reorderEnabled={screenReorderEnabled}
           />
         ))}
       </div>
@@ -285,22 +362,93 @@ export function CardLayout({
   );
 }
 
+export function ReorderModeButton({
+  className,
+  enabled,
+  onChange,
+}: {
+  className?: string;
+  enabled: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <Button
+      type="button"
+      variant={enabled ? "secondary" : "outline"}
+      size="icon"
+      className={className}
+      onClick={() => onChange(!enabled)}
+      aria-label={
+        enabled
+          ? "Concluir reorganização dos widgets"
+          : "Reorganizar widgets na tela"
+      }
+      aria-pressed={enabled}
+      title={enabled ? "Concluir reorganização" : "Reorganizar na tela"}
+    >
+      {enabled ? (
+        <CheckCircle2 className="h-4 w-4" />
+      ) : (
+        <GripVertical className="h-4 w-4" />
+      )}
+    </Button>
+  );
+}
+
 function CardLayoutItem({
   card,
+  draggingId,
+  onDragEnd,
+  onDragOver,
+  onDragStart,
+  onDrop,
+  overId,
   preference,
+  reorderEnabled,
 }: {
   card: LayoutCard;
+  draggingId: string | null;
+  onDragEnd: () => void;
+  onDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragStart: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
+  overId: string | null;
   preference?: CardPreference;
+  reorderEnabled: boolean;
 }) {
   const currentSize = preference?.size ?? card.defaultSize;
 
   return (
     <div
+      data-layout-card-id={card.id}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
       className={cn(
-        "min-w-0",
+        "group relative min-w-0 transition",
         sizeClassName(currentSize, card.className),
+        reorderEnabled &&
+          "rounded-md ring-1 ring-primary/25 ring-offset-2 ring-offset-background",
+        draggingId === card.id && "opacity-50",
+        reorderEnabled &&
+          overId === card.id &&
+          draggingId !== card.id &&
+          "ring-2 ring-primary",
       )}
     >
+      {reorderEnabled ? (
+        <button
+          type="button"
+          draggable
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          className="absolute left-1/2 top-0 z-30 flex h-6 w-8 -translate-x-1/2 -translate-y-1/2 cursor-grab items-center justify-center rounded-md border bg-card/95 text-muted-foreground shadow-sm transition hover:text-foreground active:cursor-grabbing"
+          aria-grabbed={draggingId === card.id}
+          aria-label={`Mover ${card.label ?? card.id}`}
+          title="Arrastar para mover"
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+      ) : null}
       <WidgetAppearanceProvider color={preference?.color}>
         {card.node}
       </WidgetAppearanceProvider>

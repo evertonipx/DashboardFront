@@ -102,6 +102,7 @@ export type ScenarioComparisonDefinition = {
 type ChartPoint = {
   id: string;
   isSaturday: boolean;
+  isSunday: boolean;
   name: string;
   total: number | null;
 };
@@ -861,6 +862,8 @@ export function buildScenarioComparisonPoints(
       id: bucketStart.toISOString(),
       isSaturday:
         definition.granularity === "day" && bucketStart.getDay() === 6,
+      isSunday:
+        definition.granularity === "day" && bucketStart.getDay() === 0,
       name: bucketLabel(bucketStart, definition.granularity),
       total: sumScenarioRowsInRange(rows, scenario, bucketStart, next),
     };
@@ -956,6 +959,7 @@ function buildDailyScenarioPoints(
     return {
       id: from.toISOString(),
       isSaturday: existsInMonth && from.getDay() === 6,
+      isSunday: existsInMonth && from.getDay() === 0,
       name: String(index + 1),
       total:
         existsInMonth && index < availableDays
@@ -992,6 +996,13 @@ export function buildScenarioComparisonChartOption(
     granularity === "day"
       ? calendarPoints.flatMap((point, index) =>
           point.isSaturday ? [index] : [],
+        )
+      : [],
+  );
+  const sundayIndexes = new Set(
+    granularity === "day"
+      ? calendarPoints.flatMap((point, index) =>
+          point.isSunday ? [index] : [],
         )
       : [],
   );
@@ -1054,6 +1065,7 @@ export function buildScenarioComparisonChartOption(
         interval: 0,
         rotate: dense ? 24 : 0,
         saturdayIndexes,
+        sundayIndexes,
       }),
       axisLine: {
         lineStyle: {
@@ -1147,7 +1159,7 @@ export function buildScenarioComparisonReportChart({
         definition.granularity === settings.granularity ? "" : " (ajustada)"
       }`,
       ...(definition.granularity === "day"
-        ? ["Sábados destacados no eixo"]
+        ? ["Fins de semana destacados no eixo"]
         : []),
       scenarioSelectionLabel(settings, selectedScenarios),
     ].join(" · "),
@@ -1204,6 +1216,9 @@ function emptyScenarioComparisonBuckets(
       isSaturday:
         index < daysInMonth &&
         addDays(definition.currentFrom, index).getDay() === 6,
+      isSunday:
+        index < daysInMonth &&
+        addDays(definition.currentFrom, index).getDay() === 0,
       name: String(index + 1),
       total: 0,
     }));
@@ -1213,6 +1228,8 @@ function emptyScenarioComparisonBuckets(
     id: bucketStart.toISOString(),
     isSaturday:
       definition.granularity === "day" && bucketStart.getDay() === 6,
+    isSunday:
+      definition.granularity === "day" && bucketStart.getDay() === 0,
     name: bucketLabel(bucketStart, definition.granularity),
     total: 0,
   }));

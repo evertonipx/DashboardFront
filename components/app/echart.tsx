@@ -245,6 +245,7 @@ function applyChartTheme(option: EnterpriseChartOption, dark: boolean) {
     "#5AA8F5": "#8fc6ff",
     "#0B4EA2": "#9bd0ff",
     "#EAF3FF": "#172033",
+    "#EAF8F4": "#142422",
     "#B7D7FF": "#35577E",
     "#F3F8FF": "#141B2A",
     "#D8E9FF": "#263E5D",

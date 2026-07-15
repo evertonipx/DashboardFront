@@ -11,7 +11,10 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { CardLayout } from "@/components/app/card-layout";
+import {
+  CardLayout,
+  ReorderModeButton,
+} from "@/components/app/card-layout";
 import { buildCountingIntelligenceWidgetCards } from "@/components/app/counting-intelligence-report";
 import { CountingReportPeriodControl } from "@/components/app/counting-report-period-control";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
@@ -239,6 +242,7 @@ export function ScenarioReportsDashboard({
   const [customWidgetDialogOpen, setCustomWidgetDialogOpen] =
     React.useState(false);
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
+  const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
   const [customWidgetForm, setCustomWidgetForm] =
     React.useState<ReportCustomWidgetForm>({
       comparisonSettings: createDefaultScenarioComparisonSettings(),
@@ -1456,16 +1460,22 @@ export function ScenarioReportsDashboard({
 
                 <div className="flex flex-wrap items-center gap-2">
                   {canEditVisual ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      onClick={() => setLayoutOrganizerOpen(true)}
-                      aria-label="Configurar widgets"
-                      title="Configurar widgets"
-                    >
-                      <Settings2 className="h-4 w-4" />
-                    </Button>
+                    <>
+                      <ReorderModeButton
+                        enabled={layoutReorderMode}
+                        onChange={setLayoutReorderMode}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => setLayoutOrganizerOpen(true)}
+                        aria-label="Configurar widgets"
+                        title="Configurar widgets"
+                      >
+                        <Settings2 className="h-4 w-4" />
+                      </Button>
+                    </>
                   ) : null}
                   <ReportExportActions
                     payload={scenarioReportPayload}
@@ -1497,10 +1507,13 @@ export function ScenarioReportsDashboard({
         <CardLayout
           menuKey="reports"
           monitorMode={monitorMode}
+          onReorderModeChange={setLayoutReorderMode}
           organizerOpen={layoutOrganizerOpen}
           onOrganizerOpenChange={setLayoutOrganizerOpen}
           preferenceScopeId={selectedScope?.id}
+          reorderMode={layoutReorderMode}
           showOrganizerTrigger={false}
+          showReorderTrigger={false}
           editActions={
             <Button
               type="button"

@@ -18,7 +18,10 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { CardLayout } from "@/components/app/card-layout";
+import {
+  CardLayout,
+  ReorderModeButton,
+} from "@/components/app/card-layout";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
@@ -109,6 +112,7 @@ import {
   DAY_OF_MONTH_AXIS_LABELS,
   buildCalendarAxisLabel,
   saturdayCategoryIndexesForMonth,
+  sundayCategoryIndexesForMonth,
 } from "@/lib/chart-calendar-axis";
 import type { ReportMetric, ReportPayload } from "@/lib/report-export";
 import type {
@@ -181,6 +185,7 @@ type OperationalMonthComparisonPoint = {
   current: number | null;
   day: number;
   isSaturday: boolean;
+  isSunday: boolean;
 };
 
 type OperationalTrendPoint = ChartPoint & {
@@ -280,6 +285,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const [customWidgetDialogOpen, setCustomWidgetDialogOpen] =
     React.useState(false);
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
+  const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
   const [operationalSettingsOpen, setOperationalSettingsOpen] =
     React.useState(false);
   const [operationalSettings, setOperationalSettings] =
@@ -1868,16 +1874,22 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
                 payload={liveReportPayload}
               />
               {canEditVisual ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setLayoutOrganizerOpen(true)}
-                  aria-label="Configurar widgets"
-                  title="Configurar widgets"
-                >
-                  <Settings2 className="h-4 w-4" />
-                </Button>
+                <>
+                  <ReorderModeButton
+                    enabled={layoutReorderMode}
+                    onChange={setLayoutReorderMode}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={() => setLayoutOrganizerOpen(true)}
+                    aria-label="Configurar widgets"
+                    title="Configurar widgets"
+                  >
+                    <Settings2 className="h-4 w-4" />
+                  </Button>
+                </>
               ) : null}
               <Button
                 type="button"
@@ -1963,10 +1975,13 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         <CardLayout
           menuKey="live"
           monitorMode={monitorMode}
+          onReorderModeChange={setLayoutReorderMode}
           organizerOpen={layoutOrganizerOpen}
           onOrganizerOpenChange={setLayoutOrganizerOpen}
           preferenceScopeId={selectedScope?.id}
+          reorderMode={layoutReorderMode}
           showOrganizerTrigger={false}
+          showReorderTrigger={false}
           editActions={
             <Button
               type="button"
@@ -2386,7 +2401,7 @@ function OperationalHeatmapCard({
             </CardTitle>
             <CardDescription className="mt-1">
               Intensidade do fluxo nas 24 faixas horárias e nos dias 1 a 31
-              do mês atual; sábados destacados no eixo.
+              do mês atual; fins de semana destacados no eixo.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -2446,7 +2461,7 @@ function OperationalMonthComparisonCard({
               Dias x meses
             </CardTitle>
             <CardDescription className="mt-1">
-              {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Sábados destacados no eixo.
+              {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Fins de semana destacados no eixo.
             </CardDescription>
           </div>
           <Badge variant="outline" className="max-w-full truncate">
@@ -2502,7 +2517,7 @@ function OperationalMonthCumulativeCard({
               Acumulado diário x mês-base
             </CardTitle>
             <CardDescription className="mt-1">
-              Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Sábados destacados no eixo.
+              Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Fins de semana destacados no eixo.
             </CardDescription>
           </div>
           <Badge variant="outline" className="max-w-full truncate">
@@ -2565,7 +2580,7 @@ function OperationalTrendCard({
               Tendência 7 x 30 dias
             </CardTitle>
             <CardDescription className="mt-1">
-              Médias móveis calculadas somente com dias fechados. Eixo de 1 a 31; sábados destacados.
+              Médias móveis calculadas somente com dias fechados. Eixo de 1 a 31; fins de semana destacados.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -3491,6 +3506,7 @@ function buildOperationalMonthComparisonPoints(
         : null,
       day,
       isSaturday: currentExists && currentFrom.getDay() === 6,
+      isSunday: currentExists && currentFrom.getDay() === 0,
     };
   });
 }
@@ -3888,6 +3904,7 @@ function buildOperationalHeatmapOption(
       axisLabel: buildCalendarAxisLabel({
         fontSize: 9,
         saturdayIndexes: saturdayCategoryIndexesForMonth(month),
+        sundayIndexes: sundayCategoryIndexesForMonth(month),
       }),
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
@@ -3935,6 +3952,14 @@ function saturdayIndexesFromMonthPoints(
   );
 }
 
+function sundayIndexesFromMonthPoints(
+  points: OperationalMonthComparisonPoint[],
+) {
+  return new Set(
+    points.flatMap((point, index) => (point.isSunday ? [index] : [])),
+  );
+}
+
 function buildOperationalMonthComparisonOption(
   points: OperationalMonthComparisonPoint[],
   mode: LiveOperationalSettings["monthComparison"],
@@ -3973,6 +3998,7 @@ function buildOperationalMonthComparisonOption(
       axisLabel: buildCalendarAxisLabel({
         fontSize: 9,
         saturdayIndexes: saturdayIndexesFromMonthPoints(points),
+        sundayIndexes: sundayIndexesFromMonthPoints(points),
       }),
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
@@ -4073,6 +4099,7 @@ function buildOperationalMonthCumulativeOption(
       axisLabel: buildCalendarAxisLabel({
         fontSize: 9,
         saturdayIndexes: saturdayIndexesFromMonthPoints(points),
+        sundayIndexes: sundayIndexesFromMonthPoints(points),
       }),
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
@@ -4168,6 +4195,7 @@ function buildOperationalTrendOption(
       axisLabel: buildCalendarAxisLabel({
         fontSize: 9,
         saturdayIndexes: saturdayCategoryIndexesForMonth(month),
+        sundayIndexes: sundayCategoryIndexesForMonth(month),
       }),
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
@@ -4309,6 +4337,16 @@ function buildChartOption(
         })
       : [],
   );
+  const sundayIndexes = new Set(
+    definition.granularity === "day"
+      ? points.flatMap((point, index) => {
+          const bucket = new Date(point.bucket);
+          return !Number.isNaN(bucket.getTime()) && bucket.getDay() === 0
+            ? [index]
+            : [];
+        })
+      : [],
+  );
 
   return {
     color: [widgetColor],
@@ -4348,6 +4386,7 @@ function buildChartOption(
               fontSize: 11,
               hideOverlap: true,
               saturdayIndexes,
+              sundayIndexes,
             })
           : {
               color: "#66758A",
@@ -4629,7 +4668,7 @@ function buildOperationalHeatmapReportChart({
     comparison: maximum
       ? `Maior pico: dia ${ranked[0].day}, ${hourRangeLabel(ranked[0].hour)}, ${formatNumber(maximum)} eventos`
       : "Nenhum pico registrado no período",
-    description: `Intensidade do fluxo por dia e faixa horária em ${monthLabel}. Sábados destacados. Visão: ${scopeName}.`,
+    description: `Intensidade do fluxo por dia e faixa horária em ${monthLabel}. Fins de semana destacados. Visão: ${scopeName}.`,
     option: buildOperationalHeatmapOption(points, month, widgetColor),
     table: {
       title: "Dados - Maiores picos por dia e hora",
@@ -4680,8 +4719,8 @@ function buildOperationalMonthReportChart({
   return {
     comparison: `${monthComparisonLabel(mode)} à esquerda · Mês atual à direita`,
     description: accumulated
-      ? `Acumulados comparáveis nos mesmos dias, com sábados destacados no eixo. Visão: ${scopeName}.`
-      : `Valores diários, com sábados destacados no eixo. Linha tracejada: ${averageBaseDescription(mode).toLowerCase()}. Visão: ${scopeName}.`,
+      ? `Acumulados comparáveis nos mesmos dias, com fins de semana destacados no eixo. Visão: ${scopeName}.`
+      : `Valores diários, com fins de semana destacados no eixo. Linha tracejada: ${averageBaseDescription(mode).toLowerCase()}. Visão: ${scopeName}.`,
     option: accumulated
       ? buildOperationalMonthCumulativeOption(points, mode, widgetColor)
       : buildOperationalMonthComparisonOption(points, mode, widgetColor),
@@ -4727,7 +4766,7 @@ function buildOperationalTrendReportChart(
     comparison: `MM7 ${formatMovingAverageTrend(
       trend7,
     )} · MM30 ${formatMovingAverageTrend(trend30)}`,
-    description: `Médias móveis de 7 e 30 dias calculadas apenas com dias fechados, exibidas no eixo mensal de 1 a 31 com sábados destacados. Visão: ${scopeName}.`,
+    description: `Médias móveis de 7 e 30 dias calculadas apenas com dias fechados, exibidas no eixo mensal de 1 a 31 com fins de semana destacados. Visão: ${scopeName}.`,
     option: buildOperationalTrendOption(
       points,
       trend7.direction,
