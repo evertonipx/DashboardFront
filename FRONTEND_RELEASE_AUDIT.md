@@ -67,11 +67,11 @@ O Swagger atual define `CreateWorkerRequest` e `UpdateWorkerRequest` apenas com 
 
 Acao necessaria: o backend deve tornar a identidade do agente estavel, atualizar o mesmo registro na revalidacao, derivar e persistir `company_id` do JWT/escopo autorizado e retornar uma referencia de usuario quando essa rastreabilidade fizer parte do dominio. A consolidacao do frontend evita poluicao visual, mas nao pode transferir um worker entre empresas.
 
-### 4. Destino de API permissivo
+### 4. Destino de API dinamico
 
-Se `IPXDATA_API_URL` nao estiver definido, o build usa silenciosamente `http://192.168.14.6:8080`. Uma implantacao pode compilar com sucesso apontando para o backend errado.
+Resolvido no frontend: sem `IPXDATA_API_URL`, o proxy usa em tempo de execucao o hostname acessado pelo navegador, com protocolo e porta definidos por `IPXDATA_API_PROTOCOL` e `IPXDATA_API_PORT`. Nao existe mais IP de backend embutido no build.
 
-Acao necessaria: tornar `IPXDATA_API_URL` obrigatorio em producao e falhar o startup/build quando estiver ausente.
+`IPXDATA_API_URL` permanece como override opcional para implantacoes em que a API esteja em outro host. Em proxy reverso, o header `X-Forwarded-Host` deve ser sobrescrito pelo proxy com o host publico confiavel.
 
 ### 5. Sessao no navegador sem endurecimento
 

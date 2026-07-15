@@ -7,6 +7,7 @@ import {
   type CardMenuKey,
   type CardPreference,
 } from "@/lib/view-preferences";
+import { resolveBackendBaseUrl } from "@/lib/backend-routing";
 import { permissionsAllowWidgetManagement } from "@/lib/permissions";
 import type { CurrentUser, UserPermission } from "@/lib/types";
 
@@ -92,7 +93,24 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
     };
   }
 
-  const user = await backendFetch<CurrentUser>("/api/v1/auth/me", authorization);
+  let backendBaseUrl: string;
+  try {
+    backendBaseUrl = resolveBackendBaseUrl(request);
+  } catch {
+    return {
+      response: NextResponse.json(
+        { error: "Configuração do backend inválida." },
+        { status: 500 },
+      ),
+    };
+  }
+
+  const user = await backendFetch<CurrentUser>(
+    request,
+    backendBaseUrl,
+    "/api/v1/auth/me",
+    authorization,
+  );
   if (!user) {
     return {
       response: NextResponse.json({ error: "Sessão inválida." }, { status: 401 }),
@@ -115,6 +133,8 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   if (mode === "write" && !isMaster) {
     const permissions =
       (await backendFetch<UserPermission[]>(
+        request,
+        backendBaseUrl,
         `/api/v1/users/${user.id}/permissions`,
         authorization,
       )) ?? [];
@@ -132,24 +152,24 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   return { user, companyId };
 }
 
-async function backendFetch<T>(pathname: string, authorization: string) {
-  const response = await fetch(`${backendBaseUrl()}${pathname}`, {
-    headers: {
-      Authorization: authorization,
-    },
+async function backendFetch<T>(
+  request: NextRequest,
+  backendBaseUrl: string,
+  pathname: string,
+  authorization: string,
+) {
+  const headers = new Headers({ Authorization: authorization });
+  const companyId = request.headers.get("x-company-id");
+  if (companyId) headers.set("X-Company-ID", companyId);
+
+  const response = await fetch(`${backendBaseUrl}${pathname}`, {
+    headers,
     cache: "no-store",
   }).catch(() => null);
 
   if (!response?.ok) return null;
 
   return (await response.json()) as T;
-}
-
-function backendBaseUrl() {
-  return (process.env.IPXDATA_API_URL ?? "http://192.168.14.6:8080").replace(
-    /\/$/,
-    "",
-  );
 }
 
 async function readStore(): Promise<DashboardViewStore> {

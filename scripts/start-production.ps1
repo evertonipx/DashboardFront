@@ -9,7 +9,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 if (-not (Test-Path ".env.production")) {
-  throw "Arquivo .env.production nao encontrado. Copie .env.production.example e ajuste IPXDATA_API_URL."
+  throw "Arquivo .env.production nao encontrado. Copie .env.production.example antes de iniciar."
 }
 
 if (-not (Test-Path ".next")) {
@@ -20,6 +20,14 @@ $envFile = Get-Content ".env.production" -Raw
 
 if (-not $env:IPXDATA_API_URL -and $envFile -match "(?m)^IPXDATA_API_URL=(.+)$") {
   $env:IPXDATA_API_URL = $Matches[1].Trim()
+}
+
+if (-not $env:IPXDATA_API_PROTOCOL -and $envFile -match "(?m)^IPXDATA_API_PROTOCOL=(.+)$") {
+  $env:IPXDATA_API_PROTOCOL = $Matches[1].Trim()
+}
+
+if (-not $env:IPXDATA_API_PORT -and $envFile -match "(?m)^IPXDATA_API_PORT=(\d+)$") {
+  $env:IPXDATA_API_PORT = $Matches[1].Trim()
 }
 
 if ($Port -le 0) {
