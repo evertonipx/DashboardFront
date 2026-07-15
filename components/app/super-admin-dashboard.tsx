@@ -89,6 +89,7 @@ import { cn, formatDateTime, formatNumber } from "@/lib/utils";
 import { getWorkerDisplayInfo } from "@/lib/worker-display";
 import {
   annotateWorkerCompanyScope,
+  collapseWorkerIdentityChains,
   normalizeWorkerRows,
   partitionWorkersByCompanyScope,
   sortWorkersByActivity,
@@ -447,11 +448,14 @@ export function SuperAdminDashboard() {
     setLoadingDetails(true);
     setWorkerScopeWarning("");
     try {
+      const selectedCompanyHeaders = companyScopeHeaders(selectedCompanyId);
       const [userRows, moduleRows] = await Promise.all([
-        apiFetch<ManagedUser[]>(`/companies/${selectedCompanyId}/users`),
-        apiFetch<CompanyModule[]>(`/companies/${selectedCompanyId}/modules`).catch(
-          () => [],
-        ),
+        apiFetch<ManagedUser[]>(`/companies/${selectedCompanyId}/users`, {
+          headers: selectedCompanyHeaders,
+        }),
+        apiFetch<CompanyModule[]>(`/companies/${selectedCompanyId}/modules`, {
+          headers: selectedCompanyHeaders,
+        }).catch(() => []),
       ]);
       const companyScopeIds = uniqueScopeIds(selectedCompanyId);
       const scopedUserRows = userRows.filter((user) => {
@@ -492,10 +496,20 @@ export function SuperAdminDashboard() {
         companyScopeIds,
       );
       const scopedCameras = filterRowsByCompanyScopes(cameraRows, companyScopeIds);
+      const collapsedWorkerRows = collapseWorkerIdentityChains(
+        workerScopePartition.scopedRows,
+      );
+      const collapsedWorkerDuplicateCount = collapsedWorkerRows.reduce(
+        (count, worker) =>
+          count + Math.max(0, (worker.__duplicate_record_count ?? 1) - 1),
+        0,
+      );
 
       setUsers(scopedUserRows.filter((user) => !user.is_master));
       setCompanyModules(moduleRows);
-      setWorkers(sortWorkersByActivity(workerScopePartition.scopedRows));
+      setWorkers(
+        sortWorkersByActivity(collapsedWorkerRows),
+      );
       setCompanyStats({
         algorithms: enabledOperationalModuleCount(moduleRows, modules),
         cameras: scopedCameras.length,
@@ -509,6 +523,7 @@ export function SuperAdminDashboard() {
           workerScopePartition.foreignRows.length,
           workerScopePartition.unscopedRows.length,
           workerScopePartition.inferredRows.length,
+          collapsedWorkerDuplicateCount,
         ),
       );
     } catch (error) {
@@ -723,6 +738,7 @@ export function SuperAdminDashboard() {
       if (editingCompany) {
         await apiFetch(`/companies/${editingCompany.id}`, {
           method: "PUT",
+          headers: companyScopeHeaders(editingCompany.id),
           body,
         });
         toast.success("Empresa atualizada.");
@@ -1168,12 +1184,14 @@ export function SuperAdminDashboard() {
       if (!assignment) {
         await apiFetch(`/companies/${selectedCompanyId}/modules`, {
           method: "POST",
+          headers: companyScopeHeaders(selectedCompanyId),
           body: { module_id: module.id, enabled: true },
         });
         toast.success("Módulo habilitado.");
       } else {
         await apiFetch(`/companies/${selectedCompanyId}/modules/${module.id}`, {
           method: "PUT",
+          headers: companyScopeHeaders(selectedCompanyId),
           body: { enabled: !assignment.enabled },
         });
         toast.success(assignment.enabled ? "Módulo desabilitado." : "Módulo habilitado.");
@@ -1706,6 +1724,13 @@ export function SuperAdminDashboard() {
                                 <div className="font-medium text-foreground">
                                   {worker.name}
                                 </div>
+                                {(worker as WorkerRow).__duplicate_record_count &&
+                                (worker as WorkerRow).__duplicate_record_count! > 1 ? (
+                                  <Badge variant="outline" className="mt-1 text-[10px]">
+                                    {(worker as WorkerRow).__duplicate_record_count}{" "}
+                                    registros consolidados
+                                  </Badge>
+                                ) : null}
                                 <div className="mt-1 text-xs text-muted-foreground">
                                   {worker.description ||
                                     display.identifier ||
@@ -2479,6 +2504,7 @@ function buildWorkerScopeWarning(
   foreignCount: number,
   unscopedCount: number,
   inferredCount: number,
+  duplicateCount: number,
 ) {
   const messages = [];
   if (foreignCount) {
@@ -2494,6 +2520,11 @@ function buildWorkerScopeWarning(
   if (unscopedCount) {
     messages.push(
       `${formatNumber(unscopedCount)} worker(s) vieram sem company_id/client_id; foram exibidos por terem sido retornados pela consulta escopada, mas o backend precisa persistir esse vínculo.`,
+    );
+  }
+  if (duplicateCount) {
+    messages.push(
+      `${formatNumber(duplicateCount)} registro(s) duplicado(s) de revalidação foram consolidados pela cadeia de identidade do worker.`,
     );
   }
 
@@ -2821,16 +2852,6 @@ async function revokeUserPermission(
     if (error instanceof ApiError && error.status === 404) return;
     throw error;
   }
-}
-
-function permissionFlags(enabled: boolean) {
-  return {
-    can_view: enabled,
-    can_create: enabled,
-    can_edit: enabled,
-    can_delete: enabled,
-    can_export: enabled,
-  };
 }
 
 function groupPermissionCatalog(permissions: PermissionOption[]): PermissionGroup[] {

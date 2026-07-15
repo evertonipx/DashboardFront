@@ -6,6 +6,8 @@ export type WorkerScopeRow = Worker & {
   client_id?: string | null;
   __scoped_company_id?: string | null;
   __scope_source?: string | null;
+  __identity_alias_ids?: string[];
+  __duplicate_record_count?: number;
 };
 
 export type WorkerScopePartition<T extends WorkerScopeRow> = {
@@ -74,6 +76,86 @@ export function sortWorkersByActivity<T extends WorkerScopeRow>(rows: T[]) {
       "pt-BR",
     );
   });
+}
+
+export function collapseWorkerIdentityChains<T extends WorkerScopeRow>(
+  rows: T[],
+): T[] {
+  if (rows.length < 2) return rows;
+
+  const rowsById = new Map(
+    rows
+      .filter((row) => cleanString(row.id))
+      .map((row) => [cleanString(row.id), row]),
+  );
+  const parent = new Map(rows.map((row) => [row, row]));
+
+  function find(row: T): T {
+    const current = parent.get(row) ?? row;
+    if (current === row) return row;
+    const root = find(current);
+    parent.set(row, root);
+    return root;
+  }
+
+  function union(left: T, right: T) {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) parent.set(rightRoot, leftRoot);
+  }
+
+  rows.forEach((row) => {
+    const previous = rowsById.get(cleanString(row.name));
+    if (!previous || previous === row || !workersCanShareIdentity(row, previous)) {
+      return;
+    }
+    union(row, previous);
+  });
+
+  const components = new Map<T, T[]>();
+  rows.forEach((row) => {
+    const root = find(row);
+    components.set(root, [...(components.get(root) ?? []), row]);
+  });
+
+  return Array.from(components.values()).map((component) => {
+    if (component.length === 1) return component[0];
+
+    const ordered = sortWorkersByActivity(component);
+    const latest = ordered[0];
+    const named = ordered.find((row) => {
+      const name = cleanString(row.name);
+      return name && !looksLikeIdentifier(name);
+    });
+    const aliases = Array.from(
+      new Set(
+        component.flatMap((row) => [
+          cleanString(row.id),
+          ...(row.__identity_alias_ids ?? []),
+        ]),
+      ),
+    ).filter(Boolean);
+
+    return {
+      ...latest,
+      name: named?.name || latest.name,
+      __duplicate_record_count: component.reduce(
+        (count, row) => count + (row.__duplicate_record_count ?? 1),
+        0,
+      ),
+      __identity_alias_ids: aliases,
+    } as T;
+  });
+}
+
+export function workerIdentityIds(worker: WorkerScopeRow) {
+  return Array.from(
+    new Set(
+      [worker.id, ...(worker.__identity_alias_ids ?? [])]
+        .map(cleanString)
+        .filter(Boolean),
+    ),
+  );
 }
 
 export function resolveWorkerExplicitCompanyId(worker: unknown) {
@@ -214,6 +296,37 @@ function normalizeScopeIds(
 
 function cleanString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function workersCanShareIdentity(
+  left: WorkerScopeRow,
+  right: WorkerScopeRow,
+) {
+  const leftCompanyId = resolveWorkerCompanyId(left);
+  const rightCompanyId = resolveWorkerCompanyId(right);
+  if (
+    leftCompanyId &&
+    rightCompanyId &&
+    leftCompanyId !== rightCompanyId
+  ) {
+    return false;
+  }
+
+  const leftHostname = cleanString(left.hostname).toLocaleLowerCase();
+  const rightHostname = cleanString(right.hostname).toLocaleLowerCase();
+  if (leftHostname && rightHostname && leftHostname !== rightHostname) {
+    return false;
+  }
+
+  return true;
+}
+
+function looksLikeIdentifier(value: string) {
+  return (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    ) || /^[0-9a-f]{24,}$/i.test(value)
+  );
 }
 
 function arrayValue<T>(value: unknown) {

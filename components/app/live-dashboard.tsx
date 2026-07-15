@@ -1803,6 +1803,29 @@ function buildChartOption(
       },
     },
     series: [
+      ...(showPreviousSeries
+        ? [
+            {
+              name: previousSeriesName,
+              type: "bar",
+              data: points.map((_, index) => previousPoints[index]?.total ?? 0),
+              barMaxWidth: barMaxWidth(definition.granularity),
+              barCategoryGap:
+                definition.granularity === "minute" || definition.granularity === "hour"
+                  ? "42%"
+                  : "50%",
+              itemStyle: {
+                borderRadius: [2, 2, 0, 0],
+                color: "#B7C7DA",
+              },
+              emphasis: {
+                itemStyle: {
+                  color: "#8FA5BE",
+                },
+              },
+            },
+          ]
+        : []),
       {
         name: "Período atual",
         type: "bar",
@@ -1833,25 +1856,6 @@ function buildChartOption(
           },
         },
       },
-      ...(showPreviousSeries
-        ? [
-            {
-              name: previousSeriesName,
-              type: "bar",
-              data: points.map((_, index) => previousPoints[index]?.total ?? 0),
-              barMaxWidth: barMaxWidth(definition.granularity),
-              itemStyle: {
-                borderRadius: [2, 2, 0, 0],
-                color: "#B7C7DA",
-              },
-              emphasis: {
-                itemStyle: {
-                  color: "#8FA5BE",
-                },
-              },
-            },
-          ]
-        : []),
     ],
   };
 }

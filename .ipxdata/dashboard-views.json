@@ -2,11 +2,39 @@
   "8e61a737-76fe-4f96-9406-230291ca1b1f": {
     "live": [
       {
-        "id": "live_chart_minute",
+        "id": "live_chart_hour",
         "visible": true
       },
       {
-        "id": "live_chart_hour",
+        "id": "live_scenario_period_comparison",
+        "visible": true
+      },
+      {
+        "id": "live_scenario_detail",
+        "visible": true
+      },
+      {
+        "id": "live_today_scenario_comparison",
+        "visible": true
+      },
+      {
+        "id": "live_custom_ab19c84c-a293-483c-9a16-c42ef5279145",
+        "visible": true
+      },
+      {
+        "id": "live_chart_day",
+        "visible": true
+      },
+      {
+        "id": "live_chart_week",
+        "visible": true
+      },
+      {
+        "id": "live_chart_month",
+        "visible": true
+      },
+      {
+        "id": "live_chart_minute",
         "visible": true
       },
       {
@@ -24,10 +52,6 @@
       },
       {
         "id": "live_last_5_minutes",
-        "visible": true
-      },
-      {
-        "id": "live_scenario_detail",
         "visible": true
       }
     ],
@@ -82,6 +106,147 @@
       },
       {
         "id": "occupancy_alert_list",
+        "visible": true
+      }
+    ],
+    "reports": [
+      {
+        "id": "report_counting_period_total",
+        "visible": true
+      },
+      {
+        "id": "report_counting_end_month",
+        "visible": true
+      },
+      {
+        "id": "report_counting_monthly_average",
+        "visible": true
+      },
+      {
+        "id": "report_counting_access_leader",
+        "visible": true
+      },
+      {
+        "id": "report_counting_year_month_matrix",
+        "visible": true,
+        "size": "full"
+      },
+      {
+        "id": "report_counting_annual_comparison",
+        "visible": true
+      },
+      {
+        "id": "report_counting_directional_flow",
+        "visible": true
+      },
+      {
+        "id": "report_counting_access_ranking",
+        "visible": true,
+        "size": "compact"
+      },
+      {
+        "id": "report_today_total",
+        "visible": true
+      },
+      {
+        "id": "report_last_hour",
+        "visible": true
+      },
+      {
+        "id": "report_last_7d",
+        "visible": true
+      },
+      {
+        "id": "report_scenario_count",
+        "visible": true
+      },
+      {
+        "id": "report_scenario_period_comparison",
+        "visible": true,
+        "size": "full"
+      },
+      {
+        "id": "report_chart_minute",
+        "visible": true
+      },
+      {
+        "id": "report_chart_hour",
+        "visible": true
+      },
+      {
+        "id": "report_chart_day",
+        "visible": true
+      },
+      {
+        "id": "report_chart_week",
+        "visible": true
+      },
+      {
+        "id": "report_chart_month",
+        "visible": true
+      },
+      {
+        "id": "report_chart_semester",
+        "visible": true
+      },
+      {
+        "id": "report_chart_year",
+        "visible": true
+      },
+      {
+        "id": "report_scenario_detail",
+        "visible": false
+      },
+      {
+        "id": "report_scenario_table",
+        "visible": false
+      }
+    ]
+  },
+  "cebbddb7-31f2-44e3-b7d5-e7e2fd418f98": {
+    "live": [
+      {
+        "id": "live_last_minute",
+        "visible": false
+      },
+      {
+        "id": "live_last_5_minutes",
+        "visible": false
+      },
+      {
+        "id": "live_last_hour",
+        "visible": false
+      },
+      {
+        "id": "live_today_total",
+        "visible": false
+      },
+      {
+        "id": "live_today_scenario_comparison",
+        "visible": true
+      },
+      {
+        "id": "live_chart_minute",
+        "visible": true
+      },
+      {
+        "id": "live_chart_hour",
+        "visible": true
+      },
+      {
+        "id": "live_chart_day",
+        "visible": true
+      },
+      {
+        "id": "live_chart_week",
+        "visible": true
+      },
+      {
+        "id": "live_chart_month",
+        "visible": true
+      },
+      {
+        "id": "live_scenario_detail",
         "visible": true
       }
     ]

@@ -4,19 +4,25 @@ import * as React from "react";
 import {
   BarChart,
   EffectScatterChart,
+  HeatmapChart,
   LineChart,
   ScatterChart,
 } from "echarts/charts";
 import {
+  AriaComponent,
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
+  MarkLineComponent,
   TooltipComponent,
+  VisualMapComponent,
   type GridComponentOption,
   type LegendComponentOption,
   type TooltipComponentOption,
 } from "echarts/components";
 import * as echarts from "echarts/core";
 import type { EChartsCoreOption, EChartsType } from "echarts/core";
+import { LabelLayout, UniversalTransition } from "echarts/features";
 import { CanvasRenderer } from "echarts/renderers";
 
 import { useTheme } from "@/components/app/theme-provider";
@@ -25,11 +31,18 @@ import { cn } from "@/lib/utils";
 echarts.use([
   BarChart,
   EffectScatterChart,
+  HeatmapChart,
   LineChart,
   ScatterChart,
+  AriaComponent,
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
+  MarkLineComponent,
   TooltipComponent,
+  VisualMapComponent,
+  LabelLayout,
+  UniversalTransition,
   CanvasRenderer,
 ]);
 
@@ -49,7 +62,11 @@ export function EChart({ option, className }: EChartProps) {
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const chartRef = React.useRef<EChartsType | null>(null);
   const themedOption = React.useMemo(
-    () => applyChartTheme(option, effectiveTheme === "dark"),
+    () =>
+      applyChartTheme(
+        enhanceInteractiveChartOption(option),
+        effectiveTheme === "dark",
+      ),
     [effectiveTheme, option],
   );
 
@@ -73,10 +90,147 @@ export function EChart({ option, className }: EChartProps) {
   }, []);
 
   React.useEffect(() => {
-    chartRef.current?.setOption(themedOption, true);
+    chartRef.current?.setOption(themedOption, {
+      lazyUpdate: true,
+      notMerge: true,
+    });
   }, [themedOption]);
 
   return <div ref={containerRef} className={cn("h-full w-full", className)} />;
+}
+
+function enhanceInteractiveChartOption(
+  option: EnterpriseChartOption,
+): EnterpriseChartOption {
+  const rawSeries = option.series;
+  const series = Array.isArray(rawSeries)
+    ? rawSeries
+    : rawSeries
+      ? [rawSeries]
+      : [];
+  const enhancedSeries = series.map((item) => {
+    if (!item || typeof item !== "object") return item;
+
+    const seriesOption = item as Record<string, unknown>;
+    const type = typeof seriesOption.type === "string" ? seriesOption.type : "";
+    const dataLength = Array.isArray(seriesOption.data)
+      ? seriesOption.data.length
+      : 0;
+    const emphasis =
+      seriesOption.emphasis && typeof seriesOption.emphasis === "object"
+        ? (seriesOption.emphasis as Record<string, unknown>)
+        : {};
+
+    return {
+      ...seriesOption,
+      emphasis: {
+        blurScope: "coordinateSystem",
+        focus: "series",
+        ...emphasis,
+      },
+      universalTransition:
+        seriesOption.universalTransition ??
+        ((type === "bar" || type === "line") && dataLength <= 200),
+    };
+  });
+  const categoryCount = categoryXAxisLength(option.xAxis);
+  const tooltip =
+    option.tooltip &&
+    !Array.isArray(option.tooltip) &&
+    typeof option.tooltip === "object"
+      ? {
+          enterable: true,
+          hideDelay: 80,
+          transitionDuration: 0.16,
+          triggerOn: "mousemove|click",
+          ...option.tooltip,
+        }
+      : option.tooltip;
+  const aria =
+    option.aria && typeof option.aria === "object"
+      ? (option.aria as Record<string, unknown>)
+      : {};
+  const ariaLabel =
+    aria.label && typeof aria.label === "object"
+      ? (aria.label as Record<string, unknown>)
+      : {};
+
+  return {
+    ...option,
+    animationDuration: option.animationDuration ?? 360,
+    animationDurationUpdate: option.animationDurationUpdate ?? 460,
+    animationEasing: option.animationEasing ?? "cubicOut",
+    animationEasingUpdate: option.animationEasingUpdate ?? "cubicOut",
+    animationThreshold: option.animationThreshold ?? 2_000,
+    aria: {
+      ...aria,
+      enabled: true,
+      label: {
+        data: {
+          allData: " Os dados são: ",
+          partialData: " Os primeiros {displayCnt} itens são: ",
+          separator: { end: ". ", middle: ", " },
+          withName: "o valor de {name} é {value}",
+          withoutName: "{value}",
+        },
+        enabled: true,
+        general: {
+          withTitle: 'Este é um gráfico intitulado "{title}".',
+          withoutTitle: "Este é um gráfico.",
+        },
+        series: {
+          multiple: {
+            prefix: " Ele possui {seriesCount} séries.",
+            separator: { end: "", middle: "" },
+            withName:
+              " A série {seriesId} é do tipo {seriesType} e representa {seriesName}.",
+            withoutName: " A série {seriesId} é do tipo {seriesType}.",
+          },
+          single: {
+            prefix: "",
+            withName: " Série do tipo {seriesType}, representando {seriesName}.",
+            withoutName: " Série do tipo {seriesType}.",
+          },
+        },
+        ...ariaLabel,
+      },
+    },
+    dataZoom:
+      option.dataZoom ??
+      (categoryCount > 31
+        ? [
+            {
+              filterMode: "none",
+              moveOnMouseMove: true,
+              moveOnMouseWheel: "shift",
+              preventDefaultMouseMove: false,
+              throttle: 50,
+              type: "inside",
+              xAxisIndex: 0,
+              zoomOnMouseWheel: "ctrl",
+            },
+          ]
+        : undefined),
+    series: enhancedSeries.length ? enhancedSeries : rawSeries,
+    stateAnimation: {
+      duration: 180,
+      easing: "cubicOut",
+      ...(option.stateAnimation && typeof option.stateAnimation === "object"
+        ? option.stateAnimation
+        : {}),
+    },
+    tooltip,
+  } as EnterpriseChartOption;
+}
+
+function categoryXAxisLength(xAxis: unknown) {
+  const axes = Array.isArray(xAxis) ? xAxis : xAxis ? [xAxis] : [];
+
+  return axes.reduce((largest, axis) => {
+    if (!axis || typeof axis !== "object") return largest;
+    const data = (axis as { data?: unknown }).data;
+    return Array.isArray(data) ? Math.max(largest, data.length) : largest;
+  }, 0);
 }
 
 function applyChartTheme(option: EnterpriseChartOption, dark: boolean) {

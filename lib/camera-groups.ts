@@ -8,6 +8,7 @@ import type {
   SubLocation,
   Worker,
 } from "@/lib/types";
+import { workerIdentityIds } from "@/lib/worker-scope";
 
 export type CameraGroupScopeType = "location" | "sub_location" | "worker";
 
@@ -241,7 +242,11 @@ export function buildWorkerBackedLocationOptions({
   manager: boolean;
   workers: Worker[];
 }) {
-  const workersById = new Map(workers.map((worker) => [worker.id, worker]));
+  const workersById = new Map(
+    workers.flatMap((worker) =>
+      workerIdentityIds(worker).map((workerId) => [workerId, worker] as const),
+    ),
+  );
 
   return buildLocationCameraOptions({
     cameras,

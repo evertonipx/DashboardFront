@@ -3,6 +3,7 @@ export type CardMenuKey = "live" | "reports" | "occupancy";
 export type CardSize = "compact" | "wide" | "full";
 
 export type CardPreference = {
+  color?: string;
   id: string;
   visible: boolean;
   size?: CardSize;
@@ -24,6 +25,8 @@ export type CardMenuDefinition = {
 export type CardViewUpdatedDetail = {
   menuKey: CardMenuKey;
   companyId?: string | null;
+  userId?: string | null;
+  viewId?: string | null;
 };
 
 export const CARD_VIEW_UPDATED_EVENT = "ipxdata-card-view-updated";
@@ -36,24 +39,24 @@ export const cardViewMenus: CardMenuDefinition[] = [
     description: "Cards operacionais de contagem em tempo real.",
     cards: [
       {
-        id: "live_today_total",
-        label: "Acumulado hoje",
-        description: "Total desde 00:00 até agora.",
+        id: "live_intraday_comparison",
+        label: "Horas fechadas hoje",
+        description: "Acumulado até a última hora completa contra a base escolhida.",
       },
       {
-        id: "live_last_minute",
-        label: "Último minuto",
-        description: "Movimento da barra atual.",
+        id: "live_target_progress",
+        label: "Hoje x média-base",
+        description: "Progresso de hoje contra a média diária da base escolhida.",
       },
       {
-        id: "live_last_5_minutes",
-        label: "Últimos 5 minutos",
-        description: "Movimento recente do cenário.",
+        id: "live_month_previous_comparison",
+        label: "Acumulado x mês anterior",
+        description: "Dias fechados do mês contra o mesmo intervalo do mês anterior.",
       },
       {
-        id: "live_last_hour",
-        label: "Última hora",
-        description: "Movimento dos últimos 60 minutos.",
+        id: "live_month_year_comparison",
+        label: "Acumulado x ano anterior",
+        description: "Dias fechados do mês contra o mesmo intervalo do ano anterior.",
       },
       {
         id: "live_scenario_period_comparison",
@@ -61,19 +64,34 @@ export const cardViewMenus: CardMenuDefinition[] = [
         description: "Comparação flexível de cenários por período.",
       },
       {
-        id: "live_chart_minute",
-        label: "Minuto a minuto",
-        description: "Eventos agregados por minuto.",
-      },
-      {
         id: "live_chart_hour",
-        label: "Hora a hora",
-        description: "Eventos agregados por hora.",
+        label: "Hora a Hora",
+        description: "Base histórica e hoje em barras, com média-base tracejada.",
       },
       {
-        id: "live_chart_day",
-        label: "Dia a dia",
-        description: "Eventos agregados por dia.",
+        id: "live_month_hour_heatmap",
+        label: "Mapa de calor dia x hora",
+        description: "Picos horários distribuídos pelos dias do mês atual.",
+      },
+      {
+        id: "live_moving_average_trend",
+        label: "Tendência 7 x 30 dias",
+        description: "Direção das médias móveis rápida e lenta em dias fechados.",
+      },
+      {
+        id: "live_operational_month_comparison",
+        label: "Dias x meses",
+        description: "Dias do mês atual contra a base mensal escolhida.",
+      },
+      {
+        id: "live_operational_month_cumulative",
+        label: "Acumulado diário x mês-base",
+        description: "Acumulado nos mesmos dias para indicar avanço ou atraso.",
+      },
+      {
+        id: "live_month_access_ranking",
+        label: "Ranking dos acessos do mês",
+        description: "Volume e representatividade mensal por cenário.",
       },
       {
         id: "live_chart_week",
@@ -97,6 +115,51 @@ export const cardViewMenus: CardMenuDefinition[] = [
     label: "Relatórios",
     description: "Cards de cenários por período.",
     cards: [
+      {
+        id: "report_counting_period_total",
+        label: "Total do período",
+        description: "Resultado acumulado no período selecionado.",
+      },
+      {
+        id: "report_counting_end_month",
+        label: "Mês final do período",
+        description: "Resultado do último mês selecionado e comparação anual.",
+      },
+      {
+        id: "report_counting_monthly_average",
+        label: "Média mensal",
+        description: "Média dos meses selecionados e base do ano anterior.",
+      },
+      {
+        id: "report_counting_access_leader",
+        label: "Acesso líder",
+        description: "Cenário com maior participação no fluxo selecionado.",
+      },
+      {
+        id: "report_counting_annual_comparison",
+        label: "Comparativo mensal por ano",
+        description: "Gráfico sazonal dos meses de cada ano.",
+      },
+      {
+        id: "report_counting_annual_accumulated_comparison",
+        label: "Comparativo acumulado por ano",
+        description: "Evolução acumulada mês a mês para comparar cada ano.",
+      },
+      {
+        id: "report_counting_year_over_year_month",
+        label: "Tabela mensal comparativa",
+        description: "Anos nas linhas e meses nas colunas com variação mensal.",
+      },
+      {
+        id: "report_counting_directional_flow",
+        label: "Fluxo direcional por hora",
+        description: "Entradas e saídas do período selecionado por faixa horária.",
+      },
+      {
+        id: "report_counting_access_ranking",
+        label: "Ranking dos acessos",
+        description: "Participação, ranking e picos dos cenários de acesso.",
+      },
       {
         id: "report_today_total",
         label: "Resultado hoje",
@@ -274,6 +337,9 @@ export function normalizeCardPreferences(
   const normalized = (preferences ?? [])
     .filter((preference) => definitionIds.has(preference.id))
     .map((preference) => ({
+      color: isCardColor(byId.get(preference.id)?.color)
+        ? byId.get(preference.id)?.color
+        : undefined,
       id: preference.id,
       visible: byId.get(preference.id)?.visible ?? true,
       size: isCardSize(byId.get(preference.id)?.size)
@@ -281,11 +347,27 @@ export function normalizeCardPreferences(
         : undefined,
     }));
   const normalizedIds = new Set(normalized.map((preference) => preference.id));
-  const missing = Array.from(definitionIds)
-    .filter((id) => !normalizedIds.has(id))
-    .map((id) => ({ id, visible: true }));
+  const defaultOrder = Array.from(definitionIds);
+  const merged = [...normalized];
 
-  return [...normalized, ...missing];
+  defaultOrder.forEach((id, defaultIndex) => {
+    if (normalizedIds.has(id)) return;
+
+    const nextExistingId = defaultOrder
+      .slice(defaultIndex + 1)
+      .find((candidate) => normalizedIds.has(candidate));
+    const insertionIndex = nextExistingId
+      ? merged.findIndex((preference) => preference.id === nextExistingId)
+      : merged.length;
+    merged.splice(
+      insertionIndex < 0 ? merged.length : insertionIndex,
+      0,
+      { color: undefined, id, visible: true, size: undefined },
+    );
+    normalizedIds.add(id);
+  });
+
+  return merged;
 }
 
 export function loadCardPreferences(menuKey: CardMenuKey, cardIds?: string[]) {
@@ -296,8 +378,14 @@ export function loadScopedCardPreferences(
   menuKey: CardMenuKey,
   cardIds?: string[],
   companyId?: string | null,
+  userId?: string | null,
+  viewId?: string | null,
 ) {
-  const scopedPreferences = readStoredPreferences(companyId)[menuKey];
+  const scopedPreferences =
+    readStoredPreferences(companyId, userId, viewId)[menuKey] ??
+    (userId || viewId
+      ? readStoredPreferences(companyId)[menuKey]
+      : undefined);
 
   return normalizeCardPreferences(
     menuKey,
@@ -311,19 +399,21 @@ export function saveCardPreferences(
   preferences: CardPreference[],
   cardIds?: string[],
   companyId?: string | null,
+  userId?: string | null,
+  viewId?: string | null,
 ) {
   if (typeof window === "undefined") return;
 
   const nextPreferences = normalizeCardPreferences(menuKey, preferences, cardIds);
-  const store = readStoredPreferences(companyId);
+  const store = readStoredPreferences(companyId, userId, viewId);
   store[menuKey] = nextPreferences;
   window.localStorage.setItem(
-    getCardViewStorageKey(companyId),
+    getCardViewStorageKey(companyId, userId, viewId),
     JSON.stringify(store),
   );
   window.dispatchEvent(
     new CustomEvent<CardViewUpdatedDetail>(CARD_VIEW_UPDATED_EVENT, {
-      detail: { menuKey, companyId },
+      detail: { menuKey, companyId, userId, viewId },
     }),
   );
 }
@@ -343,18 +433,33 @@ export function orderByCardPreferences<T extends { id: string }>(
   return [...ordered, ...missing];
 }
 
-export function getCardViewStorageKey(companyId?: string | null) {
-  const cleanCompanyId = companyId?.trim();
-  return cleanCompanyId
-    ? `${CARD_VIEW_STORAGE_KEY}.${cleanCompanyId}`
+export function getCardViewStorageKey(
+  companyId?: string | null,
+  userId?: string | null,
+  viewId?: string | null,
+) {
+  const segments = [
+    companyId?.trim() ? `company.${encodeURIComponent(companyId.trim())}` : "",
+    userId?.trim() ? `user.${encodeURIComponent(userId.trim())}` : "",
+    viewId?.trim() ? `view.${encodeURIComponent(viewId.trim())}` : "",
+  ].filter(Boolean);
+
+  return segments.length
+    ? `${CARD_VIEW_STORAGE_KEY}.${segments.join(".")}`
     : CARD_VIEW_STORAGE_KEY;
 }
 
-function readStoredPreferences(companyId?: string | null): CardPreferenceStore {
+function readStoredPreferences(
+  companyId?: string | null,
+  userId?: string | null,
+  viewId?: string | null,
+): CardPreferenceStore {
   if (typeof window === "undefined") return {};
 
   try {
-    const stored = window.localStorage.getItem(getCardViewStorageKey(companyId));
+    const stored = window.localStorage.getItem(
+      getCardViewStorageKey(companyId, userId, viewId),
+    );
     if (!stored) return {};
 
     const parsed = JSON.parse(stored) as CardPreferenceStore;
@@ -366,4 +471,8 @@ function readStoredPreferences(companyId?: string | null): CardPreferenceStore {
 
 function isCardSize(value: unknown): value is CardSize {
   return value === "compact" || value === "wide" || value === "full";
+}
+
+function isCardColor(value: unknown): value is string {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
 }

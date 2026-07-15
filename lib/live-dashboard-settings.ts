@@ -1,4 +1,5 @@
-import { getScopedStorageKey } from "@/lib/master-company-scope";
+import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
+import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
 
 export type LiveDashboardSettings = {
   showPreviousPeriod: boolean;
@@ -16,12 +17,13 @@ const defaultSettings: LiveDashboardSettings = {
 
 export function loadLiveDashboardSettings(
   companyId?: string | null,
+  scope: ViewPreferenceScope = {},
 ): LiveDashboardSettings {
   if (typeof window === "undefined") return defaultSettings;
 
   try {
     const stored = window.localStorage.getItem(
-      getLiveDashboardSettingsKey(companyId),
+      getLiveDashboardSettingsKey(companyId, scope),
     );
     if (!stored) return defaultSettings;
 
@@ -43,17 +45,26 @@ export function loadLiveDashboardSettings(
 export function saveLiveDashboardSettings(
   settings: LiveDashboardSettings,
   companyId?: string | null,
+  scope: ViewPreferenceScope = {},
 ) {
   if (typeof window === "undefined") return;
 
   window.localStorage.setItem(
-    getLiveDashboardSettingsKey(companyId),
+    getLiveDashboardSettingsKey(companyId, scope),
     JSON.stringify(settings),
   );
 }
 
-function getLiveDashboardSettingsKey(companyId?: string | null) {
-  return getScopedStorageKey(LIVE_DASHBOARD_SETTINGS_KEY, companyId);
+function getLiveDashboardSettingsKey(
+  companyId?: string | null,
+  scope: ViewPreferenceScope = {},
+) {
+  return getUserViewScopedStorageKey(
+    LIVE_DASHBOARD_SETTINGS_KEY,
+    companyId,
+    scope.userId,
+    scope.viewId,
+  );
 }
 
 function isIntradayComparisonMode(

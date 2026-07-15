@@ -914,6 +914,22 @@ function buildScenarioChartOption(
     },
     series: [
       {
+        name: view === "hourly" ? "Período anterior" : "Anterior",
+        type: "bar",
+        data: previousPoints.map((point) => point.total),
+        barMaxWidth: view === "hourly" ? 18 : 30,
+        barCategoryGap: view === "hourly" ? "42%" : "50%",
+        itemStyle: {
+          borderRadius: [2, 2, 0, 0],
+          color: "#B7C7DA",
+        },
+        emphasis: {
+          itemStyle: {
+            color: "#8FA5BE",
+          },
+        },
+      },
+      {
         name: view === "hourly" ? "Período atual" : "Atual",
         type: "bar",
         data: currentPoints.map((point) => point.total),
@@ -937,21 +953,6 @@ function buildScenarioChartOption(
         emphasis: {
           itemStyle: {
             color: "#0B4EA2",
-          },
-        },
-      },
-      {
-        name: view === "hourly" ? "Período anterior" : "Anterior",
-        type: "bar",
-        data: previousPoints.map((point) => point.total),
-        barMaxWidth: view === "hourly" ? 18 : 30,
-        itemStyle: {
-          borderRadius: [2, 2, 0, 0],
-          color: "#B7C7DA",
-        },
-        emphasis: {
-          itemStyle: {
-            color: "#8FA5BE",
           },
         },
       },

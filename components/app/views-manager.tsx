@@ -80,9 +80,14 @@ type ScenarioSelectionMode = "all" | "custom";
 
 type ViewWidget = {
   chart: ViewChart;
+  from?: string;
+  granularity?: ScenarioCompareGranularity;
   id: string;
-  scenarioId: string;
+  period?: ScenarioComparePeriod;
+  scenarioIds: string[];
+  selectionMode: ScenarioSelectionMode;
   title: string;
+  to?: string;
 };
 
 const scenarioCompareGranularityOptions: Array<{
@@ -136,8 +141,28 @@ export function ViewsManager() {
   );
   const [widgetChart, setWidgetChart] =
     React.useState<ViewChart>("scenario-hour");
-  const [widgetScenarioId, setWidgetScenarioId] = React.useState("");
   const [widgetTitle, setWidgetTitle] = React.useState("");
+  const [widgetScenarioCompareGranularity, setWidgetScenarioCompareGranularity] =
+    React.useState<ScenarioCompareGranularity>("hour");
+  const [widgetScenarioComparePeriod, setWidgetScenarioComparePeriod] =
+    React.useState<ScenarioComparePeriod>("today");
+  const [widgetScenarioSelectionMode, setWidgetScenarioSelectionMode] =
+    React.useState<ScenarioSelectionMode>("all");
+  const [widgetSelectedScenarioIds, setWidgetSelectedScenarioIds] = React.useState<
+    string[]
+  >([]);
+  const [widgetScenarioSettingsOpen, setWidgetScenarioSettingsOpen] =
+    React.useState(false);
+  const [widgetScenarioCompareFrom, setWidgetScenarioCompareFrom] = React.useState(
+    () => {
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      return toDateTimeLocalValue(start);
+    },
+  );
+  const [widgetScenarioCompareTo, setWidgetScenarioCompareTo] = React.useState(
+    () => toDateTimeLocalValue(new Date()),
+  );
   const [viewWidgets, setViewWidgets] = React.useState<ViewWidget[]>([]);
   const [loadingScenarios, setLoadingScenarios] = React.useState(false);
   const selectedView = viewOptions.find((option) => option.value === chart);
@@ -156,9 +181,20 @@ export function ViewsManager() {
   const selectedWidgetView = viewOptions.find(
     (option) => option.value === widgetChart,
   );
-  const selectedWidgetScenario = scenarios.find(
-    (scenario) => scenario.id === widgetScenarioId,
-  );
+  const widgetSelectedScenarioNames = widgetSelectedScenarioIds
+    .map((id) => scenarios.find((scenario) => scenario.id === id)?.name)
+    .filter(Boolean);
+  const widgetScenarioSelectionSummary =
+    widgetScenarioSelectionMode === "all"
+      ? "Todos os cenários"
+      : widgetSelectedScenarioNames.length
+        ? `${widgetSelectedScenarioNames.length} cenário(s)`
+        : "Nenhum cenário";
+  const widgetScenarioCompareSummary = `${scenarioCompareGranularityLabel(
+    widgetScenarioCompareGranularity,
+  )} · ${scenarioComparePeriodLabel(
+    widgetScenarioComparePeriod,
+  )} · ${widgetScenarioSelectionSummary}`;
   const masterScope = getStoredMasterCompanyScope();
   const generatedUrl = React.useMemo(() => {
     if (!origin) return "";
@@ -178,14 +214,29 @@ export function ViewsManager() {
         JSON.stringify(
           viewWidgets.map((widget) => ({
             chart: widget.chart,
-            granularity: widget.chart === "scenario-hour" ? "hour" : undefined,
-            period: widget.chart === "scenario-hour" ? "today" : undefined,
-            scenario_ids:
-              widget.chart === "scenario-hour" && widget.scenarioId
-                ? [widget.scenarioId]
+            from:
+              widget.chart === "scenario-hour" &&
+              widget.period === "custom" &&
+              widget.from
+                ? widget.from
                 : undefined,
-            scope_id: widget.scenarioId || undefined,
+            granularity:
+              widget.chart === "scenario-hour" ? widget.granularity : undefined,
+            period: widget.chart === "scenario-hour" ? widget.period : undefined,
+            scenario_ids:
+              widget.chart === "scenario-hour" &&
+              widget.selectionMode === "custom"
+                ? widget.scenarioIds.length
+                  ? widget.scenarioIds
+                  : ["__none"]
+                : undefined,
             title: widget.title,
+            to:
+              widget.chart === "scenario-hour" &&
+              widget.period === "custom" &&
+              widget.to
+                ? widget.to
+                : undefined,
           })),
         ),
       );
@@ -227,6 +278,10 @@ export function ViewsManager() {
   }, [chart]);
 
   React.useEffect(() => {
+    if (widgetChart !== "scenario-hour") setWidgetScenarioSettingsOpen(false);
+  }, [widgetChart]);
+
+  React.useEffect(() => {
     async function loadScenarios() {
       setLoadingScenarios(true);
       try {
@@ -240,14 +295,14 @@ export function ViewsManager() {
         setSelectedScenarioIds((current) =>
           current.filter((id) => scopedRows.some((scenario) => scenario.id === id)),
         );
-        setWidgetScenarioId((current) =>
-          current && scopedRows.some((scenario) => scenario.id === current)
-            ? current
-            : scopedRows[0]?.id ?? "",
+        setWidgetSelectedScenarioIds((current) =>
+          current.filter((id) =>
+            scopedRows.some((scenario) => scenario.id === id),
+          ),
         );
       } catch {
         setScenarios([]);
-        setWidgetScenarioId("");
+        setWidgetSelectedScenarioIds([]);
       } finally {
         setLoadingScenarios(false);
       }
@@ -263,23 +318,65 @@ export function ViewsManager() {
   }
 
   function addWidget() {
-    if (widgetChart === "scenario-hour" && !widgetScenarioId) {
-      toast.error("Selecione um cenário para adicionar este widget.");
+    if (
+      widgetChart === "scenario-hour" &&
+      widgetScenarioSelectionMode === "custom" &&
+      !widgetSelectedScenarioIds.length
+    ) {
+      toast.error("Selecione ao menos um cenário para adicionar este widget.");
+      return;
+    }
+
+    const customFrom = parseLocalDateTimeInput(widgetScenarioCompareFrom);
+    const customTo = parseLocalDateTimeInput(widgetScenarioCompareTo);
+    if (
+      widgetChart === "scenario-hour" &&
+      widgetScenarioComparePeriod === "custom" &&
+      (!customFrom || !customTo || customFrom >= customTo)
+    ) {
+      toast.error("Informe um intervalo personalizado válido.");
       return;
     }
 
     const titleFallback =
-      widgetChart === "scenario-hour" && selectedWidgetScenario
-        ? `${selectedWidgetScenario.name} - Hora a hora`
+      widgetChart === "scenario-hour"
+        ? widgetScenarioSelectionMode === "custom" &&
+          widgetSelectedScenarioNames.length === 1
+          ? `${widgetSelectedScenarioNames[0]} - ${scenarioCompareGranularityLabel(
+              widgetScenarioCompareGranularity,
+            )}`
+          : "Cenários por período"
         : selectedWidgetView?.label ?? "Widget";
-
     setViewWidgets((current) => [
       ...current,
       {
         chart: widgetChart,
+        from:
+          widgetChart === "scenario-hour" &&
+          widgetScenarioComparePeriod === "custom"
+            ? customFrom?.toISOString()
+            : undefined,
+        granularity:
+          widgetChart === "scenario-hour"
+            ? widgetScenarioCompareGranularity
+            : undefined,
         id: createWidgetId(),
-        scenarioId: widgetChart === "scenario-hour" ? widgetScenarioId : "",
+        period:
+          widgetChart === "scenario-hour"
+            ? widgetScenarioComparePeriod
+            : undefined,
+        scenarioIds:
+          widgetChart === "scenario-hour" ? widgetSelectedScenarioIds : [],
+        selectionMode:
+          widgetChart === "scenario-hour"
+            ? widgetScenarioSelectionMode
+            : "all",
         title: widgetTitle.trim() || titleFallback,
+        to:
+          widgetChart === "scenario-hour" &&
+          widgetScenarioComparePeriod === "custom"
+            ? customTo?.toISOString()
+            : undefined,
       },
     ]);
     setWidgetTitle("");
@@ -518,7 +615,7 @@ export function ViewsManager() {
                 ) : null}
               </div>
 
-              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <div className="grid gap-3 md:grid-cols-2">
                 <FormField label="Gráfico do widget">
                   <Select
                     value={widgetChart}
@@ -537,55 +634,155 @@ export function ViewsManager() {
                   </Select>
                 </FormField>
 
-                {widgetChart === "scenario-hour" ? (
-                  <FormField label="Cenário do widget">
-                    <Select
-                      value={widgetScenarioId}
-                      onValueChange={setWidgetScenarioId}
-                      disabled={loadingScenarios || !scenarios.length}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Selecione um cenário" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {scenarios.map((scenario) => (
-                          <SelectItem key={scenario.id} value={scenario.id}>
-                            {scenario.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </FormField>
-                ) : (
-                  <FormField label="Cenário do widget">
-                    <Input readOnly value="Não se aplica a este gráfico" />
-                  </FormField>
-                )}
-              </div>
-
-              <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
                 <FormField label="Título do widget">
                   <Input
                     value={widgetTitle}
                     onChange={(event) => setWidgetTitle(event.target.value)}
                     placeholder={
-                      widgetChart === "scenario-hour" && selectedWidgetScenario
-                        ? `${selectedWidgetScenario.name} - Hora a hora`
+                      widgetChart === "scenario-hour"
+                        ? "Cenários por período"
                         : selectedWidgetView?.label
                     }
                   />
                 </FormField>
-                <div className="flex items-end">
+              </div>
+
+              {widgetChart === "scenario-hour" ? (
+                <div className="mt-3 rounded-md border bg-background p-3">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold">
+                        Comparação do widget
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {widgetScenarioCompareSummary}
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant={
+                        widgetScenarioSettingsOpen ? "default" : "outline"
+                      }
+                      size="sm"
+                      className="w-full sm:w-auto"
+                      onClick={() =>
+                        setWidgetScenarioSettingsOpen((current) => !current)
+                      }
+                    >
+                      <Settings2 className="h-3.5 w-3.5" />
+                      {widgetScenarioSettingsOpen ? "Ocultar" : "Configurar"}
+                    </Button>
+                  </div>
+
+                  {widgetScenarioSettingsOpen ? (
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <FormField label="Granularidade">
+                        <Select
+                          value={widgetScenarioCompareGranularity}
+                          onValueChange={(value) =>
+                            setWidgetScenarioCompareGranularity(
+                              value as ScenarioCompareGranularity,
+                            )
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {scenarioCompareGranularityOptions.map((option) => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+
+                      <FormField label="Período">
+                        <Select
+                          value={widgetScenarioComparePeriod}
+                          onValueChange={(value) =>
+                            setWidgetScenarioComparePeriod(
+                              value as ScenarioComparePeriod,
+                            )
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {scenarioComparePeriodOptions.map((option) => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+
+                      <div className="md:col-span-2">
+                        <ScenarioPicker
+                          loading={loadingScenarios}
+                          mode={widgetScenarioSelectionMode}
+                          onModeChange={setWidgetScenarioSelectionMode}
+                          onSelectedIdsChange={setWidgetSelectedScenarioIds}
+                          scenarios={scenarios}
+                          selectedIds={widgetSelectedScenarioIds}
+                        />
+                      </div>
+
+                      {widgetScenarioComparePeriod === "custom" ? (
+                        <>
+                          <FormField label="De">
+                            <Input
+                              type="datetime-local"
+                              value={widgetScenarioCompareFrom}
+                              onChange={(event) =>
+                                setWidgetScenarioCompareFrom(event.target.value)
+                              }
+                            />
+                          </FormField>
+                          <FormField label="Até">
+                            <Input
+                              type="datetime-local"
+                              value={widgetScenarioCompareTo}
+                              onChange={(event) =>
+                                setWidgetScenarioCompareTo(event.target.value)
+                              }
+                            />
+                          </FormField>
+                        </>
+                      ) : null}
+
+                      <div className="flex justify-end md:col-span-2">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => setWidgetScenarioSettingsOpen(false)}
+                        >
+                          Concluir
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <div className="mt-3 flex justify-end">
                   <Button
                     type="button"
                     variant="outline"
                     onClick={addWidget}
-                    disabled={widgetChart === "scenario-hour" && !widgetScenarioId}
+                    disabled={
+                      widgetChart === "scenario-hour" &&
+                      widgetScenarioSelectionMode === "custom" &&
+                      !widgetSelectedScenarioIds.length
+                    }
                   >
                     <Plus className="h-4 w-4" />
                     Adicionar widget
                   </Button>
-                </div>
               </div>
 
               {viewWidgets.length ? (
@@ -593,9 +790,6 @@ export function ViewsManager() {
                   {viewWidgets.map((widget) => {
                     const widgetView = viewOptions.find(
                       (option) => option.value === widget.chart,
-                    );
-                    const scenario = scenarios.find(
-                      (item) => item.id === widget.scenarioId,
                     );
 
                     return (
@@ -608,8 +802,9 @@ export function ViewsManager() {
                             {widget.title}
                           </div>
                           <div className="truncate text-xs text-muted-foreground">
-                            {widgetView?.label ?? widget.chart}
-                            {scenario ? ` · ${scenario.name}` : ""}
+                            {widget.chart === "scenario-hour"
+                              ? viewWidgetComparisonSummary(widget, scenarios)
+                              : widgetView?.label ?? widget.chart}
                           </div>
                         </div>
                         <Button
@@ -812,4 +1007,23 @@ function scenarioComparePeriodLabel(value: ScenarioComparePeriod) {
     scenarioComparePeriodOptions.find((option) => option.value === value)?.label ??
     "Hoje"
   );
+}
+
+function viewWidgetComparisonSummary(
+  widget: ViewWidget,
+  scenarios: Scenario[],
+) {
+  const selection =
+    widget.selectionMode === "all"
+      ? "Todos os cenários"
+      : widget.scenarioIds
+          .map((id) => scenarios.find((scenario) => scenario.id === id)?.name)
+          .filter(Boolean).length === 1
+        ? scenarios.find((scenario) => scenario.id === widget.scenarioIds[0])
+            ?.name ?? "1 cenário"
+        : `${widget.scenarioIds.length} cenários`;
+
+  return `${scenarioCompareGranularityLabel(
+    widget.granularity ?? "hour",
+  )} · ${scenarioComparePeriodLabel(widget.period ?? "today")} · ${selection}`;
 }

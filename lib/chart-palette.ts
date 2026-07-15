@@ -20,6 +20,45 @@ export function pastelBarColor(index: number) {
   return hslToHex(hue, 66, 78);
 }
 
+export function monochromeHeatmapPalette(baseColor: string) {
+  const source = parseHexColor(baseColor) ?? [18, 103, 196];
+  const white: RgbColor = [255, 255, 255];
+  const black: RgbColor = [0, 0, 0];
+
+  return [
+    mixRgb(source, white, 0.88),
+    mixRgb(source, white, 0.7),
+    mixRgb(source, white, 0.48),
+    mixRgb(source, white, 0.26),
+    mixRgb(source, black, 0.02),
+    mixRgb(source, black, 0.2),
+    mixRgb(source, black, 0.42),
+  ].map(rgbToHex);
+}
+
+type RgbColor = [number, number, number];
+
+function parseHexColor(value: string): RgbColor | null {
+  const match = /^#([0-9a-f]{6})$/i.exec(value);
+  if (!match) return null;
+
+  return [
+    Number.parseInt(match[1].slice(0, 2), 16),
+    Number.parseInt(match[1].slice(2, 4), 16),
+    Number.parseInt(match[1].slice(4, 6), 16),
+  ];
+}
+
+function mixRgb(source: RgbColor, target: RgbColor, targetWeight: number) {
+  return source.map((channel, index) =>
+    Math.round(channel + (target[index] - channel) * targetWeight),
+  ) as RgbColor;
+}
+
+function rgbToHex(color: RgbColor) {
+  return `#${color.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+}
+
 function hslToHex(hue: number, saturation: number, lightness: number) {
   const normalizedSaturation = saturation / 100;
   const normalizedLightness = lightness / 100;

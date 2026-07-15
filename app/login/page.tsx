@@ -209,16 +209,18 @@ function BrandMark({
   compact?: boolean;
   hero?: boolean;
 }) {
-  const sizeClass = hero
-    ? "h-32 w-32 sm:h-40 sm:w-40"
-    : compact
-      ? "h-11 w-11 lg:hidden"
-      : "h-11 w-11";
-  const logoClass = hero
-    ? "h-24 w-24 sm:h-32 sm:w-32"
-    : compact
-      ? "h-8 w-8"
-      : "h-8 w-8";
+  const sizeClass = branding.logoUrl
+    ? hero
+      ? "h-28 w-64 sm:h-32 sm:w-72"
+      : compact
+        ? "h-12 w-36 lg:hidden"
+        : "h-12 w-36"
+    : hero
+      ? "h-28 w-28 sm:h-32 sm:w-32"
+      : compact
+        ? "h-12 w-12 lg:hidden"
+        : "h-12 w-12";
+  const logoClass = "h-full w-full";
   const initialsClass = hero ? "text-4xl sm:text-5xl" : "text-xs";
 
   if (branding.logoUrl) {

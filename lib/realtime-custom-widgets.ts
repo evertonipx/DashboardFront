@@ -1,6 +1,7 @@
 "use client";
 
-import { getScopedStorageKey } from "@/lib/master-company-scope";
+import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
+import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
 import type { AggregateGranularity } from "@/lib/types";
 
 export type RealtimeCustomWidgetGranularity = Extract<
@@ -13,44 +14,76 @@ export type RealtimeCustomWidgetScopeMode =
   | "location"
   | "sub_location";
 
-export type RealtimeCustomWidget = {
+export type RealtimeCustomWidgetKind = "scope" | "scenario_comparison";
+
+type RealtimeCustomWidgetBase = {
   id: string;
   title: string;
-  scopeId: string;
-  scopeMode: RealtimeCustomWidgetScopeMode;
-  scopeName: string;
-  granularity: RealtimeCustomWidgetGranularity;
   created_at: string;
   updated_at: string;
 };
 
-export type RealtimeCustomWidgetInput = {
-  id?: string;
-  title: string;
+export type RealtimeScopeCustomWidget = RealtimeCustomWidgetBase & {
+  kind: "scope";
   scopeId: string;
   scopeMode: RealtimeCustomWidgetScopeMode;
   scopeName: string;
   granularity: RealtimeCustomWidgetGranularity;
 };
+
+export type RealtimeScenarioComparisonWidget = RealtimeCustomWidgetBase & {
+  kind: "scenario_comparison";
+};
+
+export type RealtimeCustomWidget =
+  | RealtimeScopeCustomWidget
+  | RealtimeScenarioComparisonWidget;
+
+type RealtimeCustomWidgetInputBase = {
+  id?: string;
+  title: string;
+};
+
+export type RealtimeScopeCustomWidgetInput = RealtimeCustomWidgetInputBase & {
+  kind: "scope";
+  scopeId: string;
+  scopeMode: RealtimeCustomWidgetScopeMode;
+  scopeName: string;
+  granularity: RealtimeCustomWidgetGranularity;
+};
+
+export type RealtimeScenarioComparisonWidgetInput =
+  RealtimeCustomWidgetInputBase & {
+    kind: "scenario_comparison";
+  };
+
+export type RealtimeCustomWidgetInput =
+  | RealtimeScopeCustomWidgetInput
+  | RealtimeScenarioComparisonWidgetInput;
 
 export const REALTIME_CUSTOM_WIDGETS_UPDATED_EVENT =
   "ipxdata:realtime-custom-widgets-updated";
 
 const REALTIME_CUSTOM_WIDGETS_KEY = "ipxdata.realtime-custom-widgets.v1";
 
-export function loadRealtimeCustomWidgets(companyId?: string | null) {
+export function loadRealtimeCustomWidgets(
+  companyId?: string | null,
+  scope: ViewPreferenceScope = {},
+) {
   if (typeof window === "undefined") return [];
 
   try {
     const stored = window.localStorage.getItem(
-      getRealtimeCustomWidgetsKey(companyId),
+      getRealtimeCustomWidgetsKey(companyId, scope),
     );
     if (!stored) return [];
 
-    const parsed = JSON.parse(stored) as RealtimeCustomWidget[];
+    const parsed = JSON.parse(stored) as unknown[];
     if (!Array.isArray(parsed)) return [];
 
-    return parsed.filter(isRealtimeCustomWidget);
+    return parsed
+      .map(normalizeRealtimeCustomWidget)
+      .filter((widget): widget is RealtimeCustomWidget => Boolean(widget));
   } catch {
     return [];
   }
@@ -59,83 +92,138 @@ export function loadRealtimeCustomWidgets(companyId?: string | null) {
 export function saveRealtimeCustomWidgets(
   widgets: RealtimeCustomWidget[],
   companyId?: string | null,
+  scope: ViewPreferenceScope = {},
 ) {
   if (typeof window === "undefined") return;
 
   window.localStorage.setItem(
-    getRealtimeCustomWidgetsKey(companyId),
+    getRealtimeCustomWidgetsKey(companyId, scope),
     JSON.stringify(widgets.filter(isRealtimeCustomWidget)),
   );
-  emitRealtimeCustomWidgetsUpdated(companyId);
+  emitRealtimeCustomWidgetsUpdated(companyId, scope);
 }
 
 export function upsertRealtimeCustomWidget(
   widget: RealtimeCustomWidgetInput,
   companyId?: string | null,
+  scope: ViewPreferenceScope = {},
 ) {
-  const widgets = loadRealtimeCustomWidgets(companyId);
+  const widgets = loadRealtimeCustomWidgets(companyId, scope);
   const now = new Date().toISOString();
   const current = widget.id
     ? widgets.find((stored) => stored.id === widget.id)
     : undefined;
-  const nextWidget: RealtimeCustomWidget = {
+  const base = {
     id: widget.id || createWidgetId(),
     title: widget.title,
-    scopeId: widget.scopeId,
-    scopeMode: widget.scopeMode,
-    scopeName: widget.scopeName,
-    granularity: widget.granularity,
     created_at: current?.created_at ?? now,
     updated_at: now,
   };
+  const nextWidget: RealtimeCustomWidget =
+    widget.kind === "scenario_comparison"
+      ? { ...base, kind: "scenario_comparison" }
+      : {
+          ...base,
+          kind: "scope",
+          scopeId: widget.scopeId,
+          scopeMode: widget.scopeMode,
+          scopeName: widget.scopeName,
+          granularity: widget.granularity,
+        };
   const nextWidgets = current
     ? widgets.map((stored) =>
         stored.id === nextWidget.id ? nextWidget : stored,
       )
     : [...widgets, nextWidget];
 
-  saveRealtimeCustomWidgets(nextWidgets, companyId);
+  saveRealtimeCustomWidgets(nextWidgets, companyId, scope);
   return nextWidgets;
 }
 
 export function deleteRealtimeCustomWidget(
   widgetId: string,
   companyId?: string | null,
+  scope: ViewPreferenceScope = {},
 ) {
-  const nextWidgets = loadRealtimeCustomWidgets(companyId).filter(
+  const nextWidgets = loadRealtimeCustomWidgets(companyId, scope).filter(
     (widget) => widget.id !== widgetId,
   );
 
-  saveRealtimeCustomWidgets(nextWidgets, companyId);
+  saveRealtimeCustomWidgets(nextWidgets, companyId, scope);
   return nextWidgets;
 }
 
-function getRealtimeCustomWidgetsKey(companyId?: string | null) {
-  return getScopedStorageKey(REALTIME_CUSTOM_WIDGETS_KEY, companyId);
+function getRealtimeCustomWidgetsKey(
+  companyId?: string | null,
+  scope: ViewPreferenceScope = {},
+) {
+  return getUserViewScopedStorageKey(
+    REALTIME_CUSTOM_WIDGETS_KEY,
+    companyId,
+    scope.userId,
+    scope.viewId,
+  );
 }
 
-function emitRealtimeCustomWidgetsUpdated(companyId?: string | null) {
+function emitRealtimeCustomWidgetsUpdated(
+  companyId?: string | null,
+  scope: ViewPreferenceScope = {},
+) {
   window.dispatchEvent(
     new CustomEvent(REALTIME_CUSTOM_WIDGETS_UPDATED_EVENT, {
-      detail: { companyId },
+      detail: { companyId, userId: scope.userId, viewId: scope.viewId },
     }),
   );
 }
 
 function isRealtimeCustomWidget(value: unknown): value is RealtimeCustomWidget {
-  if (!value || typeof value !== "object") return false;
+  return Boolean(normalizeRealtimeCustomWidget(value));
+}
+
+function normalizeRealtimeCustomWidget(
+  value: unknown,
+): RealtimeCustomWidget | null {
+  if (!value || typeof value !== "object") return null;
 
   const record = value as Record<string, unknown>;
-  return (
-    typeof record.id === "string" &&
-    typeof record.title === "string" &&
+  if (
+    typeof record.id !== "string" ||
+    typeof record.title !== "string" ||
+    typeof record.created_at !== "string" ||
+    typeof record.updated_at !== "string"
+  ) {
+    return null;
+  }
+
+  const base = {
+    id: record.id,
+    title: record.title,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+  };
+
+  if (record.kind === "scenario_comparison") {
+    return { ...base, kind: "scenario_comparison" };
+  }
+
+  if (
+    (record.kind === undefined || record.kind === "scope") &&
     typeof record.scopeId === "string" &&
     isRealtimeCustomWidgetScopeMode(record.scopeMode) &&
     typeof record.scopeName === "string" &&
-    isRealtimeCustomWidgetGranularity(record.granularity) &&
-    typeof record.created_at === "string" &&
-    typeof record.updated_at === "string"
-  );
+    isRealtimeCustomWidgetGranularity(record.granularity)
+  ) {
+    return {
+      ...base,
+      kind: "scope",
+      scopeId: record.scopeId,
+      scopeMode: record.scopeMode,
+      scopeName: record.scopeName,
+      granularity: record.granularity,
+    };
+  }
+
+  return null;
 }
 
 function isRealtimeCustomWidgetScopeMode(

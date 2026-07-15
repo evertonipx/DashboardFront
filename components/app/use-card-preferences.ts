@@ -19,26 +19,49 @@ type CardViewResponse = {
   preferences: CardPreference[];
 };
 
+type CardPreferenceScope = {
+  syncServer?: boolean;
+  userId?: string | null;
+  viewId?: string | null;
+};
+
 export function useCardPreferences(
   menuKey: CardMenuKey,
   cardIds: string[] = [],
   companyId?: string | null,
+  scope: CardPreferenceScope = {},
 ) {
+  const { syncServer = true, userId, viewId } = scope;
   const cardIdsKey = cardIds.join("|");
   const normalizedCardIds = React.useMemo(
     () => (cardIdsKey ? cardIdsKey.split("|") : []),
     [cardIdsKey],
   );
   const [preferences, setPreferences] = React.useState<CardPreference[]>(() =>
-    loadScopedCardPreferences(menuKey, normalizedCardIds, companyId),
+    loadScopedCardPreferences(
+      menuKey,
+      normalizedCardIds,
+      companyId,
+      userId,
+      viewId,
+    ),
   );
 
   React.useEffect(() => {
     let cancelled = false;
 
-    setPreferences(loadScopedCardPreferences(menuKey, normalizedCardIds, companyId));
+    setPreferences(
+      loadScopedCardPreferences(
+        menuKey,
+        normalizedCardIds,
+        companyId,
+        userId,
+        viewId,
+      ),
+    );
 
-    apiFetch<CardViewResponse>(`/dashboard-views/${menuKey}`)
+    const serverRequest = syncServer
+      ? apiFetch<CardViewResponse>(`/dashboard-views/${menuKey}`)
       .then((response) => {
         if (cancelled) return;
         if (!response.found && !response.preferences.length) return;
@@ -48,27 +71,58 @@ export function useCardPreferences(
           response.preferences,
           normalizedCardIds,
           companyId,
+          userId,
+          viewId,
         );
         setPreferences(
-          loadScopedCardPreferences(menuKey, normalizedCardIds, companyId),
+          loadScopedCardPreferences(
+            menuKey,
+            normalizedCardIds,
+            companyId,
+            userId,
+            viewId,
+          ),
         );
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      : Promise.resolve();
 
     function syncFromStorage(event: StorageEvent) {
-      const scopedStorageKey = getCardViewStorageKey(companyId);
+      const scopedStorageKey = getCardViewStorageKey(
+        companyId,
+        userId,
+        viewId,
+      );
       if (event.key && event.key !== scopedStorageKey) {
         return;
       }
 
-      setPreferences(loadScopedCardPreferences(menuKey, normalizedCardIds, companyId));
+      setPreferences(
+        loadScopedCardPreferences(
+          menuKey,
+          normalizedCardIds,
+          companyId,
+          userId,
+          viewId,
+        ),
+      );
     }
 
     function syncFromCustomEvent(event: Event) {
       const detail = (event as CustomEvent<CardViewUpdatedDetail>).detail;
       if (detail?.menuKey && detail.menuKey !== menuKey) return;
       if (detail && (detail.companyId ?? null) !== (companyId ?? null)) return;
-      setPreferences(loadScopedCardPreferences(menuKey, normalizedCardIds, companyId));
+      if (detail && (detail.userId ?? null) !== (userId ?? null)) return;
+      if (detail && (detail.viewId ?? null) !== (viewId ?? null)) return;
+      setPreferences(
+        loadScopedCardPreferences(
+          menuKey,
+          normalizedCardIds,
+          companyId,
+          userId,
+          viewId,
+        ),
+      );
     }
 
     window.addEventListener("storage", syncFromStorage);
@@ -76,10 +130,18 @@ export function useCardPreferences(
 
     return () => {
       cancelled = true;
+      void serverRequest;
       window.removeEventListener("storage", syncFromStorage);
       window.removeEventListener(CARD_VIEW_UPDATED_EVENT, syncFromCustomEvent);
     };
-  }, [menuKey, normalizedCardIds, companyId]);
+  }, [
+    companyId,
+    menuKey,
+    normalizedCardIds,
+    syncServer,
+    userId,
+    viewId,
+  ]);
 
   return preferences;
 }

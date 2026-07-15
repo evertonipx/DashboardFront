@@ -157,6 +157,21 @@ export function useAuth() {
 }
 
 async function hydrateCurrentUser(user: CurrentUser) {
+  const preliminaryCompanyScope = getUserCompanyScope(user);
+  if (hasMasterAccess(user)) {
+    clearStoredCurrentCompanyScope();
+    if (preliminaryCompanyScope && !getStoredMasterCompanyScope()) {
+      setStoredMasterCompanyScope(preliminaryCompanyScope);
+    }
+  } else {
+    clearStoredMasterCompanyScope();
+    if (preliminaryCompanyScope) {
+      setStoredCurrentCompanyScope(preliminaryCompanyScope);
+    } else {
+      clearStoredCurrentCompanyScope();
+    }
+  }
+
   const [permissions, company] = await Promise.all([
     hydrateUserPermissions(user),
     hydrateUserCompany(user),
@@ -213,6 +228,7 @@ async function hydrateUserCompany(user: CurrentUser) {
   if (!companyId) return null;
 
   const cachedCompany = readCachedCompany(companyId);
+  if (!hasDeclaredManagerAccess(user)) return cachedCompany;
 
   try {
     const company = await apiFetch<CurrentUserCompany>(

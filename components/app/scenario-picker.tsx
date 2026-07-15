@@ -40,10 +40,17 @@ export function ScenarioPicker({
   const filteredScenarios = React.useMemo(() => {
     const normalizedSearch = normalizeSearch(search);
     if (!normalizedSearch) return scenarios;
+    const terms = normalizedSearch
+      .split(/[\s,;|]+/)
+      .filter((term) => term.length > 1 && term !== "ou");
+    if (!terms.length) return scenarios;
 
-    return scenarios.filter((scenario) =>
-      normalizeSearch(scenario.name).includes(normalizedSearch),
-    );
+    return scenarios.filter((scenario) => {
+      const searchable = normalizeSearch(
+        `${scenario.name} ${scenario.description ?? ""}`,
+      );
+      return terms.some((term) => searchable.includes(term));
+    });
   }, [scenarios, search]);
   const selectedSummary =
     mode === "all"
@@ -81,6 +88,11 @@ export function ScenarioPicker({
     const nextIds = new Set(selectedIds);
     filteredScenarios.forEach((scenario) => nextIds.add(scenario.id));
     onSelectedIdsChange(Array.from(nextIds));
+  }
+
+  function removeFiltered() {
+    const filteredIds = new Set(filteredScenarios.map((scenario) => scenario.id));
+    onSelectedIdsChange(selectedIds.filter((id) => !filteredIds.has(id)));
   }
 
   return (
@@ -154,13 +166,13 @@ export function ScenarioPicker({
 
           {open ? (
             <div className="mt-2 rounded-md border bg-card p-2">
-              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+              <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                   <Input
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
-                    placeholder="Buscar cenário"
+                    placeholder="Filtrar por palavras: entrada, saída..."
                     className="pl-9"
                   />
                 </div>
@@ -171,6 +183,18 @@ export function ScenarioPicker({
                   disabled={!filteredScenarios.length}
                 >
                   Selecionar filtrados
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={removeFiltered}
+                  disabled={
+                    !filteredScenarios.some((scenario) =>
+                      selectedIdSet.has(scenario.id),
+                    )
+                  }
+                >
+                  Remover filtrados
                 </Button>
                 <Button
                   type="button"

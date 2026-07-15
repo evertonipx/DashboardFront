@@ -207,15 +207,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   ) {
     requestHeaders.set("X-Company-ID", apiCompanyScope.id);
   }
-  const scopedCompanyId = pathSupportsCompanyScope
-    ? requestHeaders.get("X-Company-ID") ?? apiCompanyScope?.id ?? ""
-    : "";
-  const requestPath =
-    pathSupportsCompanyScope && scopedCompanyId
-      ? withMasterCompanyScopeQuery(path, scopedCompanyId)
-      : path;
-
-  const response = await fetch(`${apiBase()}${requestPath}`, {
+  const response = await fetch(`${apiBase()}${path}`, {
     ...init,
     headers: requestHeaders,
     body: body === undefined || body instanceof FormData ? body : JSON.stringify(body),
@@ -262,6 +254,9 @@ export function currentUserRequest() {
 }
 
 function shouldSendMasterCompanyScope(path: string) {
+  const pathname = path.split(/[?#]/, 1)[0] ?? path;
+  if (/^\/companies\/[^/]+(?:\/|$)/.test(pathname)) return true;
+
   return [
     "/analytics",
     "/cameras",
@@ -272,19 +267,5 @@ function shouldSendMasterCompanyScope(path: string) {
     "/scenarios",
     "/users",
     "/workers",
-  ].some((prefix) => path.startsWith(prefix));
-}
-
-function withMasterCompanyScopeQuery(path: string, companyId: string) {
-  if (!companyId) return path;
-
-  const [pathname, hashFragment = ""] = path.split("#", 2);
-  const [basePath, queryString = ""] = pathname.split("?", 2);
-  const params = new URLSearchParams(queryString);
-  if (!params.has("company_id")) {
-    params.set("company_id", companyId);
-  }
-
-  const query = params.toString();
-  return `${basePath}${query ? `?${query}` : ""}${hashFragment ? `#${hashFragment}` : ""}`;
+  ].some((prefix) => pathname.startsWith(prefix));
 }

@@ -85,6 +85,21 @@ export function getScopedStorageKey(baseKey: string, companyId?: string | null) 
   return cleanCompanyId ? `${baseKey}.${cleanCompanyId}` : baseKey;
 }
 
+export function getUserViewScopedStorageKey(
+  baseKey: string,
+  companyId?: string | null,
+  userId?: string | null,
+  viewId?: string | null,
+) {
+  const segments = [
+    companyId?.trim() ? `company.${encodeStorageSegment(companyId)}` : "",
+    userId?.trim() ? `user.${encodeStorageSegment(userId)}` : "",
+    viewId?.trim() ? `view.${encodeStorageSegment(viewId)}` : "",
+  ].filter(Boolean);
+
+  return segments.length ? `${baseKey}.${segments.join(".")}` : baseKey;
+}
+
 export function getEntityCompanyId(value: unknown) {
   if (!value || typeof value !== "object") return "";
 
@@ -325,6 +340,10 @@ function getEmbeddedIdentifierFromValue(value: unknown, keys: string[]) {
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function encodeStorageSegment(value: string) {
+  return encodeURIComponent(value.trim()).replace(/\./g, "%2E");
 }
 
 export function belongsToCompanyScope(

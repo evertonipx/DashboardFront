@@ -50,8 +50,6 @@ import { apiFetch } from "@/lib/api";
 import {
   filterScopedApiRows,
   getScopedStorageKey,
-  getStoredMasterCompanyScope,
-  MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
 import { canManageOccupancy, canManageScenarios } from "@/lib/permissions";
@@ -142,9 +140,6 @@ export function OccupancyScenarioDashboard() {
   const { user } = useAuth();
   const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const companyScopeId = useEffectiveCompanyScopeId(user);
-  const [masterScopeId, setMasterScopeId] = React.useState(
-    () => getStoredMasterCompanyScope()?.id ?? "",
-  );
   const canManage =
     canManageOccupancy(user) || canManageScenarios(user);
   const [scenarios, setScenarios] = React.useState<OccupancyScenario[]>([]);
@@ -221,7 +216,7 @@ export function OccupancyScenarioDashboard() {
     } finally {
       setLoadingScenarios(false);
     }
-  }, [canManage, companyScopeId, masterScopeId]);
+  }, [canManage, companyScopeId]);
 
   const loadScenarioData = React.useCallback(
     async (
@@ -243,16 +238,19 @@ export function OccupancyScenarioDashboard() {
 
       const now = new Date();
       const definitions = buildOccupancyChartDefinitions(now);
+      const headers = companyScopeId
+        ? ({ "X-Company-ID": companyScopeId } satisfies HeadersInit)
+        : undefined;
 
       try {
         const [historyResult, alertResult, chartEntries] = await Promise.all([
           apiFetch<OccupancyScenarioHistoryResponse>(
             occupancyScenarioHistoryPath(scenario.id, now),
-            { signal: controller.signal },
+            { headers, signal: controller.signal },
           ).catch(() => null),
           apiFetch<OccupancyAlertListResponse>(
             `/occupancy/scenarios/${scenario.id}/alerts?limit=12`,
-            { signal: controller.signal },
+            { headers, signal: controller.signal },
           ).catch(() => []),
           Promise.all(
             definitions.map(async (definition) => {
@@ -260,7 +258,7 @@ export function OccupancyScenarioDashboard() {
                 const response =
                   await apiFetch<OccupancyScenarioAggregateResponse>(
                     occupancyScenarioAggregatePath(scenario.id, definition),
-                    { signal: controller.signal },
+                    { headers, signal: controller.signal },
                   );
                 const state: OccupancyChartState = buildOccupancyChartState(
                   definition,
@@ -323,27 +321,12 @@ export function OccupancyScenarioDashboard() {
         }
       }
     },
-    [masterScopeId],
+    [companyScopeId],
   );
 
   React.useEffect(() => {
     loadScenarios();
   }, [loadScenarios]);
-
-  React.useEffect(() => {
-    function syncMasterScope() {
-      setMasterScopeId(getStoredMasterCompanyScope()?.id ?? "");
-    }
-
-    syncMasterScope();
-    window.addEventListener(MASTER_COMPANY_SCOPE_EVENT, syncMasterScope);
-    window.addEventListener("storage", syncMasterScope);
-
-    return () => {
-      window.removeEventListener(MASTER_COMPANY_SCOPE_EVENT, syncMasterScope);
-      window.removeEventListener("storage", syncMasterScope);
-    };
-  }, []);
 
   React.useEffect(() => {
     setScenarios([]);
@@ -354,7 +337,7 @@ export function OccupancyScenarioDashboard() {
     setMetricVisibility(readOccupancyMetricVisibility(companyScopeId));
     setHasLoadedData(false);
     hasLoadedDataRef.current = false;
-  }, [companyScopeId, masterScopeId]);
+  }, [companyScopeId]);
 
   React.useEffect(() => {
     saveOccupancyMetricVisibility(metricVisibility, companyScopeId);
