@@ -18,7 +18,7 @@ import {
   CardLayout,
   ReorderModeButton,
 } from "@/components/app/card-layout";
-import { EChart } from "@/components/app/echart";
+import { EChart, applyChartTypePreference } from "@/components/app/echart";
 import {
   MonitorModeButton,
   MonitorModeExitHint,
@@ -98,6 +98,7 @@ import type {
   Scenario,
 } from "@/lib/types";
 import { cn, formatNumber, formatTime } from "@/lib/utils";
+import type { CardChartType } from "@/lib/view-preferences";
 
 type PeriodAnalysisDashboardProps = {
   manager?: boolean;
@@ -191,6 +192,17 @@ export function PeriodAnalysisDashboard({
       new Map(
         preferences.flatMap((preference) =>
           preference.color ? [[preference.id, preference.color] as const] : [],
+        ),
+      ),
+    [preferences],
+  );
+  const widgetChartTypeById = React.useMemo(
+    () =>
+      new Map(
+        preferences.flatMap((preference) =>
+          preference.chartType
+            ? [[preference.id, preference.chartType] as const]
+            : [],
         ),
       ),
     [preferences],
@@ -342,6 +354,12 @@ export function PeriodAnalysisDashboard({
     [data, period, scenarios, widgetColorById, widgets],
   );
   const layoutCards = widgets.map((widget) => ({
+    chartTypeEnabled:
+      widget.kind === "timeline" ||
+      widget.kind === "comparison" ||
+      widget.kind === "cumulative" ||
+      widget.kind === "trend" ||
+      widget.kind === "hour_profile",
     className:
       widget.kind === "summary" || widget.kind === "heatmap"
         ? "sm:col-span-2 xl:col-span-4"
@@ -380,6 +398,7 @@ export function PeriodAnalysisDashboard({
         (widget) => !preferences.length || visibleWidgetIds.has(widget.id),
       )
       .map((widget) => ({
+        chartType: widgetChartTypeById.get(widget.id),
         model: modelByWidgetId.get(widget.id)!,
         title: widget.title,
       })),
@@ -926,16 +945,20 @@ function composePeriodAnalysisReport({
   models,
   period,
 }: {
-  models: Array<{ model: PeriodAnalysisWidgetModel; title: string }>;
+  models: Array<{
+    chartType?: CardChartType;
+    model: PeriodAnalysisWidgetModel;
+    title: string;
+  }>;
   period: PeriodAnalysisRange;
 }): ReportPayload {
   return {
-    charts: models.flatMap(({ model, title }) =>
+    charts: models.flatMap(({ chartType, model, title }) =>
       model.hasData && model.option && model.table
         ? [
             {
               description: model.description,
-              option: model.option,
+              option: applyChartTypePreference(model.option, chartType),
               table: model.table,
               title,
             },

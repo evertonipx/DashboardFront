@@ -17,7 +17,11 @@ import {
 } from "@/components/app/card-layout";
 import { buildCountingIntelligenceWidgetCards } from "@/components/app/counting-intelligence-report";
 import { CountingReportPeriodControl } from "@/components/app/counting-report-period-control";
-import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import {
+  EChart,
+  applyChartTypePreference,
+  type EnterpriseChartOption,
+} from "@/components/app/echart";
 import {
   MonitorModeButton,
   MonitorModeExitHint,
@@ -905,6 +909,7 @@ export function ScenarioReportsDashboard({
     ? [
         {
           id: "report_scenario_period_comparison",
+          chartTypeEnabled: true,
           label: "Cenários por período",
           defaultSize: "full" as const,
           className: "sm:col-span-2 xl:col-span-4",
@@ -927,6 +932,7 @@ export function ScenarioReportsDashboard({
     if (widget.kind === "scenario_comparison") {
       return {
         id: `report_custom_${widget.id}`,
+        chartTypeEnabled: true,
         label: widget.title,
         defaultSize: "full" as const,
         className: "sm:col-span-2 xl:col-span-4",
@@ -977,6 +983,7 @@ export function ScenarioReportsDashboard({
 
     return {
       id: `report_custom_${widget.id}`,
+      chartTypeEnabled: true,
       label: widget.title,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
@@ -1088,6 +1095,27 @@ export function ScenarioReportsDashboard({
       ),
     [reportPreferences],
   );
+  const reportChartTypeByCardId = React.useMemo(
+    () =>
+      new Map(
+        reportPreferences.flatMap((preference) =>
+          preference.chartType
+            ? [[preference.id, preference.chartType] as const]
+            : [],
+        ),
+      ),
+    [reportPreferences],
+  );
+  const applyReportChartType = React.useCallback(
+    (cardId: string, chart: ReportPayload["charts"][number]) => ({
+      ...chart,
+      option: applyChartTypePreference(
+        chart.option,
+        reportChartTypeByCardId.get(cardId),
+      ),
+    }),
+    [reportChartTypeByCardId],
+  );
   const countingIntelligenceAssets = React.useMemo(
     () =>
       countingIntelligenceModel
@@ -1133,14 +1161,17 @@ export function ScenarioReportsDashboard({
       const cardId = `report_custom_${widget.id}`;
       return [
         cardId,
-        buildScenarioReportChart(
-          definition,
-          state?.rows ?? [],
-          previousState?.rows ?? [],
-          scope,
-          showPreviousPeriod,
-          intradayComparison,
-          reportColorByCardId.get(cardId),
+        applyReportChartType(
+          cardId,
+          buildScenarioReportChart(
+            definition,
+            state?.rows ?? [],
+            previousState?.rows ?? [],
+            scope,
+            showPreviousPeriod,
+            intradayComparison,
+            reportColorByCardId.get(cardId),
+          ),
         ),
       ] as const;
     })
@@ -1152,7 +1183,7 @@ export function ScenarioReportsDashboard({
     readonly [string, ReportPayload["charts"][number]]
   > = countingIntelligenceAssets.charts.map(({ cardId, value }) => [
     cardId,
-    value,
+    applyReportChartType(cardId, value),
   ] as const);
   const visibleMetricByCardId = new Map<string, ReportMetric>(
     countingIntelligenceAssets.metrics.map(
@@ -1231,9 +1262,7 @@ export function ScenarioReportsDashboard({
           reportPeriodOverride,
         );
         const rows = await fetchScenarioComparisonRows(definition, companyScopeId);
-        chartByCardId.set(
-          "report_scenario_period_comparison",
-          buildScenarioComparisonReportChart({
+        const reportChart = buildScenarioComparisonReportChart({
             definition,
             rows,
             scenarios,
@@ -1242,7 +1271,13 @@ export function ScenarioReportsDashboard({
             widgetColor: reportColorByCardId.get(
               "report_scenario_period_comparison",
             ),
-          }),
+          });
+        chartByCardId.set(
+          "report_scenario_period_comparison",
+          applyReportChartType(
+            "report_scenario_period_comparison",
+            reportChart,
+          ),
         );
       } catch {
         // Mantem a exportação dos demais widgets mesmo se este gráfico falhar.
@@ -1273,9 +1308,8 @@ export function ScenarioReportsDashboard({
               definition,
               companyScopeId,
             );
-            chartByCardId.set(
-              `report_custom_${widget.id}`,
-              buildScenarioComparisonReportChart({
+            const cardId = `report_custom_${widget.id}`;
+            const reportChart = buildScenarioComparisonReportChart({
                 definition,
                 rows,
                 scenarios,
@@ -1283,9 +1317,12 @@ export function ScenarioReportsDashboard({
                 periodLabelOverride: reportPeriodOverride.label,
                 title: widget.title,
                 widgetColor: reportColorByCardId.get(
-                  `report_custom_${widget.id}`,
+                  cardId,
                 ),
-              }),
+              });
+            chartByCardId.set(
+              cardId,
+              applyReportChartType(cardId, reportChart),
             );
           } catch {
             // Mantem os demais widgets na exportação se um comparativo falhar.

@@ -4,7 +4,9 @@ import * as React from "react";
 import {
   ArrowDown,
   ArrowUp,
+  BarChart3,
   CheckCircle2,
+  ChartSpline,
   Eye,
   EyeOff,
   GripVertical,
@@ -46,11 +48,13 @@ import {
   orderByCardPreferences,
   saveCardPreferences,
   type CardPreference,
+  type CardChartType,
   type CardMenuKey,
   type CardSize,
 } from "@/lib/view-preferences";
 
 type LayoutCard = {
+  chartTypeEnabled?: boolean;
   id: string;
   label?: string;
   defaultSize?: CardSize;
@@ -225,6 +229,7 @@ export function CardLayout({
         const preference = getPreference(preferences, card.id);
 
         return {
+          chartType: preference?.chartType,
           id: card.id,
           visible: preference?.visible ?? true,
           color: preference?.color,
@@ -288,6 +293,17 @@ export function CardLayout({
       preferences.map((preference) =>
         preference.id === cardId
           ? { ...preference, color }
+          : preference,
+      ),
+    );
+    flashSaved();
+  }
+
+  function setCardChartType(cardId: string, chartType: CardChartType) {
+    persistPreferences(
+      preferences.map((preference) =>
+        preference.id === cardId
+          ? { ...preference, chartType }
           : preference,
       ),
     );
@@ -360,6 +376,7 @@ export function CardLayout({
           }}
           onOpenChange={setOrganizerOpen}
           onColorChange={setCardColor}
+          onChartTypeChange={setCardChartType}
           onResize={resizeCard}
           onRestoreDefault={restoreDefaultOrder}
           onToggleVisibility={toggleCardVisibility}
@@ -518,7 +535,10 @@ function CardLayoutItem({
           <GripVertical className="h-4 w-4" />
         </button>
       ) : null}
-      <WidgetAppearanceProvider color={preference?.color}>
+      <WidgetAppearanceProvider
+        chartType={card.chartTypeEnabled ? preference?.chartType : "bar"}
+        color={preference?.color}
+      >
         {card.node}
       </WidgetAppearanceProvider>
     </div>
@@ -539,6 +559,7 @@ function WidgetOrganizerDialog({
   onManageSavedViews,
   onOpenChange,
   onColorChange,
+  onChartTypeChange,
   onResize,
   onRestoreDefault,
   onToggleVisibility,
@@ -560,6 +581,7 @@ function WidgetOrganizerDialog({
   onManageSavedViews: () => void;
   onOpenChange: (open: boolean) => void;
   onColorChange: (cardId: string, color?: string) => void;
+  onChartTypeChange: (cardId: string, chartType: CardChartType) => void;
   onResize: (cardId: string, size: CardSize) => void;
   onRestoreDefault: () => void;
   onToggleVisibility: (cardId: string) => void;
@@ -607,6 +629,7 @@ function WidgetOrganizerDialog({
             return (
               <div
                 key={card.id}
+                data-widget-config-id={card.id}
                 draggable
                 onDragStart={(event) => onDragStart(event, card.id)}
                 onDragOver={(event) => onDragOver(event, card.id)}
@@ -642,6 +665,13 @@ function WidgetOrganizerDialog({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 sm:col-span-2 sm:pl-12 lg:col-span-1 lg:pl-0 lg:justify-end">
+                  {card.chartTypeEnabled ? (
+                    <WidgetChartTypePicker
+                      cardId={card.id}
+                      chartType={preference?.chartType ?? "bar"}
+                      onChange={onChartTypeChange}
+                    />
+                  ) : null}
                   <WidgetColorPicker
                     cardId={card.id}
                     color={preference?.color}
@@ -735,6 +765,51 @@ function WidgetOrganizerDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function WidgetChartTypePicker({
+  cardId,
+  chartType,
+  onChange,
+}: {
+  cardId: string;
+  chartType: CardChartType;
+  onChange: (cardId: string, chartType: CardChartType) => void;
+}) {
+  return (
+    <div
+      className="inline-flex h-8 items-center rounded-md border bg-background p-0.5"
+      aria-label="Tipo de gráfico"
+      role="group"
+    >
+      <button
+        type="button"
+        className={cn(
+          "flex h-6 w-7 items-center justify-center rounded-sm text-muted-foreground transition hover:text-foreground",
+          chartType === "bar" && "bg-primary text-primary-foreground shadow-sm hover:text-primary-foreground",
+        )}
+        onClick={() => onChange(cardId, "bar")}
+        aria-label="Exibir como barras"
+        aria-pressed={chartType === "bar"}
+        title="Barras"
+      >
+        <BarChart3 className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        className={cn(
+          "flex h-6 w-7 items-center justify-center rounded-sm text-muted-foreground transition hover:text-foreground",
+          chartType === "line" && "bg-primary text-primary-foreground shadow-sm hover:text-primary-foreground",
+        )}
+        onClick={() => onChange(cardId, "line")}
+        aria-label="Exibir como linha"
+        aria-pressed={chartType === "line"}
+        title="Linha"
+      >
+        <ChartSpline className="h-3.5 w-3.5" />
+      </button>
+    </div>
   );
 }
 

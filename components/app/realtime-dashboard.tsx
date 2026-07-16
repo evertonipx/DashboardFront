@@ -12,6 +12,7 @@ import {
   Route,
   Settings2,
   Sigma,
+  Table2,
   Target,
   Trash2,
   TrendingUp,
@@ -25,7 +26,11 @@ import {
   CardLayout,
   ReorderModeButton,
 } from "@/components/app/card-layout";
-import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import {
+  EChart,
+  applyChartTypePreference,
+  type EnterpriseChartOption,
+} from "@/components/app/echart";
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
@@ -74,6 +79,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { hasVisualAdminAccess } from "@/lib/access";
 import { apiFetch } from "@/lib/api";
 import { aggregateQueryIso } from "@/lib/aggregate-time";
@@ -115,10 +128,21 @@ import {
 import {
   DAY_OF_MONTH_AXIS_LABELS,
   buildCalendarAxisLabel,
+  buildCalendarMarkArea,
+  buildCalendarMarkAreaForMonth,
+  holidayCategoryIndexes,
+  holidayCategoryIndexesForMonth,
   saturdayCategoryIndexesForMonth,
   sundayCategoryIndexesForMonth,
 } from "@/lib/chart-calendar-axis";
-import type { ReportMetric, ReportPayload } from "@/lib/report-export";
+import {
+  COUNTING_MONTH_LABELS,
+} from "@/lib/counting-intelligence";
+import type {
+  ReportMetric,
+  ReportPayload,
+  ReportTable,
+} from "@/lib/report-export";
 import {
   buildCombinedScenarioPoints,
   buildScenarioCumulativeTotals,
@@ -195,6 +219,21 @@ type ScenarioComparisonPoint = {
 };
 
 type TodayComparisonPoint = ScenarioComparisonPoint;
+
+type ScenarioTotalsTableRow = {
+  id: string;
+  month: number;
+  name: string;
+  share: number;
+  today: number;
+};
+
+type CurrentYearMonthPoint = {
+  accumulated: number | null;
+  label: string;
+  month: number;
+  value: number | null;
+};
 
 type OperationalMonthComparisonPoint = {
   baseline: number | null;
@@ -414,6 +453,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     );
   }, [companyScopeId, preferenceScope]);
   const hourRows = chartData.live_chart_hour?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const monthRows = chartData.live_chart_month?.rows ?? EMPTY_AGGREGATE_ROWS;
   const comparisonHourRows =
     chartData[OPERATIONAL_COMPARISON_HOURS_ID]?.rows ?? EMPTY_AGGREGATE_ROWS;
   const currentMonthDayState = chartData[CURRENT_MONTH_DAYS_ID];
@@ -876,6 +916,19 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       scenarios,
     ],
   );
+  const scenarioTableScenarios = React.useMemo(
+    () =>
+      selectScenarios(
+        scenarios,
+        operationalSettings.scenarioTableSelectionMode,
+        operationalSettings.scenarioTableIds,
+      ),
+    [
+      operationalSettings.scenarioTableIds,
+      operationalSettings.scenarioTableSelectionMode,
+      scenarios,
+    ],
+  );
   const peakDayScenarios = React.useMemo(
     () =>
       selectScenarios(
@@ -980,6 +1033,53 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       cumulativeScenarios,
       hourRows,
     ],
+  );
+  const scenarioTableTodayPoints = React.useMemo(
+    () =>
+      buildScenarioCumulativeTotals({
+        from: startOfDay(clock),
+        rows: hourRows,
+        scenarios: scenarioTableScenarios,
+        sourceGranularity: chartData.live_chart_hour?.granularity ?? "hour",
+        to: clock,
+      }),
+    [
+      chartData.live_chart_hour?.granularity,
+      clock,
+      hourRows,
+      scenarioTableScenarios,
+    ],
+  );
+  const scenarioTableMonthPoints = React.useMemo(
+    () =>
+      buildScenarioCumulativeTotals({
+        from: startOfMonth(clock),
+        rows: currentMonthDayRows,
+        scenarios: scenarioTableScenarios,
+        sourceGranularity: currentMonthDayState?.granularity ?? "day",
+        to: clock,
+      }),
+    [
+      clock,
+      currentMonthDayRows,
+      currentMonthDayState?.granularity,
+      scenarioTableScenarios,
+    ],
+  );
+  const scenarioTableRows = React.useMemo(
+    () =>
+      buildScenarioTotalsTableRows(
+        scenarioTableTodayPoints,
+        scenarioTableMonthPoints,
+      ),
+    [scenarioTableMonthPoints, scenarioTableTodayPoints],
+  );
+  const currentYearMonthPoints = React.useMemo(
+    () =>
+      selectedScope
+        ? buildCurrentYearMonthPoints(monthRows, selectedScope, clock)
+        : [],
+    [clock, monthRows, selectedScope],
   );
   const peakDayPoints = React.useMemo(
     () =>
@@ -1379,6 +1479,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const operationalCards = [
     {
       id: "live_chart_hour",
+      chartTypeEnabled: true,
       label: "Hora a Hora",
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
@@ -1406,6 +1507,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     },
     {
       id: "live_moving_average_trend",
+      chartTypeEnabled: true,
       label: "Tendência 7 x 30 dias",
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
@@ -1420,6 +1522,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     },
     {
       id: "live_hourly_occupancy",
+      chartTypeEnabled: true,
       label: "Ocupação hora a hora",
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
@@ -1521,6 +1624,61 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       ),
     },
     {
+      id: "live_scenario_totals_table",
+      label: "Tabela acumulada por cenário",
+      defaultSize: "full" as const,
+      className: "sm:col-span-2 xl:col-span-4",
+      node: (
+        <ScenarioTotalsTableCard
+          canConfigure={canEditVisual}
+          loading={initialLoading}
+          monitorMode={monitorMode}
+          onSelectedIdsChange={(scenarioTableIds) =>
+            updateOperationalSettings({ scenarioTableIds })
+          }
+          onSelectionModeChange={(scenarioTableSelectionMode) =>
+            updateOperationalSettings({ scenarioTableSelectionMode })
+          }
+          rows={scenarioTableRows}
+          scenarios={scenarios}
+          selectedIds={operationalSettings.scenarioTableIds}
+          selectionMode={operationalSettings.scenarioTableSelectionMode}
+        />
+      ),
+    },
+    {
+      id: "live_current_year_monthly",
+      chartTypeEnabled: true,
+      label: "Comparativo mensal por ano",
+      defaultSize: "wide" as const,
+      className: "sm:col-span-2 xl:col-span-2",
+      node: (
+        <CurrentYearComparisonCard
+          accumulated={false}
+          loading={initialLoading}
+          points={currentYearMonthPoints}
+          scopeName={selectedScope?.name ?? "Visão selecionada"}
+          year={clock.getFullYear()}
+        />
+      ),
+    },
+    {
+      id: "live_current_year_accumulated",
+      chartTypeEnabled: true,
+      label: "Comparativo acumulado por ano",
+      defaultSize: "wide" as const,
+      className: "sm:col-span-2 xl:col-span-2",
+      node: (
+        <CurrentYearComparisonCard
+          accumulated
+          loading={initialLoading}
+          points={currentYearMonthPoints}
+          scopeName={selectedScope?.name ?? "Visão selecionada"}
+          year={clock.getFullYear()}
+        />
+      ),
+    },
+    {
       id: "live_month_hour_heatmap",
       label: "Mapa de calor dia x hora",
       defaultSize: "full" as const,
@@ -1598,12 +1756,14 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     },
     {
       id: "live_operational_month_comparison",
+      chartTypeEnabled: true,
       label: "Dias x meses",
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: (
         <OperationalMonthComparisonCard
           loading={initialLoading}
+          month={clock}
           mode={operationalSettings.monthComparison}
           points={monthComparisonPoints}
           scopeName={selectedScope?.name ?? "Visão selecionada"}
@@ -1612,12 +1772,14 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     },
     {
       id: "live_operational_month_cumulative",
+      chartTypeEnabled: true,
       label: "Acumulado diário x mês-base",
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: (
         <OperationalMonthCumulativeCard
           loading={initialLoading}
+          month={clock}
           mode={operationalSettings.monthComparison}
           points={monthComparisonPoints}
           scopeName={selectedScope?.name ?? "Visão selecionada"}
@@ -1630,6 +1792,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     scenarioTodayComparisonPoints.some((point) => point.total > 0)
       ? {
           id: "live_today_scenario_comparison",
+          chartTypeEnabled: true,
           label: "Hoje por cenário",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
@@ -1648,6 +1811,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     locationTodayComparisonPoints.some((point) => point.total > 0)
       ? {
           id: "live_today_location_comparison",
+          chartTypeEnabled: true,
           label: "Hoje por local",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
@@ -1666,6 +1830,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     subLocationTodayComparisonPoints.some((point) => point.total > 0)
       ? {
           id: "live_today_sub_location_comparison",
+          chartTypeEnabled: true,
           label: "Hoje por sublocal",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
@@ -1686,6 +1851,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     if (widget.kind === "scenario_comparison") {
       return {
         id: `live_custom_${widget.id}`,
+        chartTypeEnabled: true,
         label: widget.title,
         defaultSize: "full" as const,
         className: "sm:col-span-2 xl:col-span-4",
@@ -1731,6 +1897,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
 
     return {
       id: `live_custom_${widget.id}`,
+      chartTypeEnabled: true,
       label: widget.title,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
@@ -1791,6 +1958,17 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       new Map(
         livePreferences.flatMap((preference) =>
           preference.color ? [[preference.id, preference.color] as const] : [],
+        ),
+      ),
+    [livePreferences],
+  );
+  const liveChartTypeByCardId = React.useMemo(
+    () =>
+      new Map(
+        livePreferences.flatMap((preference) =>
+          preference.chartType
+            ? [[preference.id, preference.chartType] as const]
+            : [],
         ),
       ),
     [livePreferences],
@@ -1897,6 +2075,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       "live_operational_month_comparison",
       buildOperationalMonthReportChart({
         accumulated: false,
+        month: clock,
         mode: operationalSettings.monthComparison,
         points: monthComparisonPoints,
         scopeName: selectedScope.name,
@@ -1909,6 +2088,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       "live_operational_month_cumulative",
       buildOperationalMonthReportChart({
         accumulated: true,
+        month: clock,
         mode: operationalSettings.monthComparison,
         points: monthComparisonPoints,
         scopeName: selectedScope.name,
@@ -1925,6 +2105,26 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         clock,
         liveColorByCardId.get("live_moving_average_trend"),
       ),
+    ]);
+    liveChartEntries.push([
+      "live_current_year_monthly",
+      buildCurrentYearComparisonReportChart({
+        accumulated: false,
+        points: currentYearMonthPoints,
+        scopeName: selectedScope.name,
+        widgetColor: liveColorByCardId.get("live_current_year_monthly"),
+        year: clock.getFullYear(),
+      }),
+    ]);
+    liveChartEntries.push([
+      "live_current_year_accumulated",
+      buildCurrentYearComparisonReportChart({
+        accumulated: true,
+        points: currentYearMonthPoints,
+        scopeName: selectedScope.name,
+        widgetColor: liveColorByCardId.get("live_current_year_accumulated"),
+        year: clock.getFullYear(),
+      }),
     ]);
   }
   liveChartEntries.push([
@@ -2019,6 +2219,27 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       ]);
     });
 
+  const configuredLiveChartEntries = liveChartEntries.map(
+    ([cardId, chart]) =>
+      [
+        cardId,
+        {
+          ...chart,
+          option: applyChartTypePreference(
+            chart.option,
+            liveChartTypeByCardId.get(cardId),
+          ),
+        },
+      ] as const,
+  );
+
+  const liveTableByCardId = new Map<string, ReportTable>([
+    [
+      "live_scenario_totals_table",
+      buildScenarioTotalsReportTable(scenarioTableRows),
+    ],
+  ]);
+
   function composeLiveReportPayload(
     charts: ReportPayload["charts"],
   ): ReportPayload {
@@ -2046,11 +2267,14 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         .map((id) => liveMetricByCardId.get(id))
         .filter((metric): metric is ReportMetric => Boolean(metric)),
       charts,
+      tables: visibleLiveCardIds
+        .map((id) => liveTableByCardId.get(id))
+        .filter((table): table is ReportTable => Boolean(table)),
     };
   }
 
   async function buildConfiguredLiveReportPayload() {
-    const chartByCardId = new Map(liveChartEntries);
+    const chartByCardId = new Map(configuredLiveChartEntries);
 
     await Promise.all(
       customWidgets
@@ -2076,16 +2300,23 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
               definition,
               companyScopeId,
             );
-            chartByCardId.set(
-              cardId,
-              buildScenarioComparisonReportChart({
+            const reportChart = buildScenarioComparisonReportChart({
                 definition,
                 rows,
                 scenarios,
                 settings,
                 title: widget.title,
                 widgetColor: liveColorByCardId.get(cardId),
-              }),
+              });
+            chartByCardId.set(
+              cardId,
+              {
+                ...reportChart,
+                option: applyChartTypePreference(
+                  reportChart.option,
+                  liveChartTypeByCardId.get(cardId),
+                ),
+              },
             );
           } catch {
             // Preserva os demais widgets caso um comparativo isolado falhe.
@@ -2104,7 +2335,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
 
   const liveReportPayload = composeLiveReportPayload(
     liveCardIds
-      .map((id) => new Map(liveChartEntries).get(id))
+      .map((id) => new Map(configuredLiveChartEntries).get(id))
       .filter((chart): chart is ReportPayload["charts"][number] =>
         Boolean(chart),
       ),
@@ -2774,7 +3005,7 @@ function OperationalHeatmapCard({
             </CardTitle>
             <CardDescription className="mt-1">
               Intensidade do fluxo nas 24 faixas horárias e nos dias 1 a 31
-              do mês atual; fins de semana destacados no eixo.
+              do mês atual; fins de semana e feriados nacionais destacados.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -3123,21 +3354,230 @@ function ScenarioCumulativeTotalsCard({
   );
 }
 
+function ScenarioTotalsTableCard({
+  canConfigure,
+  loading,
+  monitorMode,
+  onSelectedIdsChange,
+  onSelectionModeChange,
+  rows,
+  scenarios,
+  selectedIds,
+  selectionMode,
+}: {
+  canConfigure: boolean;
+  loading: boolean;
+  monitorMode: boolean;
+  onSelectedIdsChange: (ids: string[]) => void;
+  onSelectionModeChange: (mode: "all" | "custom") => void;
+  rows: ScenarioTotalsTableRow[];
+  scenarios: Scenario[];
+  selectedIds: string[];
+  selectionMode: "all" | "custom";
+}) {
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const totalToday = rows.reduce((sum, row) => sum + row.today, 0);
+  const totalMonth = rows.reduce((sum, row) => sum + row.month, 0);
+  const selectedScenarioCount = selectScenarios(
+    scenarios,
+    selectionMode,
+    selectedIds,
+  ).length;
+
+  React.useEffect(() => {
+    if (monitorMode) setSettingsOpen(false);
+  }, [monitorMode]);
+
+  return (
+    <Card className="min-w-0 overflow-hidden">
+      <CardHeader className="pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Table2 className="h-4 w-4 text-primary" />
+              Tabela acumulada por cenário
+            </CardTitle>
+            <CardDescription className="mt-1">
+              Totais de hoje e do mês atual, linha por linha, incluindo os
+              períodos parciais.
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Badge variant="outline">
+              {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
+            </Badge>
+            <Badge variant="outline" className="tabular-nums">
+              Hoje {formatNumber(totalToday)}
+            </Badge>
+            <Badge variant="secondary" className="tabular-nums">
+              Mês {formatNumber(totalMonth)}
+            </Badge>
+            {canConfigure && !monitorMode ? (
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setSettingsOpen((current) => !current)}
+                aria-label="Configurar cenários da tabela acumulada"
+                title="Configurar cenários"
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="min-w-0 space-y-3">
+        {settingsOpen && !monitorMode ? (
+          <ScenarioPicker
+            mode={selectionMode}
+            onModeChange={onSelectionModeChange}
+            onSelectedIdsChange={onSelectedIdsChange}
+            scenarios={scenarios}
+            selectedIds={selectedIds}
+          />
+        ) : null}
+        {!selectedScenarioCount ? (
+          <EmptyChartState
+            className="h-[180px]"
+            text="Selecione ao menos um cenário para montar a tabela."
+          />
+        ) : loading ? (
+          <Skeleton className="h-[240px] w-full" />
+        ) : (
+          <div className="max-h-[460px] overflow-auto rounded-md border">
+            <Table className="min-w-[640px]">
+              <TableHeader className="sticky top-0 z-10 bg-card">
+                <TableRow>
+                  <TableHead>Cenário</TableHead>
+                  <TableHead className="text-right">Hoje</TableHead>
+                  <TableHead className="text-right">Mês atual</TableHead>
+                  <TableHead className="text-right">% do mês</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell className="max-w-[360px] font-medium">
+                      <span className="block truncate" title={row.name}>
+                        {row.name}
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatNumber(row.today)}
+                    </TableCell>
+                    <TableCell className="text-right font-semibold tabular-nums">
+                      {formatNumber(row.month)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-muted-foreground">
+                      {new Intl.NumberFormat("pt-BR", {
+                        maximumFractionDigits: 1,
+                        style: "percent",
+                      }).format(row.share)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CurrentYearComparisonCard({
+  accumulated,
+  loading,
+  points,
+  scopeName,
+  year,
+}: {
+  accumulated: boolean;
+  loading: boolean;
+  points: CurrentYearMonthPoint[];
+  scopeName: string;
+  year: number;
+}) {
+  const widgetColor = useWidgetColor();
+  const option = React.useMemo(
+    () => buildCurrentYearComparisonOption(points, accumulated, year, widgetColor),
+    [accumulated, points, widgetColor, year],
+  );
+  const values = points.flatMap((point) => {
+    const value = accumulated ? point.accumulated : point.value;
+    return value === null ? [] : [value];
+  });
+  const total = accumulated
+    ? values.at(-1) ?? 0
+    : values.reduce((sum, value) => sum + value, 0);
+  const title = accumulated
+    ? "Comparativo acumulado por ano"
+    : "Comparativo mensal por ano";
+
+  return (
+    <Card className="min-w-0 overflow-hidden">
+      <CardHeader className="pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              {accumulated ? (
+                <TrendingUp className="h-4 w-4 text-primary" />
+              ) : (
+                <CalendarDays className="h-4 w-4 text-primary" />
+              )}
+              {title}
+            </CardTitle>
+            <CardDescription className="mt-1">
+              {accumulated
+                ? "Soma progressiva dos meses do ano atual."
+                : "Meses do ano atual com média mensal tracejada."} {scopeName}.
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline">{year}</Badge>
+            <Badge variant="secondary" className="tabular-nums">
+              Total {formatNumber(total)}
+            </Badge>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="min-w-0">
+        {loading ? (
+          <Skeleton className="h-[320px] w-full" />
+        ) : values.length ? (
+          <div className="overflow-x-auto">
+            <EChart option={option} className="h-[320px] min-w-[620px]" />
+          </div>
+        ) : (
+          <EmptyChartState
+            className="h-[220px]"
+            text={`Sem valores mensais em ${year} para esta visão.`}
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function OperationalMonthComparisonCard({
   loading,
+  month,
   mode,
   points,
   scopeName,
 }: {
   loading: boolean;
+  month: Date;
   mode: LiveOperationalSettings["monthComparison"];
   points: OperationalMonthComparisonPoint[];
   scopeName: string;
 }) {
   const widgetColor = useWidgetColor();
   const option = React.useMemo(
-    () => buildOperationalMonthComparisonOption(points, mode, widgetColor),
-    [mode, points, widgetColor],
+    () => buildOperationalMonthComparisonOption(points, mode, month, widgetColor),
+    [mode, month, points, widgetColor],
   );
   const hasData = points.some(
     (point) => (point.current ?? 0) !== 0 || (point.baseline ?? 0) !== 0,
@@ -3153,7 +3593,7 @@ function OperationalMonthComparisonCard({
               Dias x meses
             </CardTitle>
             <CardDescription className="mt-1">
-              {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Fins de semana destacados no eixo.
+              {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Fins de semana e feriados nacionais destacados.
             </CardDescription>
           </div>
           <Badge variant="outline" className="max-w-full truncate">
@@ -3181,19 +3621,21 @@ function OperationalMonthComparisonCard({
 
 function OperationalMonthCumulativeCard({
   loading,
+  month,
   mode,
   points,
   scopeName,
 }: {
   loading: boolean;
+  month: Date;
   mode: LiveOperationalSettings["monthComparison"];
   points: OperationalMonthComparisonPoint[];
   scopeName: string;
 }) {
   const widgetColor = useWidgetColor();
   const option = React.useMemo(
-    () => buildOperationalMonthCumulativeOption(points, mode, widgetColor),
-    [mode, points, widgetColor],
+    () => buildOperationalMonthCumulativeOption(points, mode, month, widgetColor),
+    [mode, month, points, widgetColor],
   );
   const hasData = points.some(
     (point) => (point.current ?? 0) !== 0 || (point.baseline ?? 0) !== 0,
@@ -3209,7 +3651,7 @@ function OperationalMonthCumulativeCard({
               Acumulado diário x mês-base
             </CardTitle>
             <CardDescription className="mt-1">
-              Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Fins de semana destacados no eixo.
+              Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Fins de semana e feriados nacionais destacados.
             </CardDescription>
           </div>
           <Badge variant="outline" className="max-w-full truncate">
@@ -3272,7 +3714,7 @@ function OperationalTrendCard({
               Tendência 7 x 30 dias
             </CardTitle>
             <CardDescription className="mt-1">
-              Médias móveis calculadas somente com dias fechados. Eixo de 1 a 31; fins de semana destacados.
+              Médias móveis calculadas somente com dias fechados. Eixo de 1 a 31; fins de semana e feriados nacionais destacados.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -4525,6 +4967,55 @@ function scenarioNamesSummary(scenarios: Scenario[]) {
     : visibleNames.join(", ");
 }
 
+function buildScenarioTotalsTableRows(
+  todayPoints: ScenarioCumulativeTotalPoint[],
+  monthPoints: ScenarioCumulativeTotalPoint[],
+): ScenarioTotalsTableRow[] {
+  const todayById = new Map(
+    todayPoints.map((point) => [point.id, point.total]),
+  );
+
+  return monthPoints
+    .map((point) => ({
+      id: point.id,
+      month: point.total,
+      name: point.name,
+      share: point.share,
+      today: todayById.get(point.id) ?? 0,
+    }))
+    .sort(
+      (left, right) =>
+        right.month - left.month || left.name.localeCompare(right.name, "pt-BR"),
+    );
+}
+
+function buildCurrentYearMonthPoints(
+  rows: AggregateEventRow[],
+  scope: RealtimeScopeOption,
+  clock: Date,
+): CurrentYearMonthPoint[] {
+  const totals = aggregateScopeRowsByBucket(rows, scope, "month");
+  const year = clock.getFullYear();
+  const currentMonth = clock.getMonth();
+  let accumulated = 0;
+
+  return COUNTING_MONTH_LABELS.map((label, month) => {
+    const key = Date.UTC(year, month, 1);
+    const value = month <= currentMonth && totals.has(key)
+      ? totals.get(key) ?? 0
+      : null;
+
+    if (value !== null) accumulated += value;
+
+    return {
+      accumulated: value === null ? null : accumulated,
+      label,
+      month,
+      value,
+    };
+  });
+}
+
 function sumScopeRowsInRange(
   rows: AggregateEventRow[],
   scope: RealtimeScopeOption,
@@ -4755,6 +5246,7 @@ function buildOperationalHeatmapOption(
     xAxis: {
       axisLabel: buildCalendarAxisLabel({
         fontSize: 9,
+        holidayIndexes: holidayCategoryIndexesForMonth(month),
         saturdayIndexes: saturdayCategoryIndexesForMonth(month),
         sundayIndexes: sundayCategoryIndexesForMonth(month),
       }),
@@ -4788,6 +5280,7 @@ function buildOperationalHeatmapOption(
         itemStyle: {
           borderWidth: 0,
         },
+        markArea: buildCalendarMarkAreaForMonth(month),
         name: "Intensidade horária",
         progressive: 1_000,
         type: "heatmap",
@@ -4964,6 +5457,128 @@ function buildScenarioCumulativeTotalsOption(
   };
 }
 
+function buildCurrentYearComparisonOption(
+  points: CurrentYearMonthPoint[],
+  accumulated: boolean,
+  year: number,
+  widgetColor = "#1267C4",
+): EnterpriseChartOption {
+  const values = points.map((point) =>
+    accumulated ? point.accumulated : point.value,
+  );
+  const recordedValues = points.flatMap((point) =>
+    point.value === null ? [] : [point.value],
+  );
+  const average = recordedValues.length
+    ? recordedValues.reduce((sum, value) => sum + value, 0) /
+      recordedValues.length
+    : 0;
+  const averageName = `Média mensal de ${year}`;
+
+  return {
+    color: [widgetColor, "#C48A38"],
+    grid: { bottom: 8, containLabel: true, left: 8, right: 10, top: 58 },
+    legend: {
+      data: [String(year), ...(!accumulated && average ? [averageName] : [])],
+      itemGap: 12,
+      itemHeight: 9,
+      itemWidth: 9,
+      left: 0,
+      textStyle: { color: "#526477", fontSize: 11 },
+      top: 0,
+    },
+    tooltip: {
+      axisPointer: { type: "shadow" },
+      backgroundColor: "#ffffff",
+      borderColor: "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      textStyle: { color: "#13233A", fontSize: 12 },
+      trigger: "axis",
+      valueFormatter: (value) =>
+        value === null || value === undefined
+          ? "-"
+          : formatNumber(Number(value)),
+    },
+    xAxis: {
+      axisLabel: { color: "#66758A", fontSize: 10, interval: 0 },
+      axisLine: { lineStyle: { color: "#D8E3F2" } },
+      axisTick: { show: false },
+      data: points.map((point) => point.label),
+      type: "category",
+    },
+    yAxis: {
+      axisLabel: {
+        color: "#66758A",
+        fontSize: 10,
+        formatter: (value: number) => compactChartNumber(value),
+      },
+      minInterval: 1,
+      splitLine: { lineStyle: { color: "#E8EEF6" } },
+      type: "value",
+    },
+    series: [
+      {
+        barCategoryGap: "30%",
+        barMaxWidth: 28,
+        data: values,
+        emphasis: { focus: "series" },
+        itemStyle: {
+          borderRadius: [2, 2, 0, 0],
+          color: widgetColor,
+        },
+        label: {
+          align: "left",
+          color: "#526477",
+          distance: 7,
+          fontSize: 9,
+          formatter: (params: { value?: number | null }) => {
+            const value = params.value;
+            return value === null || value === undefined || value === 0
+              ? ""
+              : compactChartNumber(value);
+          },
+          position: "top",
+          rotate: 90,
+          show: true,
+          verticalAlign: "middle",
+        },
+        name: String(year),
+        type: "bar",
+      },
+      ...(!accumulated && average
+        ? [
+            {
+              animation: false,
+              data: points.map((point) =>
+                point.value === null ? null : average,
+              ),
+              itemStyle: { color: "#D49A45" },
+              lineStyle: {
+                color: "#C48A38",
+                opacity: 0.72,
+                type: "dashed",
+                width: 1,
+              },
+              name: averageName,
+              showSymbol: false,
+              silent: true,
+              symbol: "none",
+              type: "line",
+            },
+          ]
+        : []),
+    ],
+  };
+}
+
+function compactChartNumber(value: number) {
+  return new Intl.NumberFormat("pt-BR", {
+    maximumFractionDigits: 1,
+    notation: "compact",
+  }).format(value);
+}
+
 function buildPeakDaysRankingOption(
   points: ScenarioPeakDayPoint[],
   widgetColor = "#1267C4",
@@ -5056,6 +5671,7 @@ function sundayIndexesFromMonthPoints(
 function buildOperationalMonthComparisonOption(
   points: OperationalMonthComparisonPoint[],
   mode: LiveOperationalSettings["monthComparison"],
+  month: Date,
   widgetColor: string,
 ): EnterpriseChartOption {
   const baselineValues = points.flatMap((point) =>
@@ -5090,6 +5706,7 @@ function buildOperationalMonthComparisonOption(
     xAxis: {
       axisLabel: buildCalendarAxisLabel({
         fontSize: 9,
+        holidayIndexes: holidayCategoryIndexesForMonth(month),
         saturdayIndexes: saturdayIndexesFromMonthPoints(points),
         sundayIndexes: sundayIndexesFromMonthPoints(points),
       }),
@@ -5116,6 +5733,7 @@ function buildOperationalMonthComparisonOption(
           color: "#A3AFBF",
           opacity: 0.82,
         },
+        markArea: buildCalendarMarkAreaForMonth(month),
         name: monthComparisonLabel(mode),
         type: "bar",
       },
@@ -5160,6 +5778,7 @@ function buildOperationalMonthComparisonOption(
 function buildOperationalMonthCumulativeOption(
   points: OperationalMonthComparisonPoint[],
   mode: LiveOperationalSettings["monthComparison"],
+  month: Date,
   widgetColor: string,
 ): EnterpriseChartOption {
   const cumulative = buildOperationalMonthCumulativePoints(points);
@@ -5191,6 +5810,7 @@ function buildOperationalMonthCumulativeOption(
     xAxis: {
       axisLabel: buildCalendarAxisLabel({
         fontSize: 9,
+        holidayIndexes: holidayCategoryIndexesForMonth(month),
         saturdayIndexes: saturdayIndexesFromMonthPoints(points),
         sundayIndexes: sundayIndexesFromMonthPoints(points),
       }),
@@ -5217,6 +5837,7 @@ function buildOperationalMonthCumulativeOption(
           color: "#A3AFBF",
           opacity: 0.78,
         },
+        markArea: buildCalendarMarkAreaForMonth(month),
         name: `${monthComparisonLabel(mode)} acumulado`,
         type: "bar",
       },
@@ -5287,6 +5908,7 @@ function buildOperationalTrendOption(
     xAxis: {
       axisLabel: buildCalendarAxisLabel({
         fontSize: 9,
+        holidayIndexes: holidayCategoryIndexesForMonth(month),
         saturdayIndexes: saturdayCategoryIndexesForMonth(month),
         sundayIndexes: sundayCategoryIndexesForMonth(month),
       }),
@@ -5308,6 +5930,7 @@ function buildOperationalTrendOption(
         barMaxWidth: 14,
         data: valuesByDay((point) => point.total),
         itemStyle: { color: volumeColor, opacity: 0.42 },
+        markArea: buildCalendarMarkAreaForMonth(month),
         name: "Volume diário",
         type: "bar",
       },
@@ -5425,6 +6048,10 @@ function buildChartOption(
   widgetColor = "#1267C4",
   targetValue = 0,
 ): EnterpriseChartOption {
+  const calendarDates =
+    definition.granularity === "day"
+      ? points.map((point) => point.bucket)
+      : [];
   const saturdayIndexes = new Set(
     definition.granularity === "day"
       ? points.flatMap((point, index) => {
@@ -5483,6 +6110,7 @@ function buildChartOption(
           ? buildCalendarAxisLabel({
               fontSize: 11,
               hideOverlap: true,
+              holidayIndexes: holidayCategoryIndexes(calendarDates),
               saturdayIndexes,
               sundayIndexes,
             })
@@ -5531,6 +6159,10 @@ function buildChartOption(
           borderRadius: [2, 2, 0, 0],
           color: widgetColor,
         },
+        markArea:
+          definition.granularity === "day"
+            ? buildCalendarMarkArea(calendarDates)
+            : undefined,
         markLine:
           targetValue > 0
             ? {
@@ -5766,7 +6398,7 @@ function buildOperationalHeatmapReportChart({
     comparison: maximum
       ? `Maior pico: dia ${ranked[0].day}, ${hourRangeLabel(ranked[0].hour)}, ${formatNumber(maximum)} eventos`
       : "Nenhum pico registrado no período",
-    description: `Intensidade do fluxo por dia e faixa horária em ${monthLabel}. Fins de semana destacados. Visão: ${scopeName}.`,
+    description: `Intensidade do fluxo por dia e faixa horária em ${monthLabel}. Fins de semana e feriados nacionais destacados. Visão: ${scopeName}.`,
     option: buildOperationalHeatmapOption(points, month, widgetColor),
     table: {
       title: "Dados - Maiores picos por dia e hora",
@@ -5892,14 +6524,109 @@ function buildScenarioCumulativeTotalsReportChart(
   };
 }
 
+function buildScenarioTotalsReportTable(
+  rows: ScenarioTotalsTableRow[],
+): ReportTable {
+  const totalToday = rows.reduce((sum, row) => sum + row.today, 0);
+  const totalMonth = rows.reduce((sum, row) => sum + row.month, 0);
+
+  return {
+    columns: [
+      { key: "scenario", label: "Cenário", width: 40 },
+      { key: "today", label: "Hoje", numeric: true, width: 18 },
+      { key: "month", label: "Mês atual", numeric: true, width: 20 },
+      { key: "share", label: "% do mês", width: 18 },
+    ],
+    description: `Total hoje: ${formatNumber(totalToday)}. Total mensal: ${formatNumber(totalMonth)}.`,
+    includeInCharts: true,
+    rows: [
+      {
+        month: totalMonth,
+        scenario: "TOTAL",
+        share: totalMonth ? "100%" : "0%",
+        today: totalToday,
+      },
+      ...rows.map((row) => ({
+        month: row.month,
+        scenario: row.name,
+        share: new Intl.NumberFormat("pt-BR", {
+          maximumFractionDigits: 1,
+          style: "percent",
+        }).format(row.share),
+        today: row.today,
+      })),
+    ],
+    title: "Tabela acumulada por cenário",
+  };
+}
+
+function buildCurrentYearComparisonReportChart({
+  accumulated,
+  points,
+  scopeName,
+  widgetColor = "#1267C4",
+  year,
+}: {
+  accumulated: boolean;
+  points: CurrentYearMonthPoint[];
+  scopeName: string;
+  widgetColor?: string;
+  year: number;
+}): ReportPayload["charts"][number] {
+  const title = accumulated
+    ? "Comparativo acumulado por ano"
+    : "Comparativo mensal por ano";
+  const values = points.flatMap((point) => {
+    const value = accumulated ? point.accumulated : point.value;
+    return value === null ? [] : [value];
+  });
+  const total = accumulated
+    ? values.at(-1) ?? 0
+    : values.reduce((sum, value) => sum + value, 0);
+
+  return {
+    comparison: `${year}: ${formatNumber(total)} eventos até o mês atual`,
+    description: `${
+      accumulated
+        ? "Soma progressiva dos meses"
+        : "Valores mensais do ano atual"
+    }. Visão: ${scopeName}.`,
+    option: buildCurrentYearComparisonOption(
+      points,
+      accumulated,
+      year,
+      widgetColor,
+    ),
+    table: {
+      title: `Dados - ${title}`,
+      columns: [
+        { key: "month", label: "Mês", width: 18 },
+        {
+          key: "value",
+          label: accumulated ? "Acumulado" : String(year),
+          numeric: true,
+          width: 22,
+        },
+      ],
+      rows: points.map((point) => ({
+        month: point.label,
+        value: accumulated ? point.accumulated : point.value,
+      })),
+    },
+    title,
+  };
+}
+
 function buildOperationalMonthReportChart({
   accumulated,
+  month,
   mode,
   points,
   scopeName,
   widgetColor = "#1267C4",
 }: {
   accumulated: boolean;
+  month: Date;
   mode: LiveOperationalSettings["monthComparison"];
   points: OperationalMonthComparisonPoint[];
   scopeName: string;
@@ -5913,11 +6640,11 @@ function buildOperationalMonthReportChart({
   return {
     comparison: `${monthComparisonLabel(mode)} à esquerda · Mês atual à direita`,
     description: accumulated
-      ? `Acumulados comparáveis nos mesmos dias, com fins de semana destacados no eixo. Visão: ${scopeName}.`
-      : `Valores diários, com fins de semana destacados no eixo. Linha tracejada: ${averageBaseDescription(mode).toLowerCase()}. Visão: ${scopeName}.`,
+      ? `Acumulados comparáveis nos mesmos dias, com fins de semana e feriados nacionais destacados no eixo. Visão: ${scopeName}.`
+      : `Valores diários, com fins de semana e feriados nacionais destacados no eixo. Linha tracejada: ${averageBaseDescription(mode).toLowerCase()}. Visão: ${scopeName}.`,
     option: accumulated
-      ? buildOperationalMonthCumulativeOption(points, mode, widgetColor)
-      : buildOperationalMonthComparisonOption(points, mode, widgetColor),
+      ? buildOperationalMonthCumulativeOption(points, mode, month, widgetColor)
+      : buildOperationalMonthComparisonOption(points, mode, month, widgetColor),
     table: {
       title: `Dados - ${title}`,
       columns: [
@@ -5960,7 +6687,7 @@ function buildOperationalTrendReportChart(
     comparison: `MM7 ${formatMovingAverageTrend(
       trend7,
     )} · MM30 ${formatMovingAverageTrend(trend30)}`,
-    description: `Médias móveis de 7 e 30 dias calculadas apenas com dias fechados, exibidas no eixo mensal de 1 a 31 com fins de semana destacados. Visão: ${scopeName}.`,
+    description: `Médias móveis de 7 e 30 dias calculadas apenas com dias fechados, exibidas no eixo mensal de 1 a 31 com fins de semana e feriados nacionais destacados. Visão: ${scopeName}.`,
     option: buildOperationalTrendOption(
       points,
       trend7.direction,

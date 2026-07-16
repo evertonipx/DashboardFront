@@ -551,6 +551,10 @@ function normalizeSnapshot(
         if (typeof item.id !== "string") return [];
         return [
           {
+            chartType:
+              item.chartType === "bar" || item.chartType === "line"
+                ? item.chartType
+                : undefined,
             color:
               typeof item.color === "string" ? item.color : undefined,
             id: item.id,

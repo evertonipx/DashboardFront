@@ -152,6 +152,7 @@ export function buildCountingIntelligenceWidgetCards({
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.annualComparison,
+      chartTypeEnabled: true,
       label: "Comparativo mensal por ano",
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
@@ -161,6 +162,7 @@ export function buildCountingIntelligenceWidgetCards({
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison,
+      chartTypeEnabled: true,
       label: "Comparativo acumulado por ano",
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
@@ -181,6 +183,7 @@ export function buildCountingIntelligenceWidgetCards({
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.directionalFlow,
+      chartTypeEnabled: true,
       label: "Fluxo direcional por hora",
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",

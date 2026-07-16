@@ -31,6 +31,8 @@ import { aggregateQueryIso } from "@/lib/aggregate-time";
 import {
   DAY_OF_MONTH_AXIS_LABELS,
   buildCalendarAxisLabel,
+  buildCalendarMarkArea,
+  holidayCategoryIndexes,
 } from "@/lib/chart-calendar-axis";
 import { pastelBarColor } from "@/lib/chart-palette";
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
@@ -1006,6 +1008,8 @@ export function buildScenarioComparisonChartOption(
         )
       : [],
   );
+  const calendarDates =
+    granularity === "day" ? calendarPoints.map((point) => point.id) : [];
 
   return {
     color: series.map((item) =>
@@ -1062,6 +1066,7 @@ export function buildScenarioComparisonChartOption(
       axisLabel: buildCalendarAxisLabel({
         fontSize: 11,
         hideOverlap: true,
+        holidayIndexes: holidayCategoryIndexes(calendarDates),
         interval: 0,
         rotate: dense ? 24 : 0,
         saturdayIndexes,
@@ -1091,7 +1096,7 @@ export function buildScenarioComparisonChartOption(
       },
       type: "value",
     },
-    series: series.map((item) => {
+    series: series.map((item, seriesIndex) => {
       const color =
         item.colorIndex === 0 && widgetColor
           ? widgetColor
@@ -1114,6 +1119,10 @@ export function buildScenarioComparisonChartOption(
         color,
         opacity: item.temporalRole === "baseline" ? 0.42 : 0.96,
       },
+      markArea:
+        seriesIndex === 0 && granularity === "day"
+          ? buildCalendarMarkArea(calendarDates)
+          : undefined,
       name: item.name,
       type: "bar",
     };

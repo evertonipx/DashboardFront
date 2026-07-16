@@ -382,6 +382,7 @@ export function ScenarioFilter({
             ? [
                 {
                   id: "report_chart",
+                  chartTypeEnabled: true,
                   className: "sm:col-span-2 xl:col-span-3",
                   node: (
                     <Card>

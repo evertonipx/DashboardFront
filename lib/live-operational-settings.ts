@@ -11,6 +11,8 @@ export type LiveOperationalSettings = {
   occupancySelectionMode: "auto" | "custom";
   cumulativeScenarioIds: string[];
   cumulativeSelectionMode: "all" | "custom";
+  scenarioTableIds: string[];
+  scenarioTableSelectionMode: "all" | "custom";
   peakDayScenarioIds: string[];
   peakDaySelectionMode: "all" | "custom";
   rankingScenarioIds: string[];
@@ -29,6 +31,8 @@ const defaultSettings: LiveOperationalSettings = {
   occupancySelectionMode: "auto",
   cumulativeScenarioIds: [],
   cumulativeSelectionMode: "all",
+  scenarioTableIds: [],
+  scenarioTableSelectionMode: "all",
   peakDayScenarioIds: [],
   peakDaySelectionMode: "all",
   rankingScenarioIds: [],
@@ -96,6 +100,9 @@ function normalizeSettings(
     cumulativeScenarioIds: normalizeIds(settings.cumulativeScenarioIds),
     cumulativeSelectionMode:
       settings.cumulativeSelectionMode === "custom" ? "custom" : "all",
+    scenarioTableIds: normalizeIds(settings.scenarioTableIds),
+    scenarioTableSelectionMode:
+      settings.scenarioTableSelectionMode === "custom" ? "custom" : "all",
     peakDayScenarioIds: normalizeIds(settings.peakDayScenarioIds),
     peakDaySelectionMode:
       settings.peakDaySelectionMode === "custom" ? "custom" : "all",

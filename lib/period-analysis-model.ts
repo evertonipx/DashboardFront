@@ -1,5 +1,9 @@
 import type { EnterpriseChartOption } from "@/components/app/echart";
-import { buildCalendarAxisLabel } from "@/lib/chart-calendar-axis";
+import {
+  buildCalendarAxisLabel,
+  buildCalendarMarkArea,
+  holidayCategoryIndexes,
+} from "@/lib/chart-calendar-axis";
 import {
   monochromeHeatmapPalette,
   pastelBarColor,
@@ -421,6 +425,7 @@ function buildHeatmapModel(
             itemStyle: { shadowBlur: 8, shadowColor: "rgba(15, 35, 55, 0.22)" },
           },
           itemStyle: { borderWidth: 0 },
+          markArea: buildCalendarMarkArea(days),
           progressive: 1500,
           type: "heatmap",
         },
@@ -445,6 +450,7 @@ function buildHeatmapModel(
       xAxis: {
         axisLabel: buildCalendarAxisLabel({
           hideOverlap: true,
+          holidayIndexes: holidayCategoryIndexes(days),
           interval: 0,
           rotate: days.length > 31 ? 45 : 0,
           saturdayIndexes,
@@ -580,6 +586,7 @@ function buildTrendModel(
   const sundayIndexes = trendPoints.flatMap((point, index) =>
     point.isSunday ? [index] : [],
   );
+  const calendarDates = trendPoints.map((point) => point.bucket);
 
   return {
     description: "Médias móveis calculadas com os 29 dias anteriores ao início do período.",
@@ -597,6 +604,7 @@ function buildTrendModel(
           connectNulls: false,
           data: trendPoints.map((point) => point.average7),
           lineStyle: { type: "dashed", width: 1.3 },
+          markArea: buildCalendarMarkArea(calendarDates),
           name: "Média móvel 7 dias",
           showSymbol: false,
           smooth: 0.2,
@@ -616,6 +624,7 @@ function buildTrendModel(
       xAxis: {
         axisLabel: buildCalendarAxisLabel({
           hideOverlap: true,
+          holidayIndexes: holidayCategoryIndexes(calendarDates),
           interval: 0,
           saturdayIndexes,
           sundayIndexes,
@@ -726,6 +735,7 @@ function buildBarTimelineOption(
   const sundayIndexes = points.flatMap((point, index) =>
     point.isSunday ? [index] : [],
   );
+  const calendarDates = points.map((point) => point.bucket);
 
   return {
     color: [color],
@@ -735,6 +745,7 @@ function buildBarTimelineOption(
         barMaxWidth: 28,
         data: points.map((point) => point.total),
         itemStyle: { borderRadius: [3, 3, 0, 0] },
+        markArea: buildCalendarMarkArea(calendarDates),
         name: "Fluxo",
         type: "bar",
       },
@@ -743,6 +754,7 @@ function buildBarTimelineOption(
     xAxis: {
       axisLabel: buildCalendarAxisLabel({
         hideOverlap: true,
+        holidayIndexes: holidayCategoryIndexes(calendarDates),
         interval: 0,
         rotate: points.length > 48 ? 45 : 0,
         saturdayIndexes,
@@ -776,6 +788,7 @@ function buildMultiScenarioOption(
   const sundayIndexes = calendarPoints.flatMap((point, index) =>
     point.isSunday ? [index] : [],
   );
+  const calendarDates = calendarPoints.map((point) => point.bucket);
 
   return {
     color: series.map((_, index) => (index === 0 ? color : pastelBarColor(index))),
@@ -790,10 +803,11 @@ function buildMultiScenarioOption(
       series.length > 1
         ? { left: 0, right: 0, top: 0, type: "scroll" }
         : undefined,
-    series: series.map((item) => ({
+    series: series.map((item, index) => ({
       barMaxWidth: 24,
       data: item.points.map((point) => point.total),
       itemStyle: { borderRadius: [3, 3, 0, 0] },
+      markArea: index === 0 ? buildCalendarMarkArea(calendarDates) : undefined,
       name: item.name,
       type: "bar",
     })),
@@ -801,6 +815,7 @@ function buildMultiScenarioOption(
     xAxis: {
       axisLabel: buildCalendarAxisLabel({
         hideOverlap: true,
+        holidayIndexes: holidayCategoryIndexes(calendarDates),
         interval: 0,
         rotate: calendarPoints.length > 48 ? 45 : 0,
         saturdayIndexes,

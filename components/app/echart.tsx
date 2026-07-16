@@ -13,6 +13,7 @@ import {
   DataZoomComponent,
   GridComponent,
   LegendComponent,
+  MarkAreaComponent,
   MarkLineComponent,
   TooltipComponent,
   VisualMapComponent,
@@ -26,6 +27,8 @@ import { LabelLayout } from "echarts/features";
 import { CanvasRenderer } from "echarts/renderers";
 
 import { useTheme } from "@/components/app/theme-provider";
+import { useWidgetChartType } from "@/components/app/widget-appearance";
+import type { CardChartType } from "@/lib/view-preferences";
 import { cn } from "@/lib/utils";
 
 echarts.use([
@@ -38,6 +41,7 @@ echarts.use([
   DataZoomComponent,
   GridComponent,
   LegendComponent,
+  MarkAreaComponent,
   MarkLineComponent,
   TooltipComponent,
   VisualMapComponent,
@@ -58,15 +62,18 @@ type EChartProps = {
 
 export function EChart({ option, className }: EChartProps) {
   const { effectiveTheme } = useTheme();
+  const chartType = useWidgetChartType();
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const chartRef = React.useRef<EChartsType | null>(null);
   const themedOption = React.useMemo(
     () =>
       applyChartTheme(
-        enhanceInteractiveChartOption(option),
+        enhanceInteractiveChartOption(
+          applyChartTypePreference(option, chartType),
+        ),
         effectiveTheme === "dark",
       ),
-    [effectiveTheme, option],
+    [chartType, effectiveTheme, option],
   );
 
   React.useEffect(() => {
@@ -86,16 +93,140 @@ export function EChart({ option, className }: EChartProps) {
       chart.dispose();
       chartRef.current = null;
     };
-  }, []);
+  }, [chartType]);
 
   React.useEffect(() => {
-    chartRef.current?.setOption(themedOption, {
+    const chart = chartRef.current;
+    chart?.setOption(themedOption, {
       lazyUpdate: false,
       notMerge: true,
     });
   }, [themedOption]);
 
-  return <div ref={containerRef} className={cn("h-full w-full", className)} />;
+  return (
+    <div
+      ref={containerRef}
+      className={cn("h-full w-full", className)}
+      data-chart-type={chartType}
+    />
+  );
+}
+
+export function applyChartTypePreference(
+  option: EnterpriseChartOption,
+  chartType: CardChartType | undefined,
+): EnterpriseChartOption {
+  if (chartType !== "line") return option;
+
+  const xAxes = Array.isArray(option.xAxis)
+    ? option.xAxis
+    : option.xAxis
+      ? [option.xAxis]
+      : [];
+  const rawSeries = Array.isArray(option.series)
+    ? option.series
+    : option.series
+      ? [option.series]
+      : [];
+  let converted = false;
+  const categoryCounts = xAxes.map((axis) => {
+    if (!axis || typeof axis !== "object") return 0;
+    const data = (axis as { data?: unknown }).data;
+    return Array.isArray(data) ? data.length : 0;
+  });
+  const series = rawSeries.map((item) => {
+    if (!item || typeof item !== "object") return item;
+    const seriesOption = item as Record<string, unknown>;
+    if (seriesOption.type !== "bar") return item;
+
+    const axisIndex =
+      typeof seriesOption.xAxisIndex === "number" ? seriesOption.xAxisIndex : 0;
+    const axis = xAxes[axisIndex];
+    if (
+      !axis ||
+      typeof axis !== "object" ||
+      (axis as { type?: unknown }).type !== "category"
+    ) {
+      return item;
+    }
+
+    converted = true;
+    const lineSeries = { ...seriesOption };
+    [
+      "barCategoryGap",
+      "barGap",
+      "barMaxWidth",
+      "barMinHeight",
+      "barMinWidth",
+      "barWidth",
+    ].forEach((key) => delete lineSeries[key]);
+    const originalItemStyle =
+      lineSeries.itemStyle && typeof lineSeries.itemStyle === "object"
+        ? (lineSeries.itemStyle as Record<string, unknown>)
+        : {};
+    const itemStyle = { ...originalItemStyle };
+    delete itemStyle.borderRadius;
+    const originalLineStyle =
+      lineSeries.lineStyle && typeof lineSeries.lineStyle === "object"
+        ? (lineSeries.lineStyle as Record<string, unknown>)
+        : {};
+    const categoryCount = categoryCounts[axisIndex] ?? 0;
+    const seriesColor =
+      typeof itemStyle.color === "string" ? itemStyle.color : undefined;
+
+    return {
+      ...lineSeries,
+      connectNulls: false,
+      itemStyle: seriesColor ? { color: seriesColor } : undefined,
+      label: { show: false },
+      lineStyle: {
+        ...(seriesColor ? { color: seriesColor } : {}),
+        opacity:
+          typeof itemStyle.opacity === "number" ? itemStyle.opacity : 0.96,
+        width: 2.25,
+        ...originalLineStyle,
+      },
+      showSymbol: categoryCount <= 31,
+      smooth: categoryCount <= 31 ? 0.16 : false,
+      symbol: "circle",
+      symbolSize: categoryCount > 31 ? 3 : 5,
+      type: "line",
+    };
+  });
+
+  if (!converted) return option;
+
+  const xAxis = Array.isArray(option.xAxis)
+    ? option.xAxis.map((axis) =>
+        axis && typeof axis === "object" && axis.type === "category"
+          ? { ...axis, boundaryGap: false }
+          : axis,
+      )
+    : option.xAxis && typeof option.xAxis === "object"
+      ? { ...option.xAxis, boundaryGap: false }
+      : option.xAxis;
+  const tooltip =
+    option.tooltip &&
+    !Array.isArray(option.tooltip) &&
+    typeof option.tooltip === "object"
+      ? {
+          ...option.tooltip,
+          axisPointer: {
+            ...(option.tooltip.axisPointer &&
+            typeof option.tooltip.axisPointer === "object"
+              ? option.tooltip.axisPointer
+              : {}),
+            type: "line",
+          },
+        }
+      : option.tooltip;
+
+  return {
+    ...option,
+    series,
+    tooltip,
+    xAxis,
+  } as EnterpriseChartOption;
 }
 
 function enhanceInteractiveChartOption(
@@ -238,7 +369,9 @@ function applyChartTheme(option: EnterpriseChartOption, dark: boolean) {
     "#0B4EA2": "#9bd0ff",
     "#EAF3FF": "#172033",
     "#EAF8F4": "#142422",
+    "#FFF7E8": "#2B2418",
     "#B7D7FF": "#35577E",
+    "#E8C98E": "#6A5530",
     "#F3F8FF": "#141B2A",
     "#D8E9FF": "#263E5D",
     "#0F766E": "#2dd4bf",
@@ -277,6 +410,10 @@ function applyChartTheme(option: EnterpriseChartOption, dark: boolean) {
     "#E8EEF6": "#232328",
     "rgba(18, 103, 196, 0.06)": "rgba(90, 168, 255, 0.14)",
     "rgba(18, 103, 196, 0.05)": "rgba(90, 168, 255, 0.12)",
+    "rgba(18, 103, 196, 0.032)": "rgba(90, 168, 255, 0.055)",
+    "rgba(15, 118, 110, 0.045)": "rgba(45, 212, 191, 0.06)",
+    "rgba(196, 138, 56, 0.075)": "rgba(246, 196, 83, 0.085)",
+    "rgba(196, 138, 56, 0.18)": "rgba(246, 196, 83, 0.22)",
   }) as EnterpriseChartOption;
 }
 

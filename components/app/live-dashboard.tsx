@@ -526,6 +526,7 @@ export function LiveDashboard({ compact = false }: LiveDashboardProps) {
   ];
 
   const chartCards = chartDefinitions.map((definition) => ({
+    chartTypeEnabled: true,
     id: definition.id,
     label: definition.label,
     defaultSize: "wide" as const,

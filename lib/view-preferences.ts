@@ -2,7 +2,10 @@ export type CardMenuKey = "live" | "reports" | "analysis" | "occupancy";
 
 export type CardSize = "compact" | "wide" | "full";
 
+export type CardChartType = "bar" | "line";
+
 export type CardPreference = {
+  chartType?: CardChartType;
   color?: string;
   id: string;
   visible: boolean;
@@ -384,6 +387,9 @@ export function normalizeCardPreferences(
   const normalized = (preferences ?? [])
     .filter((preference) => definitionIds.has(preference.id))
     .map((preference) => ({
+      chartType: isCardChartType(byId.get(preference.id)?.chartType)
+        ? byId.get(preference.id)?.chartType
+        : undefined,
       color: isCardColor(byId.get(preference.id)?.color)
         ? byId.get(preference.id)?.color
         : undefined,
@@ -409,7 +415,13 @@ export function normalizeCardPreferences(
     merged.splice(
       insertionIndex < 0 ? merged.length : insertionIndex,
       0,
-      { color: undefined, id, visible: true, size: undefined },
+      {
+        chartType: undefined,
+        color: undefined,
+        id,
+        visible: true,
+        size: undefined,
+      },
     );
     normalizedIds.add(id);
   });
@@ -518,6 +530,10 @@ function readStoredPreferences(
 
 function isCardSize(value: unknown): value is CardSize {
   return value === "compact" || value === "wide" || value === "full";
+}
+
+function isCardChartType(value: unknown): value is CardChartType {
+  return value === "bar" || value === "line";
 }
 
 function isCardColor(value: unknown): value is string {
