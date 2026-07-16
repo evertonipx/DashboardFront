@@ -681,7 +681,7 @@ export function ScenarioReportsDashboard({
       selectedScope
         ? buildCountingIntelligenceModel({
             hourlyRows: chartData[COUNTING_HOUR_HISTORY_ID]?.rows ?? [],
-            includeOpenPeriod: true,
+            includeOpenPeriod: countingViewSettings.includeOpenPeriod,
             monthlyRows:
               chartData[COUNTING_MONTH_HISTORY_ID]?.rows.length
                 ? chartData[COUNTING_MONTH_HISTORY_ID].rows

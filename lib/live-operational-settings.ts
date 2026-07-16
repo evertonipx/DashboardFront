@@ -6,6 +6,13 @@ export type LiveOperationalSettings = {
   heatmapSelectionMode: "all" | "custom";
   intradayComparison: "yesterday" | "last_week";
   monthComparison: "previous_month" | "last_year";
+  occupancyEntryScenarioIds: string[];
+  occupancyExitScenarioIds: string[];
+  occupancySelectionMode: "auto" | "custom";
+  cumulativeScenarioIds: string[];
+  cumulativeSelectionMode: "all" | "custom";
+  peakDayScenarioIds: string[];
+  peakDaySelectionMode: "all" | "custom";
   rankingScenarioIds: string[];
   rankingSelectionMode: "all" | "custom";
 };
@@ -17,6 +24,13 @@ const defaultSettings: LiveOperationalSettings = {
   heatmapSelectionMode: "all",
   intradayComparison: "yesterday",
   monthComparison: "previous_month",
+  occupancyEntryScenarioIds: [],
+  occupancyExitScenarioIds: [],
+  occupancySelectionMode: "auto",
+  cumulativeScenarioIds: [],
+  cumulativeSelectionMode: "all",
+  peakDayScenarioIds: [],
+  peakDaySelectionMode: "all",
   rankingScenarioIds: [],
   rankingSelectionMode: "all",
 };
@@ -73,6 +87,18 @@ function normalizeSettings(
       settings.monthComparison === "last_year"
         ? "last_year"
         : "previous_month",
+    occupancyEntryScenarioIds: normalizeIds(
+      settings.occupancyEntryScenarioIds,
+    ),
+    occupancyExitScenarioIds: normalizeIds(settings.occupancyExitScenarioIds),
+    occupancySelectionMode:
+      settings.occupancySelectionMode === "custom" ? "custom" : "auto",
+    cumulativeScenarioIds: normalizeIds(settings.cumulativeScenarioIds),
+    cumulativeSelectionMode:
+      settings.cumulativeSelectionMode === "custom" ? "custom" : "all",
+    peakDayScenarioIds: normalizeIds(settings.peakDayScenarioIds),
+    peakDaySelectionMode:
+      settings.peakDaySelectionMode === "custom" ? "custom" : "all",
     rankingScenarioIds: normalizeIds(settings.rankingScenarioIds),
     rankingSelectionMode:
       settings.rankingSelectionMode === "custom" ? "custom" : "all",

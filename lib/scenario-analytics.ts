@@ -22,6 +22,29 @@ export type ScenarioRankingPoint = {
   total: number;
 };
 
+export type ScenarioPeakDayPoint = {
+  bucket: string;
+  label: string;
+  rank: number;
+  total: number;
+};
+
+export type ScenarioHourlyOccupancyPoint = {
+  bucket: string;
+  entries: number;
+  exits: number;
+  hour: number;
+  label: string;
+  occupancy: number | null;
+};
+
+export type ScenarioCumulativeTotalPoint = {
+  id: string;
+  name: string;
+  share: number;
+  total: number;
+};
+
 export function selectScenarios(
   scenarios: Scenario[],
   mode: ScenarioSelectionMode,
@@ -90,25 +113,12 @@ export function buildScenarioRanking({
   sourceGranularity: AggregateGranularity;
   to: Date;
 }): ScenarioRankingPoint[] {
-  const totals = new Map(scenarios.map((scenario) => [scenario.id, 0]));
-  const lineContributions = buildLineScenarioContributions(scenarios);
-  const fromTime = from.getTime();
-  const toTime = to.getTime();
-
-  rows.forEach((row) => {
-    if (!row.line_count_id) return;
-    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
-    if (!bucket) return;
-    const bucketTime = bucket.getTime();
-    if (bucketTime < fromTime || bucketTime >= toTime) return;
-
-    const contributions = lineContributions.get(row.line_count_id) ?? [];
-    contributions.forEach(({ multiplier, scenarioId }) => {
-      totals.set(
-        scenarioId,
-        (totals.get(scenarioId) ?? 0) + (row.total ?? 0) * multiplier,
-      );
-    });
+  const totals = aggregateIndividualScenarioTotals({
+    from,
+    rows,
+    scenarios,
+    sourceGranularity,
+    to,
   });
 
   const ranked = scenarios
@@ -128,6 +138,145 @@ export function buildScenarioRanking({
     ...point,
     share: grandTotal ? point.total / grandTotal : 0,
   }));
+}
+
+export function buildScenarioCumulativeTotals({
+  from,
+  rows,
+  scenarios,
+  sourceGranularity,
+  to,
+}: {
+  from: Date;
+  rows: AggregateEventRow[];
+  scenarios: Scenario[];
+  sourceGranularity: AggregateGranularity;
+  to: Date;
+}): ScenarioCumulativeTotalPoint[] {
+  const totals = aggregateIndividualScenarioTotals({
+    from,
+    rows,
+    scenarios,
+    sourceGranularity,
+    to,
+  });
+  const points = scenarios.map((scenario) => ({
+    id: scenario.id,
+    name: scenario.name,
+    total: Math.abs(totals.get(scenario.id) ?? 0),
+  }));
+  const grandTotal = points.reduce((sum, point) => sum + point.total, 0);
+
+  return points.map((point) => ({
+    ...point,
+    share: grandTotal ? point.total / grandTotal : 0,
+  }));
+}
+
+export function buildTopScenarioPeakDays({
+  from,
+  rows,
+  scenarios,
+  sourceGranularity,
+  to,
+}: {
+  from: Date;
+  rows: AggregateEventRow[];
+  scenarios: Scenario[];
+  sourceGranularity: AggregateGranularity;
+  to: Date;
+}): ScenarioPeakDayPoint[] {
+  const totals = aggregateScenarioMagnitudesByBucket({
+    from,
+    granularity: "day",
+    rows,
+    scenarios,
+    sourceGranularity,
+    to,
+  });
+
+  return listBucketStarts(from, to, "day")
+    .map((bucket) => ({
+      bucket: bucket.toISOString(),
+      label: formatPeakDayLabel(bucket),
+      total: totals.get(bucketKey(bucket, "day")) ?? 0,
+    }))
+    .filter((point) => point.total > 0)
+    .sort(
+      (left, right) =>
+        right.total - left.total ||
+        new Date(left.bucket).getTime() - new Date(right.bucket).getTime(),
+    )
+    .slice(0, 5)
+    .map((point, index) => ({ ...point, rank: index + 1 }));
+}
+
+export function buildScenarioHourlyOccupancy({
+  day,
+  entryScenarios,
+  exitScenarios,
+  rows,
+  sourceGranularity,
+  through,
+}: {
+  day: Date;
+  entryScenarios: Scenario[];
+  exitScenarios: Scenario[];
+  rows: AggregateEventRow[];
+  sourceGranularity: AggregateGranularity;
+  through: Date;
+}): ScenarioHourlyOccupancyPoint[] {
+  const from = new Date(day.getFullYear(), day.getMonth(), day.getDate());
+  const dayEnd = new Date(
+    from.getFullYear(),
+    from.getMonth(),
+    from.getDate() + 1,
+  );
+  const to = new Date(
+    Math.min(dayEnd.getTime(), Math.max(from.getTime(), through.getTime())),
+  );
+  const entryTotals = aggregateScenarioMagnitudesByBucket({
+    from,
+    granularity: "hour",
+    rows,
+    scenarios: entryScenarios,
+    sourceGranularity,
+    to,
+  });
+  const exitTotals = aggregateScenarioMagnitudesByBucket({
+    from,
+    granularity: "hour",
+    rows,
+    scenarios: exitScenarios,
+    sourceGranularity,
+    to,
+  });
+  let cumulativeEntries = 0;
+  let cumulativeExits = 0;
+
+  return Array.from({ length: 24 }, (_, hour) => {
+    const bucket = new Date(
+      from.getFullYear(),
+      from.getMonth(),
+      from.getDate(),
+      hour,
+    );
+    const included = bucket < to;
+
+    if (included) {
+      cumulativeEntries += entryTotals.get(bucketKey(bucket, "hour")) ?? 0;
+      cumulativeExits += exitTotals.get(bucketKey(bucket, "hour")) ?? 0;
+    }
+
+    return {
+      bucket: bucket.toISOString(),
+      entries: cumulativeEntries,
+      exits: cumulativeExits,
+      hour,
+      label: `${String(hour).padStart(2, "0")}h`,
+      occupancy: included ? cumulativeEntries - cumulativeExits : null,
+    };
+  });
 }
 
 export function sumSelectedScenarioRows({
@@ -248,6 +397,96 @@ function buildLineScenarioContributions(scenarios: Scenario[]) {
   return contributions;
 }
 
+function aggregateIndividualScenarioTotals({
+  from,
+  rows,
+  scenarios,
+  sourceGranularity,
+  to,
+}: {
+  from: Date;
+  rows: AggregateEventRow[];
+  scenarios: Scenario[];
+  sourceGranularity: AggregateGranularity;
+  to: Date;
+}) {
+  const totals = new Map(scenarios.map((scenario) => [scenario.id, 0]));
+  const lineContributions = buildLineScenarioContributions(scenarios);
+  const fromTime = from.getTime();
+  const toTime = to.getTime();
+
+  rows.forEach((row) => {
+    if (!row.line_count_id) return;
+    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    if (!bucket) return;
+    const bucketTime = bucket.getTime();
+    if (bucketTime < fromTime || bucketTime >= toTime) return;
+
+    const contributions = lineContributions.get(row.line_count_id) ?? [];
+    contributions.forEach(({ multiplier, scenarioId }) => {
+      totals.set(
+        scenarioId,
+        (totals.get(scenarioId) ?? 0) +
+          (Number.isFinite(row.total) ? row.total : 0) * multiplier,
+      );
+    });
+  });
+
+  return totals;
+}
+
+function aggregateScenarioMagnitudesByBucket({
+  from,
+  granularity,
+  rows,
+  scenarios,
+  sourceGranularity,
+  to,
+}: {
+  from: Date;
+  granularity: ScenarioAnalyticsGranularity;
+  rows: AggregateEventRow[];
+  scenarios: Scenario[];
+  sourceGranularity: AggregateGranularity;
+  to: Date;
+}) {
+  const contributions = buildLineScenarioContributions(scenarios);
+  const scenarioTotalsByBucket = new Map<number, Map<string, number>>();
+  const fromTime = from.getTime();
+  const toTime = to.getTime();
+
+  rows.forEach((row) => {
+    if (!row.line_count_id) return;
+    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    if (!bucket) return;
+    const bucketTime = bucket.getTime();
+    if (bucketTime < fromTime || bucketTime >= toTime) return;
+
+    const bucketStartKey = bucketKey(bucket, granularity);
+    const scenarioTotals =
+      scenarioTotalsByBucket.get(bucketStartKey) ?? new Map<string, number>();
+    const rowContributions = contributions.get(row.line_count_id) ?? [];
+    rowContributions.forEach(({ multiplier, scenarioId }) => {
+      scenarioTotals.set(
+        scenarioId,
+        (scenarioTotals.get(scenarioId) ?? 0) +
+          (Number.isFinite(row.total) ? row.total : 0) * multiplier,
+      );
+    });
+    scenarioTotalsByBucket.set(bucketStartKey, scenarioTotals);
+  });
+
+  return new Map(
+    Array.from(scenarioTotalsByBucket, ([key, scenarioTotals]) => [
+      key,
+      Array.from(scenarioTotals.values()).reduce(
+        (sum, value) => sum + Math.abs(value),
+        0,
+      ),
+    ]),
+  );
+}
+
 function listBucketStarts(
   from: Date,
   to: Date,
@@ -311,4 +550,18 @@ function formatBucketLabel(
     day: "2-digit",
     month: "2-digit",
   }).format(date);
+}
+
+function formatPeakDayLabel(date: Date) {
+  const weekday = new Intl.DateTimeFormat("pt-BR", {
+    weekday: "short",
+  })
+    .format(date)
+    .replace(".", "");
+  const dayMonth = new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+  }).format(date);
+
+  return `${weekday} ${dayMonth}`;
 }

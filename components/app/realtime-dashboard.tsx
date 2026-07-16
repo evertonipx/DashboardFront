@@ -6,13 +6,16 @@ import {
   BarChart3,
   CalendarDays,
   Clock3,
+  DoorOpen,
   Grid3X3,
   Plus,
   Route,
   Settings2,
+  Sigma,
   Target,
   Trash2,
   TrendingUp,
+  Trophy,
   Zap,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -118,9 +121,16 @@ import {
 import type { ReportMetric, ReportPayload } from "@/lib/report-export";
 import {
   buildCombinedScenarioPoints,
+  buildScenarioCumulativeTotals,
+  buildScenarioHourlyOccupancy,
+  buildTopScenarioPeakDays,
   scenarioSelectionSummary,
   selectScenarios,
+  type ScenarioCumulativeTotalPoint,
+  type ScenarioHourlyOccupancyPoint,
+  type ScenarioPeakDayPoint,
 } from "@/lib/scenario-analytics";
+import { inferScenarioDirection } from "@/lib/scenario-direction";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -406,8 +416,9 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const hourRows = chartData.live_chart_hour?.rows ?? EMPTY_AGGREGATE_ROWS;
   const comparisonHourRows =
     chartData[OPERATIONAL_COMPARISON_HOURS_ID]?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const currentMonthDayState = chartData[CURRENT_MONTH_DAYS_ID];
   const currentMonthDayRows =
-    chartData[CURRENT_MONTH_DAYS_ID]?.rows ?? EMPTY_AGGREGATE_ROWS;
+    currentMonthDayState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const previousMonthDayRows =
     chartData[OPERATIONAL_PREVIOUS_MONTH_ID]?.rows ?? EMPTY_AGGREGATE_ROWS;
   const lastYearMonthDayRows =
@@ -690,22 +701,11 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   React.useEffect(() => {
     loadCharts({ force: true });
 
-    let disposed = false;
-    let timeout: number | undefined;
-
-    function scheduleNextRefresh() {
-      timeout = window.setTimeout(async () => {
-        if (disposed) return;
-
-        if (document.visibilityState === "visible") {
-          await loadCharts({ force: true, silent: true });
-        }
-
-        scheduleNextRefresh();
-      }, REFRESH_MS);
-    }
-
-    scheduleNextRefresh();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        loadCharts({ silent: true });
+      }
+    }, REFRESH_MS);
 
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") {
@@ -716,8 +716,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
-      disposed = true;
-      if (timeout) window.clearTimeout(timeout);
+      window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       requestRef.current?.abort();
     };
@@ -864,6 +863,70 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       scenarios,
     ],
   );
+  const cumulativeScenarios = React.useMemo(
+    () =>
+      selectScenarios(
+        scenarios,
+        operationalSettings.cumulativeSelectionMode,
+        operationalSettings.cumulativeScenarioIds,
+      ),
+    [
+      operationalSettings.cumulativeScenarioIds,
+      operationalSettings.cumulativeSelectionMode,
+      scenarios,
+    ],
+  );
+  const peakDayScenarios = React.useMemo(
+    () =>
+      selectScenarios(
+        scenarios,
+        operationalSettings.peakDaySelectionMode,
+        operationalSettings.peakDayScenarioIds,
+      ),
+    [
+      operationalSettings.peakDayScenarioIds,
+      operationalSettings.peakDaySelectionMode,
+      scenarios,
+    ],
+  );
+  const automaticOccupancyScenarios = React.useMemo(
+    () => inferOccupancyScenarios(scenarios),
+    [scenarios],
+  );
+  const occupancyEntryScenarios = React.useMemo(() => {
+    if (operationalSettings.occupancySelectionMode === "auto") {
+      return automaticOccupancyScenarios.entries;
+    }
+
+    return selectScenarios(
+      scenarios,
+      "custom",
+      operationalSettings.occupancyEntryScenarioIds,
+    );
+  }, [
+    automaticOccupancyScenarios.entries,
+    operationalSettings.occupancyEntryScenarioIds,
+    operationalSettings.occupancySelectionMode,
+    scenarios,
+  ]);
+  const occupancyExitScenarios = React.useMemo(() => {
+    if (operationalSettings.occupancySelectionMode === "auto") {
+      return automaticOccupancyScenarios.exits;
+    }
+
+    const entryIds = new Set(occupancyEntryScenarios.map((scenario) => scenario.id));
+    return selectScenarios(
+      scenarios,
+      "custom",
+      operationalSettings.occupancyExitScenarioIds,
+    ).filter((scenario) => !entryIds.has(scenario.id));
+  }, [
+    automaticOccupancyScenarios.exits,
+    occupancyEntryScenarios,
+    operationalSettings.occupancyExitScenarioIds,
+    operationalSettings.occupancySelectionMode,
+    scenarios,
+  ]);
   const operationalHeatmapPoints = React.useMemo(
     () =>
       buildCombinedScenarioPoints({
@@ -901,6 +964,56 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         addDays(startOfDay(clock), 1),
       ),
     [clock, currentMonthDayRows, rankingScenarios],
+  );
+  const cumulativeScenarioPoints = React.useMemo(
+    () =>
+      buildScenarioCumulativeTotals({
+        from: startOfDay(clock),
+        rows: hourRows,
+        scenarios: cumulativeScenarios,
+        sourceGranularity: chartData.live_chart_hour?.granularity ?? "hour",
+        to: clock,
+      }),
+    [
+      chartData.live_chart_hour?.granularity,
+      clock,
+      cumulativeScenarios,
+      hourRows,
+    ],
+  );
+  const peakDayPoints = React.useMemo(
+    () =>
+      buildTopScenarioPeakDays({
+        from: startOfMonth(clock),
+        rows: currentMonthDayRows,
+        scenarios: peakDayScenarios,
+        sourceGranularity: currentMonthDayState?.granularity ?? "day",
+        to: addDays(startOfDay(clock), 1),
+      }),
+    [
+      clock,
+      currentMonthDayRows,
+      currentMonthDayState?.granularity,
+      peakDayScenarios,
+    ],
+  );
+  const hourlyOccupancyPoints = React.useMemo(
+    () =>
+      buildScenarioHourlyOccupancy({
+        day: clock,
+        entryScenarios: occupancyEntryScenarios,
+        exitScenarios: occupancyExitScenarios,
+        rows: hourRows,
+        sourceGranularity: chartData.live_chart_hour?.granularity ?? "hour",
+        through: clock,
+      }),
+    [
+      chartData.live_chart_hour?.granularity,
+      clock,
+      hourRows,
+      occupancyEntryScenarios,
+      occupancyExitScenarios,
+    ],
   );
   const scenarioTodayComparisonPoints = React.useMemo(
     () => buildScenarioTodayComparisonPoints(scenarios, hourRows, clock),
@@ -982,15 +1095,19 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   }
 
   function updateOperationalSettings(
-    patch: Partial<LiveOperationalSettings>,
+    patch:
+      | Partial<LiveOperationalSettings>
+      | ((current: LiveOperationalSettings) => Partial<LiveOperationalSettings>),
   ) {
-    setOperationalSettings((current) =>
-      saveLiveOperationalSettings(
-        { ...current, ...patch },
+    setOperationalSettings((current) => {
+      const resolvedPatch =
+        typeof patch === "function" ? patch(current) : patch;
+      return saveLiveOperationalSettings(
+        { ...current, ...resolvedPatch },
         companyScopeId,
         preferenceScope,
-      ),
-    );
+      );
+    });
   }
 
   function openCustomWidgetDialog() {
@@ -1288,6 +1405,122 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       ),
     },
     {
+      id: "live_moving_average_trend",
+      label: "Tendência 7 x 30 dias",
+      defaultSize: "wide" as const,
+      className: "sm:col-span-2 xl:col-span-2",
+      node: (
+        <OperationalTrendCard
+          loading={initialLoading}
+          month={clock}
+          points={operationalTrendPoints}
+          scopeName={selectedScope?.name ?? "Visão selecionada"}
+        />
+      ),
+    },
+    {
+      id: "live_hourly_occupancy",
+      label: "Ocupação hora a hora",
+      defaultSize: "full" as const,
+      className: "sm:col-span-2 xl:col-span-4",
+      node: (
+        <HourlyOccupancyCard
+          canConfigure={canEditVisual}
+          entryScenarioIds={
+            operationalSettings.occupancySelectionMode === "custom"
+              ? operationalSettings.occupancyEntryScenarioIds
+              : occupancyEntryScenarios.map((scenario) => scenario.id)
+          }
+          entryScenarios={occupancyEntryScenarios}
+          exitScenarioIds={
+            operationalSettings.occupancySelectionMode === "custom"
+              ? operationalSettings.occupancyExitScenarioIds
+              : occupancyExitScenarios.map((scenario) => scenario.id)
+          }
+          exitScenarios={occupancyExitScenarios}
+          loading={initialLoading}
+          monitorMode={monitorMode}
+          onEntryScenarioIdsChange={(occupancyEntryScenarioIds) =>
+            updateOperationalSettings((current) => ({
+              occupancyEntryScenarioIds,
+              occupancyExitScenarioIds:
+                current.occupancyExitScenarioIds.filter(
+                  (id) => !occupancyEntryScenarioIds.includes(id),
+                ),
+            }))
+          }
+          onExitScenarioIdsChange={(occupancyExitScenarioIds) =>
+            updateOperationalSettings((current) => ({
+              occupancyEntryScenarioIds:
+                current.occupancyEntryScenarioIds.filter(
+                  (id) => !occupancyExitScenarioIds.includes(id),
+                ),
+              occupancyExitScenarioIds,
+            }))
+          }
+          onSelectionModeChange={(occupancySelectionMode) =>
+            updateOperationalSettings((current) => {
+              if (occupancySelectionMode === "auto") {
+                return { occupancySelectionMode };
+              }
+
+              const validScenarioIds = new Set(
+                scenarios.map((scenario) => scenario.id),
+              );
+              const savedEntries = current.occupancyEntryScenarioIds.filter(
+                (id) => validScenarioIds.has(id),
+              );
+              const savedEntryIds = new Set(savedEntries);
+              const savedExits = current.occupancyExitScenarioIds.filter(
+                (id) => validScenarioIds.has(id) && !savedEntryIds.has(id),
+              );
+              const hasSavedSelection = savedEntries.length || savedExits.length;
+
+              return {
+                occupancyEntryScenarioIds: hasSavedSelection
+                  ? savedEntries
+                  : automaticOccupancyScenarios.entries.map(
+                      (scenario) => scenario.id,
+                    ),
+                occupancyExitScenarioIds: hasSavedSelection
+                  ? savedExits
+                  : automaticOccupancyScenarios.exits.map(
+                      (scenario) => scenario.id,
+                    ),
+                occupancySelectionMode,
+              };
+            })
+          }
+          points={hourlyOccupancyPoints}
+          scenarios={scenarios}
+          selectionMode={operationalSettings.occupancySelectionMode}
+        />
+      ),
+    },
+    {
+      id: "live_scenario_cumulative",
+      label: "Acumulado por cenário",
+      defaultSize: "full" as const,
+      className: "sm:col-span-2 xl:col-span-4",
+      node: (
+        <ScenarioCumulativeTotalsCard
+          canConfigure={canEditVisual}
+          loading={initialLoading}
+          monitorMode={monitorMode}
+          onSelectedIdsChange={(cumulativeScenarioIds) =>
+            updateOperationalSettings({ cumulativeScenarioIds })
+          }
+          onSelectionModeChange={(cumulativeSelectionMode) =>
+            updateOperationalSettings({ cumulativeSelectionMode })
+          }
+          points={cumulativeScenarioPoints}
+          scenarios={scenarios}
+          selectedIds={operationalSettings.cumulativeScenarioIds}
+          selectionMode={operationalSettings.cumulativeSelectionMode}
+        />
+      ),
+    },
+    {
       id: "live_month_hour_heatmap",
       label: "Mapa de calor dia x hora",
       defaultSize: "full" as const,
@@ -1318,20 +1551,6 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       ),
     },
     {
-      id: "live_moving_average_trend",
-      label: "Tendência 7 x 30 dias",
-      defaultSize: "wide" as const,
-      className: "sm:col-span-2 xl:col-span-2",
-      node: (
-        <OperationalTrendCard
-          loading={initialLoading}
-          month={clock}
-          points={operationalTrendPoints}
-          scopeName={selectedScope?.name ?? "Visão selecionada"}
-        />
-      ),
-    },
-    {
       id: "live_month_access_ranking",
       label: "Ranking dos acessos do mês",
       defaultSize: "wide" as const,
@@ -1351,6 +1570,29 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
           scenarios={scenarios}
           selectedIds={operationalSettings.rankingScenarioIds}
           selectionMode={operationalSettings.rankingSelectionMode}
+        />
+      ),
+    },
+    {
+      id: "live_month_peak_days",
+      label: "Top 5 dias de pico",
+      defaultSize: "wide" as const,
+      className: "sm:col-span-2 xl:col-span-2",
+      node: (
+        <PeakDaysRankingCard
+          canConfigure={canEditVisual}
+          loading={initialLoading}
+          monitorMode={monitorMode}
+          onSelectedIdsChange={(peakDayScenarioIds) =>
+            updateOperationalSettings({ peakDayScenarioIds })
+          }
+          onSelectionModeChange={(peakDaySelectionMode) =>
+            updateOperationalSettings({ peakDaySelectionMode })
+          }
+          points={peakDayPoints}
+          scenarios={scenarios}
+          selectedIds={operationalSettings.peakDayScenarioIds}
+          selectionMode={operationalSettings.peakDaySelectionMode}
         />
       ),
     },
@@ -1686,10 +1928,38 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     ]);
   }
   liveChartEntries.push([
+    "live_hourly_occupancy",
+    buildHourlyOccupancyReportChart({
+      entryScenarios: occupancyEntryScenarios,
+      exitScenarios: occupancyExitScenarios,
+      points: hourlyOccupancyPoints,
+      widgetColor: liveColorByCardId.get("live_hourly_occupancy"),
+    }),
+  ]);
+  liveChartEntries.push([
+    "live_scenario_cumulative",
+    buildScenarioCumulativeTotalsReportChart(
+      cumulativeScenarioPoints,
+      liveColorByCardId.get("live_scenario_cumulative"),
+    ),
+  ]);
+  liveChartEntries.push([
     "live_month_access_ranking",
     buildMonthlyAccessRankingReportChart(
       monthlyAccessRankingPoints,
       liveColorByCardId.get("live_month_access_ranking"),
+    ),
+  ]);
+  liveChartEntries.push([
+    "live_month_peak_days",
+    buildPeakDaysRankingReportChart(
+      peakDayPoints,
+      scenarioSelectionSummary(
+        scenarios,
+        operationalSettings.peakDaySelectionMode,
+        operationalSettings.peakDayScenarioIds,
+      ),
+      liveColorByCardId.get("live_month_peak_days"),
     ),
   ]);
   liveChartEntries.push(
@@ -2561,6 +2831,298 @@ function OperationalHeatmapCard({
   );
 }
 
+function HourlyOccupancyCard({
+  canConfigure,
+  entryScenarioIds,
+  entryScenarios,
+  exitScenarioIds,
+  exitScenarios,
+  loading,
+  monitorMode,
+  onEntryScenarioIdsChange,
+  onExitScenarioIdsChange,
+  onSelectionModeChange,
+  points,
+  scenarios,
+  selectionMode,
+}: {
+  canConfigure: boolean;
+  entryScenarioIds: string[];
+  entryScenarios: Scenario[];
+  exitScenarioIds: string[];
+  exitScenarios: Scenario[];
+  loading: boolean;
+  monitorMode: boolean;
+  onEntryScenarioIdsChange: (ids: string[]) => void;
+  onExitScenarioIdsChange: (ids: string[]) => void;
+  onSelectionModeChange: (mode: "auto" | "custom") => void;
+  points: ScenarioHourlyOccupancyPoint[];
+  scenarios: Scenario[];
+  selectionMode: "auto" | "custom";
+}) {
+  const widgetColor = useWidgetColor();
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const option = React.useMemo(
+    () => buildHourlyOccupancyOption(points, widgetColor),
+    [points, widgetColor],
+  );
+  const latestPoint = [...points]
+    .reverse()
+    .find((point) => point.occupancy !== null);
+  const hasSelection = entryScenarios.length + exitScenarios.length > 0;
+  const hasData = points.some(
+    (point) => point.entries > 0 || point.exits > 0,
+  );
+
+  React.useEffect(() => {
+    if (monitorMode) setSettingsOpen(false);
+  }, [monitorMode]);
+
+  return (
+    <Card className="min-w-0 overflow-hidden">
+      <CardHeader className="pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <DoorOpen className="h-4 w-4 text-primary" />
+              Ocupação hora a hora
+            </CardTitle>
+            <CardDescription className="mt-1">
+              Saldo acumulado desde 00h: cenários de entrada menos cenários de
+              saída. A hora atual permanece parcial e atualiza a cada 5 segundos.
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Badge variant="outline">
+              E {entryScenarios.length} · S {exitScenarios.length}
+            </Badge>
+            {latestPoint && latestPoint.occupancy !== null ? (
+              <>
+                <Badge variant="outline" className="tabular-nums">
+                  Entradas {formatNumber(latestPoint.entries)}
+                </Badge>
+                <Badge variant="outline" className="tabular-nums">
+                  Saídas {formatNumber(latestPoint.exits)}
+                </Badge>
+                <Badge variant="secondary" className="tabular-nums">
+                  Saldo {formatNumber(latestPoint.occupancy)}
+                </Badge>
+              </>
+            ) : null}
+            {canConfigure && !monitorMode ? (
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setSettingsOpen((current) => !current)}
+                aria-label="Configurar cenários de ocupação"
+                title="Configurar cenários"
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="min-w-0 space-y-3">
+        {settingsOpen && !monitorMode ? (
+          <div className="space-y-3 rounded-md border bg-muted/10 p-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-medium uppercase text-muted-foreground">
+                  Associação direcional
+                </div>
+                <div className="text-sm font-semibold">
+                  {selectionMode === "auto"
+                    ? "Detectada pelos nomes e linhas"
+                    : "Seleção manual por cenário"}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:w-[240px]">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={selectionMode === "auto" ? "default" : "outline"}
+                  onClick={() => onSelectionModeChange("auto")}
+                >
+                  Automático
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={selectionMode === "custom" ? "default" : "outline"}
+                  onClick={() => onSelectionModeChange("custom")}
+                >
+                  Manual
+                </Button>
+              </div>
+            </div>
+            {selectionMode === "custom" ? (
+              <div className="grid gap-3 xl:grid-cols-2">
+                <ScenarioPicker
+                  allowAll={false}
+                  label="Cenários de entrada"
+                  mode="custom"
+                  onModeChange={() => undefined}
+                  onSelectedIdsChange={onEntryScenarioIdsChange}
+                  scenarios={scenarios}
+                  selectedIds={entryScenarioIds}
+                />
+                <ScenarioPicker
+                  allowAll={false}
+                  label="Cenários de saída"
+                  mode="custom"
+                  onModeChange={() => undefined}
+                  onSelectedIdsChange={onExitScenarioIdsChange}
+                  scenarios={scenarios}
+                  selectedIds={exitScenarioIds}
+                />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        {!hasSelection ? (
+          <EmptyChartState
+            className="h-[220px]"
+            text="Configure ao menos um cenário de entrada ou de saída."
+          />
+        ) : loading ? (
+          <Skeleton className="h-[320px] w-full" />
+        ) : hasData ? (
+          <div className="overflow-x-auto">
+            <EChart option={option} className="h-[320px] min-w-[760px]" />
+          </div>
+        ) : (
+          <EmptyChartState
+            className="h-[220px]"
+            text="As linhas dos cenários selecionados não possuem eventos horários no dia atual."
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ScenarioCumulativeTotalsCard({
+  canConfigure,
+  loading,
+  monitorMode,
+  onSelectedIdsChange,
+  onSelectionModeChange,
+  points,
+  scenarios,
+  selectedIds,
+  selectionMode,
+}: {
+  canConfigure: boolean;
+  loading: boolean;
+  monitorMode: boolean;
+  onSelectedIdsChange: (ids: string[]) => void;
+  onSelectionModeChange: (mode: "all" | "custom") => void;
+  points: ScenarioCumulativeTotalPoint[];
+  scenarios: Scenario[];
+  selectedIds: string[];
+  selectionMode: "all" | "custom";
+}) {
+  const widgetColor = useWidgetColor();
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const orderedPoints = React.useMemo(
+    () =>
+      [...points].sort(
+        (left, right) =>
+          right.total - left.total ||
+          left.name.localeCompare(right.name, "pt-BR"),
+      ),
+    [points],
+  );
+  const option = React.useMemo(
+    () => buildScenarioCumulativeTotalsOption(orderedPoints, widgetColor),
+    [orderedPoints, widgetColor],
+  );
+  const total = orderedPoints.reduce((sum, point) => sum + point.total, 0);
+  const chartHeight = Math.max(260, orderedPoints.length * 38 + 36);
+  const selectedScenarioCount = selectScenarios(
+    scenarios,
+    selectionMode,
+    selectedIds,
+  ).length;
+
+  React.useEffect(() => {
+    if (monitorMode) setSettingsOpen(false);
+  }, [monitorMode]);
+
+  return (
+    <Card className="min-w-0 overflow-hidden">
+      <CardHeader className="pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Sigma className="h-4 w-4 text-primary" />
+              Acumulado por cenário
+            </CardTitle>
+            <CardDescription className="mt-1">
+              Total combinado e acumulado individual de hoje. A hora atual é
+              parcial e atualiza a cada 5 segundos.
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Badge variant="outline">
+              {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
+            </Badge>
+            <Badge variant="secondary" className="tabular-nums">
+              Total {formatNumber(total)}
+            </Badge>
+            {canConfigure && !monitorMode ? (
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setSettingsOpen((current) => !current)}
+                aria-label="Configurar cenários do acumulado"
+                title="Configurar cenários"
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="min-w-0 space-y-3">
+        {settingsOpen && !monitorMode ? (
+          <ScenarioPicker
+            mode={selectionMode}
+            onModeChange={onSelectionModeChange}
+            onSelectedIdsChange={onSelectedIdsChange}
+            scenarios={scenarios}
+            selectedIds={selectedIds}
+          />
+        ) : null}
+        {!selectedScenarioCount ? (
+          <EmptyChartState
+            className="h-[220px]"
+            text="Selecione ao menos um cenário para calcular o acumulado."
+          />
+        ) : loading ? (
+          <Skeleton className="h-[320px] w-full" />
+        ) : orderedPoints.some((point) => point.total > 0) ? (
+          <div className="max-h-[480px] overflow-y-auto overflow-x-auto pr-1">
+            <div className="min-w-[760px]" style={{ height: chartHeight }}>
+              <EChart option={option} />
+            </div>
+          </div>
+        ) : (
+          <EmptyChartState
+            className="h-[220px]"
+            text="As linhas dos cenários selecionados não possuem eventos horários no dia atual."
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function OperationalMonthComparisonCard({
   loading,
   mode,
@@ -2865,6 +3427,112 @@ function MonthlyAccessRankingCard({
           <EmptyChartState
             className="h-[200px]"
             text="Sem fluxo mensal para classificar os acessos."
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PeakDaysRankingCard({
+  canConfigure,
+  loading,
+  monitorMode,
+  onSelectedIdsChange,
+  onSelectionModeChange,
+  points,
+  scenarios,
+  selectedIds,
+  selectionMode,
+}: {
+  canConfigure: boolean;
+  loading: boolean;
+  monitorMode: boolean;
+  onSelectedIdsChange: (ids: string[]) => void;
+  onSelectionModeChange: (mode: "all" | "custom") => void;
+  points: ScenarioPeakDayPoint[];
+  scenarios: Scenario[];
+  selectedIds: string[];
+  selectionMode: "all" | "custom";
+}) {
+  const widgetColor = useWidgetColor();
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const option = React.useMemo(
+    () => buildPeakDaysRankingOption(points, widgetColor),
+    [points, widgetColor],
+  );
+  const selectedScenarioCount = selectScenarios(
+    scenarios,
+    selectionMode,
+    selectedIds,
+  ).length;
+
+  React.useEffect(() => {
+    if (monitorMode) setSettingsOpen(false);
+  }, [monitorMode]);
+
+  return (
+    <Card className="min-w-0 overflow-hidden">
+      <CardHeader className="pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Trophy className="h-4 w-4 text-primary" />
+              Top 5 dias de pico do mês
+            </CardTitle>
+            <CardDescription className="mt-1">
+              Dias com maior volume acumulado nos cenários escolhidos; o dia
+              atual é parcial e acompanha a atualização ao vivo.
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline">
+              {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
+            </Badge>
+            {points[0] ? (
+              <Badge variant="secondary" className="tabular-nums">
+                1º {points[0].label} · {formatNumber(points[0].total)}
+              </Badge>
+            ) : null}
+            {canConfigure && !monitorMode ? (
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setSettingsOpen((current) => !current)}
+                aria-label="Configurar cenários do Top 5"
+                title="Configurar cenários"
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="min-w-0 space-y-3">
+        {settingsOpen && !monitorMode ? (
+          <ScenarioPicker
+            mode={selectionMode}
+            onModeChange={onSelectionModeChange}
+            onSelectedIdsChange={onSelectedIdsChange}
+            scenarios={scenarios}
+            selectedIds={selectedIds}
+          />
+        ) : null}
+        {!selectedScenarioCount ? (
+          <EmptyChartState
+            className="h-[200px]"
+            text="Selecione ao menos um cenário para calcular os dias de pico."
+          />
+        ) : loading ? (
+          <Skeleton className="h-[300px] w-full" />
+        ) : points.length ? (
+          <EChart option={option} className="h-[300px]" />
+        ) : (
+          <EmptyChartState
+            className="h-[200px]"
+            text="Sem fluxo diário no mês atual para classificar."
           />
         )}
       </CardContent>
@@ -3837,6 +4505,26 @@ function scenarioMultiplierMap(scenario: Scenario) {
   );
 }
 
+function inferOccupancyScenarios(scenarios: Scenario[]) {
+  return scenarios.reduce(
+    (groups, scenario) => {
+      const direction = inferScenarioDirection(scenario);
+      if (direction === "entry") groups.entries.push(scenario);
+      if (direction === "exit") groups.exits.push(scenario);
+      return groups;
+    },
+    { entries: [] as Scenario[], exits: [] as Scenario[] },
+  );
+}
+
+function scenarioNamesSummary(scenarios: Scenario[]) {
+  if (!scenarios.length) return "nenhum cenário";
+  const visibleNames = scenarios.slice(0, 3).map((scenario) => scenario.name);
+  return scenarios.length > visibleNames.length
+    ? `${visibleNames.join(", ")} +${scenarios.length - visibleNames.length}`
+    : visibleNames.join(", ");
+}
+
 function sumScopeRowsInRange(
   rows: AggregateEventRow[],
   scope: RealtimeScopeOption,
@@ -4103,6 +4791,247 @@ function buildOperationalHeatmapOption(
         name: "Intensidade horária",
         progressive: 1_000,
         type: "heatmap",
+      },
+    ],
+  };
+}
+
+function buildHourlyOccupancyOption(
+  points: ScenarioHourlyOccupancyPoint[],
+  widgetColor = "#1267C4",
+): EnterpriseChartOption {
+  return {
+    grid: { bottom: 8, containLabel: true, left: 8, right: 12, top: 18 },
+    tooltip: {
+      backgroundColor: "#ffffff",
+      borderColor: "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      formatter: (rawParams: unknown) => {
+        const params = Array.isArray(rawParams) ? rawParams[0] : rawParams;
+        if (!params || typeof params !== "object") return "";
+        const data = (params as { data?: unknown }).data;
+        if (!data || typeof data !== "object") return "";
+        const point = data as {
+          entries?: number;
+          exits?: number;
+          hourLabel?: string;
+          value?: number;
+        };
+
+        return [
+          `<strong>${point.hourLabel ?? "Hora"}</strong>`,
+          `Entradas acumuladas: ${formatNumber(point.entries ?? 0)}`,
+          `Saídas acumuladas: ${formatNumber(point.exits ?? 0)}`,
+          `Ocupação estimada: ${formatNumber(point.value ?? 0)}`,
+        ].join("<br />");
+      },
+      padding: [10, 12],
+      textStyle: { color: "#13233A", fontSize: 12 },
+      trigger: "item",
+    },
+    xAxis: {
+      axisLabel: { color: "#66758A", fontSize: 9, interval: 1 },
+      axisLine: { lineStyle: { color: "#D8E3F2" } },
+      axisTick: { show: false },
+      data: points.map((point) => point.label),
+      type: "category",
+    },
+    yAxis: {
+      axisLabel: { color: "#66758A", fontSize: 10 },
+      minInterval: 1,
+      splitLine: { lineStyle: { color: "#E8EEF6" } },
+      type: "value",
+    },
+    series: [
+      {
+        barCategoryGap: "34%",
+        barMaxWidth: 30,
+        data: points.map((point) =>
+          point.occupancy === null
+            ? null
+            : {
+                entries: point.entries,
+                exits: point.exits,
+                itemStyle: {
+                  borderRadius:
+                    point.occupancy >= 0 ? [3, 3, 0, 0] : [0, 0, 3, 3],
+                  color: point.occupancy >= 0 ? widgetColor : "#D999A2",
+                },
+                hourLabel: point.label,
+                label: {
+                  position: point.occupancy >= 0 ? "top" : "bottom",
+                },
+                value: point.occupancy,
+              },
+        ),
+        label: {
+          color: "#526477",
+          fontSize: 9,
+          formatter: (params: { value?: number }) => {
+            const value = Number(params.value ?? 0);
+            return value ? formatNumber(value) : "";
+          },
+          show: true,
+        },
+        name: "Ocupação estimada",
+        type: "bar",
+      },
+    ],
+  };
+}
+
+function buildScenarioCumulativeTotalsOption(
+  points: ScenarioCumulativeTotalPoint[],
+  widgetColor = "#1267C4",
+): EnterpriseChartOption {
+  return {
+    grid: { bottom: 8, containLabel: true, left: 8, right: 82, top: 8 },
+    tooltip: {
+      backgroundColor: "#ffffff",
+      borderColor: "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      formatter: (rawParams: unknown) => {
+        const params = Array.isArray(rawParams) ? rawParams[0] : rawParams;
+        if (!params || typeof params !== "object") return "";
+        const data = (params as { data?: unknown }).data;
+        if (!data || typeof data !== "object") return "";
+        const point = data as {
+          scenarioName?: string;
+          share?: number;
+          value?: number;
+        };
+
+        return [
+          `<strong>${point.scenarioName ?? "Cenário"}</strong>`,
+          `Acumulado: ${formatNumber(point.value ?? 0)}`,
+          `Participação: ${new Intl.NumberFormat("pt-BR", {
+            maximumFractionDigits: 1,
+            style: "percent",
+          }).format(point.share ?? 0)}`,
+        ].join("<br />");
+      },
+      padding: [10, 12],
+      textStyle: { color: "#13233A", fontSize: 12 },
+      trigger: "item",
+    },
+    xAxis: {
+      axisLabel: { color: "#66758A", fontSize: 10 },
+      minInterval: 1,
+      splitLine: { lineStyle: { color: "#E8EEF6" } },
+      type: "value",
+    },
+    yAxis: {
+      axisLabel: {
+        color: "#526477",
+        fontSize: 11,
+        overflow: "truncate",
+        width: 220,
+      },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      data: points.map((point) => point.name),
+      inverse: true,
+      type: "category",
+    },
+    series: [
+      {
+        barCategoryGap: "34%",
+        barMaxWidth: 28,
+        data: points.map((point, index) => ({
+          itemStyle: {
+            borderRadius: [0, 3, 3, 0],
+            color: index === 0 ? widgetColor : pastelBarColor(index + 2),
+          },
+          scenarioName: point.name,
+          share: point.share,
+          value: point.total,
+        })),
+        label: {
+          color: "#526477",
+          distance: 6,
+          fontSize: 10,
+          formatter: (params: { value?: number }) =>
+            formatNumber(Number(params.value ?? 0)),
+          position: "right",
+          show: true,
+        },
+        name: "Acumulado de hoje",
+        type: "bar",
+      },
+    ],
+  };
+}
+
+function buildPeakDaysRankingOption(
+  points: ScenarioPeakDayPoint[],
+  widgetColor = "#1267C4",
+): EnterpriseChartOption {
+  return {
+    grid: { bottom: 8, containLabel: true, left: 8, right: 66, top: 8 },
+    tooltip: {
+      backgroundColor: "#ffffff",
+      borderColor: "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      formatter: (rawParams: unknown) => {
+        const params = Array.isArray(rawParams) ? rawParams[0] : rawParams;
+        if (!params || typeof params !== "object") return "";
+        const data = (params as { data?: unknown }).data;
+        if (!data || typeof data !== "object") return "";
+        const point = data as {
+          dayLabel?: string;
+          rank?: number;
+          value?: number;
+        };
+        return [
+          `<strong>${point.rank ?? "-"}º · ${point.dayLabel ?? "Dia"}</strong>`,
+          `${formatNumber(point.value ?? 0)} eventos`,
+        ].join("<br />");
+      },
+      padding: [10, 12],
+      textStyle: { color: "#13233A", fontSize: 12 },
+      trigger: "item",
+    },
+    xAxis: {
+      axisLabel: { color: "#66758A", fontSize: 10 },
+      minInterval: 1,
+      splitLine: { lineStyle: { color: "#E8EEF6" } },
+      type: "value",
+    },
+    yAxis: {
+      axisLabel: { color: "#526477", fontSize: 11 },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      data: points.map((point) => `${point.rank}º  ${point.label}`),
+      inverse: true,
+      type: "category",
+    },
+    series: [
+      {
+        barCategoryGap: "34%",
+        barMaxWidth: 28,
+        data: points.map((point, index) => ({
+          itemStyle: {
+            borderRadius: [0, 3, 3, 0],
+            color: index === 0 ? widgetColor : pastelBarColor(index + 2),
+          },
+          dayLabel: point.label,
+          rank: point.rank,
+          value: point.total,
+        })),
+        label: {
+          color: "#526477",
+          distance: 6,
+          fontSize: 10,
+          formatter: (params: { value?: number }) =>
+            formatNumber(Number(params.value ?? 0)),
+          position: "right",
+          show: true,
+        },
+        name: "Volume diário",
+        type: "bar",
       },
     ],
   };
@@ -4867,6 +5796,102 @@ function buildOperationalHeatmapReportChart({
   };
 }
 
+function buildHourlyOccupancyReportChart({
+  entryScenarios,
+  exitScenarios,
+  points,
+  widgetColor = "#1267C4",
+}: {
+  entryScenarios: Scenario[];
+  exitScenarios: Scenario[];
+  points: ScenarioHourlyOccupancyPoint[];
+  widgetColor?: string;
+}): ReportPayload["charts"][number] {
+  const latestPoint = [...points]
+    .reverse()
+    .find((point) => point.occupancy !== null);
+
+  return {
+    comparison: latestPoint
+      ? `Saldo atual: ${formatNumber(latestPoint.occupancy ?? 0)} · Entradas: ${formatNumber(
+          latestPoint.entries,
+        )} · Saídas: ${formatNumber(latestPoint.exits)}`
+      : "Sem saldo calculado no dia atual",
+    description: `Saldo acumulado desde 00h. Entradas: ${scenarioNamesSummary(
+      entryScenarios,
+    )}. Saídas: ${scenarioNamesSummary(exitScenarios)}.`,
+    option: buildHourlyOccupancyOption(points, widgetColor),
+    table: {
+      title: "Dados - Ocupação hora a hora",
+      columns: [
+        { key: "hour", label: "Hora", width: 14 },
+        {
+          key: "entries",
+          label: "Entradas acumuladas",
+          numeric: true,
+          width: 24,
+        },
+        {
+          key: "exits",
+          label: "Saídas acumuladas",
+          numeric: true,
+          width: 24,
+        },
+        {
+          key: "occupancy",
+          label: "Ocupação estimada",
+          numeric: true,
+          width: 24,
+        },
+      ],
+      rows: points
+        .filter((point) => point.occupancy !== null)
+        .map((point) => ({
+          entries: point.entries,
+          exits: point.exits,
+          hour: point.label,
+          occupancy: point.occupancy,
+        })),
+    },
+    title: "Ocupação hora a hora",
+  };
+}
+
+function buildScenarioCumulativeTotalsReportChart(
+  points: ScenarioCumulativeTotalPoint[],
+  widgetColor = "#1267C4",
+): ReportPayload["charts"][number] {
+  const orderedPoints = [...points].sort(
+    (left, right) =>
+      right.total - left.total || left.name.localeCompare(right.name, "pt-BR"),
+  );
+  const total = orderedPoints.reduce((sum, point) => sum + point.total, 0);
+
+  return {
+    comparison: `${formatNumber(total)} eventos nos cenários selecionados`,
+    description:
+      "Total combinado e acumulado individual de cada cenário no dia atual, incluindo a hora parcial.",
+    option: buildScenarioCumulativeTotalsOption(orderedPoints, widgetColor),
+    table: {
+      title: "Dados - Acumulado por cenário",
+      columns: [
+        { key: "scenario", label: "Cenário", width: 40 },
+        { key: "total", label: "Acumulado", numeric: true, width: 20 },
+        { key: "share", label: "Participação", width: 20 },
+      ],
+      rows: orderedPoints.map((point) => ({
+        scenario: point.name,
+        share: new Intl.NumberFormat("pt-BR", {
+          maximumFractionDigits: 1,
+          style: "percent",
+        }).format(point.share),
+        total: point.total,
+      })),
+    },
+    title: "Acumulado por cenário",
+  };
+}
+
 function buildOperationalMonthReportChart({
   accumulated,
   mode,
@@ -4993,6 +6018,34 @@ function buildMonthlyAccessRankingReportChart(
       })),
     },
     title: "Ranking dos acessos do mês",
+  };
+}
+
+function buildPeakDaysRankingReportChart(
+  points: ScenarioPeakDayPoint[],
+  scopeName: string,
+  widgetColor = "#1267C4",
+): ReportPayload["charts"][number] {
+  return {
+    comparison: points.length
+      ? `Maior dia: ${points[0].label}, ${formatNumber(points[0].total)} eventos`
+      : "Nenhum dia com fluxo no período",
+    description: `Cinco dias com maior volume acumulado no mês em andamento. Visão: ${scopeName}.`,
+    option: buildPeakDaysRankingOption(points, widgetColor),
+    table: {
+      title: "Dados - Top 5 dias de pico do mês",
+      columns: [
+        { key: "rank", label: "Posição", numeric: true, width: 12 },
+        { key: "day", label: "Dia", width: 20 },
+        { key: "total", label: "Volume", numeric: true, width: 18 },
+      ],
+      rows: points.map((point) => ({
+        day: point.label,
+        rank: point.rank,
+        total: point.total,
+      })),
+    },
+    title: "Top 5 dias de pico do mês",
   };
 }
 

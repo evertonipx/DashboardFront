@@ -12,7 +12,9 @@ import { cn, formatNumber } from "@/lib/utils";
 type ScenarioSelectionMode = "all" | "custom";
 
 type ScenarioPickerProps = {
+  allowAll?: boolean;
   className?: string;
+  label?: string;
   loading?: boolean;
   mode: ScenarioSelectionMode;
   onModeChange: (mode: ScenarioSelectionMode) => void;
@@ -22,7 +24,9 @@ type ScenarioPickerProps = {
 };
 
 export function ScenarioPicker({
+  allowAll = true,
   className,
+  label = "Cenários",
   loading = false,
   mode,
   onModeChange,
@@ -100,28 +104,30 @@ export function ScenarioPicker({
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <div className="text-xs font-medium uppercase text-muted-foreground">
-            Cenários
+            {label}
           </div>
           <div className="truncate text-sm font-semibold">{selectedSummary}</div>
         </div>
-        <div className="grid grid-cols-2 gap-2 sm:w-[220px]">
-          <Button
-            type="button"
-            size="sm"
-            variant={mode === "all" ? "default" : "outline"}
-            onClick={selectAll}
-          >
-            Todos
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={mode === "custom" ? "default" : "outline"}
-            onClick={chooseCustom}
-          >
-            Escolher
-          </Button>
-        </div>
+        {allowAll ? (
+          <div className="grid grid-cols-2 gap-2 sm:w-[220px]">
+            <Button
+              type="button"
+              size="sm"
+              variant={mode === "all" ? "default" : "outline"}
+              onClick={selectAll}
+            >
+              Todos
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={mode === "custom" ? "default" : "outline"}
+              onClick={chooseCustom}
+            >
+              Escolher
+            </Button>
+          </div>
+        ) : null}
       </div>
 
       {mode === "custom" ? (

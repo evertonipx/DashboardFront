@@ -1,5 +1,9 @@
 import type { EnterpriseChartOption } from "@/components/app/echart";
 import { pastelBarColor } from "@/lib/chart-palette";
+import {
+  inferDirectionFromText,
+  type ScenarioDirection,
+} from "@/lib/scenario-direction";
 import type {
   ReportChart,
   ReportMetric,
@@ -162,7 +166,7 @@ type BuildCountingIntelligenceInput = {
   scope: CountingIntelligenceScope;
 };
 
-type Direction = "entry" | "exit";
+type Direction = ScenarioDirection;
 
 type ScenarioDirectionTotals = {
   entry: number;
@@ -268,10 +272,9 @@ export function buildCountingIntelligenceModel({
   const previousCurrentMonthValue =
     selectedMonthTotals.get(monthKey(currentYear - 1, currentMonth)) ?? 0;
   const monthlyScenarioTotals = aggregateScenarioDirections(
-    monthlyRows.filter((row) => {
-      const date = parseBucket(row.bucket);
-      return Boolean(date && date >= periodFrom && date < periodTo);
-    }),
+    monthlyRows.filter((row) =>
+      isMonthlyBucketInRange(row.bucket, periodFrom, periodTo),
+    ),
     scenarios,
   );
   const hourlyScenarioTotals = aggregateScenarioDirections(hourlyRows, scenarios);
@@ -1140,8 +1143,8 @@ function aggregateScopeMonths(
   );
 
   rows.forEach((row) => {
-    const date = parseBucket(row.bucket);
-    if (!date) return;
+    const key = monthlyBucketKey(row.bucket);
+    if (!key) return;
 
     let value = 0;
     if (scope.scenario) {
@@ -1154,7 +1157,6 @@ function aggregateScopeMonths(
       value = finiteTotal(row.total);
     }
 
-    const key = monthKey(date.getFullYear(), date.getMonth());
     totals.set(key, (totals.get(key) ?? 0) + value);
   });
 
@@ -1205,7 +1207,7 @@ function buildScenarioLineBindings(scenarios: Scenario[]) {
   const bindings = new Map<string, ScenarioLineBinding[]>();
 
   scenarios.forEach((scenario) => {
-    const scenarioDirection = directionFromText(
+    const scenarioDirection = inferDirectionFromText(
       `${scenario.name} ${scenario.description ?? ""}`,
     );
     const seen = new Set<string>();
@@ -1214,7 +1216,7 @@ function buildScenarioLineBindings(scenarios: Scenario[]) {
       if (line.action_multiplier === 0 || seen.has(line.line_count_id)) return;
       seen.add(line.line_count_id);
       const direction =
-        directionFromText(line.label ?? "") ??
+        inferDirectionFromText(line.label ?? "") ??
         scenarioDirection ??
         (line.action_multiplier < 0 ? "exit" : "entry");
       const current = bindings.get(line.line_count_id) ?? [];
@@ -1551,49 +1553,6 @@ function buildAccessHourlyDetailReportTable(
   };
 }
 
-function directionFromText(value: string): Direction | null {
-  const words = normalizeText(value).split(/[^a-z0-9]+/).filter(Boolean);
-  const hasEntry = words.some((word) =>
-    matchesDirectionWord(word, [
-      "entrada",
-      "entradas",
-      "entry",
-      "enter",
-      "inbound",
-      "ingresso",
-      "ent",
-      "in",
-    ]),
-  );
-  const hasExit = words.some((word) =>
-    matchesDirectionWord(word, [
-      "saida",
-      "saidas",
-      "exit",
-      "outbound",
-      "egresso",
-      "sai",
-      "out",
-    ]),
-  );
-
-  if (hasEntry === hasExit) return null;
-  return hasEntry ? "entry" : "exit";
-}
-
-function matchesDirectionWord(word: string, aliases: string[]) {
-  return aliases.some(
-    (alias) => word === alias || new RegExp(`^${alias}\\d+$`).test(word),
-  );
-}
-
-function normalizeText(value: string) {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
-}
-
 function rankValues(rows: CountingAccessRow[], key: "entry" | "exit" | "flow") {
   return new Map(
     [...rows]
@@ -1707,6 +1666,21 @@ function isValidDate(date: Date) {
 function parseBucket(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function monthlyBucketKey(value: string) {
+  const date = parseBucket(value);
+  return date ? monthKey(date.getUTCFullYear(), date.getUTCMonth()) : null;
+}
+
+function isMonthlyBucketInRange(value: string, from: Date, to: Date) {
+  const key = monthlyBucketKey(value);
+  if (!key) return false;
+
+  return (
+    key >= monthKey(from.getFullYear(), from.getMonth()) &&
+    key < monthKey(to.getFullYear(), to.getMonth())
+  );
 }
 
 function finiteTotal(value: number) {
