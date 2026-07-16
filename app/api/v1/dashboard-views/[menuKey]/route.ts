@@ -21,7 +21,12 @@ type RouteContext = {
   }>;
 };
 
-const validMenuKeys = new Set<CardMenuKey>(["live", "reports", "occupancy"]);
+const validMenuKeys = new Set<CardMenuKey>([
+  "live",
+  "reports",
+  "analysis",
+  "occupancy",
+]);
 const dataDirectory = path.join(process.cwd(), ".ipxdata");
 const dataFile = path.join(dataDirectory, "dashboard-views.json");
 

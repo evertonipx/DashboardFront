@@ -1514,6 +1514,11 @@ export function ScenarioReportsDashboard({
           reorderMode={layoutReorderMode}
           showOrganizerTrigger={false}
           showReorderTrigger={false}
+          viewScopeName={selectedScope?.name}
+          viewScopes={scopeOptions.map((scope) => ({
+            id: scope.id,
+            name: scope.name,
+          }))}
           editActions={
             <Button
               type="button"

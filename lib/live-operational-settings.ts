@@ -2,15 +2,23 @@ import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
 import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
 
 export type LiveOperationalSettings = {
+  heatmapScenarioIds: string[];
+  heatmapSelectionMode: "all" | "custom";
   intradayComparison: "yesterday" | "last_week";
   monthComparison: "previous_month" | "last_year";
+  rankingScenarioIds: string[];
+  rankingSelectionMode: "all" | "custom";
 };
 
 const STORAGE_KEY = "ipxdata.live-operational-settings.v1";
 
 const defaultSettings: LiveOperationalSettings = {
+  heatmapScenarioIds: [],
+  heatmapSelectionMode: "all",
   intradayComparison: "yesterday",
   monthComparison: "previous_month",
+  rankingScenarioIds: [],
+  rankingSelectionMode: "all",
 };
 
 export function loadLiveOperationalSettings(
@@ -54,6 +62,9 @@ function normalizeSettings(
   settings: Partial<LiveOperationalSettings>,
 ): LiveOperationalSettings {
   return {
+    heatmapScenarioIds: normalizeIds(settings.heatmapScenarioIds),
+    heatmapSelectionMode:
+      settings.heatmapSelectionMode === "custom" ? "custom" : "all",
     intradayComparison:
       settings.intradayComparison === "last_week"
         ? "last_week"
@@ -62,7 +73,22 @@ function normalizeSettings(
       settings.monthComparison === "last_year"
         ? "last_year"
         : "previous_month",
+    rankingScenarioIds: normalizeIds(settings.rankingScenarioIds),
+    rankingSelectionMode:
+      settings.rankingSelectionMode === "custom" ? "custom" : "all",
   };
+}
+
+function normalizeIds(value: unknown) {
+  return Array.isArray(value)
+    ? Array.from(
+        new Set(
+          value.filter(
+            (id): id is string => typeof id === "string" && Boolean(id.trim()),
+          ),
+        ),
+      )
+    : [];
 }
 
 function storageKey(

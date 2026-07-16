@@ -22,7 +22,7 @@ import {
 } from "echarts/components";
 import * as echarts from "echarts/core";
 import type { EChartsCoreOption, EChartsType } from "echarts/core";
-import { LabelLayout, UniversalTransition } from "echarts/features";
+import { LabelLayout } from "echarts/features";
 import { CanvasRenderer } from "echarts/renderers";
 
 import { useTheme } from "@/components/app/theme-provider";
@@ -42,7 +42,6 @@ echarts.use([
   TooltipComponent,
   VisualMapComponent,
   LabelLayout,
-  UniversalTransition,
   CanvasRenderer,
 ]);
 
@@ -91,7 +90,7 @@ export function EChart({ option, className }: EChartProps) {
 
   React.useEffect(() => {
     chartRef.current?.setOption(themedOption, {
-      lazyUpdate: true,
+      lazyUpdate: false,
       notMerge: true,
     });
   }, [themedOption]);
@@ -112,10 +111,6 @@ function enhanceInteractiveChartOption(
     if (!item || typeof item !== "object") return item;
 
     const seriesOption = item as Record<string, unknown>;
-    const type = typeof seriesOption.type === "string" ? seriesOption.type : "";
-    const dataLength = Array.isArray(seriesOption.data)
-      ? seriesOption.data.length
-      : 0;
     const emphasis =
       seriesOption.emphasis && typeof seriesOption.emphasis === "object"
         ? (seriesOption.emphasis as Record<string, unknown>)
@@ -128,9 +123,6 @@ function enhanceInteractiveChartOption(
         focus: "series",
         ...emphasis,
       },
-      universalTransition:
-        seriesOption.universalTransition ??
-        ((type === "bar" || type === "line") && dataLength <= 200),
     };
   });
   const categoryCount = categoryXAxisLength(option.xAxis);

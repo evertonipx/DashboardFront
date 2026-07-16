@@ -8,6 +8,7 @@ import {
   Eye,
   EyeOff,
   GripVertical,
+  LayoutTemplate,
   Maximize2,
   Minimize2,
   Palette,
@@ -28,6 +29,7 @@ import {
 } from "@/components/ui/dialog";
 import { useAuth } from "@/components/app/auth-provider";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
+import { WidgetViewPresetsDialog } from "@/components/app/widget-view-presets";
 import { WidgetAppearanceProvider } from "@/components/app/widget-appearance";
 import { hasVisualAdminAccess } from "@/lib/access";
 import {
@@ -36,6 +38,10 @@ import {
 } from "@/lib/chart-palette";
 import { useEffectiveCompanyScopeId } from "@/lib/master-company-scope";
 import { cn } from "@/lib/utils";
+import {
+  applyDefaultWidgetViewPresetIfEmpty,
+  type WidgetViewScope,
+} from "@/lib/widget-view-presets";
 import {
   orderByCardPreferences,
   saveCardPreferences,
@@ -64,6 +70,8 @@ type CardLayoutProps = {
   reorderMode?: boolean;
   showOrganizerTrigger?: boolean;
   showReorderTrigger?: boolean;
+  viewScopeName?: string | null;
+  viewScopes?: WidgetViewScope[];
 };
 
 export function CardLayout({
@@ -78,6 +86,8 @@ export function CardLayout({
   reorderMode: controlledReorderMode,
   showOrganizerTrigger = true,
   showReorderTrigger = true,
+  viewScopeName,
+  viewScopes = [],
 }: CardLayoutProps) {
   const { user } = useAuth();
   const [organizerDraggingId, setOrganizerDraggingId] = React.useState<string | null>(
@@ -90,7 +100,9 @@ export function CardLayout({
   const [screenOverId, setScreenOverId] = React.useState<string | null>(null);
   const [internalReorderMode, setInternalReorderMode] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
+  const [savedViewsOpen, setSavedViewsOpen] = React.useState(false);
   const [internalOrganizerOpen, setInternalOrganizerOpen] = React.useState(false);
+  const defaultApplicationRef = React.useRef("");
   const organizerOpen = controlledOrganizerOpen ?? internalOrganizerOpen;
   const screenReorderEnabled = controlledReorderMode ?? internalReorderMode;
   const setOrganizerOpen = React.useCallback(
@@ -121,6 +133,45 @@ export function CardLayout({
   const canEditLayout = hasVisualAdminAccess(user) && !monitorMode;
   const orderedCards = orderByCardPreferences(cards, preferences);
   const organizerCards = orderByAllCardPreferences(cards, preferences);
+  const currentViewScope = preferenceScopeId
+    ? {
+        id: preferenceScopeId,
+        name: viewScopeName?.trim() || "Tela atual",
+      }
+    : null;
+
+  React.useEffect(() => {
+    if (!preferenceScopeId || !user?.id) return;
+    const applicationKey = [
+      menuKey,
+      companyId ?? "",
+      user.id,
+      preferenceScopeId,
+    ].join("|");
+    if (defaultApplicationRef.current === applicationKey) return;
+    defaultApplicationRef.current = applicationKey;
+
+    const applied = applyDefaultWidgetViewPresetIfEmpty({
+      cardIds,
+      companyId,
+      menuKey,
+      targetScope: {
+        id: preferenceScopeId,
+        name: viewScopeName?.trim() || "Tela atual",
+      },
+      userId: user.id,
+    });
+    if (applied) {
+      window.setTimeout(() => window.location.reload(), 120);
+    }
+  }, [
+    cardIds,
+    companyId,
+    menuKey,
+    preferenceScopeId,
+    user?.id,
+    viewScopeName,
+  ]);
 
   React.useEffect(() => {
     if (!canEditLayout) {
@@ -303,6 +354,10 @@ export function CardLayout({
           }}
           onMoveDown={(cardId, index) => moveOrganizerCardTo(cardId, index + 1)}
           onMoveUp={(cardId, index) => moveOrganizerCardTo(cardId, index - 1)}
+          onManageSavedViews={() => {
+            setOrganizerOpen(false);
+            setSavedViewsOpen(true);
+          }}
           onOpenChange={setOrganizerOpen}
           onColorChange={setCardColor}
           onResize={resizeCard}
@@ -315,6 +370,20 @@ export function CardLayout({
           editActions={editActions}
         />
       )}
+
+      {canEditLayout ? (
+        <WidgetViewPresetsDialog
+          cardIds={cardIds}
+          companyId={companyId}
+          currentScope={currentViewScope}
+          menuKey={menuKey}
+          onOpenChange={setSavedViewsOpen}
+          open={savedViewsOpen}
+          preferences={preferences}
+          scopes={viewScopes}
+          userId={user?.id}
+        />
+      ) : null}
 
       <div
         className={cn(
@@ -467,6 +536,7 @@ function WidgetOrganizerDialog({
   onDrop,
   onMoveDown,
   onMoveUp,
+  onManageSavedViews,
   onOpenChange,
   onColorChange,
   onResize,
@@ -487,6 +557,7 @@ function WidgetOrganizerDialog({
   onDrop: (event: React.DragEvent<HTMLDivElement>, cardId: string) => void;
   onMoveDown: (cardId: string, index: number) => void;
   onMoveUp: (cardId: string, index: number) => void;
+  onManageSavedViews: () => void;
   onOpenChange: (open: boolean) => void;
   onColorChange: (cardId: string, color?: string) => void;
   onResize: (cardId: string, size: CardSize) => void;
@@ -507,14 +578,22 @@ function WidgetOrganizerDialog({
               Adicione, reordene e ajuste a aparência dos widgets.
             </DialogDescription>
           </DialogHeader>
-          {editActions ? (
-            <div
-              className="flex shrink-0 items-center gap-2 sm:pr-8"
-              onClickCapture={() => onOpenChange(false)}
+          <div className="flex shrink-0 flex-wrap items-center gap-2 sm:pr-8">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onManageSavedViews}
             >
-              {editActions}
-            </div>
-          ) : null}
+              <LayoutTemplate className="h-4 w-4" />
+              Visões salvas
+            </Button>
+            {editActions ? (
+              <div onClickCapture={() => onOpenChange(false)}>
+                {editActions}
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <div className="min-h-0 space-y-2 overflow-y-auto pr-1">

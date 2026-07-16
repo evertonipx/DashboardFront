@@ -1,4 +1,4 @@
-export type CardMenuKey = "live" | "reports" | "occupancy";
+export type CardMenuKey = "live" | "reports" | "analysis" | "occupancy";
 
 export type CardSize = "compact" | "wide" | "full";
 
@@ -229,6 +229,53 @@ export const cardViewMenus: CardMenuDefinition[] = [
         id: "report_scenario_table",
         label: "Cenários disponíveis",
         description: "Tabela para alternar entre cenários.",
+      },
+    ],
+  },
+  {
+    key: "analysis",
+    label: "Análises",
+    description: "Widgets operacionais por intervalo personalizado.",
+    cards: [
+      {
+        id: "analysis_summary",
+        label: "Resumo do período",
+        description: "Indicadores consolidados dos cenários escolhidos.",
+      },
+      {
+        id: "analysis_timeline",
+        label: "Fluxo por período",
+        description: "Fluxo agrupado por dia ou hora.",
+      },
+      {
+        id: "analysis_comparison",
+        label: "Comparativo de cenários",
+        description: "Séries independentes para os cenários selecionados.",
+      },
+      {
+        id: "analysis_heatmap",
+        label: "Mapa de calor dia x hora",
+        description: "Intensidade horária no intervalo selecionado.",
+      },
+      {
+        id: "analysis_cumulative",
+        label: "Acumulado diário x base",
+        description: "Evolução acumulada contra uma base configurável.",
+      },
+      {
+        id: "analysis_trend",
+        label: "Tendência 7 x 30 dias",
+        description: "Médias móveis no intervalo selecionado.",
+      },
+      {
+        id: "analysis_ranking",
+        label: "Ranking de cenários",
+        description: "Volume e representatividade dos cenários escolhidos.",
+      },
+      {
+        id: "analysis_hour_profile",
+        label: "Perfil horário",
+        description: "Média de fluxo para cada uma das 24 horas.",
       },
     ],
   },

@@ -22,6 +22,7 @@ export type ReportTable = {
   description?: string;
   columns: ReportTableColumn[];
   rows: ReportTableRow[];
+  includeInCharts?: boolean;
 };
 
 export type ReportChart = {
@@ -93,9 +94,9 @@ export async function exportReportToExcel(
   if (mode !== "charts") {
     buildExcelMetrics(summary, payload.metrics, summaryContentStartRow);
     nextRow = summaryContentStartRow + 4 + Math.ceil(payload.metrics.length / 2) * 3;
-    for (const table of payload.tables ?? []) {
-      nextRow = buildExcelTable(summary, table, nextRow) + 2;
-    }
+  }
+  for (const table of reportTablesForMode(payload.tables, mode)) {
+    nextRow = buildExcelTable(summary, table, nextRow) + 2;
   }
 
   for (const [index, chart] of payload.charts.entries()) {
@@ -214,14 +215,12 @@ export async function exportReportToPdf(
     }
   }
 
-  if (mode !== "charts") {
-    for (const table of payload.tables ?? []) {
-      doc.addPage();
-      drawPdfPageHeader(doc, payload.title, table.title);
-      if (table.description) drawPdfText(doc, table.description, 42, 86, 11, MUTED_TEXT);
-      drawPdfText(doc, reportCompletenessLabel(payload), 42, table.description ? 104 : 86, 10, MUTED_TEXT);
-      drawPdfTable(doc, table, table.description ? 128 : 112, payload.title, true);
-    }
+  for (const table of reportTablesForMode(payload.tables, mode)) {
+    doc.addPage();
+    drawPdfPageHeader(doc, payload.title, table.title);
+    if (table.description) drawPdfText(doc, table.description, 42, 86, 11, MUTED_TEXT);
+    drawPdfText(doc, reportCompletenessLabel(payload), 42, table.description ? 104 : 86, 10, MUTED_TEXT);
+    drawPdfTable(doc, table, table.description ? 128 : 112, payload.title, true);
   }
 
   doc.save(`${safeFilename(`${payload.filename}-${mode}`)}.pdf`);
@@ -458,6 +457,16 @@ function modeLabel(mode: ReportExportMode) {
   if (mode === "charts") return "Somente gráficos";
   if (mode === "data") return "Somente dados";
   return "Completo";
+}
+
+function reportTablesForMode(
+  tables: ReportTable[] | undefined,
+  mode: ReportExportMode,
+) {
+  const availableTables = tables ?? [];
+  return mode === "charts"
+    ? availableTables.filter((table) => table.includeInCharts)
+    : availableTables;
 }
 
 function drawPdfPageHeader(

@@ -24,6 +24,7 @@ import {
 } from "@/components/app/card-layout";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
 import { ReportExportActions } from "@/components/app/report-export-actions";
+import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
 import { useWidgetColor } from "@/components/app/widget-appearance";
 import {
@@ -115,6 +116,11 @@ import {
   sundayCategoryIndexesForMonth,
 } from "@/lib/chart-calendar-axis";
 import type { ReportMetric, ReportPayload } from "@/lib/report-export";
+import {
+  buildCombinedScenarioPoints,
+  scenarioSelectionSummary,
+  selectScenarios,
+} from "@/lib/scenario-analytics";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -832,16 +838,56 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       return bucket >= currentMonthStart;
     });
   }, [clock, operationalTrendRows, selectedScope]);
+  const heatmapScenarios = React.useMemo(
+    () =>
+      selectScenarios(
+        scenarios,
+        operationalSettings.heatmapSelectionMode,
+        operationalSettings.heatmapScenarioIds,
+      ),
+    [
+      operationalSettings.heatmapScenarioIds,
+      operationalSettings.heatmapSelectionMode,
+      scenarios,
+    ],
+  );
+  const rankingScenarios = React.useMemo(
+    () =>
+      selectScenarios(
+        scenarios,
+        operationalSettings.rankingSelectionMode,
+        operationalSettings.rankingScenarioIds,
+      ),
+    [
+      operationalSettings.rankingScenarioIds,
+      operationalSettings.rankingSelectionMode,
+      scenarios,
+    ],
+  );
   const operationalHeatmapPoints = React.useMemo(
     () =>
-      selectedScope
-        ? buildOperationalHeatmapPoints(
-            operationalMonthHourRows,
-            selectedScope,
-            clock,
-          )
-        : [],
-    [clock, operationalMonthHourRows, selectedScope],
+      buildCombinedScenarioPoints({
+        from: startOfMonth(clock),
+        granularity: "hour",
+        rows: operationalMonthHourRows,
+        scenarios: heatmapScenarios,
+        sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
+        to: addHours(startOfHour(clock), 1),
+      }).map((point) => {
+        const bucket = new Date(point.bucket);
+        return {
+          bucket: point.bucket,
+          day: bucket.getDate(),
+          hour: bucket.getHours(),
+          total: point.total,
+        };
+      }),
+    [
+      clock,
+      heatmapScenarios,
+      operationalMonthHourRows,
+      operationalMonthHourState?.granularity,
+    ],
   );
   const targetProgress = baselineDailyAverage
     ? todayTotal / baselineDailyAverage
@@ -849,12 +895,12 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const monthlyAccessRankingPoints = React.useMemo(
     () =>
       buildScenarioPeriodComparisonPoints(
-        scenarios,
+        rankingScenarios,
         currentMonthDayRows,
         startOfMonth(clock),
         addDays(startOfDay(clock), 1),
       ),
-    [clock, currentMonthDayRows, scenarios],
+    [clock, currentMonthDayRows, rankingScenarios],
   );
   const scenarioTodayComparisonPoints = React.useMemo(
     () => buildScenarioTodayComparisonPoints(scenarios, hourRows, clock),
@@ -1248,11 +1294,26 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       className: "sm:col-span-2 xl:col-span-4",
       node: (
         <OperationalHeatmapCard
+          canConfigure={canEditVisual}
           error={operationalMonthHourState?.error}
           loading={initialLoading}
           month={clock}
+          monitorMode={monitorMode}
+          onSelectedIdsChange={(heatmapScenarioIds) =>
+            updateOperationalSettings({ heatmapScenarioIds })
+          }
+          onSelectionModeChange={(heatmapSelectionMode) =>
+            updateOperationalSettings({ heatmapSelectionMode })
+          }
           points={operationalHeatmapPoints}
-          scopeName={selectedScope?.name ?? "Visão selecionada"}
+          scenarios={scenarios}
+          selectedIds={operationalSettings.heatmapScenarioIds}
+          selectionLabel={scenarioSelectionSummary(
+            scenarios,
+            operationalSettings.heatmapSelectionMode,
+            operationalSettings.heatmapScenarioIds,
+          )}
+          selectionMode={operationalSettings.heatmapSelectionMode}
         />
       ),
     },
@@ -1277,8 +1338,19 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       className: "sm:col-span-2 xl:col-span-2",
       node: (
         <MonthlyAccessRankingCard
+          canConfigure={canEditVisual}
           loading={initialLoading}
+          monitorMode={monitorMode}
+          onSelectedIdsChange={(rankingScenarioIds) =>
+            updateOperationalSettings({ rankingScenarioIds })
+          }
+          onSelectionModeChange={(rankingSelectionMode) =>
+            updateOperationalSettings({ rankingSelectionMode })
+          }
           points={monthlyAccessRankingPoints}
+          scenarios={scenarios}
+          selectedIds={operationalSettings.rankingScenarioIds}
+          selectionMode={operationalSettings.rankingSelectionMode}
         />
       ),
     },
@@ -1571,7 +1643,11 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       buildOperationalHeatmapReportChart({
         month: clock,
         points: operationalHeatmapPoints,
-        scopeName: selectedScope.name,
+        scopeName: scenarioSelectionSummary(
+          scenarios,
+          operationalSettings.heatmapSelectionMode,
+          operationalSettings.heatmapScenarioIds,
+        ),
         widgetColor: liveColorByCardId.get("live_month_hour_heatmap"),
       }),
     ]);
@@ -1982,6 +2058,11 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
           reorderMode={layoutReorderMode}
           showOrganizerTrigger={false}
           showReorderTrigger={false}
+          viewScopeName={selectedScope?.name}
+          viewScopes={scopeOptions.map((scope) => ({
+            id: scope.id,
+            name: scope.name,
+          }))}
           editActions={
             <Button
               type="button"
@@ -2371,24 +2452,46 @@ function OperationalHourlyChartCard({
 }
 
 function OperationalHeatmapCard({
+  canConfigure,
   error,
   loading,
   month,
+  monitorMode,
+  onSelectedIdsChange,
+  onSelectionModeChange,
   points,
-  scopeName,
+  scenarios,
+  selectedIds,
+  selectionLabel,
+  selectionMode,
 }: {
+  canConfigure: boolean;
   error?: string;
   loading: boolean;
   month: Date;
+  monitorMode: boolean;
+  onSelectedIdsChange: (ids: string[]) => void;
+  onSelectionModeChange: (mode: "all" | "custom") => void;
   points: OperationalHeatmapPoint[];
-  scopeName: string;
+  scenarios: Scenario[];
+  selectedIds: string[];
+  selectionLabel: string;
+  selectionMode: "all" | "custom";
 }) {
   const widgetColor = useWidgetColor();
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   const option = React.useMemo(
     () => buildOperationalHeatmapOption(points, month, widgetColor),
     [month, points, widgetColor],
   );
   const hasData = points.some((point) => point.total > 0);
+  const hasSelection =
+    selectionMode === "all" ||
+    scenarios.some((scenario) => selectedIds.includes(scenario.id));
+
+  React.useEffect(() => {
+    if (monitorMode) setSettingsOpen(false);
+  }, [monitorMode]);
 
   return (
     <Card className="min-w-0 overflow-hidden">
@@ -2406,13 +2509,40 @@ function OperationalHeatmapCard({
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Badge variant="outline" className="max-w-full truncate">
-              {scopeName}
+              {selectionLabel}
             </Badge>
+            {canConfigure && !monitorMode ? (
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setSettingsOpen((current) => !current)}
+                aria-label="Configurar cenários do mapa de calor"
+                title="Configurar cenários"
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            ) : null}
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0">
-        {loading ? (
+      <CardContent className="min-w-0 space-y-3">
+        {settingsOpen && !monitorMode ? (
+          <ScenarioPicker
+            mode={selectionMode}
+            onModeChange={onSelectionModeChange}
+            onSelectedIdsChange={onSelectedIdsChange}
+            scenarios={scenarios}
+            selectedIds={selectedIds}
+          />
+        ) : null}
+        {!hasSelection ? (
+          <EmptyChartState
+            className="h-[260px]"
+            text="Selecione ao menos um cenário para montar o mapa de calor."
+          />
+        ) : loading ? (
           <Skeleton className="h-[500px] w-full" />
         ) : error ? (
           <EmptyChartState className="h-[260px]" text={error} />
@@ -2634,13 +2764,28 @@ function TrendBadge({
 }
 
 function MonthlyAccessRankingCard({
+  canConfigure,
   loading,
+  monitorMode,
+  onSelectedIdsChange,
+  onSelectionModeChange,
   points,
+  scenarios,
+  selectedIds,
+  selectionMode,
 }: {
+  canConfigure: boolean;
   loading: boolean;
+  monitorMode: boolean;
+  onSelectedIdsChange: (ids: string[]) => void;
+  onSelectionModeChange: (mode: "all" | "custom") => void;
   points: ScenarioComparisonPoint[];
+  scenarios: Scenario[];
+  selectedIds: string[];
+  selectionMode: "all" | "custom";
 }) {
   const widgetColor = useWidgetColor();
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   const rankedPoints = React.useMemo(
     () => points.filter((point) => point.total > 0),
     [points],
@@ -2650,6 +2795,15 @@ function MonthlyAccessRankingCard({
     [rankedPoints, widgetColor],
   );
   const chartHeight = Math.max(280, rankedPoints.length * 34 + 30);
+  const selectedScenarioCount = selectScenarios(
+    scenarios,
+    selectionMode,
+    selectedIds,
+  ).length;
+
+  React.useEffect(() => {
+    if (monitorMode) setSettingsOpen(false);
+  }, [monitorMode]);
 
   return (
     <Card className="min-w-0 overflow-hidden">
@@ -2664,13 +2818,42 @@ function MonthlyAccessRankingCard({
               Volume e representatividade de cada cenário no mês em andamento.
             </CardDescription>
           </div>
-          <Badge variant="outline">
-            {rankedPoints.length} {rankedPoints.length === 1 ? "acesso" : "acessos"}
-          </Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline">
+              {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
+            </Badge>
+            {canConfigure && !monitorMode ? (
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setSettingsOpen((current) => !current)}
+                aria-label="Configurar cenários do ranking"
+                title="Configurar cenários"
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0">
-        {loading ? (
+      <CardContent className="min-w-0 space-y-3">
+        {settingsOpen && !monitorMode ? (
+          <ScenarioPicker
+            mode={selectionMode}
+            onModeChange={onSelectionModeChange}
+            onSelectedIdsChange={onSelectedIdsChange}
+            scenarios={scenarios}
+            selectedIds={selectedIds}
+          />
+        ) : null}
+        {!selectedScenarioCount ? (
+          <EmptyChartState
+            className="h-[200px]"
+            text="Selecione ao menos um cenário para montar o ranking."
+          />
+        ) : loading ? (
           <Skeleton className="h-[300px] w-full" />
         ) : rankedPoints.length ? (
           <div className="max-h-[360px] overflow-y-auto overflow-x-hidden pr-1">
@@ -3507,25 +3690,6 @@ function buildOperationalMonthComparisonPoints(
       day,
       isSaturday: currentExists && currentFrom.getDay() === 6,
       isSunday: currentExists && currentFrom.getDay() === 0,
-    };
-  });
-}
-
-function buildOperationalHeatmapPoints(
-  rows: AggregateEventRow[],
-  scope: RealtimeScopeOption,
-  now: Date,
-): OperationalHeatmapPoint[] {
-  const definition = buildOperationalMonthHoursDefinition(now);
-
-  return buildScopePoints(definition, rows, scope).map((point) => {
-    const bucket = new Date(point.bucket);
-
-    return {
-      bucket: point.bucket,
-      day: bucket.getDate(),
-      hour: bucket.getHours(),
-      total: point.total,
     };
   });
 }

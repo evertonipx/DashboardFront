@@ -7,6 +7,7 @@ import {
   Activity,
   Building2,
   Camera,
+  ChartNoAxesCombined,
   ChevronRight,
   FileText,
   Filter,
@@ -48,6 +49,11 @@ type AppShellProps = {
 
 const clientNavItems = [
   { href: "/dashboard/live", label: "Ao Vivo", icon: Activity },
+  {
+    href: "/dashboard/analytics",
+    label: "Análises",
+    icon: ChartNoAxesCombined,
+  },
   { href: "/dashboard/reports", label: "Relatórios", icon: FileText },
 ];
 
@@ -60,6 +66,11 @@ type NavItem = {
 
 const managerNavItems: NavItem[] = [
   { href: "/manager/live", label: "Ao Vivo", icon: Activity },
+  {
+    href: "/manager/analytics",
+    label: "Análises",
+    icon: ChartNoAxesCombined,
+  },
   { href: "/manager/reports", label: "Relatórios", icon: FileText },
   {
     href: "/manager/views",

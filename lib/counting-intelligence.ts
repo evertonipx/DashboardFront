@@ -1387,6 +1387,7 @@ function buildMonthlyComparisonReportTable(
     description: `Anos, meses, acumulado e média em ${formatCountingIntelligencePeriod(
       model,
     )}. A variação compara sempre o ano mais recente com o anterior.`,
+    includeInCharts: true,
     rows,
     title: "Tabela mensal comparativa",
   };
