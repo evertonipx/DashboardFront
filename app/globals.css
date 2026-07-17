@@ -86,6 +86,54 @@
       0 0 0 1px hsl(var(--primary) / 0.035);
   }
 
+  [data-layout-card-id] > [data-premium-card] {
+    display: flex;
+    height: 100%;
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  [data-layout-card-id] [data-card-header] {
+    flex: 0 0 auto;
+  }
+
+  [data-layout-card-id] [data-card-description] {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  [data-layout-card-id] [data-card-content] {
+    min-width: 0;
+  }
+
+  [data-layout-card-id] [data-card-content]:has([data-echart]) {
+    display: flex;
+    min-height: 0;
+    flex: 1 1 0%;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  [data-layout-card-id] [data-card-content] > :has([data-echart]),
+  [data-layout-card-id] [data-card-content] :has(> [data-echart]) {
+    min-height: 0 !important;
+    min-width: 0 !important;
+    max-height: none !important;
+    max-width: 100% !important;
+    flex: 1 1 0%;
+    overflow: hidden !important;
+  }
+
+  [data-layout-card-id] [data-echart] {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    min-width: 0 !important;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     [data-premium-card],
     [data-premium-hover] {

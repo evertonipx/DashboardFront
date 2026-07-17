@@ -5,9 +5,11 @@ import {
   Activity,
   BarChart3,
   CalendarDays,
+  ChartPie,
   Clock3,
   DoorOpen,
   Grid3X3,
+  Pencil,
   Plus,
   Route,
   Settings2,
@@ -119,6 +121,8 @@ import {
   type RealtimeCustomWidgetGranularity,
   type RealtimeCustomWidgetKind,
   type RealtimeCustomWidgetScopeMode,
+  type RealtimeScenarioWidgetType,
+  type RealtimeScenarioCustomWidget,
   type RealtimeScopeCustomWidget,
 } from "@/lib/realtime-custom-widgets";
 import {
@@ -275,11 +279,19 @@ type RealtimeScopeOption = {
 type RealtimeCustomWidgetForm = {
   comparisonSettings: ScenarioComparisonSettings;
   granularity: RealtimeCustomWidgetGranularity;
+  id?: string;
   kind: RealtimeCustomWidgetKind;
+  scenarioIds: string[];
+  scenarioSelectionMode: "all" | "custom";
+  scenarioWidgetType: RealtimeScenarioWidgetType;
   scopeId: string;
   scopeMode: RealtimeCustomWidgetScopeMode;
   title: string;
 };
+
+type CustomScenarioWidgetPatch = Partial<
+  Pick<RealtimeScenarioCustomWidget, "scenarioIds" | "selectionMode">
+>;
 
 const REFRESH_MS = 5_000;
 const MINUTE_MS = 60_000;
@@ -309,6 +321,49 @@ const CUSTOM_WIDGET_GRANULARITY_OPTIONS: {
   { label: "Semana a semana", value: "week" },
   { label: "Mês a mês", value: "month" },
 ];
+const SCENARIO_WIDGET_OPTIONS: Array<{
+  description: string;
+  label: string;
+  value: RealtimeScenarioWidgetType;
+}> = [
+  {
+    description: "Volume e representatividade mensal em ordem decrescente.",
+    label: "Ranking dos acessos",
+    value: "ranking",
+  },
+  {
+    description: "Participação proporcional dos cenários no fluxo mensal.",
+    label: "Distribuição radial por cenário",
+    value: "rose",
+  },
+  {
+    description: "Cinco dias de maior volume no mês atual.",
+    label: "Top 5 dias de pico",
+    value: "peak_days",
+  },
+  {
+    description: "Intensidade de fluxo por dia e faixa horária.",
+    label: "Mapa de calor dia x hora",
+    value: "heatmap",
+  },
+  {
+    description: "Total de hoje para cada cenário selecionado.",
+    label: "Acumulado por cenário",
+    value: "cumulative",
+  },
+  {
+    description: "Totais de hoje e do mês em formato tabular.",
+    label: "Tabela acumulada por cenário",
+    value: "totals_table",
+  },
+];
+
+function scenarioWidgetOption(widgetType: RealtimeScenarioWidgetType) {
+  return (
+    SCENARIO_WIDGET_OPTIONS.find((option) => option.value === widgetType) ??
+    SCENARIO_WIDGET_OPTIONS[0]
+  );
+}
 
 export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const { user } = useAuth();
@@ -352,6 +407,9 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       comparisonSettings: createDefaultScenarioComparisonSettings(),
       granularity: "hour",
       kind: "scope",
+      scenarioIds: [],
+      scenarioSelectionMode: "all",
+      scenarioWidgetType: "ranking",
       scopeId: "",
       scopeMode: "scenario",
       title: "",
@@ -796,7 +854,16 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     todayComparableTotal,
     comparisonComparableTotal,
   );
+  const currentHourPartialTotal = todayTotal - todayComparableTotal;
   const completedMonthDayCount = Math.max(0, clock.getDate() - 1);
+  const currentMonthRealtimeTotal = selectedScope
+    ? sumScopeRowsInRange(
+        currentMonthDayRows,
+        selectedScope,
+        startOfMonth(clock),
+        addDays(startOfDay(clock), 1),
+      )
+    : 0;
   const currentMonthClosedTotal = selectedScope
     ? sumScopeRowsInRange(
         currentMonthDayRows,
@@ -866,13 +933,13 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     if (!selectedScope) return [];
     const definition = buildOperationalTrendDaysDefinition(clock);
     const currentMonthStart = startOfMonth(clock);
-    const closedPoints = buildScopePoints(
+    const trendPoints = buildScopePoints(
       definition,
       operationalTrendRows,
       selectedScope,
-    ).filter((point) => new Date(point.bucket) < startOfDay(clock));
+    );
 
-    return buildOperationalTrendPoints(closedPoints).filter((point) => {
+    return buildOperationalTrendPoints(trendPoints).filter((point) => {
       const bucket = new Date(point.bucket);
       return bucket >= currentMonthStart;
     });
@@ -900,6 +967,19 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     [
       operationalSettings.rankingScenarioIds,
       operationalSettings.rankingSelectionMode,
+      scenarios,
+    ],
+  );
+  const roseScenarios = React.useMemo(
+    () =>
+      selectScenarios(
+        scenarios,
+        operationalSettings.roseSelectionMode,
+        operationalSettings.roseScenarioIds,
+      ),
+    [
+      operationalSettings.roseScenarioIds,
+      operationalSettings.roseSelectionMode,
       scenarios,
     ],
   );
@@ -1017,6 +1097,16 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         addDays(startOfDay(clock), 1),
       ),
     [clock, currentMonthDayRows, rankingScenarios],
+  );
+  const roseScenarioPoints = React.useMemo(
+    () =>
+      buildScenarioPeriodComparisonPoints(
+        roseScenarios,
+        currentMonthDayRows,
+        startOfMonth(clock),
+        addDays(startOfDay(clock), 1),
+      ),
+    [clock, currentMonthDayRows, roseScenarios],
   );
   const cumulativeScenarioPoints = React.useMemo(
     () =>
@@ -1223,10 +1313,67 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       comparisonSettings: createDefaultScenarioComparisonSettings(),
       granularity,
       kind: "scope",
+      scenarioIds: [],
+      scenarioSelectionMode: "all",
+      scenarioWidgetType: "ranking",
       scopeId: scope?.id ?? "",
       scopeMode: (scope?.mode ?? preferredMode) as RealtimeCustomWidgetScopeMode,
       title: scope ? buildCustomWidgetDefaultTitle(scope, granularity) : "",
     });
+    setCustomWidgetDialogOpen(true);
+  }
+
+  function openCustomWidgetEditor(widget: RealtimeCustomWidget) {
+    const preferredMode = (selectedScope?.mode ??
+      availableModes[0]?.value ??
+      "scenario") as RealtimeCustomWidgetScopeMode;
+    const fallbackScope = getScopeOptionsForMode(preferredMode)[0] ?? null;
+
+    if (widget.kind === "scenario_comparison") {
+      setCustomWidgetForm({
+        comparisonSettings: loadScenarioComparisonSettings(
+          realtimeScenarioComparisonStorageKey(widget.id),
+          companyScopeId,
+          preferenceScope,
+        ),
+        granularity: "hour",
+        id: widget.id,
+        kind: "scenario_comparison",
+        scenarioIds: [],
+        scenarioSelectionMode: "all",
+        scenarioWidgetType: "ranking",
+        scopeId: fallbackScope?.id ?? "",
+        scopeMode: preferredMode,
+        title: widget.title,
+      });
+    } else if (widget.kind === "scenario_widget") {
+      setCustomWidgetForm({
+        comparisonSettings: createDefaultScenarioComparisonSettings(),
+        granularity: "hour",
+        id: widget.id,
+        kind: "scenario_widget",
+        scenarioIds: widget.scenarioIds,
+        scenarioSelectionMode: widget.selectionMode,
+        scenarioWidgetType: widget.widgetType,
+        scopeId: fallbackScope?.id ?? "",
+        scopeMode: preferredMode,
+        title: widget.title,
+      });
+    } else {
+      setCustomWidgetForm({
+        comparisonSettings: createDefaultScenarioComparisonSettings(),
+        granularity: widget.granularity,
+        id: widget.id,
+        kind: "scope",
+        scenarioIds: [],
+        scenarioSelectionMode: "all",
+        scenarioWidgetType: "ranking",
+        scopeId: widget.scopeId,
+        scopeMode: widget.scopeMode,
+        title: widget.title,
+      });
+    }
+
     setCustomWidgetDialogOpen(true);
   }
 
@@ -1242,9 +1389,20 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       title:
         kind === "scenario_comparison"
           ? "Cenários por período"
+          : kind === "scenario_widget"
+            ? scenarioWidgetOption(current.scenarioWidgetType).label
           : scope
             ? buildCustomWidgetDefaultTitle(scope, current.granularity)
             : "",
+    }));
+  }
+
+  function handleScenarioWidgetTypeChange(value: string) {
+    const scenarioWidgetType = value as RealtimeScenarioWidgetType;
+    setCustomWidgetForm((current) => ({
+      ...current,
+      scenarioWidgetType,
+      title: scenarioWidgetOption(scenarioWidgetType).label,
     }));
   }
 
@@ -1298,25 +1456,30 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   }
 
   function saveCustomWidget() {
+    const widgetId = customWidgetForm.id;
+    const editing = Boolean(widgetId);
+
     if (customWidgetForm.kind === "scenario_comparison") {
       const nextWidgets = upsertRealtimeCustomWidget(
         {
+          id: widgetId,
           kind: "scenario_comparison",
           title: customWidgetForm.title.trim() || "Cenários por período",
         },
         companyScopeId,
         preferenceScope,
       );
-      const addedWidget =
-        nextWidgets.find(
-          (widget) =>
-            widget.kind === "scenario_comparison" &&
-            !customWidgets.some((current) => current.id === widget.id),
-        ) ?? nextWidgets.at(-1);
+      const savedWidget = widgetId
+        ? nextWidgets.find((widget) => widget.id === widgetId)
+        : nextWidgets.find(
+            (widget) =>
+              widget.kind === "scenario_comparison" &&
+              !customWidgets.some((current) => current.id === widget.id),
+          );
 
-      if (addedWidget?.kind === "scenario_comparison") {
+      if (savedWidget?.kind === "scenario_comparison") {
         saveScenarioComparisonSettings(
-          realtimeScenarioComparisonStorageKey(addedWidget.id),
+          realtimeScenarioComparisonStorageKey(savedWidget.id),
           customWidgetForm.comparisonSettings,
           companyScopeId,
           preferenceScope,
@@ -1325,7 +1488,42 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
 
       setCustomWidgets(nextWidgets);
       setCustomWidgetDialogOpen(false);
-      toast.success("Widget de cenários por período adicionado.");
+      toast.success(
+        editing
+          ? "Widget de cenários por período atualizado."
+          : "Widget de cenários por período adicionado.",
+      );
+      return;
+    }
+
+    if (customWidgetForm.kind === "scenario_widget") {
+      if (
+        customWidgetForm.scenarioSelectionMode === "custom" &&
+        !customWidgetForm.scenarioIds.length
+      ) {
+        toast.error("Selecione ao menos um cenário para criar o widget.");
+        return;
+      }
+
+      const nextWidgets = upsertRealtimeCustomWidget(
+        {
+          id: widgetId,
+          kind: "scenario_widget",
+          scenarioIds: customWidgetForm.scenarioIds,
+          selectionMode: customWidgetForm.scenarioSelectionMode,
+          title:
+            customWidgetForm.title.trim() ||
+            scenarioWidgetOption(customWidgetForm.scenarioWidgetType).label,
+          widgetType: customWidgetForm.scenarioWidgetType,
+        },
+        companyScopeId,
+        preferenceScope,
+      );
+      setCustomWidgets(nextWidgets);
+      setCustomWidgetDialogOpen(false);
+      toast.success(
+        editing ? "Widget por cenário atualizado." : "Widget por cenário adicionado.",
+      );
       return;
     }
 
@@ -1344,6 +1542,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     const nextWidgets = upsertRealtimeCustomWidget(
       {
         granularity: customWidgetForm.granularity,
+        id: widgetId,
         kind: "scope",
         scopeId: scope.id,
         scopeMode: scope.mode as RealtimeCustomWidgetScopeMode,
@@ -1356,7 +1555,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
 
     setCustomWidgets(nextWidgets);
     setCustomWidgetDialogOpen(false);
-    toast.success("Widget adicionado ao Ao Vivo.");
+    toast.success(editing ? "Widget atualizado." : "Widget adicionado ao Ao Vivo.");
   }
 
   function removeCustomWidget(widgetId: string) {
@@ -1380,23 +1579,27 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const metricCards = [
     {
       id: "live_intraday_comparison",
-      label: "Horas fechadas hoje",
+      label: "Hoje em tempo real",
       defaultSize: "compact" as const,
       node: (
         <MetricCard
           icon={Clock3}
-          label={`Hoje até ${String(completedHourCount).padStart(2, "0")}h`}
-          value={todayComparableTotal}
+          label="Hoje até agora"
+          value={todayTotal}
           loading={initialLoading}
           tone="primary"
           description={
             completedHourCount
-              ? `${formatDelta(comparisonDelta)} vs. ${intradayComparisonSeriesLabel(
+              ? `${formatNumber(
+                  currentHourPartialTotal,
+                )} na hora em andamento · ${formatDelta(
+                  comparisonDelta,
+                )} nas horas fechadas vs. ${intradayComparisonSeriesLabel(
                   operationalSettings.intradayComparison,
                 ).toLowerCase()} · base ${formatNumber(
                   comparisonComparableTotal,
                 )}`
-              : "Aguardando a primeira hora completa"
+              : "Atualização contínua; comparativo disponível após a primeira hora fechada"
           }
         />
       ),
@@ -1436,14 +1639,13 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         <MetricCard
           icon={Activity}
           label="Acumulado x mês anterior"
-          value={formatDelta(previousMonthDelta)}
+          value={currentMonthRealtimeTotal}
+          comparison={formatDelta(previousMonthDelta)}
           loading={initialLoading}
           tone="sky"
           description={`${formatNumber(
-            currentMonthClosedTotal,
-          )} atual · ${formatNumber(
             previousMonthComparableTotal,
-          )} base · ${completedMonthDayCount} dias fechados`}
+          )} até o último dia fechado do mês anterior · comparação em ${completedMonthDayCount} dias fechados`}
         />
       ),
     },
@@ -1455,14 +1657,13 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         <MetricCard
           icon={TrendingUp}
           label="Acumulado x ano anterior"
-          value={formatDelta(lastYearMonthDelta)}
+          value={currentMonthRealtimeTotal}
+          comparison={formatDelta(lastYearMonthDelta)}
           loading={initialLoading}
           tone="indigo"
           description={`${formatNumber(
-            currentMonthClosedTotal,
-          )} atual · ${formatNumber(
             lastYearMonthComparableTotal,
-          )} base · ${completedMonthDayCount} dias fechados`}
+          )} até o último dia fechado do ano anterior · comparação em ${completedMonthDayCount} dias fechados`}
         />
       ),
     },
@@ -1481,6 +1682,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       id: "live_chart_hour",
       chartTypeEnabled: true,
       label: "Hora a Hora",
+      defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node:
@@ -1509,6 +1711,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       id: "live_moving_average_trend",
       chartTypeEnabled: true,
       label: "Tendência 7 x 30 dias",
+      defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: (
@@ -1524,6 +1727,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       id: "live_hourly_occupancy",
       chartTypeEnabled: true,
       label: "Ocupação hora a hora",
+      defaultHeight: "standard" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: (
@@ -1603,6 +1807,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     {
       id: "live_scenario_cumulative",
       label: "Acumulado por cenário",
+      defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: (
@@ -1626,6 +1831,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     {
       id: "live_scenario_totals_table",
       label: "Tabela acumulada por cenário",
+      defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: (
@@ -1650,6 +1856,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       id: "live_current_year_monthly",
       chartTypeEnabled: true,
       label: "Comparativo mensal por ano",
+      defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: (
@@ -1666,6 +1873,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       id: "live_current_year_accumulated",
       chartTypeEnabled: true,
       label: "Comparativo acumulado por ano",
+      defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: (
@@ -1681,6 +1889,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     {
       id: "live_month_hour_heatmap",
       label: "Mapa de calor dia x hora",
+      defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: (
@@ -1711,6 +1920,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     {
       id: "live_month_access_ranking",
       label: "Ranking dos acessos do mês",
+      defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: (
@@ -1734,6 +1944,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     {
       id: "live_month_peak_days",
       label: "Top 5 dias de pico",
+      defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: (
@@ -1755,9 +1966,34 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       ),
     },
     {
+      id: "live_scenario_rose",
+      label: "Distribuição radial por cenário",
+      defaultHeight: "standard" as const,
+      defaultSize: "wide" as const,
+      className: "sm:col-span-2 xl:col-span-2",
+      node: (
+        <ScenarioRoseCard
+          canConfigure={canEditVisual}
+          loading={initialLoading}
+          monitorMode={monitorMode}
+          onSelectedIdsChange={(roseScenarioIds) =>
+            updateOperationalSettings({ roseScenarioIds })
+          }
+          onSelectionModeChange={(roseSelectionMode) =>
+            updateOperationalSettings({ roseSelectionMode })
+          }
+          points={roseScenarioPoints}
+          scenarios={scenarios}
+          selectedIds={operationalSettings.roseScenarioIds}
+          selectionMode={operationalSettings.roseSelectionMode}
+        />
+      ),
+    },
+    {
       id: "live_operational_month_comparison",
       chartTypeEnabled: true,
       label: "Dias x meses",
+      defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: (
@@ -1774,6 +2010,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       id: "live_operational_month_cumulative",
       chartTypeEnabled: true,
       label: "Acumulado diário x mês-base",
+      defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: (
@@ -1858,20 +2095,13 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         node: (
           <ScenarioComparisonCard
             action={
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  removeCustomWidget(widget.id);
-                }}
-                aria-label={`Remover widget ${widget.title}`}
-                title="Remover widget"
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
+              canEditVisual && !monitorMode ? (
+                <CustomWidgetActions
+                  onEdit={() => openCustomWidgetEditor(widget)}
+                  onRemove={() => removeCustomWidget(widget.id)}
+                  title={widget.title}
+                />
+              ) : null
             }
             autoRefresh
             companyId={companyScopeId}
@@ -1880,6 +2110,60 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
             scenarios={scenarios}
             storageKey={realtimeScenarioComparisonStorageKey(widget.id)}
             title={widget.title}
+          />
+        ),
+      };
+    }
+
+    if (widget.kind === "scenario_widget") {
+      return {
+        id: `live_custom_${widget.id}`,
+        label: widget.title,
+        defaultHeight:
+          widget.widgetType === "heatmap" ? ("tall" as const) : ("standard" as const),
+        defaultSize:
+          widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
+            ? ("full" as const)
+            : ("wide" as const),
+        node: (
+          <CustomScenarioWidgetCard
+            canConfigure={canEditVisual}
+            clock={clock}
+            currentMonthDayGranularity={
+              currentMonthDayState?.granularity ?? "day"
+            }
+            currentMonthDayRows={currentMonthDayRows}
+            error={operationalMonthHourState?.error}
+            hourGranularity={
+              chartData.live_chart_hour?.granularity ?? "hour"
+            }
+            hourRows={hourRows}
+            loading={initialLoading}
+            monitorMode={monitorMode}
+            monthHourGranularity={
+              operationalMonthHourState?.granularity ?? "hour"
+            }
+            monthHourRows={operationalMonthHourRows}
+            onEdit={() => openCustomWidgetEditor(widget)}
+            onChange={(patch) => {
+              const nextWidgets = upsertRealtimeCustomWidget(
+                {
+                  id: widget.id,
+                  kind: "scenario_widget",
+                  scenarioIds: patch.scenarioIds ?? widget.scenarioIds,
+                  selectionMode:
+                    patch.selectionMode ?? widget.selectionMode,
+                  title: widget.title,
+                  widgetType: widget.widgetType,
+                },
+                companyScopeId,
+                preferenceScope,
+              );
+              setCustomWidgets(nextWidgets);
+            }}
+            onRemove={() => removeCustomWidget(widget.id)}
+            scenarios={scenarios}
+            widget={widget}
           />
         ),
       };
@@ -1904,21 +2188,13 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       node: scope ? (
         <RealtimeChartCard
           action={
-            monitorMode ? null : (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  removeCustomWidget(widget.id);
-                }}
-                aria-label={`Remover widget ${widget.title}`}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            )
+            canEditVisual && !monitorMode ? (
+              <CustomWidgetActions
+                onEdit={() => openCustomWidgetEditor(widget)}
+                onRemove={() => removeCustomWidget(widget.id)}
+                title={widget.title}
+              />
+            ) : null
           }
           definition={definition}
           loading={initialLoading}
@@ -1929,7 +2205,16 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       ) : (
         <MissingCustomWidgetCard
           title={widget.title}
-          onRemove={monitorMode ? undefined : () => removeCustomWidget(widget.id)}
+          onEdit={
+            canEditVisual && !monitorMode
+              ? () => openCustomWidgetEditor(widget)
+              : undefined
+          }
+          onRemove={
+            canEditVisual && !monitorMode
+              ? () => removeCustomWidget(widget.id)
+              : undefined
+          }
         />
       ),
     };
@@ -1993,12 +2278,16 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       "live_intraday_comparison",
       {
         description: completedHourCount
-          ? `${formatDelta(comparisonDelta)} contra ${intradayComparisonSeriesLabel(
+          ? `${formatNumber(
+              currentHourPartialTotal,
+            )} na hora em andamento · ${formatDelta(
+              comparisonDelta,
+            )} nas horas fechadas contra ${intradayComparisonSeriesLabel(
               operationalSettings.intradayComparison,
             ).toLowerCase()}`
-          : "Aguardando a primeira hora completa",
-        label: `Hoje até ${String(completedHourCount).padStart(2, "0")}h`,
-        value: todayComparableTotal,
+          : "Atualização contínua; comparativo disponível após a primeira hora fechada",
+        label: "Hoje até agora",
+        value: todayTotal,
       },
     ],
     [
@@ -2017,21 +2306,21 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     [
       "live_month_previous_comparison",
       {
-        description: `${formatNumber(currentMonthClosedTotal)} atual · ${formatNumber(
+        description: `${formatDelta(previousMonthDelta)} contra ${formatNumber(
           previousMonthComparableTotal,
-        )} base`,
+        )} até o último dia fechado do mês anterior`,
         label: "Acumulado x mês anterior",
-        value: formatDelta(previousMonthDelta),
+        value: currentMonthRealtimeTotal,
       },
     ],
     [
       "live_month_year_comparison",
       {
-        description: `${formatNumber(currentMonthClosedTotal)} atual · ${formatNumber(
+        description: `${formatDelta(lastYearMonthDelta)} contra ${formatNumber(
           lastYearMonthComparableTotal,
-        )} base`,
+        )} até o último dia fechado do ano anterior`,
         label: "Acumulado x ano anterior",
-        value: formatDelta(lastYearMonthDelta),
+        value: currentMonthRealtimeTotal,
       },
     ],
   ]);
@@ -2151,6 +2440,18 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     ),
   ]);
   liveChartEntries.push([
+    "live_scenario_rose",
+    buildScenarioRoseReportChart(
+      roseScenarioPoints,
+      scenarioSelectionSummary(
+        scenarios,
+        operationalSettings.roseSelectionMode,
+        operationalSettings.roseScenarioIds,
+      ),
+      liveColorByCardId.get("live_scenario_rose"),
+    ),
+  ]);
+  liveChartEntries.push([
     "live_month_peak_days",
     buildPeakDaysRankingReportChart(
       peakDayPoints,
@@ -2219,6 +2520,149 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       ]);
     });
 
+  const customScenarioTableByCardId = new Map<string, ReportTable>();
+  customWidgets
+    .filter(
+      (widget): widget is RealtimeScenarioCustomWidget =>
+        widget.kind === "scenario_widget",
+    )
+    .forEach((widget) => {
+      const cardId = `live_custom_${widget.id}`;
+      const widgetColor = liveColorByCardId.get(cardId);
+      const selectedScenarios = selectScenarios(
+        scenarios,
+        widget.selectionMode,
+        widget.scenarioIds,
+      );
+      const monthStart = startOfMonth(clock);
+      const monthEnd = addDays(startOfDay(clock), 1);
+      const selectionLabel = scenarioSelectionSummary(
+        scenarios,
+        widget.selectionMode,
+        widget.scenarioIds,
+      );
+      const rankingPoints = buildScenarioPeriodComparisonPoints(
+        selectedScenarios,
+        currentMonthDayRows,
+        monthStart,
+        monthEnd,
+      );
+
+      if (widget.widgetType === "ranking") {
+        liveChartEntries.push([
+          cardId,
+          renameReportChart(
+            buildMonthlyAccessRankingReportChart(rankingPoints, widgetColor),
+            widget.title,
+          ),
+        ]);
+        return;
+      }
+
+      if (widget.widgetType === "rose") {
+        liveChartEntries.push([
+          cardId,
+          buildScenarioRoseReportChart(
+            rankingPoints,
+            selectionLabel,
+            widgetColor,
+            widget.title,
+          ),
+        ]);
+        return;
+      }
+
+      if (widget.widgetType === "peak_days") {
+        const points = buildTopScenarioPeakDays({
+          from: monthStart,
+          rows: currentMonthDayRows,
+          scenarios: selectedScenarios,
+          sourceGranularity: currentMonthDayState?.granularity ?? "day",
+          to: monthEnd,
+        });
+        liveChartEntries.push([
+          cardId,
+          renameReportChart(
+            buildPeakDaysRankingReportChart(points, selectionLabel, widgetColor),
+            widget.title,
+          ),
+        ]);
+        return;
+      }
+
+      if (widget.widgetType === "heatmap") {
+        const points = buildCombinedScenarioPoints({
+          from: monthStart,
+          granularity: "hour",
+          rows: operationalMonthHourRows,
+          scenarios: selectedScenarios,
+          sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
+          to: addHours(startOfHour(clock), 1),
+        }).map((point) => {
+          const bucket = new Date(point.bucket);
+          return {
+            bucket: point.bucket,
+            day: bucket.getDate(),
+            hour: bucket.getHours(),
+            total: point.total,
+          };
+        });
+        liveChartEntries.push([
+          cardId,
+          renameReportChart(
+            buildOperationalHeatmapReportChart({
+              month: clock,
+              points,
+              scopeName: selectionLabel,
+              widgetColor,
+            }),
+            widget.title,
+          ),
+        ]);
+        return;
+      }
+
+      if (widget.widgetType === "cumulative") {
+        const points = buildScenarioCumulativeTotals({
+          from: startOfDay(clock),
+          rows: hourRows,
+          scenarios: selectedScenarios,
+          sourceGranularity: chartData.live_chart_hour?.granularity ?? "hour",
+          to: clock,
+        });
+        liveChartEntries.push([
+          cardId,
+          renameReportChart(
+            buildScenarioCumulativeTotalsReportChart(points, widgetColor),
+            widget.title,
+          ),
+        ]);
+        return;
+      }
+
+      const today = buildScenarioCumulativeTotals({
+        from: startOfDay(clock),
+        rows: hourRows,
+        scenarios: selectedScenarios,
+        sourceGranularity: chartData.live_chart_hour?.granularity ?? "hour",
+        to: clock,
+      });
+      const month = buildScenarioCumulativeTotals({
+        from: monthStart,
+        rows: currentMonthDayRows,
+        scenarios: selectedScenarios,
+        sourceGranularity: currentMonthDayState?.granularity ?? "day",
+        to: monthEnd,
+      });
+      const table = buildScenarioTotalsReportTable(
+        buildScenarioTotalsTableRows(today, month),
+      );
+      customScenarioTableByCardId.set(cardId, {
+        ...table,
+        title: widget.title,
+      });
+    });
+
   const configuredLiveChartEntries = liveChartEntries.map(
     ([cardId, chart]) =>
       [
@@ -2238,6 +2682,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       "live_scenario_totals_table",
       buildScenarioTotalsReportTable(scenarioTableRows),
     ],
+    ...customScenarioTableByCardId.entries(),
   ]);
 
   function composeLiveReportPayload(
@@ -2588,9 +3033,15 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       >
         <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
           <DialogHeader>
-            <DialogTitle>Novo widget ao vivo</DialogTitle>
+            <DialogTitle>
+              {customWidgetForm.id
+                ? "Editar widget ao vivo"
+                : "Novo widget ao vivo"}
+            </DialogTitle>
             <DialogDescription>
-              Adicione uma visão individual ou uma comparação de cenários.
+              {customWidgetForm.id
+                ? "Altere o título e qualquer configuração deste widget."
+                : "Adicione uma visão individual ou uma comparação de cenários."}
             </DialogDescription>
           </DialogHeader>
 
@@ -2606,6 +3057,9 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="scope">Visão individual</SelectItem>
+                  <SelectItem value="scenario_widget">
+                    Widget configurável por cenário
+                  </SelectItem>
                   <SelectItem value="scenario_comparison">
                     Cenários por período
                   </SelectItem>
@@ -2627,6 +3081,8 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
                 placeholder={
                   customWidgetForm.kind === "scenario_comparison"
                     ? "Comparativo de entradas e saídas"
+                    : customWidgetForm.kind === "scenario_widget"
+                      ? "Ranking das entradas"
                     : "Entradas hora a hora"
                 }
               />
@@ -2694,7 +3150,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
                   </Select>
                 </div>
               </>
-            ) : (
+            ) : customWidgetForm.kind === "scenario_comparison" ? (
               <div className="rounded-md border bg-muted/20 p-3">
                 <ScenarioComparisonConfigurator
                   onChange={(patch) =>
@@ -2708,6 +3164,50 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
                   }
                   scenarios={scenarios}
                   settings={customWidgetForm.comparisonSettings}
+                />
+              </div>
+            ) : (
+              <div className="space-y-4 rounded-md border bg-muted/20 p-3">
+                <div className="space-y-2">
+                  <Label>Modelo</Label>
+                  <Select
+                    value={customWidgetForm.scenarioWidgetType}
+                    onValueChange={handleScenarioWidgetTypeChange}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SCENARIO_WIDGET_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {
+                      scenarioWidgetOption(customWidgetForm.scenarioWidgetType)
+                        .description
+                    }
+                  </p>
+                </div>
+                <ScenarioPicker
+                  mode={customWidgetForm.scenarioSelectionMode}
+                  onModeChange={(scenarioSelectionMode) =>
+                    setCustomWidgetForm((current) => ({
+                      ...current,
+                      scenarioSelectionMode,
+                    }))
+                  }
+                  onSelectedIdsChange={(scenarioIds) =>
+                    setCustomWidgetForm((current) => ({
+                      ...current,
+                      scenarioIds,
+                    }))
+                  }
+                  scenarios={scenarios}
+                  selectedIds={customWidgetForm.scenarioIds}
                 />
               </div>
             )}
@@ -2728,10 +3228,13 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
                 (customWidgetForm.kind === "scope" && !customWidgetForm.scopeId) ||
                 (customWidgetForm.kind === "scenario_comparison" &&
                   customWidgetForm.comparisonSettings.selectionMode === "custom" &&
-                  !customWidgetForm.comparisonSettings.selectedScenarioIds.length)
+                  !customWidgetForm.comparisonSettings.selectedScenarioIds.length) ||
+                (customWidgetForm.kind === "scenario_widget" &&
+                  customWidgetForm.scenarioSelectionMode === "custom" &&
+                  !customWidgetForm.scenarioIds.length)
               }
             >
-              Adicionar widget
+              {customWidgetForm.id ? "Salvar alterações" : "Adicionar widget"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2742,6 +3245,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
 }
 
 function MetricCard({
+  comparison,
   description,
   icon: Icon,
   label,
@@ -2749,6 +3253,7 @@ function MetricCard({
   tone,
   value,
 }: {
+  comparison?: string;
   description: string;
   icon: React.ComponentType<{ className?: string }>;
   label: string;
@@ -2765,8 +3270,8 @@ function MetricCard({
   }[tone];
 
   return (
-    <Card>
-      <CardContent className="flex min-h-[116px] items-center justify-between gap-4 p-4">
+    <Card className="h-full overflow-hidden">
+      <CardContent className="flex h-full min-h-0 items-center justify-between gap-3 p-4">
         <div className="min-w-0">
           <div className="text-xs font-medium uppercase text-muted-foreground">
             {label}
@@ -2774,11 +3279,23 @@ function MetricCard({
           {loading ? (
             <Skeleton className="mt-3 h-8 w-24" />
           ) : (
-            <div className="mt-2 text-2xl font-semibold">
-              {typeof value === "number" ? formatNumber(value) : value}
+            <div className="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <div className="text-3xl font-semibold leading-none tabular-nums">
+                {typeof value === "number" ? formatNumber(value) : value}
+              </div>
+              {comparison ? (
+                <div
+                  className={cn(
+                    "text-sm font-semibold tabular-nums",
+                    metricComparisonClassName(comparison),
+                  )}
+                >
+                  {comparison}
+                </div>
+              ) : null}
             </div>
           )}
-          <div className="mt-1 text-xs leading-4 text-muted-foreground">
+          <div className="mt-1 line-clamp-2 text-xs leading-4 text-muted-foreground">
             {description}
           </div>
         </div>
@@ -2793,6 +3310,17 @@ function MetricCard({
       </CardContent>
     </Card>
   );
+}
+
+function metricComparisonClassName(value: string) {
+  const normalized = value.trim();
+  if (normalized.startsWith("+")) {
+    return "text-emerald-700 dark:text-emerald-300";
+  }
+  if (normalized.startsWith("-")) {
+    return "text-rose-700 dark:text-rose-300";
+  }
+  return "text-muted-foreground";
 }
 
 function RealtimeChartCard({
@@ -2952,7 +3480,274 @@ function OperationalHourlyChartCard({
   );
 }
 
+function CustomScenarioWidgetCard({
+  canConfigure,
+  clock,
+  currentMonthDayGranularity,
+  currentMonthDayRows,
+  error,
+  hourGranularity,
+  hourRows,
+  loading,
+  monitorMode,
+  monthHourGranularity,
+  monthHourRows,
+  onEdit,
+  onChange,
+  onRemove,
+  scenarios,
+  widget,
+}: {
+  canConfigure: boolean;
+  clock: Date;
+  currentMonthDayGranularity: AggregateGranularity;
+  currentMonthDayRows: AggregateEventRow[];
+  error?: string;
+  hourGranularity: AggregateGranularity;
+  hourRows: AggregateEventRow[];
+  loading: boolean;
+  monitorMode: boolean;
+  monthHourGranularity: AggregateGranularity;
+  monthHourRows: AggregateEventRow[];
+  onEdit: () => void;
+  onChange: (patch: CustomScenarioWidgetPatch) => void;
+  onRemove: () => void;
+  scenarios: Scenario[];
+  widget: RealtimeScenarioCustomWidget;
+}) {
+  const selectedScenarios = React.useMemo(
+    () => selectScenarios(scenarios, widget.selectionMode, widget.scenarioIds),
+    [scenarios, widget.scenarioIds, widget.selectionMode],
+  );
+  const selectionLabel = scenarioSelectionSummary(
+    scenarios,
+    widget.selectionMode,
+    widget.scenarioIds,
+  );
+  const action =
+    monitorMode || !canConfigure ? null : (
+      <CustomWidgetActions
+        onEdit={onEdit}
+        onRemove={onRemove}
+        title={widget.title}
+      />
+    );
+  const selectionProps = {
+    canConfigure,
+    monitorMode,
+    onSelectedIdsChange: (scenarioIds: string[]) => onChange({ scenarioIds }),
+    onSelectionModeChange: (selectionMode: "all" | "custom") =>
+      onChange({ selectionMode }),
+    scenarios,
+    selectedIds: widget.scenarioIds,
+    selectionMode: widget.selectionMode,
+  };
+  const monthStart = startOfMonth(clock);
+  const monthEnd = addDays(startOfDay(clock), 1);
+  const rankingPoints = React.useMemo(
+    () =>
+      buildScenarioPeriodComparisonPoints(
+        selectedScenarios,
+        currentMonthDayRows,
+        monthStart,
+        monthEnd,
+      ),
+    [currentMonthDayRows, monthEnd, monthStart, selectedScenarios],
+  );
+  const peakPoints = React.useMemo(
+    () =>
+      buildTopScenarioPeakDays({
+        from: monthStart,
+        rows: currentMonthDayRows,
+        scenarios: selectedScenarios,
+        sourceGranularity: currentMonthDayGranularity,
+        to: monthEnd,
+      }),
+    [
+      currentMonthDayGranularity,
+      currentMonthDayRows,
+      monthEnd,
+      monthStart,
+      selectedScenarios,
+    ],
+  );
+  const heatmapPoints = React.useMemo(
+    () =>
+      buildCombinedScenarioPoints({
+        from: monthStart,
+        granularity: "hour",
+        rows: monthHourRows,
+        scenarios: selectedScenarios,
+        sourceGranularity: monthHourGranularity,
+        to: addHours(startOfHour(clock), 1),
+      }).map((point) => {
+        const bucket = new Date(point.bucket);
+        return {
+          bucket: point.bucket,
+          day: bucket.getDate(),
+          hour: bucket.getHours(),
+          total: point.total,
+        };
+      }),
+    [clock, monthHourGranularity, monthHourRows, monthStart, selectedScenarios],
+  );
+  const cumulativePoints = React.useMemo(
+    () =>
+      buildScenarioCumulativeTotals({
+        from: startOfDay(clock),
+        rows: hourRows,
+        scenarios: selectedScenarios,
+        sourceGranularity: hourGranularity,
+        to: clock,
+      }),
+    [clock, hourGranularity, hourRows, selectedScenarios],
+  );
+  const tableRows = React.useMemo(() => {
+    const today = buildScenarioCumulativeTotals({
+      from: startOfDay(clock),
+      rows: hourRows,
+      scenarios: selectedScenarios,
+      sourceGranularity: hourGranularity,
+      to: clock,
+    });
+    const month = buildScenarioCumulativeTotals({
+      from: monthStart,
+      rows: currentMonthDayRows,
+      scenarios: selectedScenarios,
+      sourceGranularity: currentMonthDayGranularity,
+      to: monthEnd,
+    });
+    return buildScenarioTotalsTableRows(today, month);
+  }, [
+    clock,
+    currentMonthDayGranularity,
+    currentMonthDayRows,
+    hourGranularity,
+    hourRows,
+    monthEnd,
+    monthStart,
+    selectedScenarios,
+  ]);
+
+  if (widget.widgetType === "heatmap") {
+    return (
+      <OperationalHeatmapCard
+        {...selectionProps}
+        action={action}
+        error={error}
+        loading={loading}
+        month={clock}
+        points={heatmapPoints}
+        selectionLabel={selectionLabel}
+        title={widget.title}
+      />
+    );
+  }
+
+  if (widget.widgetType === "peak_days") {
+    return (
+      <PeakDaysRankingCard
+        {...selectionProps}
+        action={action}
+        loading={loading}
+        points={peakPoints}
+        title={widget.title}
+      />
+    );
+  }
+
+  if (widget.widgetType === "cumulative") {
+    return (
+      <ScenarioCumulativeTotalsCard
+        {...selectionProps}
+        action={action}
+        loading={loading}
+        points={cumulativePoints}
+        title={widget.title}
+      />
+    );
+  }
+
+  if (widget.widgetType === "totals_table") {
+    return (
+      <ScenarioTotalsTableCard
+        {...selectionProps}
+        action={action}
+        loading={loading}
+        rows={tableRows}
+        title={widget.title}
+      />
+    );
+  }
+
+  if (widget.widgetType === "rose") {
+    return (
+      <ScenarioRoseCard
+        {...selectionProps}
+        action={action}
+        loading={loading}
+        points={rankingPoints}
+        title={widget.title}
+      />
+    );
+  }
+
+  return (
+    <MonthlyAccessRankingCard
+      {...selectionProps}
+      action={action}
+      loading={loading}
+      points={rankingPoints}
+      title={widget.title}
+    />
+  );
+}
+
+function CustomWidgetActions({
+  onEdit,
+  onRemove,
+  title,
+}: {
+  onEdit: () => void;
+  onRemove: () => void;
+  title: string;
+}) {
+  return (
+    <div className="flex items-center gap-0.5">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+        onClick={(event) => {
+          event.stopPropagation();
+          onEdit();
+        }}
+        aria-label={`Editar widget ${title}`}
+        title="Editar widget"
+      >
+        <Pencil className="h-4 w-4" />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+        onClick={(event) => {
+          event.stopPropagation();
+          onRemove();
+        }}
+        aria-label={`Remover widget ${title}`}
+        title="Remover widget"
+      >
+        <Trash2 className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
+
 function OperationalHeatmapCard({
+  action,
   canConfigure,
   error,
   loading,
@@ -2965,7 +3760,9 @@ function OperationalHeatmapCard({
   selectedIds,
   selectionLabel,
   selectionMode,
+  title = "Mapa de calor dia x hora",
 }: {
+  action?: React.ReactNode;
   canConfigure: boolean;
   error?: string;
   loading: boolean;
@@ -2978,6 +3775,7 @@ function OperationalHeatmapCard({
   selectedIds: string[];
   selectionLabel: string;
   selectionMode: "all" | "custom";
+  title?: string;
 }) {
   const widgetColor = useWidgetColor();
   const [settingsOpen, setSettingsOpen] = React.useState(false);
@@ -3001,11 +3799,11 @@ function OperationalHeatmapCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Grid3X3 className="h-4 w-4 text-primary" />
-              Mapa de calor dia x hora
+              {title}
             </CardTitle>
             <CardDescription className="mt-1">
               Intensidade do fluxo nas 24 faixas horárias e nos dias 1 a 31
-              do mês atual; fins de semana e feriados nacionais destacados.
+              do mês atual; fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -3025,6 +3823,7 @@ function OperationalHeatmapCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
+            {action}
           </div>
         </div>
       </CardHeader>
@@ -3048,9 +3847,7 @@ function OperationalHeatmapCard({
         ) : error ? (
           <EmptyChartState className="h-[260px]" text={error} />
         ) : hasData ? (
-          <div className="overflow-x-auto">
-            <EChart option={option} className="h-[500px] min-w-[760px]" />
-          </div>
+          <EChart option={option} className="h-[500px]" />
         ) : (
           <EmptyChartState
             className="h-[260px]"
@@ -3221,9 +4018,7 @@ function HourlyOccupancyCard({
         ) : loading ? (
           <Skeleton className="h-[320px] w-full" />
         ) : hasData ? (
-          <div className="overflow-x-auto">
-            <EChart option={option} className="h-[320px] min-w-[760px]" />
-          </div>
+          <EChart option={option} className="h-[320px]" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -3236,6 +4031,7 @@ function HourlyOccupancyCard({
 }
 
 function ScenarioCumulativeTotalsCard({
+  action,
   canConfigure,
   loading,
   monitorMode,
@@ -3245,7 +4041,9 @@ function ScenarioCumulativeTotalsCard({
   scenarios,
   selectedIds,
   selectionMode,
+  title = "Acumulado por cenário",
 }: {
+  action?: React.ReactNode;
   canConfigure: boolean;
   loading: boolean;
   monitorMode: boolean;
@@ -3255,6 +4053,7 @@ function ScenarioCumulativeTotalsCard({
   scenarios: Scenario[];
   selectedIds: string[];
   selectionMode: "all" | "custom";
+  title?: string;
 }) {
   const widgetColor = useWidgetColor();
   const [settingsOpen, setSettingsOpen] = React.useState(false);
@@ -3272,7 +4071,6 @@ function ScenarioCumulativeTotalsCard({
     [orderedPoints, widgetColor],
   );
   const total = orderedPoints.reduce((sum, point) => sum + point.total, 0);
-  const chartHeight = Math.max(260, orderedPoints.length * 38 + 36);
   const selectedScenarioCount = selectScenarios(
     scenarios,
     selectionMode,
@@ -3290,7 +4088,7 @@ function ScenarioCumulativeTotalsCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Sigma className="h-4 w-4 text-primary" />
-              Acumulado por cenário
+              {title}
             </CardTitle>
             <CardDescription className="mt-1">
               Total combinado e acumulado individual de hoje. A hora atual é
@@ -3317,6 +4115,7 @@ function ScenarioCumulativeTotalsCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
+            {action}
           </div>
         </div>
       </CardHeader>
@@ -3338,11 +4137,7 @@ function ScenarioCumulativeTotalsCard({
         ) : loading ? (
           <Skeleton className="h-[320px] w-full" />
         ) : orderedPoints.some((point) => point.total > 0) ? (
-          <div className="max-h-[480px] overflow-y-auto overflow-x-auto pr-1">
-            <div className="min-w-[760px]" style={{ height: chartHeight }}>
-              <EChart option={option} />
-            </div>
-          </div>
+          <EChart option={option} className="h-[320px]" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -3355,6 +4150,7 @@ function ScenarioCumulativeTotalsCard({
 }
 
 function ScenarioTotalsTableCard({
+  action,
   canConfigure,
   loading,
   monitorMode,
@@ -3364,7 +4160,9 @@ function ScenarioTotalsTableCard({
   scenarios,
   selectedIds,
   selectionMode,
+  title = "Tabela acumulada por cenário",
 }: {
+  action?: React.ReactNode;
   canConfigure: boolean;
   loading: boolean;
   monitorMode: boolean;
@@ -3374,6 +4172,7 @@ function ScenarioTotalsTableCard({
   scenarios: Scenario[];
   selectedIds: string[];
   selectionMode: "all" | "custom";
+  title?: string;
 }) {
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const totalToday = rows.reduce((sum, row) => sum + row.today, 0);
@@ -3395,7 +4194,7 @@ function ScenarioTotalsTableCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Table2 className="h-4 w-4 text-primary" />
-              Tabela acumulada por cenário
+              {title}
             </CardTitle>
             <CardDescription className="mt-1">
               Totais de hoje e do mês atual, linha por linha, incluindo os
@@ -3425,6 +4224,7 @@ function ScenarioTotalsTableCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
+            {action}
           </div>
         </div>
       </CardHeader>
@@ -3547,9 +4347,7 @@ function CurrentYearComparisonCard({
         {loading ? (
           <Skeleton className="h-[320px] w-full" />
         ) : values.length ? (
-          <div className="overflow-x-auto">
-            <EChart option={option} className="h-[320px] min-w-[620px]" />
-          </div>
+          <EChart option={option} className="h-[320px]" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -3593,7 +4391,7 @@ function OperationalMonthComparisonCard({
               Dias x meses
             </CardTitle>
             <CardDescription className="mt-1">
-              {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Fins de semana e feriados nacionais destacados.
+              {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
           <Badge variant="outline" className="max-w-full truncate">
@@ -3605,9 +4403,7 @@ function OperationalMonthComparisonCard({
         {loading ? (
           <Skeleton className="h-[310px] w-full" />
         ) : hasData ? (
-          <div className="overflow-x-auto">
-            <EChart option={option} className="h-[310px] min-w-[720px]" />
-          </div>
+          <EChart option={option} className="h-[310px]" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
@@ -3651,7 +4447,7 @@ function OperationalMonthCumulativeCard({
               Acumulado diário x mês-base
             </CardTitle>
             <CardDescription className="mt-1">
-              Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Fins de semana e feriados nacionais destacados.
+              Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
           <Badge variant="outline" className="max-w-full truncate">
@@ -3663,9 +4459,7 @@ function OperationalMonthCumulativeCard({
         {loading ? (
           <Skeleton className="h-[310px] w-full" />
         ) : hasData ? (
-          <div className="overflow-x-auto">
-            <EChart option={option} className="h-[310px] min-w-[720px]" />
-          </div>
+          <EChart option={option} className="h-[310px]" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
@@ -3714,7 +4508,7 @@ function OperationalTrendCard({
               Tendência 7 x 30 dias
             </CardTitle>
             <CardDescription className="mt-1">
-              Médias móveis calculadas somente com dias fechados. Eixo de 1 a 31; fins de semana e feriados nacionais destacados.
+              Dia atual parcial incluído e atualizado a cada 5 segundos. Eixo de 1 a 31; fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -3730,13 +4524,11 @@ function OperationalTrendCard({
         {loading ? (
           <Skeleton className="h-[300px] w-full" />
         ) : hasData ? (
-          <div className="overflow-x-auto">
-            <EChart option={option} className="h-[300px] min-w-[560px]" />
-          </div>
+          <EChart option={option} className="h-[300px]" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
-            text="São necessários ao menos 7 dias fechados para calcular a tendência."
+            text="São necessários ao menos 7 dias com dados para calcular a tendência."
           />
         )}
       </CardContent>
@@ -3767,7 +4559,8 @@ function TrendBadge({
   );
 }
 
-function MonthlyAccessRankingCard({
+function ScenarioRoseCard({
+  action,
   canConfigure,
   loading,
   monitorMode,
@@ -3777,7 +4570,9 @@ function MonthlyAccessRankingCard({
   scenarios,
   selectedIds,
   selectionMode,
+  title = "Distribuição radial por cenário",
 }: {
+  action?: React.ReactNode;
   canConfigure: boolean;
   loading: boolean;
   monitorMode: boolean;
@@ -3787,6 +4582,127 @@ function MonthlyAccessRankingCard({
   scenarios: Scenario[];
   selectedIds: string[];
   selectionMode: "all" | "custom";
+  title?: string;
+}) {
+  const widgetColor = useWidgetColor();
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const visiblePoints = React.useMemo(
+    () =>
+      [...points]
+        .filter((point) => point.total > 0)
+        .sort(
+          (left, right) =>
+            right.total - left.total || left.name.localeCompare(right.name, "pt-BR"),
+        ),
+    [points],
+  );
+  const option = React.useMemo(
+    () => buildScenarioRoseOption(visiblePoints, widgetColor),
+    [visiblePoints, widgetColor],
+  );
+  const total = visiblePoints.reduce((sum, point) => sum + point.total, 0);
+  const selectedScenarioCount = selectScenarios(
+    scenarios,
+    selectionMode,
+    selectedIds,
+  ).length;
+
+  React.useEffect(() => {
+    if (monitorMode) setSettingsOpen(false);
+  }, [monitorMode]);
+
+  return (
+    <Card className="min-w-0 overflow-hidden">
+      <CardHeader className="pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <ChartPie className="h-4 w-4 text-primary" />
+              {title}
+            </CardTitle>
+            <CardDescription className="mt-1">
+              Participação do fluxo mensal por cenário. O raio de cada pétala
+              acompanha o volume relativo.
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline">
+              {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
+            </Badge>
+            <Badge variant="secondary" className="tabular-nums">
+              Total {formatNumber(total)}
+            </Badge>
+            {canConfigure && !monitorMode ? (
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setSettingsOpen((current) => !current)}
+                aria-label="Configurar cenários da distribuição radial"
+                title="Configurar cenários"
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            ) : null}
+            {action}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="min-w-0 space-y-3">
+        {settingsOpen && !monitorMode ? (
+          <ScenarioPicker
+            mode={selectionMode}
+            onModeChange={onSelectionModeChange}
+            onSelectedIdsChange={onSelectedIdsChange}
+            scenarios={scenarios}
+            selectedIds={selectedIds}
+          />
+        ) : null}
+        {!selectedScenarioCount ? (
+          <EmptyChartState
+            className="h-[220px]"
+            text="Selecione ao menos um cenário para montar a distribuição radial."
+          />
+        ) : loading ? (
+          <Skeleton className="h-[320px] w-full" />
+        ) : visiblePoints.length ? (
+          <EChart option={option} className="h-[320px]" />
+        ) : (
+          <EmptyChartState
+            className="h-[220px]"
+            text="Sem fluxo mensal para os cenários selecionados."
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function MonthlyAccessRankingCard({
+  action,
+  canConfigure,
+  loading,
+  monitorMode,
+  onSelectedIdsChange,
+  onSelectionModeChange,
+  points,
+  scenarios,
+  selectedIds,
+  selectionMode,
+  title = "Ranking dos acessos do mês",
+}: {
+  action?: React.ReactNode;
+  canConfigure: boolean;
+  loading: boolean;
+  monitorMode: boolean;
+  onSelectedIdsChange: (ids: string[]) => void;
+  onSelectionModeChange: (mode: "all" | "custom") => void;
+  points: ScenarioComparisonPoint[];
+  scenarios: Scenario[];
+  selectedIds: string[];
+  selectionMode: "all" | "custom";
+  title?: string;
 }) {
   const widgetColor = useWidgetColor();
   const [settingsOpen, setSettingsOpen] = React.useState(false);
@@ -3798,7 +4714,6 @@ function MonthlyAccessRankingCard({
     () => buildMonthlyAccessRankingOption(rankedPoints, widgetColor),
     [rankedPoints, widgetColor],
   );
-  const chartHeight = Math.max(280, rankedPoints.length * 34 + 30);
   const selectedScenarioCount = selectScenarios(
     scenarios,
     selectionMode,
@@ -3816,7 +4731,7 @@ function MonthlyAccessRankingCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              Ranking dos acessos do mês
+              {title}
             </CardTitle>
             <CardDescription className="mt-1">
               Volume e representatividade de cada cenário no mês em andamento.
@@ -3839,6 +4754,7 @@ function MonthlyAccessRankingCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
+            {action}
           </div>
         </div>
       </CardHeader>
@@ -3860,11 +4776,7 @@ function MonthlyAccessRankingCard({
         ) : loading ? (
           <Skeleton className="h-[300px] w-full" />
         ) : rankedPoints.length ? (
-          <div className="max-h-[360px] overflow-y-auto overflow-x-hidden pr-1">
-            <div style={{ height: chartHeight }}>
-              <EChart option={option} />
-            </div>
-          </div>
+          <EChart option={option} className="h-[300px]" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
@@ -3877,6 +4789,7 @@ function MonthlyAccessRankingCard({
 }
 
 function PeakDaysRankingCard({
+  action,
   canConfigure,
   loading,
   monitorMode,
@@ -3886,7 +4799,9 @@ function PeakDaysRankingCard({
   scenarios,
   selectedIds,
   selectionMode,
+  title = "Top 5 dias de pico do mês",
 }: {
+  action?: React.ReactNode;
   canConfigure: boolean;
   loading: boolean;
   monitorMode: boolean;
@@ -3896,6 +4811,7 @@ function PeakDaysRankingCard({
   scenarios: Scenario[];
   selectedIds: string[];
   selectionMode: "all" | "custom";
+  title?: string;
 }) {
   const widgetColor = useWidgetColor();
   const [settingsOpen, setSettingsOpen] = React.useState(false);
@@ -3920,7 +4836,7 @@ function PeakDaysRankingCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Trophy className="h-4 w-4 text-primary" />
-              Top 5 dias de pico do mês
+              {title}
             </CardTitle>
             <CardDescription className="mt-1">
               Dias com maior volume acumulado nos cenários escolhidos; o dia
@@ -3949,6 +4865,7 @@ function PeakDaysRankingCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
+            {action}
           </div>
         </div>
       </CardHeader>
@@ -3983,9 +4900,11 @@ function PeakDaysRankingCard({
 }
 
 function MissingCustomWidgetCard({
+  onEdit,
   onRemove,
   title,
 }: {
+  onEdit?: () => void;
   onRemove?: () => void;
   title: string;
 }) {
@@ -4002,17 +4921,12 @@ function MissingCustomWidgetCard({
               A visão vinculada a este widget não está mais disponível.
             </CardDescription>
           </div>
-          {onRemove ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={onRemove}
-              aria-label="Remover widget"
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
+          {onEdit && onRemove ? (
+            <CustomWidgetActions
+              onEdit={onEdit}
+              onRemove={onRemove}
+              title={title}
+            />
           ) : null}
         </div>
       </CardHeader>
@@ -5964,6 +6878,83 @@ function buildOperationalTrendOption(
   };
 }
 
+function buildScenarioRoseOption(
+  points: ScenarioComparisonPoint[],
+  widgetColor: string,
+): EnterpriseChartOption {
+  const orderedPoints = [...points].sort(
+    (left, right) =>
+      right.total - left.total || left.name.localeCompare(right.name, "pt-BR"),
+  );
+  const total = orderedPoints.reduce((sum, point) => sum + point.total, 0);
+  const visibleLabelLimit =
+    orderedPoints.length > 8 ? 4 : Math.min(orderedPoints.length, 6);
+
+  return {
+    legend: {
+      bottom: 0,
+      itemGap: 12,
+      itemHeight: 9,
+      itemWidth: 9,
+      textStyle: { color: "#526477", fontSize: 10 },
+      type: "scroll",
+    },
+    tooltip: {
+      backgroundColor: "#ffffff",
+      borderColor: "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      formatter: (params: unknown) => {
+        const record = params as {
+          data?: { value?: number };
+          name?: string;
+          value?: number;
+        };
+        const value = Number(record.value ?? record.data?.value ?? 0);
+        const share = total ? value / total : 0;
+        return `${record.name ?? "Cenário"}<br/>${formatNumber(value)} eventos · ${new Intl.NumberFormat(
+          "pt-BR",
+          { maximumFractionDigits: 1, style: "percent" },
+        ).format(share)}`;
+      },
+      textStyle: { color: "#13233A", fontSize: 12 },
+      trigger: "item",
+    },
+    series: [
+      {
+        center: ["50%", "44%"],
+        data: orderedPoints.map((point, index) => ({
+          itemStyle: {
+            color: index === 0 ? widgetColor : pastelBarColor(index),
+          },
+          label: { show: index < visibleLabelLimit },
+          name: point.name,
+          value: point.total,
+        })),
+        label: {
+          color: "#526477",
+          fontSize: 10,
+          formatter: (params: { name?: string; value?: number }) => {
+            const value = Number(params.value ?? 0);
+            const share = total ? value / total : 0;
+            return `${params.name ?? ""}\n${formatNumber(value)} · ${new Intl.NumberFormat(
+              "pt-BR",
+              { maximumFractionDigits: 0, style: "percent" },
+            ).format(share)}`;
+          },
+          show: false,
+        },
+        labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
+        labelLine: { length: 7, length2: 5, smooth: 0.15 },
+        minAngle: 4,
+        radius: ["18%", "68%"],
+        roseType: "area",
+        type: "pie",
+      },
+    ],
+  };
+}
+
 function buildMonthlyAccessRankingOption(
   points: ScenarioComparisonPoint[],
   widgetColor: string,
@@ -6398,7 +7389,7 @@ function buildOperationalHeatmapReportChart({
     comparison: maximum
       ? `Maior pico: dia ${ranked[0].day}, ${hourRangeLabel(ranked[0].hour)}, ${formatNumber(maximum)} eventos`
       : "Nenhum pico registrado no período",
-    description: `Intensidade do fluxo por dia e faixa horária em ${monthLabel}. Fins de semana e feriados nacionais destacados. Visão: ${scopeName}.`,
+    description: `Intensidade do fluxo por dia e faixa horária em ${monthLabel}. Fins de semana e feriados nacionais e de São Paulo destacados. Visão: ${scopeName}.`,
     option: buildOperationalHeatmapOption(points, month, widgetColor),
     table: {
       title: "Dados - Maiores picos por dia e hora",
@@ -6640,8 +7631,8 @@ function buildOperationalMonthReportChart({
   return {
     comparison: `${monthComparisonLabel(mode)} à esquerda · Mês atual à direita`,
     description: accumulated
-      ? `Acumulados comparáveis nos mesmos dias, com fins de semana e feriados nacionais destacados no eixo. Visão: ${scopeName}.`
-      : `Valores diários, com fins de semana e feriados nacionais destacados no eixo. Linha tracejada: ${averageBaseDescription(mode).toLowerCase()}. Visão: ${scopeName}.`,
+      ? `Acumulados comparáveis nos mesmos dias, com fins de semana e feriados nacionais e de São Paulo destacados no eixo. Visão: ${scopeName}.`
+      : `Valores diários, com fins de semana e feriados nacionais e de São Paulo destacados no eixo. Linha tracejada: ${averageBaseDescription(mode).toLowerCase()}. Visão: ${scopeName}.`,
     option: accumulated
       ? buildOperationalMonthCumulativeOption(points, mode, month, widgetColor)
       : buildOperationalMonthComparisonOption(points, mode, month, widgetColor),
@@ -6687,7 +7678,7 @@ function buildOperationalTrendReportChart(
     comparison: `MM7 ${formatMovingAverageTrend(
       trend7,
     )} · MM30 ${formatMovingAverageTrend(trend30)}`,
-    description: `Médias móveis de 7 e 30 dias calculadas apenas com dias fechados, exibidas no eixo mensal de 1 a 31 com fins de semana e feriados nacionais destacados. Visão: ${scopeName}.`,
+    description: `Médias móveis de 7 e 30 dias atualizadas com o dia corrente parcial, exibidas no eixo mensal de 1 a 31 com fins de semana e feriados nacionais e de São Paulo destacados. Visão: ${scopeName}.`,
     option: buildOperationalTrendOption(
       points,
       trend7.direction,
@@ -6745,6 +7736,54 @@ function buildMonthlyAccessRankingReportChart(
       })),
     },
     title: "Ranking dos acessos do mês",
+  };
+}
+
+function buildScenarioRoseReportChart(
+  points: ScenarioComparisonPoint[],
+  scopeName: string,
+  widgetColor = "#1267C4",
+  title = "Distribuição radial por cenário",
+): ReportPayload["charts"][number] {
+  const visiblePoints = points.filter((point) => point.total > 0);
+  const total = visiblePoints.reduce((sum, point) => sum + point.total, 0);
+
+  return {
+    comparison: `${formatNumber(total)} eventos · ${scopeName}`,
+    description:
+      "Participação proporcional de cada cenário no fluxo do mês em andamento.",
+    option: buildScenarioRoseOption(visiblePoints, widgetColor),
+    table: {
+      title: `Dados - ${title}`,
+      columns: [
+        { key: "scenario", label: "Cenário", width: 38 },
+        { key: "total", label: "Total", numeric: true, width: 20 },
+        { key: "share", label: "Representatividade", width: 22 },
+      ],
+      rows: visiblePoints.map((point) => ({
+        scenario: point.name,
+        share: new Intl.NumberFormat("pt-BR", {
+          maximumFractionDigits: 1,
+          style: "percent",
+        }).format(total ? point.total / total : 0),
+        total: point.total,
+      })),
+    },
+    title,
+  };
+}
+
+function renameReportChart(
+  chart: ReportPayload["charts"][number],
+  title: string,
+): ReportPayload["charts"][number] {
+  return {
+    ...chart,
+    table: {
+      ...chart.table,
+      title: `Dados - ${title}`,
+    },
+    title,
   };
 }
 

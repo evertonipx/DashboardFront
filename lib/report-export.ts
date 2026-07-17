@@ -705,11 +705,14 @@ function withExportBarValueLabels(
   const series = (option as { series?: unknown }).series;
   if (!series) return option;
   const seriesList = Array.isArray(series) ? series : [series];
-  const barSeries = seriesList.filter(
+  const valueSeries = seriesList.filter(
     (item) =>
-      item && typeof item === "object" && (item as { type?: unknown }).type === "bar",
+      item &&
+      typeof item === "object" &&
+      ((item as { type?: unknown }).type === "bar" ||
+        (item as { type?: unknown }).type === "line"),
   );
-  const pointCount = barSeries.reduce((sum, item) => {
+  const pointCount = valueSeries.reduce((sum, item) => {
     const data = (item as { data?: unknown }).data;
     return sum + (Array.isArray(data) ? data.length : 0);
   }, 0);
@@ -728,8 +731,8 @@ function withExportBarValueLabels(
           }
         : option.grid,
     series: Array.isArray(series)
-      ? series.map((item) => addExportBarValueLabel(item, dense, horizontal))
-      : addExportBarValueLabel(series, dense, horizontal),
+      ? series.map((item) => addExportValueLabel(item, dense, horizontal))
+      : addExportValueLabel(series, dense, horizontal),
   } as EnterpriseChartOption;
 }
 
@@ -748,7 +751,7 @@ function exportGridTop(value: unknown, dense: boolean, horizontal: boolean) {
   return Number.isFinite(numericValue) ? Math.max(numericValue, minimum) : minimum;
 }
 
-function addExportBarValueLabel(
+function addExportValueLabel(
   series: unknown,
   dense: boolean,
   horizontal: boolean,
@@ -756,12 +759,16 @@ function addExportBarValueLabel(
   if (!series || typeof series !== "object") return series;
 
   const record = series as Record<string, unknown>;
-  if (record.type !== "bar") return series;
+  if (record.type !== "bar" && record.type !== "line") return series;
+  if (isExportReferenceSeries(record)) return series;
+
+  const isLine = record.type === "line";
 
   return {
     ...record,
     label: {
       ...(record.label && typeof record.label === "object" ? record.label : {}),
+      align: horizontal ? "left" : "center",
       color: "#13233A",
       distance: dense ? 3 : 5,
       fontSize: dense ? 7 : 9,
@@ -769,8 +776,9 @@ function addExportBarValueLabel(
       formatter: (params: { value?: unknown }) =>
         formatBarLabelValue(params.value),
       position: horizontal ? "right" : "top",
-      rotate: horizontal ? 0 : dense ? 90 : 0,
+      rotate: horizontal || isLine ? 0 : 90,
       show: true,
+      verticalAlign: horizontal ? "middle" : "bottom",
     },
     labelLayout: {
       ...(record.labelLayout && typeof record.labelLayout === "object"
@@ -779,6 +787,17 @@ function addExportBarValueLabel(
       hideOverlap: true,
     },
   };
+}
+
+function isExportReferenceSeries(series: Record<string, unknown>) {
+  if (series.silent === true) return true;
+  const name = typeof series.name === "string" ? series.name.toLowerCase() : "";
+  return (
+    name.includes("média-base") ||
+    name.includes("média móvel") ||
+    name.includes("meta") ||
+    name.includes("limiar")
+  );
 }
 
 function formatBarLabelValue(value: unknown) {

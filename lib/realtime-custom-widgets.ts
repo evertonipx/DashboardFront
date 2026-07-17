@@ -14,7 +14,18 @@ export type RealtimeCustomWidgetScopeMode =
   | "location"
   | "sub_location";
 
-export type RealtimeCustomWidgetKind = "scope" | "scenario_comparison";
+export type RealtimeScenarioWidgetType =
+  | "ranking"
+  | "peak_days"
+  | "heatmap"
+  | "cumulative"
+  | "totals_table"
+  | "rose";
+
+export type RealtimeCustomWidgetKind =
+  | "scope"
+  | "scenario_comparison"
+  | "scenario_widget";
 
 type RealtimeCustomWidgetBase = {
   id: string;
@@ -35,9 +46,17 @@ export type RealtimeScenarioComparisonWidget = RealtimeCustomWidgetBase & {
   kind: "scenario_comparison";
 };
 
+export type RealtimeScenarioCustomWidget = RealtimeCustomWidgetBase & {
+  kind: "scenario_widget";
+  scenarioIds: string[];
+  selectionMode: "all" | "custom";
+  widgetType: RealtimeScenarioWidgetType;
+};
+
 export type RealtimeCustomWidget =
   | RealtimeScopeCustomWidget
-  | RealtimeScenarioComparisonWidget;
+  | RealtimeScenarioComparisonWidget
+  | RealtimeScenarioCustomWidget;
 
 type RealtimeCustomWidgetInputBase = {
   id?: string;
@@ -57,9 +76,17 @@ export type RealtimeScenarioComparisonWidgetInput =
     kind: "scenario_comparison";
   };
 
+export type RealtimeScenarioCustomWidgetInput = RealtimeCustomWidgetInputBase & {
+  kind: "scenario_widget";
+  scenarioIds: string[];
+  selectionMode: "all" | "custom";
+  widgetType: RealtimeScenarioWidgetType;
+};
+
 export type RealtimeCustomWidgetInput =
   | RealtimeScopeCustomWidgetInput
-  | RealtimeScenarioComparisonWidgetInput;
+  | RealtimeScenarioComparisonWidgetInput
+  | RealtimeScenarioCustomWidgetInput;
 
 export const REALTIME_CUSTOM_WIDGETS_UPDATED_EVENT =
   "ipxdata:realtime-custom-widgets-updated";
@@ -119,10 +146,19 @@ export function upsertRealtimeCustomWidget(
     created_at: current?.created_at ?? now,
     updated_at: now,
   };
-  const nextWidget: RealtimeCustomWidget =
-    widget.kind === "scenario_comparison"
-      ? { ...base, kind: "scenario_comparison" }
-      : {
+  let nextWidget: RealtimeCustomWidget;
+  if (widget.kind === "scenario_comparison") {
+    nextWidget = { ...base, kind: "scenario_comparison" };
+  } else if (widget.kind === "scenario_widget") {
+    nextWidget = {
+      ...base,
+      kind: "scenario_widget",
+      scenarioIds: normalizeIds(widget.scenarioIds),
+      selectionMode: widget.selectionMode === "custom" ? "custom" : "all",
+      widgetType: widget.widgetType,
+    };
+  } else {
+    nextWidget = {
           ...base,
           kind: "scope",
           scopeId: widget.scopeId,
@@ -130,6 +166,7 @@ export function upsertRealtimeCustomWidget(
           scopeName: widget.scopeName,
           granularity: widget.granularity,
         };
+  }
   const nextWidgets = current
     ? widgets.map((stored) =>
         stored.id === nextWidget.id ? nextWidget : stored,
@@ -207,6 +244,19 @@ function normalizeRealtimeCustomWidget(
   }
 
   if (
+    record.kind === "scenario_widget" &&
+    isRealtimeScenarioWidgetType(record.widgetType)
+  ) {
+    return {
+      ...base,
+      kind: "scenario_widget",
+      scenarioIds: normalizeIds(record.scenarioIds),
+      selectionMode: record.selectionMode === "custom" ? "custom" : "all",
+      widgetType: record.widgetType,
+    };
+  }
+
+  if (
     (record.kind === undefined || record.kind === "scope") &&
     typeof record.scopeId === "string" &&
     isRealtimeCustomWidgetScopeMode(record.scopeMode) &&
@@ -244,6 +294,31 @@ function isRealtimeCustomWidgetGranularity(
     value === "week" ||
     value === "month"
   );
+}
+
+function isRealtimeScenarioWidgetType(
+  value: unknown,
+): value is RealtimeScenarioWidgetType {
+  return (
+    value === "ranking" ||
+    value === "peak_days" ||
+    value === "heatmap" ||
+    value === "cumulative" ||
+    value === "totals_table" ||
+    value === "rose"
+  );
+}
+
+function normalizeIds(value: unknown) {
+  return Array.isArray(value)
+    ? Array.from(
+        new Set(
+          value.filter(
+            (id): id is string => typeof id === "string" && Boolean(id.trim()),
+          ),
+        ),
+      )
+    : [];
 }
 
 function createWidgetId() {

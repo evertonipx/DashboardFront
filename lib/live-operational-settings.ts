@@ -17,6 +17,8 @@ export type LiveOperationalSettings = {
   peakDaySelectionMode: "all" | "custom";
   rankingScenarioIds: string[];
   rankingSelectionMode: "all" | "custom";
+  roseScenarioIds: string[];
+  roseSelectionMode: "all" | "custom";
 };
 
 const STORAGE_KEY = "ipxdata.live-operational-settings.v1";
@@ -37,6 +39,8 @@ const defaultSettings: LiveOperationalSettings = {
   peakDaySelectionMode: "all",
   rankingScenarioIds: [],
   rankingSelectionMode: "all",
+  roseScenarioIds: [],
+  roseSelectionMode: "all",
 };
 
 export function loadLiveOperationalSettings(
@@ -109,6 +113,9 @@ function normalizeSettings(
     rankingScenarioIds: normalizeIds(settings.rankingScenarioIds),
     rankingSelectionMode:
       settings.rankingSelectionMode === "custom" ? "custom" : "all",
+    roseScenarioIds: normalizeIds(settings.roseScenarioIds),
+    roseSelectionMode:
+      settings.roseSelectionMode === "custom" ? "custom" : "all",
   };
 }
 

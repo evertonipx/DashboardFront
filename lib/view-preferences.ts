@@ -1,12 +1,15 @@
 export type CardMenuKey = "live" | "reports" | "analysis" | "occupancy";
 
-export type CardSize = "compact" | "wide" | "full";
+export type CardSize = "compact" | "wide" | "large" | "full";
+
+export type CardHeight = "short" | "standard" | "tall";
 
 export type CardChartType = "bar" | "line";
 
 export type CardPreference = {
   chartType?: CardChartType;
   color?: string;
+  height?: CardHeight;
   id: string;
   visible: boolean;
   size?: CardSize;
@@ -43,8 +46,8 @@ export const cardViewMenus: CardMenuDefinition[] = [
     cards: [
       {
         id: "live_intraday_comparison",
-        label: "Horas fechadas hoje",
-        description: "Acumulado até a última hora completa contra a base escolhida.",
+        label: "Hoje em tempo real",
+        description: "Acumulado de hoje incluindo a hora parcial, com comparação nas horas fechadas.",
       },
       {
         id: "live_target_progress",
@@ -54,12 +57,12 @@ export const cardViewMenus: CardMenuDefinition[] = [
       {
         id: "live_month_previous_comparison",
         label: "Acumulado x mês anterior",
-        description: "Dias fechados do mês contra o mesmo intervalo do mês anterior.",
+        description: "Acumulado do mês em tempo real contra os dias fechados equivalentes do mês anterior.",
       },
       {
         id: "live_month_year_comparison",
         label: "Acumulado x ano anterior",
-        description: "Dias fechados do mês contra o mesmo intervalo do ano anterior.",
+        description: "Acumulado do mês em tempo real contra os dias fechados equivalentes do ano anterior.",
       },
       {
         id: "live_scenario_period_comparison",
@@ -79,7 +82,7 @@ export const cardViewMenus: CardMenuDefinition[] = [
       {
         id: "live_moving_average_trend",
         label: "Tendência 7 x 30 dias",
-        description: "Direção das médias móveis rápida e lenta em dias fechados.",
+        description: "Direção das médias móveis rápida e lenta, incluindo o dia parcial atual.",
       },
       {
         id: "live_operational_month_comparison",
@@ -95,6 +98,11 @@ export const cardViewMenus: CardMenuDefinition[] = [
         id: "live_month_access_ranking",
         label: "Ranking dos acessos do mês",
         description: "Volume e representatividade mensal por cenário.",
+      },
+      {
+        id: "live_scenario_rose",
+        label: "Distribuição radial por cenário",
+        description: "Participação mensal dos cenários em pétalas proporcionais.",
       },
       {
         id: "live_chart_week",
@@ -393,6 +401,9 @@ export function normalizeCardPreferences(
       color: isCardColor(byId.get(preference.id)?.color)
         ? byId.get(preference.id)?.color
         : undefined,
+      height: isCardHeight(byId.get(preference.id)?.height)
+        ? byId.get(preference.id)?.height
+        : undefined,
       id: preference.id,
       visible: byId.get(preference.id)?.visible ?? true,
       size: isCardSize(byId.get(preference.id)?.size)
@@ -418,6 +429,7 @@ export function normalizeCardPreferences(
       {
         chartType: undefined,
         color: undefined,
+        height: undefined,
         id,
         visible: true,
         size: undefined,
@@ -529,7 +541,16 @@ function readStoredPreferences(
 }
 
 function isCardSize(value: unknown): value is CardSize {
-  return value === "compact" || value === "wide" || value === "full";
+  return (
+    value === "compact" ||
+    value === "wide" ||
+    value === "large" ||
+    value === "full"
+  );
+}
+
+function isCardHeight(value: unknown): value is CardHeight {
+  return value === "short" || value === "standard" || value === "tall";
 }
 
 function isCardChartType(value: unknown): value is CardChartType {

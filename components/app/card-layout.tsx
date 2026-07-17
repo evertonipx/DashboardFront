@@ -17,6 +17,8 @@ import {
   PanelTop,
   RotateCcw,
   Settings2,
+  StretchHorizontal,
+  StretchVertical,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +51,7 @@ import {
   saveCardPreferences,
   type CardPreference,
   type CardChartType,
+  type CardHeight,
   type CardMenuKey,
   type CardSize,
 } from "@/lib/view-preferences";
@@ -57,6 +60,7 @@ type LayoutCard = {
   chartTypeEnabled?: boolean;
   id: string;
   label?: string;
+  defaultHeight?: CardHeight;
   defaultSize?: CardSize;
   className?: string;
   node: React.ReactNode;
@@ -233,6 +237,7 @@ export function CardLayout({
           id: card.id,
           visible: preference?.visible ?? true,
           color: preference?.color,
+          height: preference?.height,
           size: preference?.size,
         };
       }),
@@ -283,6 +288,15 @@ export function CardLayout({
     persistPreferences(
       preferences.map((preference) =>
         preference.id === cardId ? { ...preference, size } : preference,
+      ),
+    );
+    flashSaved();
+  }
+
+  function resizeCardHeight(cardId: string, height: CardHeight) {
+    persistPreferences(
+      preferences.map((preference) =>
+        preference.id === cardId ? { ...preference, height } : preference,
       ),
     );
     flashSaved();
@@ -377,6 +391,7 @@ export function CardLayout({
           onOpenChange={setOrganizerOpen}
           onColorChange={setCardColor}
           onChartTypeChange={setCardChartType}
+          onHeightChange={resizeCardHeight}
           onResize={resizeCard}
           onRestoreDefault={restoreDefaultOrder}
           onToggleVisibility={toggleCardVisibility}
@@ -404,7 +419,7 @@ export function CardLayout({
 
       <div
         className={cn(
-          "grid min-w-0 grid-cols-[minmax(0,1fr)] sm:grid-cols-2 xl:grid-cols-4",
+          "grid min-w-0 grid-flow-row-dense auto-rows-[164px] grid-cols-[minmax(0,1fr)] sm:grid-cols-2 xl:grid-cols-4",
           monitorMode ? "gap-3" : "gap-4",
         )}
       >
@@ -503,6 +518,10 @@ function CardLayoutItem({
   reorderEnabled: boolean;
 }) {
   const currentSize = preference?.size ?? card.defaultSize;
+  const currentHeight =
+    preference?.height ??
+    card.defaultHeight ??
+    (currentSize === "compact" ? "short" : "standard");
 
   return (
     <div
@@ -510,8 +529,9 @@ function CardLayoutItem({
       onDragOver={onDragOver}
       onDrop={onDrop}
       className={cn(
-        "group relative min-w-0 transition",
+        "group relative h-full min-h-0 min-w-0 transition",
         sizeClassName(currentSize, card.className),
+        heightClassName(currentHeight),
         reorderEnabled &&
           "rounded-md ring-1 ring-primary/25 ring-offset-2 ring-offset-background",
         draggingId === card.id && "opacity-50",
@@ -560,6 +580,7 @@ function WidgetOrganizerDialog({
   onOpenChange,
   onColorChange,
   onChartTypeChange,
+  onHeightChange,
   onResize,
   onRestoreDefault,
   onToggleVisibility,
@@ -582,6 +603,7 @@ function WidgetOrganizerDialog({
   onOpenChange: (open: boolean) => void;
   onColorChange: (cardId: string, color?: string) => void;
   onChartTypeChange: (cardId: string, chartType: CardChartType) => void;
+  onHeightChange: (cardId: string, height: CardHeight) => void;
   onResize: (cardId: string, size: CardSize) => void;
   onRestoreDefault: () => void;
   onToggleVisibility: (cardId: string) => void;
@@ -623,6 +645,10 @@ function WidgetOrganizerDialog({
             const preference = getPreference(preferences, card.id);
             const visible = preference?.visible !== false;
             const currentSize = preference?.size ?? card.defaultSize;
+            const currentHeight =
+              preference?.height ??
+              card.defaultHeight ??
+              (currentSize === "compact" ? "short" : "standard");
             const first = index === 0;
             const last = index === cards.length - 1;
 
@@ -657,7 +683,9 @@ function WidgetOrganizerDialog({
                     <Badge variant={visible ? "outline" : "secondary"}>
                       {visible ? "Visível" : "Oculto"}
                     </Badge>
-                    <Badge variant="outline">{sizeLabel(currentSize)}</Badge>
+                    <Badge variant="outline">
+                      {sizeLabel(currentSize)} · {heightLabel(currentHeight)}
+                    </Badge>
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     Posição {formatPosition(index)} de {cards.length}
@@ -730,10 +758,40 @@ function WidgetOrganizerDialog({
                       onClick={() => onResize(card.id, "wide")}
                     />
                     <SizeButton
+                      active={currentSize === "large"}
+                      icon={StretchHorizontal}
+                      label="Três colunas"
+                      onClick={() => onResize(card.id, "large")}
+                    />
+                    <SizeButton
                       active={currentSize === "full"}
                       icon={Maximize2}
                       label="Largura total"
                       onClick={() => onResize(card.id, "full")}
+                    />
+                  </div>
+                  <div
+                    className="inline-flex rounded-md border bg-background p-1"
+                    aria-label="Altura do widget"
+                    role="group"
+                  >
+                    <SizeButton
+                      active={currentHeight === "short"}
+                      icon={Minimize2}
+                      label="Altura baixa"
+                      onClick={() => onHeightChange(card.id, "short")}
+                    />
+                    <SizeButton
+                      active={currentHeight === "standard"}
+                      icon={PanelTop}
+                      label="Altura padrão"
+                      onClick={() => onHeightChange(card.id, "standard")}
+                    />
+                    <SizeButton
+                      active={currentHeight === "tall"}
+                      icon={StretchVertical}
+                      label="Altura ampliada"
+                      onClick={() => onHeightChange(card.id, "tall")}
                     />
                   </div>
                 </div>
@@ -918,8 +976,15 @@ function SizeButton({
 function sizeClassName(size: CardSize | undefined, fallback: string | undefined) {
   if (!size) return fallback;
   if (size === "wide") return "sm:col-span-2 xl:col-span-2";
+  if (size === "large") return "sm:col-span-2 xl:col-span-3";
   if (size === "full") return "sm:col-span-2 xl:col-span-4";
   return undefined;
+}
+
+function heightClassName(height: CardHeight) {
+  if (height === "tall") return "row-span-3";
+  if (height === "standard") return "row-span-2";
+  return "row-span-1";
 }
 
 function orderByAllCardPreferences(cards: LayoutCard[], preferences: CardPreference[]) {
@@ -939,8 +1004,15 @@ function getPreference(preferences: CardPreference[], cardId: string) {
 
 function sizeLabel(size: CardSize | undefined) {
   if (size === "full") return "Largura total";
+  if (size === "large") return "Três colunas";
   if (size === "wide") return "Largo";
   return "Compacto";
+}
+
+function heightLabel(height: CardHeight) {
+  if (height === "tall") return "Altura ampliada";
+  if (height === "standard") return "Altura padrão";
+  return "Altura baixa";
 }
 
 function formatPosition(index: number) {

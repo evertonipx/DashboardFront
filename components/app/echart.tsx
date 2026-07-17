@@ -6,6 +6,7 @@ import {
   EffectScatterChart,
   HeatmapChart,
   LineChart,
+  PieChart,
   ScatterChart,
 } from "echarts/charts";
 import {
@@ -36,6 +37,7 @@ echarts.use([
   EffectScatterChart,
   HeatmapChart,
   LineChart,
+  PieChart,
   ScatterChart,
   AriaComponent,
   DataZoomComponent,
@@ -107,6 +109,7 @@ export function EChart({ option, className }: EChartProps) {
     <div
       ref={containerRef}
       className={cn("h-full w-full", className)}
+      data-echart
       data-chart-type={chartType}
     />
   );
@@ -134,6 +137,7 @@ export function applyChartTypePreference(
     const data = (axis as { data?: unknown }).data;
     return Array.isArray(data) ? data.length : 0;
   });
+  const markAreaCarriers: Record<string, unknown>[] = [];
   const series = rawSeries.map((item) => {
     if (!item || typeof item !== "object") return item;
     const seriesOption = item as Record<string, unknown>;
@@ -173,12 +177,35 @@ export function applyChartTypePreference(
     const categoryCount = categoryCounts[axisIndex] ?? 0;
     const seriesColor =
       typeof itemStyle.color === "string" ? itemStyle.color : undefined;
+    const markArea = lineSeries.markArea;
+
+    if (markArea && typeof markArea === "object") {
+      markAreaCarriers.push({
+        animation: false,
+        data: Array.isArray(seriesOption.data)
+          ? seriesOption.data.map(() => 0)
+          : Array.from({ length: categoryCount }, () => 0),
+        emphasis: { disabled: true },
+        itemStyle: { color: "transparent", opacity: 0 },
+        markArea,
+        name: "",
+        silent: true,
+        tooltip: { show: false },
+        type: "bar",
+        xAxisIndex: axisIndex,
+        yAxisIndex:
+          typeof seriesOption.yAxisIndex === "number"
+            ? seriesOption.yAxisIndex
+            : 0,
+        z: -10,
+      });
+      delete lineSeries.markArea;
+    }
 
     return {
       ...lineSeries,
       connectNulls: false,
       itemStyle: seriesColor ? { color: seriesColor } : undefined,
-      label: { show: false },
       lineStyle: {
         ...(seriesColor ? { color: seriesColor } : {}),
         opacity:
@@ -223,7 +250,7 @@ export function applyChartTypePreference(
 
   return {
     ...option,
-    series,
+    series: markAreaCarriers.length ? [...markAreaCarriers, ...series] : series,
     tooltip,
     xAxis,
   } as EnterpriseChartOption;
@@ -238,6 +265,9 @@ function enhanceInteractiveChartOption(
     : rawSeries
       ? [rawSeries]
       : [];
+  const horizontal =
+    firstAxisType(option.xAxis) === "value" &&
+    firstAxisType(option.yAxis) === "category";
   const enhancedSeries = series.map((item) => {
     if (!item || typeof item !== "object") return item;
 
@@ -247,6 +277,35 @@ function enhanceInteractiveChartOption(
         ? (seriesOption.emphasis as Record<string, unknown>)
         : {};
 
+    const existingLabel =
+      seriesOption.label && typeof seriesOption.label === "object"
+        ? (seriesOption.label as Record<string, unknown>)
+        : null;
+    const supportsValueLabels =
+      (seriesOption.type === "bar" || seriesOption.type === "line") &&
+      !isDecorativeChartSeries(seriesOption);
+    const verticalBarLabel = seriesOption.type === "bar" && !horizontal;
+    const valueLabel = supportsValueLabels
+      ? {
+          align: horizontal ? "left" : "center",
+          color: "#334155",
+          distance: horizontal ? 6 : verticalBarLabel ? 3 : 5,
+          fontSize: 10,
+          fontWeight: 600,
+          formatter: (params: { value?: unknown }) =>
+            formatChartValueLabel(params.value),
+          position: horizontal ? "right" : "top",
+          rotate: verticalBarLabel ? 90 : 0,
+          show: true,
+          verticalAlign: horizontal ? "middle" : "bottom",
+          ...(existingLabel ?? {}),
+        }
+      : existingLabel;
+    const existingLabelLayout =
+      seriesOption.labelLayout && typeof seriesOption.labelLayout === "object"
+        ? (seriesOption.labelLayout as Record<string, unknown>)
+        : {};
+
     return {
       ...seriesOption,
       emphasis: {
@@ -254,6 +313,16 @@ function enhanceInteractiveChartOption(
         focus: "series",
         ...emphasis,
       },
+      ...(valueLabel ? { label: valueLabel } : {}),
+      ...(supportsValueLabels
+        ? {
+            labelLayout: {
+              hideOverlap: true,
+              moveOverlap: horizontal ? "shiftY" : "shiftX",
+              ...existingLabelLayout,
+            },
+          }
+        : {}),
     };
   });
   const categoryCount = categoryXAxisLength(option.xAxis);
@@ -334,6 +403,7 @@ function enhanceInteractiveChartOption(
             },
           ]
         : undefined),
+    grid: valueLabelGrid(option.grid, enhancedSeries, horizontal),
     series: enhancedSeries.length ? enhancedSeries : rawSeries,
     stateAnimation: {
       duration: 180,
@@ -344,6 +414,74 @@ function enhanceInteractiveChartOption(
     },
     tooltip,
   } as EnterpriseChartOption;
+}
+
+function firstAxisType(axis: unknown) {
+  const first = Array.isArray(axis) ? axis[0] : axis;
+  return first && typeof first === "object"
+    ? (first as { type?: unknown }).type
+    : undefined;
+}
+
+function isDecorativeChartSeries(series: Record<string, unknown>) {
+  const name = typeof series.name === "string" ? series.name.toLowerCase() : "";
+  const itemStyle =
+    series.itemStyle && typeof series.itemStyle === "object"
+      ? (series.itemStyle as Record<string, unknown>)
+      : {};
+  const color = typeof itemStyle.color === "string" ? itemStyle.color : "";
+
+  return (
+    series.silent === true ||
+    itemStyle.opacity === 0 ||
+    color === "transparent" ||
+    color.includes("rgba(0,0,0,0)") ||
+    name.includes("média-base") ||
+    name.includes("média móvel") ||
+    name.includes("meta") ||
+    name.includes("limiar")
+  );
+}
+
+function formatChartValueLabel(value: unknown) {
+  const rawValue = Array.isArray(value) ? value[value.length - 1] : value;
+  const numericValue =
+    typeof rawValue === "number" ? rawValue : Number(String(rawValue ?? ""));
+
+  if (!Number.isFinite(numericValue) || numericValue === 0) return "";
+  return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(
+    numericValue,
+  );
+}
+
+function valueLabelGrid(
+  grid: EnterpriseChartOption["grid"],
+  series: unknown[],
+  horizontal: boolean,
+) {
+  if (!grid || Array.isArray(grid) || typeof grid !== "object") return grid;
+  const hasValueLabels = series.some(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      ((item as { type?: unknown }).type === "bar" ||
+        (item as { type?: unknown }).type === "line") &&
+      (item as { label?: { show?: unknown } }).label?.show !== false,
+  );
+  if (!hasValueLabels) return grid;
+
+  return {
+    ...grid,
+    right: horizontal
+      ? numericGridOffset(grid.right, 58)
+      : grid.right,
+    top: horizontal ? grid.top : numericGridOffset(grid.top, 38),
+  };
+}
+
+function numericGridOffset(value: unknown, minimum: number) {
+  const numeric = typeof value === "number" ? value : Number(String(value ?? ""));
+  return Number.isFinite(numeric) ? Math.max(numeric, minimum) : minimum;
 }
 
 function categoryXAxisLength(xAxis: unknown) {

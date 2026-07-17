@@ -557,10 +557,17 @@ function normalizeSnapshot(
                 : undefined,
             color:
               typeof item.color === "string" ? item.color : undefined,
+            height:
+              item.height === "short" ||
+              item.height === "standard" ||
+              item.height === "tall"
+                ? item.height
+                : undefined,
             id: item.id,
             size:
               item.size === "compact" ||
               item.size === "wide" ||
+              item.size === "large" ||
               item.size === "full"
                 ? item.size
                 : undefined,

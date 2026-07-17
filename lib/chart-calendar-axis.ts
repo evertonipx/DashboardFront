@@ -31,8 +31,8 @@ export function holidayCategoryIndexes(
   return new Set(
     Array.from(dates).flatMap((rawDate, index) => {
       if (!rawDate) return [];
-      const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
-      return !Number.isNaN(date.getTime()) && brazilianNationalHolidayName(date)
+      const date = parseCalendarDate(rawDate);
+      return date && saoPauloHolidayName(date)
         ? [index]
         : [];
     }),
@@ -58,10 +58,10 @@ export function buildCalendarMarkArea(
 ) {
   const data = Array.from(dates).flatMap((rawDate, index) => {
     if (!rawDate) return [];
-    const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
-    if (Number.isNaN(date.getTime())) return [];
+    const date = parseCalendarDate(rawDate);
+    if (!date) return [];
 
-    const holiday = brazilianNationalHolidayName(date);
+    const holiday = saoPauloHolidayName(date);
     const kind = holiday
       ? "holiday"
       : date.getDay() === 0
@@ -74,14 +74,16 @@ export function buildCalendarMarkArea(
     const style = calendarBandStyle(kind);
     const name = holiday ?? (kind === "saturday" ? "Sábado" : "Domingo");
 
+    // Ordinal axes round fractional coordinates; matching integer endpoints
+    // creates one full category band instead of extending into the next day.
     return [
       [
         {
           itemStyle: style,
           name,
-          xAxis: index - 0.5,
+          xAxis: index,
         },
-        { xAxis: index + 0.5 },
+        { xAxis: index },
       ],
     ];
   });
@@ -99,10 +101,25 @@ export function buildCalendarMarkArea(
 
 export function brazilianNationalHolidayName(date: Date) {
   return BRAZILIAN_NATIONAL_HOLIDAYS.get(
-    `${String(date.getMonth() + 1).padStart(2, "0")}-${String(
-      date.getDate(),
-    ).padStart(2, "0")}`,
+    calendarMonthDay(date),
   );
+}
+
+export function saoPauloHolidayName(date: Date) {
+  const nationalHoliday = brazilianNationalHolidayName(date);
+  if (nationalHoliday) return nationalHoliday;
+
+  const localHoliday = SAO_PAULO_FIXED_HOLIDAYS.get(calendarMonthDay(date));
+  if (localHoliday) return localHoliday;
+
+  const easter = easterSunday(date.getFullYear());
+  const goodFriday = addCalendarDays(easter, -2);
+  if (isSameCalendarDay(date, goodFriday)) return "Paixão de Cristo";
+
+  const corpusChristi = addCalendarDays(easter, 60);
+  if (isSameCalendarDay(date, corpusChristi)) return "Corpus Christi";
+
+  return undefined;
 }
 
 function categoryIndexesForWeekday(month: Date, weekday: number) {
@@ -191,6 +208,79 @@ const BRAZILIAN_NATIONAL_HOLIDAYS = new Map([
   ["11-20", "Dia Nacional de Zumbi e da Consciência Negra"],
   ["12-25", "Natal"],
 ]);
+
+const SAO_PAULO_FIXED_HOLIDAYS = new Map([
+  ["01-25", "Aniversário da Cidade de São Paulo"],
+  ["07-09", "Data Magna do Estado de São Paulo"],
+]);
+
+function parseCalendarDate(rawDate: Date | string) {
+  if (rawDate instanceof Date) {
+    return Number.isNaN(rawDate.getTime()) ? null : rawDate;
+  }
+
+  // Buckets returned by the API commonly arrive as YYYY-MM-DD or midnight UTC.
+  // Reading that shape with new Date() moves it to the previous day in São Paulo.
+  const isoDate = /^(\d{4})-(\d{2})-(\d{2})(?:$|T)/.exec(rawDate);
+  if (isoDate) {
+    const year = Number(isoDate[1]);
+    const month = Number(isoDate[2]);
+    const day = Number(isoDate[3]);
+    const date = new Date(year, month - 1, day);
+    return date.getFullYear() === year &&
+      date.getMonth() === month - 1 &&
+      date.getDate() === day
+      ? date
+      : null;
+  }
+
+  const date = new Date(rawDate);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function calendarMonthDay(date: Date) {
+  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+    date.getDate(),
+  ).padStart(2, "0")}`;
+}
+
+function addCalendarDays(date: Date, amount: number) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + amount);
+}
+
+function isSameCalendarDay(first: Date, second: Date) {
+  return (
+    first.getFullYear() === second.getFullYear() &&
+    first.getMonth() === second.getMonth() &&
+    first.getDate() === second.getDate()
+  );
+}
+
+function easterSunday(year: number) {
+  const goldenYear = year % 19;
+  const century = Math.floor(year / 100);
+  const yearInCentury = year % 100;
+  const leapCenturies = Math.floor(century / 4);
+  const centuryRemainder = century % 4;
+  const correction = Math.floor((century + 8) / 25);
+  const moonCorrection = Math.floor((century - correction + 1) / 3);
+  const epact =
+    (19 * goldenYear + century - leapCenturies - moonCorrection + 15) % 30;
+  const leapYears = Math.floor(yearInCentury / 4);
+  const yearRemainder = yearInCentury % 4;
+  const weekdayCorrection =
+    (32 + 2 * centuryRemainder + 2 * leapYears - epact - yearRemainder) % 7;
+  const finalCorrection = Math.floor(
+    (goldenYear + 11 * epact + 22 * weekdayCorrection) / 451,
+  );
+  const month = Math.floor(
+    (epact + weekdayCorrection - 7 * finalCorrection + 114) / 31,
+  );
+  const day =
+    ((epact + weekdayCorrection - 7 * finalCorrection + 114) % 31) + 1;
+
+  return new Date(year, month - 1, day);
+}
 
 function calendarBandStyle(kind: "holiday" | "saturday" | "sunday") {
   if (kind === "holiday") {
