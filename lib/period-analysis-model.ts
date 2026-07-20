@@ -111,6 +111,15 @@ export function buildPeriodAnalysisWidgetModel({
   if (widget.kind === "trend") {
     return buildTrendModel(data, period, selectedScenarios, color);
   }
+  if (widget.kind === "peak_days") {
+    return buildPeakDaysModel(data, period, selectedScenarios, color);
+  }
+  if (widget.kind === "rose") {
+    return buildRoseModel(data, period, selectedScenarios, color);
+  }
+  if (widget.kind === "totals_table") {
+    return buildScenarioTotalsModel(data, period, selectedScenarios);
+  }
 
   return buildHourProfileModel(data, period, selectedScenarios, color);
 }
@@ -152,7 +161,40 @@ export function periodAnalysisBaselineLabel(baseline: PeriodAnalysisBaseline) {
 
 export function formatPeriodAnalysisRange(period: PeriodAnalysisRange) {
   const end = addDays(period.to, -1);
+  if (isSingleDayAnalysisPeriod(period)) return formatDate(period.from);
   return `${formatDate(period.from)} a ${formatDate(end)}`;
+}
+
+export function isSingleDayAnalysisPeriod(period: PeriodAnalysisRange) {
+  return addDays(period.from, 1).getTime() === period.to.getTime();
+}
+
+export function periodAnalysisOperationalRange(
+  period: PeriodAnalysisRange,
+): PeriodAnalysisRange {
+  if (!isSingleDayAnalysisPeriod(period)) return period;
+
+  return {
+    from: new Date(period.from.getFullYear(), period.from.getMonth(), 1),
+    to: period.to,
+  };
+}
+
+export function periodAnalysisEffectiveGranularity(
+  widget: PeriodAnalysisWidget,
+  period: PeriodAnalysisRange,
+) {
+  return isSingleDayAnalysisPeriod(period) &&
+    (widget.kind === "timeline" || widget.kind === "comparison")
+    ? "hour"
+    : widget.granularity;
+}
+
+function periodRangeThroughNow(period: PeriodAnalysisRange) {
+  const now = new Date();
+  return now >= period.from && now < period.to
+    ? { from: period.from, to: now }
+    : period;
 }
 
 function buildSummaryModel(
@@ -160,13 +202,22 @@ function buildSummaryModel(
   period: PeriodAnalysisRange,
   scenarios: Scenario[],
 ): PeriodAnalysisWidgetModel {
-  const points = combinedPoints(data.day, scenarios, period, "day");
-  const ranking = buildScenarioRanking({
-    from: period.from,
-    rows: data.day.rows,
+  const singleDay = isSingleDayAnalysisPeriod(period);
+  const effectivePeriod = periodRangeThroughNow(period);
+  const granularity = singleDay ? "hour" : "day";
+  const dataset = singleDay ? data.hour : data.day;
+  const points = combinedPoints(
+    dataset,
     scenarios,
-    sourceGranularity: data.day.granularity,
-    to: period.to,
+    effectivePeriod,
+    granularity,
+  );
+  const ranking = buildScenarioRanking({
+    from: effectivePeriod.from,
+    rows: dataset.rows,
+    scenarios,
+    sourceGranularity: dataset.granularity,
+    to: effectivePeriod.to,
   });
   const total = points.reduce((sum, point) => sum + point.total, 0);
   const average = points.length ? total / points.length : 0;
@@ -178,17 +229,17 @@ function buildSummaryModel(
   const metrics: ReportMetric[] = [
     {
       description: formatPeriodAnalysisRange(period),
-      label: "Total do período",
+      label: singleDay ? "Total do dia" : "Total do período",
       value: total,
     },
     {
-      description: `${points.length} dia(s) consultado(s)`,
-      label: "Média diária",
+      description: `${points.length} ${singleDay ? "hora(s)" : "dia(s)"} consultada(s)`,
+      label: singleDay ? "Média por hora" : "Média diária",
       value: Math.round(average),
     },
     {
       description: peak ? peak.label : "Sem dados",
-      label: "Maior fluxo diário",
+      label: singleDay ? "Maior fluxo horário" : "Maior fluxo diário",
       value: peak?.total ?? 0,
     },
     {
@@ -201,9 +252,11 @@ function buildSummaryModel(
   ];
 
   return {
-    description: "Síntese executiva dos cenários escolhidos no intervalo.",
+    description: singleDay
+      ? "Síntese operacional dos cenários escolhidos no dia."
+      : "Síntese executiva dos cenários escolhidos no intervalo.",
     emptyText: "Sem eventos nos cenários selecionados para este período.",
-    error: data.day.error,
+    error: dataset.error,
     hasData: total !== 0,
     height: 180,
     metrics,
@@ -219,7 +272,7 @@ function buildSummaryModel(
         indicator: metric.label,
         value: metric.value,
       })),
-      title: "Resumo do período",
+      title: singleDay ? "Resumo do dia" : "Resumo do período",
     },
   };
 }
@@ -231,12 +284,19 @@ function buildTimelineModel(
   scenarios: Scenario[],
   color: string,
 ): PeriodAnalysisWidgetModel {
-  const dataset = widget.granularity === "hour" ? data.hour : data.day;
-  const points = combinedPoints(dataset, scenarios, period, widget.granularity);
+  const granularity = periodAnalysisEffectiveGranularity(widget, period);
+  const effectivePeriod = periodRangeThroughNow(period);
+  const dataset = granularity === "hour" ? data.hour : data.day;
+  const points = combinedPoints(
+    dataset,
+    scenarios,
+    effectivePeriod,
+    granularity,
+  );
   const option = buildBarTimelineOption(points, color);
 
   return {
-    description: `${granularityLabel(widget.granularity)} dos cenários selecionados em ${formatPeriodAnalysisRange(period)}.`,
+    description: `${granularityLabel(granularity)} dos cenários selecionados em ${formatPeriodAnalysisRange(period)}.`,
     emptyText: "Sem fluxo no período e nos cenários selecionados.",
     error: dataset.error,
     hasData: points.some((point) => point.total !== 0),
@@ -254,17 +314,19 @@ function buildComparisonModel(
   scenarios: Scenario[],
   color: string,
 ): PeriodAnalysisWidgetModel {
-  const dataset = widget.granularity === "hour" ? data.hour : data.day;
+  const granularity = periodAnalysisEffectiveGranularity(widget, period);
+  const effectivePeriod = periodRangeThroughNow(period);
+  const dataset = granularity === "hour" ? data.hour : data.day;
   const series = scenarios.map((scenario) => ({
     id: scenario.id,
     name: scenario.name,
-    points: combinedPoints(dataset, [scenario], period, widget.granularity),
+    points: combinedPoints(dataset, [scenario], effectivePeriod, granularity),
   }));
   const option = buildMultiScenarioOption(series, color);
   const labels = series[0]?.points.map((point) => point.label) ?? [];
 
   return {
-    description: `${granularityLabel(widget.granularity)} com uma série para cada cenário escolhido.`,
+    description: `${granularityLabel(granularity)} com uma série para cada cenário escolhido.`,
     emptyText: "Sem dados nos cenários escolhidos para comparar.",
     error: dataset.error,
     hasData: series.some((item) =>
@@ -302,18 +364,24 @@ function buildRankingModel(
   scenarios: Scenario[],
   color: string,
 ): PeriodAnalysisWidgetModel {
+  const analysisPeriod = isSingleDayAnalysisPeriod(period)
+    ? periodAnalysisOperationalRange(period)
+    : period;
+  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
   const ranking = buildScenarioRanking({
-    from: period.from,
+    from: effectivePeriod.from,
     rows: data.day.rows,
     scenarios,
     sourceGranularity: data.day.granularity,
-    to: period.to,
+    to: effectivePeriod.to,
   });
   const displayed = [...ranking].reverse();
   const height = Math.max(290, ranking.length * 34 + 60);
 
   return {
-    description: "Volume e representatividade apenas dos cenários escolhidos.",
+    description: isSingleDayAnalysisPeriod(period)
+      ? `Volume e representatividade no mês até ${formatDate(period.from)}.`
+      : "Volume e representatividade apenas dos cenários escolhidos.",
     emptyText: "Sem fluxo para classificar os cenários selecionados.",
     error: data.day.error,
     hasData: ranking.length > 0,
@@ -368,7 +436,7 @@ function buildRankingModel(
         { key: "total", label: "Total", numeric: true, width: 18 },
         { key: "share", label: "Representatividade", width: 20 },
       ],
-      description: formatPeriodAnalysisRange(period),
+      description: formatPeriodAnalysisRange(analysisPeriod),
       rows: ranking.map((point, index) => ({
         position: index + 1,
         scenario: point.name,
@@ -380,14 +448,237 @@ function buildRankingModel(
   };
 }
 
+function buildPeakDaysModel(
+  data: PeriodAnalysisData,
+  period: PeriodAnalysisRange,
+  scenarios: Scenario[],
+  color: string,
+): PeriodAnalysisWidgetModel {
+  const analysisPeriod = isSingleDayAnalysisPeriod(period)
+    ? periodAnalysisOperationalRange(period)
+    : period;
+  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const ranked = combinedPoints(
+    data.day,
+    scenarios,
+    effectivePeriod,
+    "day",
+  )
+    .filter((point) => point.total !== 0)
+    .sort((left, right) => right.total - left.total)
+    .slice(0, 5);
+  const displayed = [...ranked].reverse();
+
+  return {
+    description: `Cinco dias com maior fluxo em ${formatPeriodAnalysisRange(
+      analysisPeriod,
+    )}.`,
+    emptyText: "Sem dados diários para identificar os dias de pico.",
+    error: data.day.error,
+    hasData: ranked.length > 0,
+    height: 300,
+    option: {
+      color: [color],
+      grid: { bottom: 18, containLabel: true, left: 18, right: 72, top: 12 },
+      series: [
+        {
+          barMaxWidth: 24,
+          data: displayed.map((point) => point.total),
+          itemStyle: { borderRadius: [0, 3, 3, 0], color },
+          label: {
+            color: "#526477",
+            formatter: (params: { value?: number }) =>
+              formatNumber(Number(params.value ?? 0)),
+            position: "right",
+            show: true,
+          },
+          type: "bar",
+        },
+      ],
+      tooltip: { trigger: "axis", valueFormatter: numberTooltip },
+      xAxis: {
+        axisLabel: { color: "#66758A" },
+        splitLine: { lineStyle: { color: "#E8EEF6" } },
+        type: "value",
+      },
+      yAxis: {
+        axisLabel: { color: "#526477" },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        data: displayed.map((point) => point.label),
+        type: "category",
+      },
+    } as EnterpriseChartOption,
+    table: {
+      columns: [
+        { key: "position", label: "Posição", numeric: true, width: 12 },
+        { key: "date", label: "Data", width: 24 },
+        { key: "total", label: "Total", numeric: true, width: 20 },
+      ],
+      description: formatPeriodAnalysisRange(analysisPeriod),
+      rows: ranked.map((point, index) => ({
+        date: point.label,
+        position: index + 1,
+        total: point.total,
+      })),
+      title: "Top 5 dias de pico",
+    },
+  };
+}
+
+function buildRoseModel(
+  data: PeriodAnalysisData,
+  period: PeriodAnalysisRange,
+  scenarios: Scenario[],
+  color: string,
+): PeriodAnalysisWidgetModel {
+  const analysisPeriod = isSingleDayAnalysisPeriod(period)
+    ? periodAnalysisOperationalRange(period)
+    : period;
+  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const ranking = buildScenarioRanking({
+    from: effectivePeriod.from,
+    rows: data.day.rows,
+    scenarios,
+    sourceGranularity: data.day.granularity,
+    to: effectivePeriod.to,
+  });
+  const total = ranking.reduce((sum, point) => sum + point.total, 0);
+
+  return {
+    description: "Participação proporcional dos cenários escolhidos no período.",
+    emptyText: "Sem fluxo para calcular a distribuição dos cenários.",
+    error: data.day.error,
+    hasData: ranking.length > 0,
+    height: 340,
+    option: {
+      series: [
+        {
+          center: ["50%", "48%"],
+          data: ranking.map((point, index) => ({
+            itemStyle: {
+              color: index === 0 ? color : pastelBarColor(index),
+            },
+            name: point.name,
+            value: point.total,
+          })),
+          label: {
+            color: "#526477",
+            formatter: (params: { name?: string; value?: number }) => {
+              const value = Number(params.value ?? 0);
+              return `${params.name ?? ""}\n${formatNumber(value)} · ${formatPercent(
+                total ? value / total : 0,
+              )}`;
+            },
+            fontSize: 10,
+          },
+          labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
+          labelLine: { length: 8, length2: 6, smooth: 0.15 },
+          minAngle: 4,
+          radius: ["18%", "70%"],
+          roseType: "area",
+          type: "pie",
+        },
+      ],
+      tooltip: {
+        formatter: (params: {
+          name?: string;
+          value?: number;
+        }) => {
+          const value = Number(params.value ?? 0);
+          return `${params.name ?? "Cenário"}<br/><strong>${formatNumber(
+            value,
+          )}</strong> · ${formatPercent(total ? value / total : 0)}`;
+        },
+        trigger: "item",
+      },
+    } as EnterpriseChartOption,
+    table: {
+      columns: [
+        { key: "scenario", label: "Cenário", width: 34 },
+        { key: "total", label: "Total", numeric: true, width: 20 },
+        { key: "share", label: "Representatividade", width: 20 },
+      ],
+      description: formatPeriodAnalysisRange(analysisPeriod),
+      rows: ranking.map((point) => ({
+        scenario: point.name,
+        share: formatPercent(point.share),
+        total: point.total,
+      })),
+      title: "Distribuição radial por cenário",
+    },
+  };
+}
+
+function buildScenarioTotalsModel(
+  data: PeriodAnalysisData,
+  period: PeriodAnalysisRange,
+  scenarios: Scenario[],
+): PeriodAnalysisWidgetModel {
+  const analysisPeriod = isSingleDayAnalysisPeriod(period)
+    ? periodAnalysisOperationalRange(period)
+    : period;
+  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const ranking = buildScenarioRanking({
+    from: effectivePeriod.from,
+    rows: data.day.rows,
+    scenarios,
+    sourceGranularity: data.day.granularity,
+    to: effectivePeriod.to,
+  });
+  const total = ranking.reduce((sum, point) => sum + point.total, 0);
+  const metrics: ReportMetric[] = [
+    {
+      description: formatPeriodAnalysisRange(analysisPeriod),
+      label: "Total combinado",
+      value: total,
+    },
+    ...ranking.map((point) => ({
+      description: `${formatPercent(point.share)} de representatividade`,
+      label: point.name,
+      value: point.total,
+    })),
+  ];
+
+  return {
+    description: "Total combinado e acumulado individual dos cenários escolhidos.",
+    emptyText: "Sem totais para os cenários selecionados.",
+    error: data.day.error,
+    hasData: ranking.length > 0,
+    height: Math.max(180, Math.ceil(metrics.length / 4) * 110),
+    metrics,
+    table: {
+      columns: [
+        { key: "scenario", label: "Cenário", width: 34 },
+        { key: "total", label: "Total", numeric: true, width: 20 },
+        { key: "share", label: "Representatividade", width: 20 },
+      ],
+      description: formatPeriodAnalysisRange(analysisPeriod),
+      rows: [
+        { scenario: "Total combinado", share: "100,0%", total },
+        ...ranking.map((point) => ({
+          scenario: point.name,
+          share: formatPercent(point.share),
+          total: point.total,
+        })),
+      ],
+      title: "Totais por cenário",
+    },
+  };
+}
+
 function buildHeatmapModel(
   data: PeriodAnalysisData,
   period: PeriodAnalysisRange,
   scenarios: Scenario[],
   color: string,
 ): PeriodAnalysisWidgetModel {
-  const points = combinedPoints(data.hour, scenarios, period, "hour");
-  const days = listDayStarts(period.from, period.to);
+  const analysisPeriod = isSingleDayAnalysisPeriod(period)
+    ? periodAnalysisOperationalRange(period)
+    : period;
+  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const points = combinedPoints(data.hour, scenarios, effectivePeriod, "hour");
+  const days = listDayStarts(effectivePeriod.from, effectivePeriod.to);
   const dayIndexes = new Map(
     days.map((day, index) => [calendarDayKey(day), index]),
   );
@@ -409,7 +700,9 @@ function buildHeatmapModel(
   const labels = days.map(formatShortDate);
 
   return {
-    description: "Intensidade combinada dos cenários escolhidos por dia e hora.",
+    description: isSingleDayAnalysisPeriod(period)
+      ? `Intensidade por dia e hora no mês até ${formatDate(period.from)}.`
+      : "Intensidade combinada dos cenários escolhidos por dia e hora.",
     emptyText: "Sem eventos horários para montar o mapa de calor.",
     error: data.hour.error,
     hasData: points.some((point) => point.total > 0),
@@ -480,7 +773,7 @@ function buildHeatmapModel(
         { key: "hour", label: "Hora", width: 12 },
         { key: "total", label: "Total", numeric: true, width: 18 },
       ],
-      description: formatPeriodAnalysisRange(period),
+      description: formatPeriodAnalysisRange(analysisPeriod),
       rows: points.map((point) => {
         const bucket = new Date(point.bucket);
         return {
@@ -501,8 +794,20 @@ function buildCumulativeModel(
   scenarios: Scenario[],
   color: string,
 ): PeriodAnalysisWidgetModel {
-  const baselinePeriod = periodAnalysisBaselineRange(period, widget.baseline);
-  const current = combinedPoints(data.day, scenarios, period, "day");
+  const analysisPeriod = isSingleDayAnalysisPeriod(period)
+    ? periodAnalysisOperationalRange(period)
+    : period;
+  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const baselinePeriod = periodAnalysisBaselineRange(
+    effectivePeriod,
+    widget.baseline,
+  );
+  const current = combinedPoints(
+    data.day,
+    scenarios,
+    effectivePeriod,
+    "day",
+  );
   const baselineDataset = data.baseline[widget.baseline] ?? emptyDataset("day");
   const baseline = combinedPoints(
     baselineDataset,
@@ -525,7 +830,7 @@ function buildCumulativeModel(
   const baselineLabel = periodAnalysisBaselineLabel(widget.baseline);
 
   return {
-    description: `Evolução acumulada contra ${baselineLabel.toLowerCase()}. Base à esquerda e período atual à direita.`,
+    description: `${isSingleDayAnalysisPeriod(period) ? "Mês até a data escolhida" : "Período selecionado"} contra ${baselineLabel.toLowerCase()}. Base à esquerda e período atual à direita.`,
     emptyText: "Sem dados diários para o comparativo acumulado.",
     error: data.day.error ?? baselineDataset.error,
     hasData: points.some((point) => point.current !== 0 || point.baseline !== 0),
@@ -547,7 +852,7 @@ function buildCumulativeModel(
         { key: "current", label: "Acumulado atual", numeric: true, width: 20 },
         { key: "variation", label: "Variação", width: 14 },
       ],
-      description: `${formatPeriodAnalysisRange(period)} · ${baselineLabel}`,
+      description: `${formatPeriodAnalysisRange(analysisPeriod)} · ${baselineLabel}`,
       rows: points.map((point) => ({
         baseline: point.baseline,
         baseline_date: point.baselineDate,
@@ -566,11 +871,15 @@ function buildTrendModel(
   scenarios: Scenario[],
   color: string,
 ): PeriodAnalysisWidgetModel {
-  const historyFrom = addDays(period.from, -29);
+  const analysisPeriod = isSingleDayAnalysisPeriod(period)
+    ? periodAnalysisOperationalRange(period)
+    : period;
+  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const historyFrom = addDays(analysisPeriod.from, -29);
   const historyPoints = combinedPoints(
     data.day,
     scenarios,
-    { from: historyFrom, to: period.to },
+    { from: historyFrom, to: effectivePeriod.to },
     "day",
   );
   const trendPoints = historyPoints
@@ -579,7 +888,7 @@ function buildTrendModel(
       average7: movingAverage(historyPoints, index, 7),
       average30: movingAverage(historyPoints, index, 30),
     }))
-    .filter((point) => new Date(point.bucket) >= period.from);
+    .filter((point) => new Date(point.bucket) >= analysisPeriod.from);
   const saturdayIndexes = trendPoints.flatMap((point, index) =>
     point.isSaturday ? [index] : [],
   );
@@ -589,10 +898,14 @@ function buildTrendModel(
   const calendarDates = trendPoints.map((point) => point.bucket);
 
   return {
-    description: "Médias móveis calculadas com os 29 dias anteriores ao início do período.",
+    description: isSingleDayAnalysisPeriod(period)
+      ? `Médias móveis no mês até ${formatDate(period.from)}, com 29 dias anteriores de base.`
+      : "Médias móveis calculadas com os 29 dias anteriores ao início do período.",
     emptyText: "São necessários ao menos 7 dias com dados para calcular a tendência.",
     error: data.day.error,
-    hasData: trendPoints.some((point) => point.average7 !== null),
+    hasData:
+      historyPoints.some((point) => point.total !== 0) &&
+      trendPoints.some((point) => point.average7 !== null),
     height: 330,
     minWidth: trendPoints.length > 45 ? Math.min(1600, trendPoints.length * 26) : undefined,
     option: {
@@ -647,7 +960,7 @@ function buildTrendModel(
         { key: "average_7", label: "Média 7 dias", numeric: true, width: 18 },
         { key: "average_30", label: "Média 30 dias", numeric: true, width: 18 },
       ],
-      description: formatPeriodAnalysisRange(period),
+      description: formatPeriodAnalysisRange(analysisPeriod),
       rows: trendPoints.map((point) => ({
         average_30: nullableRounded(point.average30),
         average_7: nullableRounded(point.average7),
@@ -665,7 +978,8 @@ function buildHourProfileModel(
   scenarios: Scenario[],
   color: string,
 ): PeriodAnalysisWidgetModel {
-  const points = combinedPoints(data.hour, scenarios, period, "hour");
+  const effectivePeriod = periodRangeThroughNow(period);
+  const points = combinedPoints(data.hour, scenarios, effectivePeriod, "hour");
   const totals = Array.from({ length: 24 }, () => 0);
   const dayKeys = new Set<string>();
   points.forEach((point) => {
@@ -1020,6 +1334,9 @@ function widgetDescription(widget: PeriodAnalysisWidget) {
   if (widget.kind === "cumulative") return "Acumulado contra uma base comparável.";
   if (widget.kind === "trend") return "Médias móveis de 7 e 30 dias.";
   if (widget.kind === "hour_profile") return "Perfil médio das 24 horas.";
+  if (widget.kind === "peak_days") return "Dias com os maiores picos do período.";
+  if (widget.kind === "rose") return "Distribuição proporcional por cenário.";
+  if (widget.kind === "totals_table") return "Totais individuais por cenário.";
   if (widget.kind === "comparison") return "Comparação dos cenários selecionados.";
   if (widget.kind === "timeline") return "Fluxo agrupado no período.";
   return "Indicadores consolidados do período.";

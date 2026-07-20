@@ -41,9 +41,11 @@ import {
   monochromeHeatmapPalette,
 } from "@/lib/chart-palette";
 import { useEffectiveCompanyScopeId } from "@/lib/master-company-scope";
+import { flushUserGridSync } from "@/lib/user-grid";
 import { cn } from "@/lib/utils";
 import {
   applyDefaultWidgetViewPresetIfEmpty,
+  type WidgetViewPreset,
   type WidgetViewScope,
 } from "@/lib/widget-view-presets";
 import {
@@ -71,6 +73,7 @@ type CardLayoutProps = {
   menuKey: CardMenuKey;
   editActions?: React.ReactNode;
   monitorMode?: boolean;
+  onApplySavedViewSource?: (preset: WidgetViewPreset) => boolean;
   onOrganizerOpenChange?: (open: boolean) => void;
   onReorderModeChange?: (enabled: boolean) => void;
   organizerOpen?: boolean;
@@ -78,6 +81,7 @@ type CardLayoutProps = {
   reorderMode?: boolean;
   showOrganizerTrigger?: boolean;
   showReorderTrigger?: boolean;
+  savedViewSourceMenus?: CardMenuKey[];
   viewScopeName?: string | null;
   viewScopes?: WidgetViewScope[];
 };
@@ -87,6 +91,7 @@ export function CardLayout({
   menuKey,
   editActions,
   monitorMode = false,
+  onApplySavedViewSource,
   onOrganizerOpenChange,
   onReorderModeChange,
   organizerOpen: controlledOrganizerOpen,
@@ -94,6 +99,7 @@ export function CardLayout({
   reorderMode: controlledReorderMode,
   showOrganizerTrigger = true,
   showReorderTrigger = true,
+  savedViewSourceMenus = [],
   viewScopeName,
   viewScopes = [],
 }: CardLayoutProps) {
@@ -134,7 +140,6 @@ export function CardLayout({
   const cardIds = React.useMemo(() => cards.map((card) => card.id), [cards]);
   const companyId = useEffectiveCompanyScopeId(user) || null;
   const preferences = useCardPreferences(menuKey, cardIds, companyId, {
-    syncServer: false,
     userId: user?.id,
     viewId: preferenceScopeId,
   });
@@ -150,6 +155,7 @@ export function CardLayout({
 
   React.useEffect(() => {
     if (!preferenceScopeId || !user?.id) return;
+    let cancelled = false;
     const applicationKey = [
       menuKey,
       companyId ?? "",
@@ -170,8 +176,14 @@ export function CardLayout({
       userId: user.id,
     });
     if (applied) {
-      window.setTimeout(() => window.location.reload(), 120);
+      void flushUserGridSync().then((synchronized) => {
+        if (!cancelled && synchronized) window.location.reload();
+      });
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     cardIds,
     companyId,
@@ -409,10 +421,12 @@ export function CardLayout({
           companyId={companyId}
           currentScope={currentViewScope}
           menuKey={menuKey}
+          onApplySourcePreset={onApplySavedViewSource}
           onOpenChange={setSavedViewsOpen}
           open={savedViewsOpen}
           preferences={preferences}
           scopes={viewScopes}
+          sourceMenuKeys={savedViewSourceMenus}
           userId={user?.id}
         />
       ) : null}

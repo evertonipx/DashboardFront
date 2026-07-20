@@ -64,7 +64,6 @@ import {
   filterScopedApiRows,
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
-  withCompanyScope,
 } from "@/lib/master-company-scope";
 import { canManageCameras, canManageLocations } from "@/lib/permissions";
 import type {
@@ -76,7 +75,6 @@ import type {
 } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 import {
-  annotateWorkerCompanyScope,
   normalizeWorkerRows,
   partitionWorkersByCompanyScope,
   sortWorkersByActivity,
@@ -598,7 +596,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
           `/locations/${editingLocation.id}`,
           {
             method: "PUT",
-            body: withCompanyScope(body, companyScopeId),
+            body,
           },
         );
         savedLocationId = updated?.id || editingLocation.id;
@@ -606,10 +604,10 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
       } else {
         const created = await apiFetch<Partial<Location> | null>("/locations", {
           method: "POST",
-          body: withCompanyScope({
+          body: {
             name,
             description: locationForm.description.trim() || undefined,
-          }, companyScopeId),
+          },
         });
         savedLocationId = created?.id ?? "";
         toast.success("Location criada");
@@ -657,17 +655,17 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
           `/locations/${selectedLocationId}/sub-locations/${editingSubLocation.id}`,
           {
             method: "PUT",
-            body: withCompanyScope({
+            body: {
               name,
               active: subLocationForm.active === "true",
-            }, companyScopeId),
+            },
           },
         );
         toast.success("Sub-location atualizada");
       } else {
         await apiFetch(`/locations/${selectedLocationId}/sub-locations`, {
           method: "POST",
-          body: withCompanyScope({ name }, companyScopeId),
+          body: { name },
         });
         toast.success("Sub-location criada");
       }
@@ -734,23 +732,23 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
       if (editingCamera) {
         await apiFetch(`/cameras/${editingCamera.id}`, {
           method: "PUT",
-          body: withCompanyScope({
+          body: {
             ...sharedBody,
             active: cameraForm.active === "true",
-          }, companyScopeId),
+          },
         });
         toast.success("Câmera atualizada");
       } else {
         await apiFetch("/cameras", {
           method: "POST",
-          body: withCompanyScope({
+          body: {
             ...sharedBody,
             location_id: cameraForm.location_id,
             sub_location_id:
               cameraForm.sub_location_id === "none"
                 ? undefined
                 : cameraForm.sub_location_id,
-          }, companyScopeId),
+          },
         });
         toast.success("Câmera criada");
       }
@@ -784,18 +782,18 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
           `/cameras/${selectedCameraId}/line-counts/${editingLine.id}`,
           {
             method: "PUT",
-            body: withCompanyScope({
+            body: {
               name,
               line_code: lineCode,
               active: lineForm.active === "true",
-            }, companyScopeId),
+            },
           },
         );
         toast.success("Line count atualizada");
       } else {
         await apiFetch(`/cameras/${selectedCameraId}/line-counts`, {
           method: "POST",
-          body: withCompanyScope({ name, line_code: lineCode }, companyScopeId),
+          body: { name, line_code: lineCode },
         });
         toast.success("Line count criada");
       }
@@ -1742,17 +1740,9 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
   );
 }
 
-function companyScopeHeaders(companyId?: string | null) {
-  const cleanCompanyId = companyId?.trim();
-  return cleanCompanyId ? { "X-Company-ID": cleanCompanyId } : undefined;
-}
-
 async function fetchInfrastructureWorkers(companyId?: string | null) {
-  const headers = companyScopeHeaders(companyId);
-  const rows = await apiFetch<unknown>("/workers", { headers }).then((response) =>
-    normalizeWorkerRows(response).map((row) =>
-      annotateWorkerCompanyScope(row, companyId, "GET /workers"),
-    ),
+  const rows = await apiFetch<unknown>("/workers").then((response) =>
+    normalizeWorkerRows(response),
   );
   const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
   return sortWorkersByActivity(scopedRows);

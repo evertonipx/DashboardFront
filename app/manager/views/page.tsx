@@ -8,7 +8,7 @@ export default function ManagerViewsPage() {
       <AppShell
         mode="manager"
         title="Visões"
-        description="URLs autenticadas para exibir gráficos em tela inteira do conteúdo."
+        description="Configure visões autenticadas e distribua o Ao Vivo em um ou mais monitores."
       >
         <ViewsManager />
       </AppShell>

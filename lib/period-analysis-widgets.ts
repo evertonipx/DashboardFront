@@ -14,7 +14,10 @@ export type PeriodAnalysisWidgetKind =
   | "heatmap"
   | "cumulative"
   | "trend"
-  | "hour_profile";
+  | "hour_profile"
+  | "peak_days"
+  | "rose"
+  | "totals_table";
 
 export type PeriodAnalysisBaseline =
   | "previous_period"
@@ -42,6 +45,7 @@ export type PeriodAnalysisWidgetInput = Omit<
 
 export type PeriodAnalysisSettings = {
   from: string;
+  mode: "day" | "range";
   to: string;
 };
 
@@ -126,11 +130,9 @@ export function createDefaultPeriodAnalysisWidgets() {
 export function createDefaultPeriodAnalysisSettings(
   now = new Date(),
 ): PeriodAnalysisSettings {
-  const to = formatDateInput(now);
-  const fromDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  fromDate.setDate(fromDate.getDate() - 29);
+  const date = formatDateInput(now);
 
-  return { from: formatDateInput(fromDate), to };
+  return { from: date, mode: "day", to: date };
 }
 
 export function loadPeriodAnalysisWidgets(
@@ -230,10 +232,16 @@ export function loadPeriodAnalysisSettings(
     );
     if (!stored) return defaults;
     const parsed = JSON.parse(stored) as Partial<PeriodAnalysisSettings>;
-    return {
-      from: isDateInput(parsed.from) ? parsed.from : defaults.from,
-      to: isDateInput(parsed.to) ? parsed.to : defaults.to,
-    };
+    const from = isDateInput(parsed.from) ? parsed.from : defaults.from;
+    const to = isDateInput(parsed.to) ? parsed.to : defaults.to;
+    const storedMode =
+      parsed.mode === "day" || parsed.mode === "range"
+        ? parsed.mode
+        : from === to
+          ? "day"
+          : "range";
+    const mode = storedMode === "range" && from === to ? "day" : storedMode;
+    return mode === "day" ? { from, mode, to: from } : { from, mode, to };
   } catch {
     return defaults;
   }
@@ -260,9 +268,12 @@ export function widgetKindLabel(kind: PeriodAnalysisWidgetKind) {
       cumulative: "Acumulado diário x base",
       heatmap: "Mapa de calor dia x hora",
       hour_profile: "Perfil horário",
+      peak_days: "Top 5 dias de pico",
       ranking: "Ranking de cenários",
+      rose: "Distribuição radial por cenário",
       summary: "Resumo do período",
       timeline: "Fluxo por período",
+      totals_table: "Totais por cenário",
       trend: "Tendência 7 x 30 dias",
     } satisfies Record<PeriodAnalysisWidgetKind, string>
   )[kind];
@@ -319,6 +330,9 @@ function isWidgetKind(value: unknown): value is PeriodAnalysisWidgetKind {
     "cumulative",
     "trend",
     "hour_profile",
+    "peak_days",
+    "rose",
+    "totals_table",
   ].includes(String(value));
 }
 

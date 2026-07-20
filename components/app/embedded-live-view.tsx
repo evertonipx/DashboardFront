@@ -12,6 +12,11 @@ import {
 } from "@/components/app/monitor-mode";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
+import {
+  aggregateBucketInRange,
+  aggregateQueryIso,
+  parseAggregateBucket,
+} from "@/lib/aggregate-time";
 import { hasMasterAccess } from "@/lib/access";
 import {
   buildWorkerBackedLocationOptions,
@@ -36,7 +41,6 @@ import type {
 } from "@/lib/types";
 import { formatNumber, formatTime } from "@/lib/utils";
 import {
-  annotateWorkerCompanyScope,
   normalizeWorkerRows,
   partitionWorkersByCompanyScope,
   sortWorkersByActivity,
@@ -110,6 +114,7 @@ type ScopeComparisonOption = {
 
 const DEFAULT_METRIC_TYPE = "count";
 const REFRESH_SECONDS = 5;
+const RECENT_DAY_RECONCILIATION_COUNT = 3;
 
 const chartLabels: Record<ViewChart, string> = {
   "scenario-hour": "Cenários por período",
@@ -183,9 +188,6 @@ export function EmbeddedLiveView() {
 
     try {
       const now = new Date();
-      const headers = companyScopeId
-        ? ({ "X-Company-ID": companyScopeId } satisfies HeadersInit)
-        : undefined;
       const [
         scenarioRows,
         cameraRows,
@@ -195,12 +197,12 @@ export function EmbeddedLiveView() {
         minuteRows,
       ] =
         await Promise.all([
-          apiFetch<Scenario[]>("/scenarios", { headers }),
-          apiFetch<Camera[]>("/cameras", { headers }).catch(() => []),
-          apiFetch<Location[]>("/locations", { headers }).catch(() => []),
+          apiFetch<Scenario[]>("/scenarios"),
+          apiFetch<Camera[]>("/cameras").catch(() => []),
+          apiFetch<Location[]>("/locations").catch(() => []),
           fetchEmbeddedWorkers(companyScopeId).catch(() => []),
-          fetchAggregateRows(buildAggregateDefinition(now, "hour"), headers),
-          fetchAggregateRows(buildAggregateDefinition(now, "minute"), headers),
+          fetchAggregateRows(buildAggregateDefinition(now, "hour")),
+          fetchAggregateRows(buildAggregateDefinition(now, "minute")),
         ]);
       const scopedScenarios = filterScopedApiRows(
         scenarioRows,
@@ -231,7 +233,7 @@ export function EmbeddedLiveView() {
             locations: scopedLocations,
             manager: false,
             subLocations: filterScopedApiRows(
-              await fetchSubLocations(scopedLocations, headers),
+              await fetchSubLocations(scopedLocations),
               companyScopeId,
             ),
           })
@@ -242,7 +244,7 @@ export function EmbeddedLiveView() {
             .filter((config) => config.chart === "scenario-hour")
             .map(async (config) => [
               config.id,
-              await fetchScenarioComparisonRows(config, now, headers),
+              await fetchScenarioComparisonRows(config, now),
             ] as const),
         ),
       );
@@ -599,17 +601,15 @@ function buildAggregateDefinition(
 
 async function fetchAggregateRows(
   definition: AggregateDefinition,
-  headers?: HeadersInit,
 ) {
   const params = new URLSearchParams({
     granularity: definition.granularity,
-    from: definition.from.toISOString(),
-    to: definition.to.toISOString(),
+    from: aggregateQueryIso(definition.from, definition.granularity),
+    to: aggregateQueryIso(definition.to, definition.granularity),
     metric_type: DEFAULT_METRIC_TYPE,
   });
   const response = await apiFetch<AggregateEventsResponse>(
     `/analytics/aggregate?${params.toString()}`,
-    { headers },
   );
 
   return response.data ?? [];
@@ -618,63 +618,196 @@ async function fetchAggregateRows(
 async function fetchScenarioComparisonRows(
   config: EmbeddedWidgetConfig,
   now: Date,
-  headers?: HeadersInit,
 ) {
   const definition = buildScenarioComparisonDefinition(config, now);
-  const rows = await fetchAggregateRows(definition, headers);
-  const openBucket = currentOpenBucket(definition.granularity, now);
-  const sourceGranularity = sourceGranularityForOpenBucket(
-    definition.granularity,
-  );
+  let rows = await fetchAggregateRows(definition);
 
+  if (definition.granularity === "hour") {
+    const currentHour = currentOpenBucket("hour", now);
+    if (
+      rangesOverlap(
+        definition.from,
+        definition.to,
+        currentHour.from,
+        currentHour.to,
+      )
+    ) {
+      const minuteRows = await fetchAggregateRows(
+        {
+          granularity: "minute",
+          from: currentHour.from,
+          to: addMinutes(startOfMinute(now), 1),
+        },
+      );
+      rows = replaceOpenBucketRowsFromSource(
+        rows,
+        "hour",
+        currentHour.from,
+        minuteRows,
+        "minute",
+        currentHour.from,
+        currentHour.to,
+      );
+    }
+
+    return rows;
+  }
+
+  const recentDayStart = addDays(
+    startOfDay(now),
+    1 - RECENT_DAY_RECONCILIATION_COUNT,
+  );
+  const recentDayEnd = addHours(startOfHour(now), 1);
   if (
-    !sourceGranularity ||
-    !rangesOverlap(definition.from, definition.to, openBucket.from, openBucket.to)
+    !rangesOverlap(
+      definition.from,
+      definition.to,
+      recentDayStart,
+      recentDayEnd,
+    )
   ) {
     return rows;
   }
 
-  const sourceRows = await fetchAggregateRows(
-    {
-      granularity: sourceGranularity,
-      from: openBucket.from,
-      to: openBucket.to,
-    },
-    headers,
+  const affectedBucketStarts = uniqueDateStarts(
+    recentDayStarts(now)
+      .map((dayStart) =>
+        alignToGranularity(dayStart, definition.granularity),
+      )
+      .filter((bucketStart) => {
+        const bucketEnd = addGranularity(
+          bucketStart,
+          definition.granularity,
+        );
+        return rangesOverlap(
+          definition.from,
+          definition.to,
+          bucketStart,
+          bucketEnd,
+        );
+      }),
   );
+  if (!affectedBucketStarts.length) return rows;
 
-  return replaceOpenBucketRowsFromSource(
-    rows,
-    definition.granularity,
-    openBucket.from,
-    sourceRows,
-    openBucket.from,
-    openBucket.to,
+  const dailySourceFrom = affectedBucketStarts[0];
+  const dailySourceTo = affectedBucketStarts.reduce(
+    (latest, bucketStart) => {
+      const bucketEnd = addGranularity(
+        bucketStart,
+        definition.granularity,
+      );
+      return bucketEnd > latest ? bucketEnd : latest;
+    },
+    addGranularity(affectedBucketStarts[0], definition.granularity),
   );
+  let dailyRows =
+    definition.granularity === "day"
+      ? rows
+      : await fetchAggregateRows(
+          {
+            granularity: "day",
+            from: dailySourceFrom,
+            to: dailySourceTo,
+          },
+        );
+  const hourlyFrom = new Date(
+    Math.max(dailySourceFrom.getTime(), recentDayStart.getTime()),
+  );
+  const hourlyTo = new Date(
+    Math.min(dailySourceTo.getTime(), recentDayEnd.getTime()),
+  );
+  let recentHourRows = await fetchAggregateRows({
+    granularity: "hour",
+    from: hourlyFrom,
+    to: hourlyTo,
+  });
+  const currentHour = currentOpenBucket("hour", now);
+  if (
+    rangesOverlap(hourlyFrom, hourlyTo, currentHour.from, currentHour.to)
+  ) {
+    const minuteRows = await fetchAggregateRows(
+      {
+        granularity: "minute",
+        from: currentHour.from,
+        to: addMinutes(startOfMinute(now), 1),
+      },
+    );
+    recentHourRows = replaceOpenBucketRowsFromSource(
+      recentHourRows,
+      "hour",
+      currentHour.from,
+      minuteRows,
+      "minute",
+      currentHour.from,
+      currentHour.to,
+    );
+  }
+
+  recentDayStarts(now).forEach((dayStart) => {
+    const dayEnd = addDays(dayStart, 1);
+    if (!rangesOverlap(dailySourceFrom, dailySourceTo, dayStart, dayEnd)) return;
+    dailyRows = replaceOpenBucketRowsFromSource(
+      dailyRows,
+      "day",
+      dayStart,
+      recentHourRows,
+      "hour",
+      dayStart,
+      dayEnd,
+    );
+  });
+
+  if (definition.granularity === "day") return dailyRows;
+
+  affectedBucketStarts.forEach((bucketStart) => {
+    const bucketEnd = addGranularity(bucketStart, definition.granularity);
+    rows = replaceOpenBucketRowsFromSource(
+      rows,
+      definition.granularity,
+      bucketStart,
+      dailyRows,
+      "day",
+      bucketStart,
+      bucketEnd,
+    );
+  });
+
+  return rows;
+}
+
+function recentDayStarts(now: Date) {
+  const firstDay = addDays(
+    startOfDay(now),
+    1 - RECENT_DAY_RECONCILIATION_COUNT,
+  );
+  return Array.from(
+    { length: RECENT_DAY_RECONCILIATION_COUNT },
+    (_, index) => addDays(firstDay, index),
+  );
+}
+
+function uniqueDateStarts(dates: Date[]) {
+  return Array.from(
+    new Map(dates.map((date) => [date.getTime(), date] as const)).values(),
+  ).sort((left, right) => left.getTime() - right.getTime());
 }
 
 async function fetchEmbeddedWorkers(
   companyId?: string | null,
 ): Promise<Worker[]> {
-  const cleanCompanyId = companyId?.trim();
-  const headers = cleanCompanyId
-    ? ({ "X-Company-ID": cleanCompanyId } satisfies HeadersInit)
-    : undefined;
-  const rows = await apiFetch<unknown>("/workers", { headers }).then((response) =>
-    normalizeWorkerRows(response).map((row) =>
-      annotateWorkerCompanyScope(row, companyId, "GET /workers"),
-    ),
+  const rows = await apiFetch<unknown>("/workers").then((response) =>
+    normalizeWorkerRows(response),
   );
   const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
   return sortWorkersByActivity(scopedRows);
 }
 
-async function fetchSubLocations(locations: Location[], headers?: HeadersInit) {
+async function fetchSubLocations(locations: Location[]) {
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<SubLocation[]>(`/locations/${location.id}/sub-locations`, {
-        headers,
-      }).catch(() => []),
+      apiFetch<SubLocation[]>(`/locations/${location.id}/sub-locations`).catch(
+        () => [],
+      ),
     ),
   );
 
@@ -690,11 +823,12 @@ function hydrateCurrentHourRows(
   const nextHourStart = addHours(currentHourStart, 1);
   const currentHourTime = currentHourStart.getTime();
   const stableRows = hourRows.filter((row) => {
-    const bucket = new Date(row.bucket).getTime();
-    return Number.isNaN(bucket) || bucket !== currentHourTime;
+    const bucket = parseAggregateBucket(row.bucket, "hour");
+    return !bucket || bucket.getTime() !== currentHourTime;
   });
   const currentRows = aggregateRowsIntoBucket(
     minuteRows,
+    "minute",
     currentHourStart,
     nextHourStart,
   );
@@ -707,12 +841,14 @@ function replaceOpenBucketRowsFromSource(
   targetGranularity: AggregateGranularity,
   bucketStart: Date,
   sourceRows: AggregateEventRow[],
+  sourceGranularity: AggregateGranularity,
   sourceFrom: Date,
   sourceTo: Date,
 ) {
   const targetKey = bucketKeyForGranularity(bucketStart, targetGranularity);
   const replacementRows = aggregateRowsIntoBucket(
     sourceRows,
+    sourceGranularity,
     sourceFrom,
     sourceTo,
   ).map((row) => ({
@@ -722,8 +858,8 @@ function replaceOpenBucketRowsFromSource(
 
   return [
     ...rows.filter((row) => {
-      const rowDate = new Date(row.bucket);
-      if (Number.isNaN(rowDate.getTime())) return true;
+      const rowDate = parseAggregateBucket(row.bucket, targetGranularity);
+      if (!rowDate) return true;
       return bucketKeyForGranularity(rowDate, targetGranularity) !== targetKey;
     }),
     ...replacementRows,
@@ -732,16 +868,16 @@ function replaceOpenBucketRowsFromSource(
 
 function aggregateRowsIntoBucket(
   rows: AggregateEventRow[],
+  sourceGranularity: AggregateGranularity,
   from: Date,
   to: Date,
 ) {
-  const fromTime = from.getTime();
-  const toTime = to.getTime();
   const totals = new Map<string, AggregateIdentityTotal>();
 
   rows.forEach((row) => {
-    const bucket = new Date(row.bucket).getTime();
-    if (Number.isNaN(bucket) || bucket < fromTime || bucket >= toTime) return;
+    if (!aggregateBucketInRange(row.bucket, sourceGranularity, from, to)) {
+      return;
+    }
 
     const identity = rowIdentity(row);
     const key = rowIdentityKey(identity);
@@ -799,7 +935,13 @@ function buildScenarioTodayComparisonPoints(
     .map((scenario) => ({
       id: scenario.id,
       name: scenario.name,
-      total: sumScenarioRowsInRange(rows, scenario, todayStart, tomorrowStart),
+      total: sumScenarioRowsInRange(
+        rows,
+        scenario,
+        todayStart,
+        tomorrowStart,
+        "hour",
+      ),
     }))
     .sort(compareChartPoints);
 }
@@ -816,7 +958,13 @@ function buildScopeTodayComparisonPoints(
     .map((scope) => ({
       id: scope.id,
       name: scope.name,
-      total: sumCameraRowsInRange(rows, scope.cameraIds, todayStart, tomorrowStart),
+      total: sumCameraRowsInRange(
+        rows,
+        scope.cameraIds,
+        todayStart,
+        tomorrowStart,
+        "hour",
+      ),
     }))
     .sort(compareChartPoints);
 }
@@ -882,7 +1030,13 @@ function buildScenarioComparisonPoints(
     return {
       id: bucketStart.toISOString(),
       name: bucketLabel(bucketStart, definition.granularity),
-      total: sumScenarioRowsInRange(rows, scenario, bucketStart, next),
+      total: sumScenarioRowsInRange(
+        rows,
+        scenario,
+        bucketStart,
+        next,
+        definition.granularity,
+      ),
     };
   });
 }
@@ -968,15 +1122,6 @@ function currentOpenBucket(granularity: AggregateGranularity, now: Date) {
   };
 }
 
-function sourceGranularityForOpenBucket(
-  granularity: AggregateGranularity,
-): AggregateGranularity | null {
-  if (granularity === "hour") return "minute";
-  if (granularity === "day") return "hour";
-  if (granularity === "week" || granularity === "month") return "day";
-  return null;
-}
-
 function rangesOverlap(leftFrom: Date, leftTo: Date, rightFrom: Date, rightTo: Date) {
   return leftFrom < rightTo && rightFrom < leftTo;
 }
@@ -993,10 +1138,9 @@ function sumScenarioRowsInRange(
   scenario: Scenario,
   from: Date,
   to: Date,
+  sourceGranularity: AggregateGranularity,
 ) {
   const multipliers = scenarioMultiplierMap(scenario);
-  const fromTime = from.getTime();
-  const toTime = to.getTime();
 
   return rows.reduce((sum, row) => {
     const multiplier = row.line_count_id
@@ -1004,8 +1148,7 @@ function sumScenarioRowsInRange(
       : undefined;
     if (multiplier === undefined) return sum;
 
-    const bucket = new Date(row.bucket).getTime();
-    if (Number.isNaN(bucket) || bucket < fromTime || bucket >= toTime) {
+    if (!aggregateBucketInRange(row.bucket, sourceGranularity, from, to)) {
       return sum;
     }
 
@@ -1018,16 +1161,14 @@ function sumCameraRowsInRange(
   cameraIds: string[],
   from: Date,
   to: Date,
+  sourceGranularity: AggregateGranularity,
 ) {
   const cameraIdSet = new Set(cameraIds);
-  const fromTime = from.getTime();
-  const toTime = to.getTime();
 
   return rows.reduce((sum, row) => {
     if (!row.camera_id || !cameraIdSet.has(row.camera_id)) return sum;
 
-    const bucket = new Date(row.bucket).getTime();
-    if (Number.isNaN(bucket) || bucket < fromTime || bucket >= toTime) {
+    if (!aggregateBucketInRange(row.bucket, sourceGranularity, from, to)) {
       return sum;
     }
 

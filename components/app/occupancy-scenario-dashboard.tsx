@@ -48,6 +48,10 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import {
+  aggregateQueryIso,
+  parseAggregateBucket,
+} from "@/lib/aggregate-time";
+import {
   filterScopedApiRows,
   getScopedStorageKey,
   useEffectiveCompanyScopeId,
@@ -223,6 +227,12 @@ export function OccupancyScenarioDashboard() {
       scenario: OccupancyScenario,
       { force = false, silent = false }: LoadOptions = {},
     ) => {
+      if (!companyScopeId) {
+        setChartData({});
+        setLoadingData(false);
+        return;
+      }
+
       if (runningRef.current) {
         if (!force) return;
         requestRef.current?.abort();
@@ -238,19 +248,16 @@ export function OccupancyScenarioDashboard() {
 
       const now = new Date();
       const definitions = buildOccupancyChartDefinitions(now);
-      const headers = companyScopeId
-        ? ({ "X-Company-ID": companyScopeId } satisfies HeadersInit)
-        : undefined;
 
       try {
         const [historyResult, alertResult, chartEntries] = await Promise.all([
           apiFetch<OccupancyScenarioHistoryResponse>(
             occupancyScenarioHistoryPath(scenario.id, now),
-            { headers, signal: controller.signal },
+            { signal: controller.signal },
           ).catch(() => null),
           apiFetch<OccupancyAlertListResponse>(
             `/occupancy/scenarios/${scenario.id}/alerts?limit=12`,
-            { headers, signal: controller.signal },
+            { signal: controller.signal },
           ).catch(() => []),
           Promise.all(
             definitions.map(async (definition) => {
@@ -258,7 +265,7 @@ export function OccupancyScenarioDashboard() {
                 const response =
                   await apiFetch<OccupancyScenarioAggregateResponse>(
                     occupancyScenarioAggregatePath(scenario.id, definition),
-                    { headers, signal: controller.signal },
+                    { signal: controller.signal },
                   );
                 const state: OccupancyChartState = buildOccupancyChartState(
                   definition,
@@ -1135,9 +1142,9 @@ function occupancyScenarioAggregatePath(
   definition: OccupancyChartDefinition,
 ) {
   const params = new URLSearchParams({
-    from: definition.from.toISOString(),
+    from: aggregateQueryIso(definition.from, definition.granularity),
     granularity: definition.granularity,
-    to: definition.to.toISOString(),
+    to: aggregateQueryIso(definition.to, definition.granularity),
   });
 
   return `/occupancy/scenarios/${scenarioId}/aggregate?${params.toString()}`;
@@ -1188,8 +1195,8 @@ function aggregateOccupancyRowsByBucket(
   >();
 
   rows.forEach((row) => {
-    const date = new Date(row.bucket);
-    if (Number.isNaN(date.getTime())) return;
+    const date = parseAggregateBucket(row.bucket, granularity);
+    if (!date) return;
 
     const key = bucketKeyForGranularity(date, granularity);
     const existing = totals.get(key);
@@ -1768,11 +1775,18 @@ function bucketKeyForGranularity(
   if (granularity === "minute") return startOfMinute(date).getTime();
   if (granularity === "hour") return startOfHour(date).getTime();
   if (granularity === "day") {
-    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+    return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
   }
-  if (granularity === "week") return startOfUtcWeek(date).getTime();
+  if (granularity === "week") {
+    const weekStart = startOfWeek(date);
+    return Date.UTC(
+      weekStart.getFullYear(),
+      weekStart.getMonth(),
+      weekStart.getDate(),
+    );
+  }
 
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
+  return Date.UTC(date.getFullYear(), date.getMonth(), 1);
 }
 
 function bucketLabel(
@@ -1856,16 +1870,6 @@ function startOfWeek(date: Date) {
   const day = next.getDay();
   const diff = day === 0 ? -6 : 1 - day;
   next.setDate(next.getDate() + diff);
-  return next;
-}
-
-function startOfUtcWeek(date: Date) {
-  const next = new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
-  );
-  const day = next.getUTCDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  next.setUTCDate(next.getUTCDate() + diff);
   return next;
 }
 

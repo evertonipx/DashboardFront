@@ -13,14 +13,9 @@ export async function GET(request: NextRequest) {
     from: new Date(now.getTime() - 60 * 60_000).toISOString(),
     to: now.toISOString(),
   });
-  const companyId = request.headers.get("x-company-id");
   const headers = new Headers({
     Authorization: authorization,
   });
-
-  if (companyId) {
-    headers.set("X-Company-ID", companyId);
-  }
 
   let backendBaseUrl: string;
   try {

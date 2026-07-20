@@ -2,25 +2,17 @@
 
 import * as React from "react";
 
-import { apiFetch } from "@/lib/api";
 import {
   CARD_VIEW_UPDATED_EVENT,
   getCardViewStorageKey,
   loadScopedCardPreferences,
-  saveCardPreferences,
   type CardMenuKey,
   type CardPreference,
   type CardViewUpdatedDetail,
 } from "@/lib/view-preferences";
-
-type CardViewResponse = {
-  menuKey: CardMenuKey;
-  found?: boolean;
-  preferences: CardPreference[];
-};
+import { USER_GRID_HYDRATED_EVENT } from "@/lib/user-grid";
 
 type CardPreferenceScope = {
-  syncServer?: boolean;
   userId?: string | null;
   viewId?: string | null;
 };
@@ -31,7 +23,7 @@ export function useCardPreferences(
   companyId?: string | null,
   scope: CardPreferenceScope = {},
 ) {
-  const { syncServer = true, userId, viewId } = scope;
+  const { userId, viewId } = scope;
   const cardIdsKey = cardIds.join("|");
   const normalizedCardIds = React.useMemo(
     () => (cardIdsKey ? cardIdsKey.split("|") : []),
@@ -48,8 +40,6 @@ export function useCardPreferences(
   );
 
   React.useEffect(() => {
-    let cancelled = false;
-
     setPreferences(
       loadScopedCardPreferences(
         menuKey,
@@ -59,33 +49,6 @@ export function useCardPreferences(
         viewId,
       ),
     );
-
-    const serverRequest = syncServer
-      ? apiFetch<CardViewResponse>(`/dashboard-views/${menuKey}`)
-      .then((response) => {
-        if (cancelled) return;
-        if (!response.found && !response.preferences.length) return;
-
-        saveCardPreferences(
-          menuKey,
-          response.preferences,
-          normalizedCardIds,
-          companyId,
-          userId,
-          viewId,
-        );
-        setPreferences(
-          loadScopedCardPreferences(
-            menuKey,
-            normalizedCardIds,
-            companyId,
-            userId,
-            viewId,
-          ),
-        );
-      })
-      .catch(() => undefined)
-      : Promise.resolve();
 
     function syncFromStorage(event: StorageEvent) {
       const scopedStorageKey = getCardViewStorageKey(
@@ -127,18 +90,17 @@ export function useCardPreferences(
 
     window.addEventListener("storage", syncFromStorage);
     window.addEventListener(CARD_VIEW_UPDATED_EVENT, syncFromCustomEvent);
+    window.addEventListener(USER_GRID_HYDRATED_EVENT, syncFromCustomEvent);
 
     return () => {
-      cancelled = true;
-      void serverRequest;
       window.removeEventListener("storage", syncFromStorage);
       window.removeEventListener(CARD_VIEW_UPDATED_EVENT, syncFromCustomEvent);
+      window.removeEventListener(USER_GRID_HYDRATED_EVENT, syncFromCustomEvent);
     };
   }, [
     companyId,
     menuKey,
     normalizedCardIds,
-    syncServer,
     userId,
     viewId,
   ]);

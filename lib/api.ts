@@ -8,7 +8,6 @@ import type {
 import {
   clearStoredCurrentCompanyScope,
   clearStoredMasterCompanyScope,
-  getStoredApiCompanyScope,
 } from "@/lib/master-company-scope";
 
 const ACCESS_KEY = "access_token";
@@ -196,17 +195,9 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     requestHeaders.set("Authorization", `Bearer ${session.access_token}`);
   }
 
-  const apiCompanyScope = getStoredApiCompanyScope();
-  const hasExplicitCompanyScope = auth && requestHeaders.has("X-Company-ID");
-  const pathSupportsCompanyScope =
-    auth && (hasExplicitCompanyScope || shouldSendMasterCompanyScope(path));
-  if (
-    pathSupportsCompanyScope &&
-    apiCompanyScope &&
-    !requestHeaders.has("X-Company-ID")
-  ) {
-    requestHeaders.set("X-Company-ID", apiCompanyScope.id);
-  }
+  // Tenant authorization comes from the signed JWT claims. A client-selected
+  // company must never override that authorization context.
+  requestHeaders.delete("X-Company-ID");
   const response = await fetch(`${apiBase()}${path}`, {
     ...init,
     headers: requestHeaders,
@@ -251,21 +242,4 @@ export async function loginRequest(email: string, password: string) {
 
 export function currentUserRequest() {
   return apiFetch<CurrentUser>("/auth/me");
-}
-
-function shouldSendMasterCompanyScope(path: string) {
-  const pathname = path.split(/[?#]/, 1)[0] ?? path;
-  if (/^\/companies\/[^/]+(?:\/|$)/.test(pathname)) return true;
-
-  return [
-    "/analytics",
-    "/cameras",
-    "/company/modules",
-    "/dashboard-views",
-    "/locations",
-    "/occupancy",
-    "/scenarios",
-    "/users",
-    "/workers",
-  ].some((prefix) => pathname.startsWith(prefix));
 }

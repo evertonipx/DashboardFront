@@ -51,7 +51,6 @@ import { apiFetch } from "@/lib/api";
 import {
   filterScopedApiRows,
   useEffectiveCompanyScopeId,
-  withCompanyScope,
 } from "@/lib/master-company-scope";
 import {
   buildOccupancyAreaKey,
@@ -299,7 +298,6 @@ export function OccupancyScenarioManager() {
 
       <OccupancyScenarioDialog
         areaOptions={areaOptions}
-        companyScopeId={companyScopeId}
         onOpenChange={setDialogOpen}
         onSaved={handleSaved}
         open={dialogOpen}
@@ -311,14 +309,12 @@ export function OccupancyScenarioManager() {
 
 function OccupancyScenarioDialog({
   areaOptions,
-  companyScopeId,
   onOpenChange,
   onSaved,
   open,
   scenario,
 }: {
   areaOptions: AreaOption[];
-  companyScopeId: string;
   onOpenChange: (open: boolean) => void;
   onSaved: () => Promise<void>;
   open: boolean;
@@ -403,16 +399,16 @@ function OccupancyScenarioDialog({
       if (draft.id) {
         await apiFetch<OccupancyScenario>(`/occupancy/scenarios/${draft.id}`, {
           method: "PUT",
-          body: withCompanyScope({
+          body: {
             ...payload,
             active: draft.active,
-          }, companyScopeId),
+          },
         });
         toast.success("Cenário de ocupação atualizado.");
       } else {
         await apiFetch<OccupancyScenario>("/occupancy/scenarios", {
           method: "POST",
-          body: withCompanyScope(payload, companyScopeId),
+          body: payload,
         });
         toast.success("Cenário de ocupação criado.");
       }

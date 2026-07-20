@@ -28,6 +28,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import {
+  flushUserGridSync,
+  requestUserGridSync,
+} from "@/lib/user-grid";
+import {
   applyWidgetViewPreset,
   captureWidgetViewSnapshot,
   deleteWidgetViewPreset,
@@ -49,11 +53,19 @@ type WidgetViewPresetsDialogProps = {
   companyId?: string | null;
   currentScope?: WidgetViewScope | null;
   menuKey: CardMenuKey;
+  onApplySourcePreset?: (preset: WidgetViewPreset) => boolean;
   onOpenChange: (open: boolean) => void;
   open: boolean;
   preferences: CardPreference[];
   scopes?: WidgetViewScope[];
+  sourceMenuKeys?: CardMenuKey[];
   userId?: string | null;
+};
+
+type SourcePresetGroup = {
+  label: string;
+  menuKey: CardMenuKey;
+  presets: WidgetViewPreset[];
 };
 
 export function WidgetViewPresetsDialog({
@@ -61,19 +73,36 @@ export function WidgetViewPresetsDialog({
   companyId,
   currentScope = null,
   menuKey,
+  onApplySourcePreset,
   onOpenChange,
   open,
   preferences,
   scopes = [],
+  sourceMenuKeys = [],
   userId,
 }: WidgetViewPresetsDialogProps) {
   const menu = getCardMenuDefinition(menuKey);
   const [presets, setPresets] = React.useState<WidgetViewPreset[]>([]);
+  const [sourcePresetGroups, setSourcePresetGroups] = React.useState<
+    SourcePresetGroup[]
+  >([]);
   const [name, setName] = React.useState("");
   const [deleteId, setDeleteId] = React.useState<string | null>(null);
   const [replicateId, setReplicateId] = React.useState<string | null>(null);
   const [selectedScopeIds, setSelectedScopeIds] = React.useState<string[]>([]);
   const [scopeFilter, setScopeFilter] = React.useState("");
+  const sourceMenuKeysValue = sourceMenuKeys.join("|");
+  const normalizedSourceMenuKeys = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (sourceMenuKeysValue
+            ? sourceMenuKeysValue.split("|")
+            : []) as CardMenuKey[],
+        ),
+      ).filter((sourceMenuKey) => sourceMenuKey !== menuKey),
+    [menuKey, sourceMenuKeysValue],
+  );
   const normalizedScopes = React.useMemo(
     () => uniqueScopes(scopes),
     [scopes],
@@ -89,7 +118,14 @@ export function WidgetViewPresetsDialog({
 
   const refreshPresets = React.useCallback(() => {
     setPresets(loadWidgetViewPresets(menuKey, companyId, userId));
-  }, [companyId, menuKey, userId]);
+    setSourcePresetGroups(
+      normalizedSourceMenuKeys.map((sourceMenuKey) => ({
+        label: getCardMenuDefinition(sourceMenuKey).label,
+        menuKey: sourceMenuKey,
+        presets: loadWidgetViewPresets(sourceMenuKey, companyId, userId),
+      })),
+    );
+  }, [companyId, menuKey, normalizedSourceMenuKeys, userId]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -175,6 +211,12 @@ export function WidgetViewPresetsDialog({
     });
     toast.success("Visão aplicada nesta tela.");
     scheduleReload();
+  }
+
+  function applySourcePreset(preset: WidgetViewPreset) {
+    if (!onApplySourcePreset?.(preset)) return;
+    requestUserGridSync();
+    onOpenChange(false);
   }
 
   function toggleDefault(preset: WidgetViewPreset) {
@@ -271,9 +313,16 @@ export function WidgetViewPresetsDialog({
     }
   }
 
-  function scheduleReload() {
+  async function scheduleReload() {
     onOpenChange(false);
-    window.setTimeout(() => window.location.reload(), 180);
+    const synchronized = await flushUserGridSync();
+    if (!synchronized) {
+      toast.error(
+        "A visão foi aplicada, mas o servidor ainda não confirmou a sincronização. A tela não será recarregada para preservar as alterações.",
+      );
+      return;
+    }
+    window.location.reload();
   }
 
   function toggleScope(scopeId: string) {
@@ -294,7 +343,8 @@ export function WidgetViewPresetsDialog({
           </DialogTitle>
           <DialogDescription>
             Salve a composição completa, replique em outras telas e escolha um
-            padrão para novos cenários.
+            padrão para novos cenários. Visões compatíveis de outros menus
+            também podem ser abertas aqui.
           </DialogDescription>
         </DialogHeader>
 
@@ -535,12 +585,67 @@ export function WidgetViewPresetsDialog({
               );
             })}
           </div>
+
+          {onApplySourcePreset
+            ? sourcePresetGroups.map((group) => (
+                <section key={group.menuKey} className="space-y-2 pt-2">
+                  <div className="flex flex-wrap items-end justify-between gap-2 border-t pt-4">
+                    <div>
+                      <div className="text-sm font-semibold">
+                        Visões de {group.label}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Abra em {menu.label} uma composição salva anteriormente.
+                      </div>
+                    </div>
+                    <Badge variant="outline">{group.presets.length}</Badge>
+                  </div>
+
+                  {group.presets.length ? (
+                    group.presets.map((preset) => (
+                      <div
+                        key={`${group.menuKey}-${preset.id}`}
+                        className="flex flex-col gap-3 rounded-md border bg-card p-3 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="truncate text-sm font-semibold">
+                              {preset.name}
+                            </div>
+                            <Badge variant="secondary">{group.label}</Badge>
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {preset.snapshot.sourceScope
+                              ? `Origem: ${preset.snapshot.sourceScope.name} · `
+                              : ""}
+                            {preset.snapshot.cardIds.length} widget(s) · atualizado em{" "}
+                            {formatDateTime(preset.updatedAt)}
+                          </div>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={() => applySourcePreset(preset)}
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          Abrir em {menu.label}
+                        </Button>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-md border border-dashed bg-muted/10 px-3 py-5 text-center text-sm text-muted-foreground">
+                      Nenhuma visão salva em {group.label}.
+                    </div>
+                  )}
+                </section>
+              ))
+            : null}
         </div>
 
         <DialogFooter className="sm:items-center sm:justify-between">
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <Check className="h-3.5 w-3.5 text-emerald-600" />
-            As visões ficam separadas por usuário, empresa e menu.
+            As visões ficam vinculadas ao usuário e à empresa autenticada.
           </div>
           <Button type="button" onClick={() => onOpenChange(false)}>
             Concluir

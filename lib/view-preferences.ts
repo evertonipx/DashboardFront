@@ -465,6 +465,26 @@ export function loadScopedCardPreferences(
   );
 }
 
+export function loadSavedScopedCardPreferences(
+  menuKey: CardMenuKey,
+  cardIds?: string[],
+  companyId?: string | null,
+  userId?: string | null,
+  viewId?: string | null,
+) {
+  const stored = readStoredPreferences(companyId, userId, viewId)[menuKey];
+  if (!Array.isArray(stored)) return null;
+  const allowedIds = cardIds?.length ? new Set(cardIds) : null;
+  const selected = allowedIds
+    ? stored.filter((preference) => allowedIds.has(preference.id))
+    : stored;
+  return normalizeCardPreferences(
+    menuKey,
+    selected,
+    selected.map((preference) => preference.id),
+  );
+}
+
 export function saveCardPreferences(
   menuKey: CardMenuKey,
   preferences: CardPreference[],

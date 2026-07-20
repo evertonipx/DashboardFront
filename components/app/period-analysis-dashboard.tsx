@@ -3,9 +3,13 @@
 import * as React from "react";
 import {
   BarChart3,
+  CalendarDays,
   CalendarRange,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Grid3X3,
+  Layers3,
   Plus,
   Settings2,
   Trash2,
@@ -55,17 +59,25 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { hasVisualAdminAccess } from "@/lib/access";
-import { aggregateQueryIso } from "@/lib/aggregate-time";
+import {
+  aggregateBucketInRange,
+  aggregateQueryIso,
+  parseAggregateBucket,
+} from "@/lib/aggregate-time";
 import { apiFetch } from "@/lib/api";
 import {
   filterScopedApiRows,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
+import { buildLiveAnalysisImport } from "@/lib/live-analysis-import";
 import {
   buildPeriodAnalysisWidgetModel,
   formatPeriodAnalysisRange,
+  isSingleDayAnalysisPeriod,
   periodAnalysisBaselineLabel,
   periodAnalysisBaselineRange,
+  periodAnalysisEffectiveGranularity,
+  periodAnalysisOperationalRange,
   resolvePeriodAnalysisRange,
   type PeriodAnalysisData,
   type PeriodAnalysisDataset,
@@ -79,6 +91,7 @@ import {
   loadPeriodAnalysisSettings,
   loadPeriodAnalysisWidgets,
   savePeriodAnalysisSettings,
+  savePeriodAnalysisWidgets,
   upsertPeriodAnalysisWidget,
   widgetKindLabel,
   type PeriodAnalysisBaseline,
@@ -93,16 +106,35 @@ import {
   type ScenarioAnalyticsGranularity,
 } from "@/lib/scenario-analytics";
 import type {
+  AggregateEventRow,
   AggregateEventsResponse,
   AggregateGranularity,
   Scenario,
 } from "@/lib/types";
 import { cn, formatNumber, formatTime } from "@/lib/utils";
-import type { CardChartType } from "@/lib/view-preferences";
+import {
+  saveCardPreferences,
+  type CardChartType,
+} from "@/lib/view-preferences";
+import type { WidgetViewPreset } from "@/lib/widget-view-presets";
 
 type PeriodAnalysisDashboardProps = {
   manager?: boolean;
 };
+
+type AggregateIdentityTotal = {
+  cameraId: string;
+  lineCountId: string;
+  metricType: string;
+  objectClass: string;
+  total: number;
+};
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const LIVE_ANALYSIS_REFRESH_MS = 5_000;
+const RECENT_DAY_RECONCILIATION_COUNT = 3;
+const DEFAULT_METRIC_TYPE = "count";
 
 const widgetKindOptions: Array<{
   label: string;
@@ -116,6 +148,9 @@ const widgetKindOptions: Array<{
   { label: "Acumulado diário x base", value: "cumulative" },
   { label: "Tendência 7 x 30 dias", value: "trend" },
   { label: "Perfil horário", value: "hour_profile" },
+  { label: "Top 5 dias de pico", value: "peak_days" },
+  { label: "Distribuição radial por cenário", value: "rose" },
+  { label: "Totais por cenário", value: "totals_table" },
 ];
 
 const baselineOptions: Array<{
@@ -135,9 +170,12 @@ const widgetIcons: Record<
   cumulative: TrendingUp,
   heatmap: Grid3X3,
   hour_profile: BarChart3,
+  peak_days: BarChart3,
   ranking: BarChart3,
+  rose: Grid3X3,
   summary: CalendarRange,
   timeline: BarChart3,
+  totals_table: Layers3,
   trend: TrendingUp,
 };
 
@@ -168,6 +206,7 @@ export function PeriodAnalysisDashboard({
   const [widgetForm, setWidgetForm] =
     React.useState<PeriodAnalysisWidgetInput>(() => emptyWidgetForm());
   const requestRef = React.useRef<AbortController | null>(null);
+  const hasLoadedDataRef = React.useRef(false);
   const period = React.useMemo(
     () =>
       resolvePeriodAnalysisRange(appliedSettings.from, appliedSettings.to) ??
@@ -177,6 +216,13 @@ export function PeriodAnalysisDashboard({
       )!,
     [appliedSettings],
   );
+  const singleDayAnalysis = appliedSettings.mode === "day";
+  const operationalPeriod = React.useMemo(
+    () => periodAnalysisOperationalRange(period),
+    [period],
+  );
+  const autoRefreshEnabled =
+    new Date() >= period.from && new Date() < period.to;
   const widgetIds = React.useMemo(
     () => widgets.map((widget) => widget.id),
     [widgets],
@@ -185,7 +231,7 @@ export function PeriodAnalysisDashboard({
     "analysis",
     widgetIds,
     companyScopeId,
-    { syncServer: false, userId: user?.id },
+    { userId: user?.id },
   );
   const widgetColorById = React.useMemo(
     () =>
@@ -217,19 +263,23 @@ export function PeriodAnalysisDashboard({
               .map((widget) => widget.baseline),
           ),
         ).sort(),
-        hour: widgets.some(
-          (widget) =>
-            widget.kind === "heatmap" ||
-            widget.kind === "hour_profile" ||
-            ((widget.kind === "timeline" || widget.kind === "comparison") &&
-              widget.granularity === "hour"),
-        ),
+        hour:
+          singleDayAnalysis ||
+          widgets.some(
+            (widget) =>
+              widget.kind === "heatmap" ||
+              widget.kind === "hour_profile" ||
+              ((widget.kind === "timeline" || widget.kind === "comparison") &&
+                widget.granularity === "hour"),
+          ),
       }),
-    [widgets],
+    [singleDayAnalysis, widgets],
   );
 
   React.useEffect(() => {
     const settings = loadPeriodAnalysisSettings(companyScopeId, user?.id);
+    hasLoadedDataRef.current = false;
+    setData(emptyData());
     setDraftSettings(settings);
     setAppliedSettings(settings);
     setWidgets(loadPeriodAnalysisWidgets(companyScopeId, user?.id));
@@ -286,21 +336,31 @@ export function PeriodAnalysisDashboard({
     const controller = new AbortController();
     requestRef.current?.abort();
     requestRef.current = controller;
-    setLoadingData(true);
+    const announceErrors = !hasLoadedDataRef.current;
+    if (announceErrors) setLoadingData(true);
 
-    const dayRange = { from: addDays(period.from, -29), to: period.to };
+    const dayRange = {
+      from: addDays(operationalPeriod.from, -29),
+      to: operationalPeriod.to,
+    };
     Promise.all([
-      fetchAnalysisDataset("day", dayRange, companyScopeId, controller.signal),
+      fetchAnalysisDataset("day", dayRange, controller.signal),
       requirements.hour
-        ? fetchAnalysisDataset("hour", period, companyScopeId, controller.signal)
+        ? fetchAnalysisDataset(
+            "hour",
+            operationalPeriod,
+            controller.signal,
+          )
         : Promise.resolve(emptyDataset("hour")),
       Promise.all(
         requirements.baseline.map(async (baseline) => {
-          const baselineRange = periodAnalysisBaselineRange(period, baseline);
+          const baselineRange = periodAnalysisBaselineRange(
+            operationalPeriod,
+            baseline,
+          );
           const dataset = await fetchAnalysisDataset(
             "day",
             baselineRange,
-            companyScopeId,
             controller.signal,
           );
           return [baseline, dataset] as const;
@@ -310,11 +370,13 @@ export function PeriodAnalysisDashboard({
       .then(([day, hour, baselineEntries]) => {
         if (controller.signal.aborted) return;
         setData({ baseline: Object.fromEntries(baselineEntries), day, hour });
+        hasLoadedDataRef.current = true;
         setLastUpdated(new Date());
         if (
-          day.error ||
-          hour.error ||
-          baselineEntries.some(([, dataset]) => dataset.error)
+          announceErrors &&
+          (day.error ||
+            hour.error ||
+            baselineEntries.some(([, dataset]) => dataset.error))
         ) {
           toast.error("Alguns dados da análise não puderam ser carregados.");
         }
@@ -335,7 +397,24 @@ export function PeriodAnalysisDashboard({
       });
 
     return () => controller.abort();
-  }, [companyScopeId, dataRequirementsKey, period, queryVersion]);
+  }, [companyScopeId, dataRequirementsKey, operationalPeriod, queryVersion]);
+
+  React.useEffect(() => {
+    if (!autoRefreshEnabled) return;
+
+    const refresh = () => {
+      if (document.visibilityState === "visible") {
+        setQueryVersion((value) => value + 1);
+      }
+    };
+    const interval = window.setInterval(refresh, LIVE_ANALYSIS_REFRESH_MS);
+    document.addEventListener("visibilitychange", refresh);
+
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [autoRefreshEnabled, period]);
 
   const modelByWidgetId = React.useMemo(
     () =>
@@ -361,11 +440,15 @@ export function PeriodAnalysisDashboard({
       widget.kind === "trend" ||
       widget.kind === "hour_profile",
     className:
-      widget.kind === "summary" || widget.kind === "heatmap"
+      widget.kind === "summary" ||
+      widget.kind === "heatmap" ||
+      widget.kind === "totals_table"
         ? "sm:col-span-2 xl:col-span-4"
         : "sm:col-span-2 xl:col-span-2",
     defaultSize:
-      widget.kind === "summary" || widget.kind === "heatmap"
+      widget.kind === "summary" ||
+      widget.kind === "heatmap" ||
+      widget.kind === "totals_table"
         ? ("full" as const)
         : ("wide" as const),
     id: widget.id,
@@ -373,6 +456,7 @@ export function PeriodAnalysisDashboard({
     node: (
       <PeriodAnalysisCard
         canConfigure={canEditVisual}
+        effectiveGranularity={periodAnalysisEffectiveGranularity(widget, period)}
         loading={loadingData || loadingScenarios}
         model={modelByWidgetId.get(widget.id)!}
         monitorMode={monitorMode}
@@ -405,19 +489,85 @@ export function PeriodAnalysisDashboard({
     period,
   });
 
-  function applyPeriod() {
+  function commitAnalysisSettings(nextSettings: PeriodAnalysisSettings) {
+    let normalizedSettings =
+      nextSettings.mode === "day"
+        ? {
+            ...nextSettings,
+            from: nextSettings.from || nextSettings.to,
+            to: nextSettings.from || nextSettings.to,
+          }
+        : nextSettings;
+    if (
+      normalizedSettings.mode === "range" &&
+      normalizedSettings.from === normalizedSettings.to
+    ) {
+      normalizedSettings = { ...normalizedSettings, mode: "day" };
+    }
     const nextPeriod = resolvePeriodAnalysisRange(
-      draftSettings.from,
-      draftSettings.to,
+      normalizedSettings.from,
+      normalizedSettings.to,
     );
     if (!nextPeriod) {
       toast.error("Informe um período válido, com a data inicial antes da final.");
       return;
     }
 
-    savePeriodAnalysisSettings(draftSettings, companyScopeId, user?.id);
-    setAppliedSettings(draftSettings);
+    savePeriodAnalysisSettings(normalizedSettings, companyScopeId, user?.id);
+    requestRef.current?.abort();
+    requestRef.current = null;
+    hasLoadedDataRef.current = false;
+    setData(emptyData());
+    setDraftSettings(normalizedSettings);
+    setLoadingData(true);
+    setAppliedSettings(normalizedSettings);
     setQueryVersion((value) => value + 1);
+  }
+
+  function applyPeriod() {
+    commitAnalysisSettings(draftSettings);
+  }
+
+  function updateAnalysisMode(mode: PeriodAnalysisSettings["mode"]) {
+    if (mode === draftSettings.mode) return;
+
+    const referenceDate =
+      parseDateInputValue(draftSettings.to || draftSettings.from) ?? new Date();
+    if (mode === "day") {
+      const date = formatFileDate(referenceDate);
+      commitAnalysisSettings({ from: date, mode, to: date });
+      return;
+    }
+
+    commitAnalysisSettings({
+      from: formatFileDate(addDays(referenceDate, -6)),
+      mode,
+      to: formatFileDate(referenceDate),
+    });
+  }
+
+  function selectAnalysisDay(value: string) {
+    if (!value) return;
+    commitAnalysisSettings({ from: value, mode: "day", to: value });
+  }
+
+  function shiftAnalysisDay(amount: number) {
+    const selectedDate = parseDateInputValue(appliedSettings.from);
+    if (!selectedDate) return;
+    selectAnalysisDay(formatFileDate(addDays(selectedDate, amount)));
+  }
+
+  function applyRangePreset(preset: "7d" | "30d" | "month") {
+    const endDate = parseDateInputValue(draftSettings.to) ?? new Date();
+    const startDate =
+      preset === "month"
+        ? new Date(endDate.getFullYear(), endDate.getMonth(), 1)
+        : addDays(endDate, preset === "7d" ? -6 : -29);
+    commitAnalysisSettings({
+      from: formatFileDate(startDate),
+      mode: "range",
+      to: formatFileDate(endDate),
+    });
   }
 
   function openAddWidget() {
@@ -484,6 +634,45 @@ export function PeriodAnalysisDashboard({
     toast.success("Widget removido.");
   }
 
+  function applySavedLiveView(preset: WidgetViewPreset) {
+    if (preset.snapshot.menuKey !== "live") return false;
+    const sourceScenarioId = preset.snapshot.sourceScope?.id;
+    const scenario = scenarios.find(
+      (candidate) => candidate.id === sourceScenarioId,
+    );
+    if (!scenario) {
+      toast.error(
+        "O cenário de origem desta visão do Ao Vivo não está disponível para a empresa atual.",
+      );
+      return false;
+    }
+
+    const imported = buildLiveAnalysisImport({
+      scenario,
+      snapshot: preset.snapshot,
+    });
+    if (!imported.widgets.length) {
+      toast.error("A visão escolhida não possui widgets compatíveis com Análises.");
+      return false;
+    }
+
+    savePeriodAnalysisWidgets(imported.widgets, companyScopeId, user?.id);
+    saveCardPreferences(
+      "analysis",
+      imported.preferences,
+      imported.widgets.map((widget) => widget.id),
+      companyScopeId,
+      user?.id,
+    );
+    setWidgets(imported.widgets);
+    toast.success(
+      imported.unsupportedCount
+        ? `Visão “${preset.name}” carregada com ${imported.widgets.length} widget(s); ${imported.unsupportedCount} item(ns) sem equivalente foram ignorados.`
+        : `Visão “${preset.name}” carregada em Análises.`,
+    );
+    return true;
+  }
+
   return (
     <section
       className={cn(
@@ -498,62 +687,166 @@ export function PeriodAnalysisDashboard({
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
           <div className="min-w-0">
             <div className="text-xs font-medium uppercase text-muted-foreground">
-              Análises por período
+              {singleDayAnalysis ? "Análise do dia" : "Análise consolidada"}
             </div>
             <div className="truncate text-lg font-semibold">
               {formatPeriodAnalysisRange(period)}
             </div>
           </div>
-          {lastUpdated ? (
-            <Badge variant="outline" className="gap-1 bg-card">
-              <Clock3 className="h-3.5 w-3.5" />
-              {formatTime(lastUpdated)}
-            </Badge>
-          ) : null}
+          <div className="flex flex-wrap items-center gap-2">
+            {autoRefreshEnabled ? (
+              <Badge variant="outline" className="bg-card">
+                Atualização 5 s
+              </Badge>
+            ) : null}
+            {lastUpdated ? (
+              <Badge variant="outline" className="gap-1 bg-card">
+                <Clock3 className="h-3.5 w-3.5" />
+                {formatTime(lastUpdated)}
+              </Badge>
+            ) : null}
+          </div>
         </div>
       ) : (
         <div className="rounded-md border bg-card p-4 shadow-soft">
           <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-end">
-            <div className="min-w-0">
-              <div className="mb-3 flex items-center gap-2">
-                <CalendarRange className="h-4 w-4 text-primary" />
-                <div className="text-sm font-semibold">Período da análise</div>
+            <div className="min-w-0 space-y-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="inline-flex rounded-md border bg-muted/30 p-1">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={singleDayAnalysis ? "secondary" : "ghost"}
+                    className="h-8"
+                    onClick={() => updateAnalysisMode("day")}
+                  >
+                    <CalendarDays className="h-4 w-4" />
+                    Dia
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={singleDayAnalysis ? "ghost" : "secondary"}
+                    className="h-8"
+                    onClick={() => updateAnalysisMode("range")}
+                  >
+                    <Layers3 className="h-4 w-4" />
+                    Período
+                  </Button>
+                </div>
+                <div className="text-sm font-semibold">
+                  {singleDayAnalysis ? "Dia analisado" : "Período consolidado"}
+                </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-[minmax(150px,220px)_minmax(150px,220px)_auto] sm:items-end">
-                <Field label="De">
-                  <Input
-                    type="date"
-                    value={draftSettings.from}
-                    onChange={(event) =>
-                      setDraftSettings((current) => ({
-                        ...current,
-                        from: event.target.value,
-                      }))
+
+              {singleDayAnalysis ? (
+                <div className="flex flex-wrap items-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={() => shiftAnalysisDay(-1)}
+                    aria-label="Dia anterior"
+                    title="Dia anterior"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
+                  <Field label="Data">
+                    <Input
+                      className="w-[180px]"
+                      max={formatFileDate(new Date())}
+                      type="date"
+                      value={draftSettings.from}
+                      onChange={(event) => selectAnalysisDay(event.target.value)}
+                    />
+                  </Field>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    disabled={
+                      appliedSettings.from >= formatFileDate(new Date())
                     }
-                  />
-                </Field>
-                <Field label="Até">
-                  <Input
-                    type="date"
-                    value={draftSettings.to}
-                    onChange={(event) =>
-                      setDraftSettings((current) => ({
-                        ...current,
-                        to: event.target.value,
-                      }))
+                    onClick={() => shiftAnalysisDay(1)}
+                    aria-label="Próximo dia"
+                    title="Próximo dia"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={
+                      appliedSettings.from === formatFileDate(new Date())
                     }
-                  />
-                </Field>
-                <Button
-                  type="button"
-                  onClick={applyPeriod}
-                  disabled={loadingData}
-                  className="sm:w-[150px] sm:justify-self-start"
-                >
-                  <CalendarRange className="h-4 w-4" />
-                  Consultar
-                </Button>
-              </div>
+                    onClick={() => selectAnalysisDay(formatFileDate(new Date()))}
+                  >
+                    Hoje
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-end gap-3">
+                  <Field label="De">
+                    <Input
+                      className="w-[180px]"
+                      max={draftSettings.to || formatFileDate(new Date())}
+                      type="date"
+                      value={draftSettings.from}
+                      onChange={(event) =>
+                        setDraftSettings((current) => ({
+                          ...current,
+                          from: event.target.value,
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field label="Até">
+                    <Input
+                      className="w-[180px]"
+                      max={formatFileDate(new Date())}
+                      min={draftSettings.from}
+                      type="date"
+                      value={draftSettings.to}
+                      onChange={(event) =>
+                        setDraftSettings((current) => ({
+                          ...current,
+                          to: event.target.value,
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Button type="button" onClick={applyPeriod} disabled={loadingData}>
+                    <CalendarRange className="h-4 w-4" />
+                    Consultar
+                  </Button>
+                  <div className="flex flex-wrap gap-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => applyRangePreset("7d")}
+                    >
+                      7 dias
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => applyRangePreset("30d")}
+                    >
+                      30 dias
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => applyRangePreset("month")}
+                    >
+                      Mês
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2 2xl:justify-end">
@@ -561,6 +854,11 @@ export function PeriodAnalysisDashboard({
                 <Clock3 className="h-3.5 w-3.5" />
                 {formatPeriodAnalysisRange(period)}
               </Badge>
+              {autoRefreshEnabled ? (
+                <Badge variant="outline" className="bg-background">
+                  Atualização 5 s
+                </Badge>
+              ) : null}
               {lastUpdated ? (
                 <Badge variant="outline" className="gap-1 bg-background">
                   {formatTime(lastUpdated)}
@@ -613,10 +911,12 @@ export function PeriodAnalysisDashboard({
           }
           menuKey="analysis"
           monitorMode={monitorMode}
+          onApplySavedViewSource={applySavedLiveView}
           onOrganizerOpenChange={setLayoutOrganizerOpen}
           onReorderModeChange={setLayoutReorderMode}
           organizerOpen={layoutOrganizerOpen}
           reorderMode={layoutReorderMode}
+          savedViewSourceMenus={["live"]}
           showOrganizerTrigger={false}
           showReorderTrigger={false}
         />
@@ -641,6 +941,7 @@ export function PeriodAnalysisDashboard({
 
 function PeriodAnalysisCard({
   canConfigure,
+  effectiveGranularity,
   loading,
   model,
   monitorMode,
@@ -650,6 +951,7 @@ function PeriodAnalysisCard({
   widget,
 }: {
   canConfigure: boolean;
+  effectiveGranularity: ScenarioAnalyticsGranularity;
   loading: boolean;
   model: PeriodAnalysisWidgetModel;
   monitorMode: boolean;
@@ -683,7 +985,7 @@ function PeriodAnalysisCard({
             </Badge>
             {(widget.kind === "timeline" || widget.kind === "comparison") && (
               <Badge variant="outline">
-                {widget.granularity === "hour" ? "Hora a hora" : "Dia a dia"}
+                {effectiveGranularity === "hour" ? "Hora a hora" : "Dia a dia"}
               </Badge>
             )}
             {widget.kind === "cumulative" ? (
@@ -748,7 +1050,7 @@ function PeriodAnalysisCard({
 
 function MetricGrid({ metrics }: { metrics: NonNullable<PeriodAnalysisWidgetModel["metrics"]> }) {
   return (
-    <div className="grid gap-px overflow-hidden rounded-md border bg-border sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border xl:grid-cols-4">
       {metrics.map((metric) => (
         <div key={metric.label} className="min-w-0 bg-card p-4">
           <div className="text-xs font-medium uppercase text-muted-foreground">
@@ -835,7 +1137,7 @@ function WidgetDialog({
           </Field>
 
           {configurableGranularity ? (
-            <Field label="Agrupamento">
+            <Field label="Agrupamento no modo Período">
               <Select
                 value={form.granularity}
                 onValueChange={(value) =>
@@ -952,6 +1254,7 @@ function composePeriodAnalysisReport({
   }>;
   period: PeriodAnalysisRange;
 }): ReportPayload {
+  const singleDay = isSingleDayAnalysisPeriod(period);
   return {
     charts: models.flatMap(({ chartType, model, title }) =>
       model.hasData && model.option && model.table
@@ -965,7 +1268,10 @@ function composePeriodAnalysisReport({
           ]
         : [],
     ),
-    context: [formatPeriodAnalysisRange(period)],
+    context: [
+      singleDay ? "Análise histórica diária" : "Período consolidado",
+      formatPeriodAnalysisRange(period),
+    ],
     dataCompleteUntil: addDays(period.to, -1),
     filename: `ipxdata-analises-${formatFileDate(period.from)}-${formatFileDate(
       addDays(period.to, -1),
@@ -976,32 +1282,33 @@ function composePeriodAnalysisReport({
     tables: models.flatMap(({ model }) =>
       model.option || !model.table ? [] : [model.table],
     ),
-    title: "Análises por período",
+    title: singleDay ? "Análise do dia" : "Análises por período",
   };
 }
 
 async function fetchAnalysisDataset(
   granularity: "hour" | "day",
   range: PeriodAnalysisRange,
-  companyId?: string | null,
   signal?: AbortSignal,
 ): Promise<PeriodAnalysisDataset> {
-  const params = new URLSearchParams({
-    from: aggregateQueryIso(range.from, granularity),
-    granularity,
-    metric_type: "count",
-    to: aggregateQueryIso(range.to, granularity),
-  });
-  const headers = companyId ? { "X-Company-ID": companyId } : undefined;
-
   try {
-    const response = await apiFetch<AggregateEventsResponse>(
-      `/analytics/aggregate?${params.toString()}`,
-      { headers, signal },
-    );
+    const response = await fetchAnalysisAggregate(granularity, range, signal);
+    const responseGranularity = response.granularity ?? granularity;
+    let rows = response.data ?? [];
+    try {
+      if (granularity === "hour" && responseGranularity === "hour") {
+        rows = await reconcileCurrentAnalysisHour(rows, range, signal);
+      } else if (granularity === "day" && responseGranularity === "day") {
+        rows = await reconcileRecentAnalysisDays(rows, range, signal);
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // Preserve the valid coarse aggregate when live reconciliation is unavailable.
+    }
+
     return {
-      granularity: response.granularity ?? granularity,
-      rows: response.data ?? [],
+      granularity: responseGranularity,
+      rows,
     };
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -1014,6 +1321,258 @@ async function fetchAnalysisDataset(
       rows: [],
     };
   }
+}
+
+function fetchAnalysisAggregate(
+  granularity: AggregateGranularity,
+  range: PeriodAnalysisRange,
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams({
+    from: aggregateQueryIso(range.from, granularity),
+    granularity,
+    metric_type: DEFAULT_METRIC_TYPE,
+    to: aggregateQueryIso(range.to, granularity),
+  });
+
+  return apiFetch<AggregateEventsResponse>(
+    `/analytics/aggregate?${params.toString()}`,
+    { signal },
+  );
+}
+
+async function reconcileCurrentAnalysisHour(
+  hourlyRows: AggregateEventRow[],
+  range: PeriodAnalysisRange,
+  signal?: AbortSignal,
+) {
+  const now = new Date();
+  const currentHourStart = startOfHour(now);
+  const currentHourEnd = addHours(currentHourStart, 1);
+  if (currentHourEnd <= range.from || currentHourStart >= range.to) {
+    return hourlyRows;
+  }
+
+  const minuteFrom = new Date(
+    Math.max(currentHourStart.getTime(), range.from.getTime()),
+  );
+  const minuteTo = new Date(
+    Math.min(
+      addMinutes(startOfMinute(now), 1).getTime(),
+      range.to.getTime(),
+    ),
+  );
+  if (minuteTo <= minuteFrom) return hourlyRows;
+
+  const minuteResponse = await fetchAnalysisAggregate(
+    "minute",
+    { from: minuteFrom, to: minuteTo },
+    signal,
+  );
+  return replaceAggregateBucketRows(
+    hourlyRows,
+    "hour",
+    currentHourStart,
+    currentHourEnd,
+    minuteResponse.data ?? [],
+    minuteResponse.granularity ?? "minute",
+  );
+}
+
+async function reconcileRecentAnalysisDays(
+  dailyRows: AggregateEventRow[],
+  range: PeriodAnalysisRange,
+  signal?: AbortSignal,
+) {
+  const now = new Date();
+  const todayStart = startOfDay(now);
+  const recentDayStart = addDays(
+    todayStart,
+    1 - RECENT_DAY_RECONCILIATION_COUNT,
+  );
+  const hourlyFrom = new Date(
+    Math.max(range.from.getTime(), recentDayStart.getTime()),
+  );
+  const hourlyTo = new Date(
+    Math.min(
+      range.to.getTime(),
+      addHours(startOfHour(now), 1).getTime(),
+    ),
+  );
+  if (hourlyTo <= hourlyFrom) return dailyRows;
+
+  const hourlyResponse = await fetchAnalysisAggregate(
+    "hour",
+    { from: hourlyFrom, to: hourlyTo },
+    signal,
+  );
+  let hourlyRows = hourlyResponse.data ?? [];
+  const currentHourStart = startOfHour(now);
+  const currentHourEnd = addHours(currentHourStart, 1);
+
+  if (currentHourEnd > hourlyFrom && currentHourStart < hourlyTo) {
+    const minuteFrom = new Date(
+      Math.max(currentHourStart.getTime(), hourlyFrom.getTime()),
+    );
+    const minuteTo = new Date(
+      Math.min(
+        addMinutes(startOfMinute(now), 1).getTime(),
+        hourlyTo.getTime(),
+      ),
+    );
+
+    if (minuteTo > minuteFrom) {
+      const minuteResponse = await fetchAnalysisAggregate(
+        "minute",
+        { from: minuteFrom, to: minuteTo },
+        signal,
+      );
+      hourlyRows = replaceAggregateBucketRows(
+        hourlyRows,
+        "hour",
+        currentHourStart,
+        currentHourEnd,
+        minuteResponse.data ?? [],
+        minuteResponse.granularity ?? "minute",
+      );
+    }
+  }
+
+  let reconciledRows = [...dailyRows];
+  let dayStart = startOfDay(hourlyFrom);
+  while (dayStart < hourlyTo) {
+    const dayEnd = addDays(dayStart, 1);
+    reconciledRows = replaceAggregateBucketRows(
+      reconciledRows,
+      "day",
+      dayStart,
+      dayEnd,
+      hourlyRows,
+      hourlyResponse.granularity ?? "hour",
+    );
+    dayStart = dayEnd;
+  }
+
+  return reconciledRows;
+}
+
+function replaceAggregateBucketRows(
+  targetRows: AggregateEventRow[],
+  targetGranularity: AggregateGranularity,
+  bucketStart: Date,
+  bucketEnd: Date,
+  sourceRows: AggregateEventRow[],
+  sourceGranularity: AggregateGranularity,
+) {
+  const existingTotals = aggregateRowsByIdentity(
+    targetRows,
+    targetGranularity,
+    bucketStart,
+    bucketEnd,
+  );
+  const sourceTotals = aggregateRowsByIdentity(
+    sourceRows,
+    sourceGranularity,
+    bucketStart,
+    bucketEnd,
+  );
+  const mergedTotals = mergeIdentityTotals(existingTotals, sourceTotals);
+  if (!mergedTotals.size) return targetRows;
+
+  const bucketKey = aggregateBucketKey(bucketStart, targetGranularity);
+  return [
+    ...targetRows.filter((row) => {
+      const bucket = parseAggregateBucket(row.bucket, targetGranularity);
+      return (
+        !bucket || aggregateBucketKey(bucket, targetGranularity) !== bucketKey
+      );
+    }),
+    ...Array.from(mergedTotals.values(), (identity) => ({
+      bucket: bucketStart.toISOString(),
+      camera_id: identity.cameraId,
+      line_count_id: identity.lineCountId || undefined,
+      metric_type: identity.metricType || DEFAULT_METRIC_TYPE,
+      object_class: identity.objectClass || undefined,
+      total: identity.total,
+    })),
+  ];
+}
+
+function aggregateRowsByIdentity(
+  rows: AggregateEventRow[],
+  granularity: AggregateGranularity,
+  from: Date,
+  to: Date,
+) {
+  const totals = new Map<string, AggregateIdentityTotal>();
+
+  rows.forEach((row) => {
+    const identity = aggregateRowIdentity(row);
+    if (!identity.cameraId && !identity.lineCountId) return;
+    if (!aggregateBucketInRange(row.bucket, granularity, from, to)) return;
+
+    const key = aggregateIdentityKey(identity);
+    const current = totals.get(key);
+    totals.set(key, {
+      ...identity,
+      total: (current?.total ?? 0) + (row.total ?? 0),
+    });
+  });
+
+  return totals;
+}
+
+function mergeIdentityTotals(
+  existingTotals: Map<string, AggregateIdentityTotal>,
+  sourceTotals: Map<string, AggregateIdentityTotal>,
+) {
+  const merged = new Map<string, AggregateIdentityTotal>();
+  const keys = new Set([...existingTotals.keys(), ...sourceTotals.keys()]);
+
+  keys.forEach((key) => {
+    const existing = existingTotals.get(key);
+    const source = sourceTotals.get(key);
+    const identity = source ?? existing;
+    if (!identity) return;
+
+    merged.set(key, {
+      ...identity,
+      total: Math.max(existing?.total ?? 0, source?.total ?? 0),
+    });
+  });
+
+  return merged;
+}
+
+function aggregateRowIdentity(
+  row: AggregateEventRow,
+): Omit<AggregateIdentityTotal, "total"> {
+  return {
+    cameraId: row.camera_id ?? "",
+    lineCountId: row.line_count_id ?? "",
+    metricType: row.metric_type ?? DEFAULT_METRIC_TYPE,
+    objectClass: row.object_class ?? "",
+  };
+}
+
+function aggregateIdentityKey(
+  identity: Omit<AggregateIdentityTotal, "total">,
+) {
+  return [
+    identity.cameraId,
+    identity.lineCountId,
+    identity.metricType,
+    identity.objectClass,
+  ].join("|");
+}
+
+function aggregateBucketKey(
+  date: Date,
+  granularity: AggregateGranularity,
+) {
+  if (granularity === "minute") return startOfMinute(date).getTime();
+  if (granularity === "hour") return startOfHour(date).getTime();
+  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
 function emptyData(): PeriodAnalysisData {
@@ -1030,10 +1589,44 @@ function emptyDataset(
   return { granularity, rows: [] };
 }
 
+function startOfMinute(date: Date) {
+  const next = new Date(date);
+  next.setSeconds(0, 0);
+  return next;
+}
+
+function startOfHour(date: Date) {
+  const next = new Date(date);
+  next.setMinutes(0, 0, 0);
+  return next;
+}
+
+function startOfDay(date: Date) {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function addMinutes(date: Date, amount: number) {
+  return new Date(date.getTime() + amount * MINUTE_MS);
+}
+
+function addHours(date: Date, amount: number) {
+  return new Date(date.getTime() + amount * HOUR_MS);
+}
+
 function addDays(date: Date, amount: number) {
   const next = new Date(date);
   next.setDate(next.getDate() + amount);
   return next;
+}
+
+function parseDateInputValue(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function formatFileDate(date: Date) {

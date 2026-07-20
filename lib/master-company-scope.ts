@@ -39,10 +39,6 @@ export function clearStoredCurrentCompanyScope() {
   clearStoredCompanyScope(CURRENT_COMPANY_SCOPE_KEY);
 }
 
-export function getStoredApiCompanyScope() {
-  return getStoredMasterCompanyScope() ?? getStoredCurrentCompanyScope();
-}
-
 export function getEffectiveCompanyScopeId(user: CurrentUser | null) {
   const userCompanyId = getCurrentUserCompanyId(user);
 
@@ -108,66 +104,13 @@ export function getEntityCompanyId(value: unknown) {
     record.company && typeof record.company === "object"
       ? (record.company as Record<string, unknown>)
       : null;
-  const nestedTenant =
-    record.tenant && typeof record.tenant === "object"
-      ? (record.tenant as Record<string, unknown>)
-      : null;
-  const nestedOrganization =
-    record.organization && typeof record.organization === "object"
-      ? (record.organization as Record<string, unknown>)
-      : null;
-  const nestedCustomer =
-    record.customer && typeof record.customer === "object"
-      ? (record.customer as Record<string, unknown>)
-      : null;
-  const nestedAccount =
-    record.account && typeof record.account === "object"
-      ? (record.account as Record<string, unknown>)
-      : null;
   const companyId =
     record.company_id ??
     record.companyId ??
     record.companyID ??
-    record.company_uuid ??
-    record.companyUuid ??
-    record.client_id ??
-    record.clientId ??
-    record.clientID ??
-    record.tenant_id ??
-    record.tenantId ??
-    record.tenantID ??
-    record.organization_id ??
-    record.organizationId ??
-    record.organizationID ??
-    record.customer_id ??
-    record.customerId ??
-    record.customerID ??
-    record.account_id ??
-    record.accountId ??
-    record.accountID ??
-    record.owner_company_id ??
-    record.ownerCompanyId ??
-    nestedCompany?.id ??
-    nestedTenant?.id ??
-    nestedOrganization?.id ??
-    nestedCustomer?.id ??
-    nestedAccount?.id;
+    nestedCompany?.id;
 
-  return (
-    toCleanId(companyId) ||
-    getEmbeddedIdentifier(record, [
-      "company_id",
-      "companyId",
-      "companyID",
-      "tenant_id",
-      "tenantId",
-      "client_id",
-      "clientId",
-      "organization_id",
-      "customer_id",
-      "account_id",
-    ])
-  );
+  return toCleanId(companyId);
 }
 
 export function getEntityUserId(value: unknown) {
@@ -402,20 +345,6 @@ export function getScopedRowCompanyId<T>(
   if (directCompanyId) return directCompanyId;
 
   return resolveCompanyId?.(row)?.trim() ?? "";
-}
-
-export function withCompanyScope<T extends object>(
-  body: T,
-  companyId?: string | null,
-) {
-  const cleanCompanyId = companyId?.trim();
-  const record = body as Record<string, unknown>;
-  if (!cleanCompanyId || record.company_id) return body;
-
-  return {
-    ...body,
-    company_id: cleanCompanyId,
-  };
 }
 
 function readStoredCompanyScope(key: string) {

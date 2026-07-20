@@ -285,11 +285,15 @@ function enhanceInteractiveChartOption(
       (seriesOption.type === "bar" || seriesOption.type === "line") &&
       !isDecorativeChartSeries(seriesOption);
     const verticalBarLabel = seriesOption.type === "bar" && !horizontal;
+    const lineValueLabel = seriesOption.type === "line";
+    const anchoredValueLabel = verticalBarLabel || lineValueLabel;
     const valueLabel = supportsValueLabels
       ? {
-          align: horizontal ? "left" : "center",
+          // A 90-degree label needs a left anchor: after rotation its whole
+          // height grows upward from the bar top instead of crossing it.
+          align: horizontal || verticalBarLabel ? "left" : "center",
           color: "#334155",
-          distance: horizontal ? 6 : verticalBarLabel ? 3 : 5,
+          distance: horizontal ? 6 : verticalBarLabel ? 5 : 6,
           fontSize: 10,
           fontWeight: 600,
           formatter: (params: { value?: unknown }) =>
@@ -297,8 +301,20 @@ function enhanceInteractiveChartOption(
           position: horizontal ? "right" : "top",
           rotate: verticalBarLabel ? 90 : 0,
           show: true,
-          verticalAlign: horizontal ? "middle" : "bottom",
+          verticalAlign:
+            horizontal || verticalBarLabel ? "middle" : "bottom",
           ...(existingLabel ?? {}),
+          // A bar-to-line conversion can carry a 90-degree bar label over to
+          // the line. Point labels are always horizontal and above the point.
+          ...(lineValueLabel
+            ? {
+                align: "center",
+                distance: 6,
+                position: "top",
+                rotate: 0,
+                verticalAlign: "bottom",
+              }
+            : {}),
         }
       : existingLabel;
     const existingLabelLayout =
@@ -318,7 +334,12 @@ function enhanceInteractiveChartOption(
         ? {
             labelLayout: {
               hideOverlap: true,
-              moveOverlap: horizontal ? "shiftY" : "shiftX",
+              // Keep bar and point labels centered on their own data item.
+              // If space is insufficient, ECharts hides a label instead of
+              // shifting it away from the bar or point it describes.
+              ...(anchoredValueLabel
+                ? {}
+                : { moveOverlap: horizontal ? "shiftY" : "shiftX" }),
               ...existingLabelLayout,
             },
           }

@@ -3,6 +3,7 @@ import type {
   AggregateGranularity,
   Scenario,
 } from "@/lib/types";
+import { parseAggregateBucket } from "@/lib/aggregate-time";
 
 export type ScenarioSelectionMode = "all" | "custom";
 export type ScenarioAnalyticsGranularity = "hour" | "day";
@@ -307,27 +308,6 @@ export function sumSelectedScenarioRows({
 
     return sum + (row.total ?? 0) * multiplier;
   }, 0);
-}
-
-export function parseAggregateBucket(
-  value: string,
-  sourceGranularity: AggregateGranularity,
-) {
-  if (
-    sourceGranularity === "day" ||
-    sourceGranularity === "week" ||
-    sourceGranularity === "month" ||
-    sourceGranularity === "semester" ||
-    sourceGranularity === "year"
-  ) {
-    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
-    if (match) {
-      return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-    }
-  }
-
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function aggregateSelectedRowsByBucket(

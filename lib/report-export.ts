@@ -763,14 +763,17 @@ function addExportValueLabel(
   if (isExportReferenceSeries(record)) return series;
 
   const isLine = record.type === "line";
+  const verticalBarLabel = record.type === "bar" && !horizontal;
 
   return {
     ...record,
     label: {
       ...(record.label && typeof record.label === "object" ? record.label : {}),
-      align: horizontal ? "left" : "center",
+      // With a 90-degree rotation, left alignment places the full label
+      // above the bar while vertical alignment keeps it centered on the bar.
+      align: horizontal || verticalBarLabel ? "left" : "center",
       color: "#13233A",
-      distance: dense ? 3 : 5,
+      distance: horizontal ? 6 : verticalBarLabel ? 5 : dense ? 3 : 5,
       fontSize: dense ? 7 : 9,
       fontWeight: 600,
       formatter: (params: { value?: unknown }) =>
@@ -778,7 +781,8 @@ function addExportValueLabel(
       position: horizontal ? "right" : "top",
       rotate: horizontal || isLine ? 0 : 90,
       show: true,
-      verticalAlign: horizontal ? "middle" : "bottom",
+      verticalAlign:
+        horizontal || verticalBarLabel ? "middle" : "bottom",
     },
     labelLayout: {
       ...(record.labelLayout && typeof record.labelLayout === "object"

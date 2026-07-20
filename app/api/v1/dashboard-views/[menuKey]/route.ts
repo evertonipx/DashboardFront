@@ -111,7 +111,6 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   }
 
   const user = await backendFetch<CurrentUser>(
-    request,
     backendBaseUrl,
     "/api/v1/auth/me",
     authorization,
@@ -123,8 +122,7 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   }
 
   const isMaster = hasMasterAccess(user);
-  const scopedCompanyId = request.headers.get("x-company-id")?.trim();
-  const companyId = isMaster ? scopedCompanyId || user.company_id : user.company_id;
+  const companyId = user.company_id;
 
   if (!companyId) {
     return {
@@ -138,7 +136,6 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   if (mode === "write" && !isMaster) {
     const permissions =
       (await backendFetch<UserPermission[]>(
-        request,
         backendBaseUrl,
         `/api/v1/users/${user.id}/permissions`,
         authorization,
@@ -158,14 +155,11 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
 }
 
 async function backendFetch<T>(
-  request: NextRequest,
   backendBaseUrl: string,
   pathname: string,
   authorization: string,
 ) {
   const headers = new Headers({ Authorization: authorization });
-  const companyId = request.headers.get("x-company-id");
-  if (companyId) headers.set("X-Company-ID", companyId);
 
   const response = await fetch(`${backendBaseUrl}${pathname}`, {
     headers,

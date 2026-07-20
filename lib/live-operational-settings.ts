@@ -52,8 +52,8 @@ export function loadLiveOperationalSettings(
   try {
     const stored = window.localStorage.getItem(storageKey(companyId, scope));
     if (!stored) return defaultSettings;
-    const normalized = normalizeSettings(
-      JSON.parse(stored) as Partial<LiveOperationalSettings>,
+    const normalized = normalizeLiveOperationalSettings(
+      JSON.parse(stored) as unknown,
     );
     window.localStorage.setItem(
       storageKey(companyId, scope),
@@ -70,7 +70,7 @@ export function saveLiveOperationalSettings(
   companyId?: string | null,
   scope: ViewPreferenceScope = {},
 ) {
-  const normalized = normalizeSettings(settings);
+  const normalized = normalizeLiveOperationalSettings(settings);
   if (typeof window !== "undefined") {
     window.localStorage.setItem(
       storageKey(companyId, scope),
@@ -80,9 +80,13 @@ export function saveLiveOperationalSettings(
   return normalized;
 }
 
-function normalizeSettings(
-  settings: Partial<LiveOperationalSettings>,
+export function normalizeLiveOperationalSettings(
+  value: unknown,
 ): LiveOperationalSettings {
+  const settings =
+    value && typeof value === "object"
+      ? (value as Partial<LiveOperationalSettings>)
+      : {};
   return {
     heatmapScenarioIds: normalizeIds(settings.heatmapScenarioIds),
     heatmapSelectionMode:

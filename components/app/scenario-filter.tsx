@@ -43,6 +43,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/components/app/auth-provider";
+import { parseAggregateBucket } from "@/lib/aggregate-time";
 import { apiFetch } from "@/lib/api";
 import {
   filterScopedApiRows,
@@ -980,8 +981,11 @@ function buildScenarioBuckets(
     const multiplier = multipliers.get(row.line_count_id);
     if (multiplier === undefined) return;
 
-    const date = new Date(row.bucket);
-    if (Number.isNaN(date.getTime())) return;
+    const date = parseAggregateBucket(
+      row.bucket,
+      view === "daily" ? "day" : "hour",
+    );
+    if (!date) return;
 
     const key =
       view === "daily"

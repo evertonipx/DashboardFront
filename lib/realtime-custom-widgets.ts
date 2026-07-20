@@ -105,15 +105,17 @@ export function loadRealtimeCustomWidgets(
     );
     if (!stored) return [];
 
-    const parsed = JSON.parse(stored) as unknown[];
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .map(normalizeRealtimeCustomWidget)
-      .filter((widget): widget is RealtimeCustomWidget => Boolean(widget));
+    return normalizeRealtimeCustomWidgets(JSON.parse(stored) as unknown);
   } catch {
     return [];
   }
+}
+
+export function normalizeRealtimeCustomWidgets(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(normalizeRealtimeCustomWidget)
+    .filter((widget): widget is RealtimeCustomWidget => Boolean(widget));
 }
 
 export function saveRealtimeCustomWidgets(

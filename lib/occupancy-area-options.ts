@@ -31,13 +31,10 @@ export async function fetchOccupancyAreaOptions({
   from,
   to,
 }: FetchOccupancyAreaOptionsInput): Promise<OccupancyAreaOption[]> {
-  const headers = companyScopeHeaders(companyId);
   const responses = await Promise.allSettled([
-    apiFetch<OccupancySnapshotsResponse>(occupancyDiscoveryPath(from, to), {
-      headers,
-    }),
-    apiFetch<unknown>("/cameras", { headers }),
-    apiFetch<unknown>("/workers/config", { headers }),
+    apiFetch<OccupancySnapshotsResponse>(occupancyDiscoveryPath(from, to)),
+    apiFetch<unknown>("/cameras"),
+    apiFetch<unknown>("/workers/config"),
   ]);
   const cameras = filterScopedApiRows(
     normalizeCameraList(settledValue(responses[1])),
@@ -85,7 +82,6 @@ async function fetchCameraAreaLineRows(
     cameras.map(async (camera) => {
       const lines = await apiFetch<CameraLineCount[]>(
         `/cameras/${camera.id}/line-counts`,
-        { headers: companyScopeHeaders(companyId) },
       );
 
       return filterScopedApiRows(normalizeLineCountList(lines), companyId).flatMap(
@@ -97,11 +93,6 @@ async function fetchCameraAreaLineRows(
   return responses.flatMap((response) =>
     response.status === "fulfilled" ? response.value : [],
   );
-}
-
-function companyScopeHeaders(companyId?: string | null) {
-  const cleanCompanyId = companyId?.trim();
-  return cleanCompanyId ? { "X-Company-ID": cleanCompanyId } : undefined;
 }
 
 function workerCameraAreaRows(camera: WorkerConfigCamera) {

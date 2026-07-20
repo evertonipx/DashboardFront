@@ -59,7 +59,6 @@ import { apiFetch } from "@/lib/api";
 import {
   filterScopedApiRows,
   useEffectiveCompanyScopeId,
-  withCompanyScope,
 } from "@/lib/master-company-scope";
 import { isOccupancyAreaLineCount } from "@/lib/occupancy-area-options";
 import { canManageScenarios } from "@/lib/permissions";
@@ -481,13 +480,13 @@ function ScenarioDialog({
       if (scenario) {
         await apiFetch(`/scenarios/${scenario.id}`, {
           method: "PUT",
-          body: withCompanyScope(payload, companyScopeId),
+          body: payload,
         });
         toast.success("Cenário atualizado");
       } else {
         await apiFetch("/scenarios", {
           method: "POST",
-          body: withCompanyScope(payload, companyScopeId),
+          body: payload,
         });
         toast.success("Cenário criado");
       }
@@ -863,7 +862,7 @@ function BulkScenarioDialog({
               scenario_type: "custom",
             };
             return apiFetch("/scenarios", {
-              body: withCompanyScope(payload, companyScopeId),
+              body: payload,
               method: "POST",
             });
           }),

@@ -71,7 +71,10 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { hasVisualAdminAccess } from "@/lib/access";
 import { apiFetch } from "@/lib/api";
-import { aggregateQueryIso } from "@/lib/aggregate-time";
+import {
+  aggregateQueryIso,
+  parseAggregateBucket,
+} from "@/lib/aggregate-time";
 import {
   CAMERA_GROUPS_UPDATED_EVENT,
   type CameraGroup,
@@ -156,6 +159,14 @@ type ChartPoint = {
   total: number;
 };
 
+type AggregateIdentityTotal = {
+  cameraId: string;
+  lineCountId: string;
+  metricType: string;
+  objectClass: string;
+  total: number;
+};
+
 type ReportScopeMode = "scenario" | "location" | "sub_location";
 
 type ReportScopeOption = {
@@ -183,6 +194,7 @@ type ReportCustomWidgetForm = {
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
+const RECENT_DAY_RECONCILIATION_COUNT = 3;
 const DEFAULT_METRIC_TYPE = "count";
 const PREVIOUS_SUFFIX = "__previous";
 const CURRENT_HOUR_MINUTES_ID = "report_current_hour_minutes";
@@ -1081,7 +1093,6 @@ export function ScenarioReportsDashboard({
     reportCardIds,
     companyScopeId,
     {
-      syncServer: false,
       userId: user?.id,
       viewId: selectedScope?.id,
     },
@@ -1261,7 +1272,7 @@ export function ScenarioReportsDashboard({
           new Date(),
           reportPeriodOverride,
         );
-        const rows = await fetchScenarioComparisonRows(definition, companyScopeId);
+        const rows = await fetchScenarioComparisonRows(definition);
         const reportChart = buildScenarioComparisonReportChart({
             definition,
             rows,
@@ -1304,10 +1315,7 @@ export function ScenarioReportsDashboard({
               new Date(),
               reportPeriodOverride,
             );
-            const rows = await fetchScenarioComparisonRows(
-              definition,
-              companyScopeId,
-            );
+            const rows = await fetchScenarioComparisonRows(definition);
             const cardId = `report_custom_${widget.id}`;
             const reportChart = buildScenarioComparisonReportChart({
                 definition,
@@ -2136,25 +2144,38 @@ function buildCurrentHourMinutesDefinition(
 function buildCurrentDayHoursDefinition(
   now: Date,
 ): ScenarioAggregateDefinition {
+  const todayStart = startOfDay(now);
+
   return {
     id: CURRENT_DAY_HOURS_ID,
-    label: "Horas do dia atual",
-    description: "Base auxiliar do período aberto.",
+    label: "Horas dos dias recentes",
+    description: "Base auxiliar para reconciliar os dias recentes.",
     granularity: "hour",
-    from: startOfDay(now),
+    from: addDays(todayStart, 1 - RECENT_DAY_RECONCILIATION_COUNT),
     to: addHours(startOfHour(now), 1),
   };
 }
 
 function buildCurrentMonthDaysDefinition(now: Date): ScenarioAggregateDefinition {
   const todayStart = startOfDay(now);
+  const recentDayStart = addDays(
+    todayStart,
+    1 - RECENT_DAY_RECONCILIATION_COUNT,
+  );
+  const supportStart = new Date(
+    Math.min(
+      startOfMonth(recentDayStart).getTime(),
+      startOfWeek(now).getTime(),
+      startOfMonth(now).getTime(),
+    ),
+  );
 
   return {
     id: CURRENT_MONTH_DAYS_ID,
-    label: "Dias do mês atual",
+    label: "Dias dos períodos recentes",
     description: "Base auxiliar para completar períodos em andamento.",
     granularity: "day",
-    from: startOfMonth(now),
+    from: supportStart,
     to: addDays(todayStart, 1),
   };
 }
@@ -2312,13 +2333,54 @@ function hydrateScenarioOpenBuckets(
   if (now < period.from || now >= period.to) return next;
 
   const currentHourStart = startOfHour(now);
+  const todayStart = startOfDay(now);
+  const recentDayStart = addDays(
+    todayStart,
+    1 - RECENT_DAY_RECONCILIATION_COUNT,
+  );
+  const recentDayStarts = Array.from(
+    { length: RECENT_DAY_RECONCILIATION_COUNT },
+    (_, index) => addDays(recentDayStart, index),
+  );
+  const currentMinuteRows = next[CURRENT_HOUR_MINUTES_ID]?.rows ?? [];
+
+  function replaceVisibleBucket(
+    granularity: AggregateGranularity,
+    bucketStart: Date,
+    bucketEnd: Date,
+    sourceRows: AggregateEventRow[],
+    sourceGranularity: AggregateGranularity,
+  ) {
+    if (bucketEnd <= period.from || bucketStart >= period.to) return;
+
+    Object.entries(next).forEach(([chartId, state]) => {
+      if (
+        !chartId.startsWith("report_chart_") ||
+        chartId.endsWith(PREVIOUS_SUFFIX) ||
+        state.granularity !== granularity
+      ) {
+        return;
+      }
+
+      replaceBucketRowsFromSource(
+        next,
+        chartId,
+        granularity,
+        bucketStart,
+        bucketEnd,
+        sourceRows,
+        sourceGranularity,
+      );
+    });
+  }
+
   replaceBucketRowsFromSource(
     next,
     CURRENT_DAY_HOURS_ID,
     "hour",
     currentHourStart,
     addHours(currentHourStart, 1),
-    next[CURRENT_HOUR_MINUTES_ID]?.rows ?? [],
+    currentMinuteRows,
     "minute",
   );
   replaceBucketRowsFromSource(
@@ -2327,33 +2389,106 @@ function hydrateScenarioOpenBuckets(
     "hour",
     currentHourStart,
     addHours(currentHourStart, 1),
-    next[CURRENT_HOUR_MINUTES_ID]?.rows ?? [],
+    currentMinuteRows,
+    "minute",
+  );
+  replaceVisibleBucket(
+    "hour",
+    currentHourStart,
+    addHours(currentHourStart, 1),
+    currentMinuteRows,
     "minute",
   );
 
-  const todayStart = startOfDay(now);
-  replaceBucketRowsFromSource(
-    next,
-    CURRENT_MONTH_DAYS_ID,
-    "day",
-    todayStart,
-    addDays(todayStart, 1),
-    next[CURRENT_DAY_HOURS_ID]?.rows ?? [],
-    "hour",
-  );
+  const recentHourRows = next[CURRENT_DAY_HOURS_ID]?.rows ?? [];
+  recentDayStarts.forEach((dayStart) => {
+    const dayEnd = addDays(dayStart, 1);
+    replaceBucketRowsFromSource(
+      next,
+      CURRENT_MONTH_DAYS_ID,
+      "day",
+      dayStart,
+      dayEnd,
+      recentHourRows,
+      "hour",
+    );
+    replaceVisibleBucket(
+      "day",
+      dayStart,
+      dayEnd,
+      recentHourRows,
+      "hour",
+    );
+  });
 
-  const currentMonthStart = startOfMonth(now);
-  replaceBucketRowsFromSource(
-    next,
-    COUNTING_MONTH_HISTORY_ID,
-    "month",
-    currentMonthStart,
-    addMonths(currentMonthStart, 1),
-    next[CURRENT_MONTH_DAYS_ID]?.rows ?? [],
-    "day",
+  const recentDayRows = next[CURRENT_MONTH_DAYS_ID]?.rows ?? [];
+  const affectedWeekStarts = uniqueDateStarts(
+    recentDayStarts.map((date) => startOfWeek(date)),
   );
+  affectedWeekStarts.forEach((weekStart) => {
+    replaceVisibleBucket(
+      "week",
+      weekStart,
+      addDays(weekStart, 7),
+      recentDayRows,
+      "day",
+    );
+  });
+
+  const affectedMonthStarts = uniqueDateStarts(
+    recentDayStarts.map((date) => startOfMonth(date)),
+  );
+  affectedMonthStarts.forEach((monthStart) => {
+    const monthEnd = addMonths(monthStart, 1);
+    replaceBucketRowsFromSource(
+      next,
+      COUNTING_MONTH_HISTORY_ID,
+      "month",
+      monthStart,
+      monthEnd,
+      recentDayRows,
+      "day",
+    );
+    replaceVisibleBucket(
+      "month",
+      monthStart,
+      monthEnd,
+      recentDayRows,
+      "day",
+    );
+  });
+
+  const monthRows = next[COUNTING_MONTH_HISTORY_ID]?.rows ?? [];
+  uniqueDateStarts(
+    affectedMonthStarts.map((date) => startOfSemester(date)),
+  ).forEach((semesterStart) => {
+    replaceVisibleBucket(
+      "semester",
+      semesterStart,
+      addMonths(semesterStart, 6),
+      monthRows,
+      "month",
+    );
+  });
+  uniqueDateStarts(
+    affectedMonthStarts.map((date) => startOfYear(date)),
+  ).forEach((yearStart) => {
+    replaceVisibleBucket(
+      "year",
+      yearStart,
+      addYears(yearStart, 1),
+      monthRows,
+      "month",
+    );
+  });
 
   return next;
+}
+
+function uniqueDateStarts(dates: Date[]) {
+  return Array.from(
+    new Map(dates.map((date) => [date.getTime(), date] as const)).values(),
+  );
 }
 
 function cloneChartData(data: Record<string, ScenarioChartState>) {
@@ -2377,19 +2512,19 @@ function replaceBucketRowsFromSource(
   const state = data[chartId];
   if (!state) return;
 
-  const existingTotals = sumRowsByLine(
+  const existingTotals = aggregateRowsByIdentity(
     state.rows,
     targetGranularity,
     bucketStart,
     bucketEnd,
   );
-  const sourceTotals = sumRowsByLine(
+  const sourceTotals = aggregateRowsByIdentity(
     sourceRows,
     sourceGranularity,
     bucketStart,
     bucketEnd,
   );
-  const mergedTotals = mergeLineTotals(existingTotals, sourceTotals);
+  const mergedTotals = mergeIdentityTotals(existingTotals, sourceTotals);
   if (!mergedTotals.size) return;
 
   const bucketKey = bucketKeyForGranularity(bucketStart, targetGranularity);
@@ -2397,34 +2532,35 @@ function replaceBucketRowsFromSource(
     ...state,
     rows: [
       ...state.rows.filter((row) => {
-        const rowDate = new Date(row.bucket);
-        if (Number.isNaN(rowDate.getTime())) return true;
+        const rowDate = parseAggregateBucket(row.bucket, targetGranularity);
+        if (!rowDate) return true;
         return bucketKeyForGranularity(rowDate, targetGranularity) !== bucketKey;
       }),
-      ...Array.from(mergedTotals, ([lineCountId, total]) =>
-        createAggregateRow(bucketStart, lineCountId, total),
+      ...Array.from(mergedTotals.values(), (identity) =>
+        createAggregateRow(bucketStart, identity),
       ),
     ],
   };
 }
 
-function sumRowsByLine(
+function aggregateRowsByIdentity(
   rows: AggregateEventRow[],
   granularity: AggregateGranularity,
   from: Date,
   to: Date,
 ) {
-  const totals = new Map<string, number>();
+  const totals = new Map<string, AggregateIdentityTotal>();
   const fromTime = from.getTime();
   const toTime = to.getTime();
   const fromKey = bucketKeyForGranularity(from, granularity);
   const toKey = bucketKeyForGranularity(to, granularity);
 
   rows.forEach((row) => {
-    if (!row.line_count_id) return;
+    const identity = rowIdentity(row);
+    if (!identity.cameraId && !identity.lineCountId) return;
 
-    const rowDate = new Date(row.bucket);
-    if (Number.isNaN(rowDate.getTime())) return;
+    const rowDate = parseAggregateBucket(row.bucket, granularity);
+    if (!rowDate) return;
 
     const inRange =
       granularity === "minute" || granularity === "hour"
@@ -2433,40 +2569,70 @@ function sumRowsByLine(
           bucketKeyForGranularity(rowDate, granularity) < toKey;
     if (!inRange) return;
 
-    totals.set(row.line_count_id, (totals.get(row.line_count_id) ?? 0) + row.total);
+    const key = rowIdentityKey(identity);
+    const current = totals.get(key);
+    totals.set(key, {
+      ...identity,
+      total: (current?.total ?? 0) + (row.total ?? 0),
+    });
   });
 
   return totals;
 }
 
-function mergeLineTotals(
-  existingTotals: Map<string, number>,
-  sourceTotals: Map<string, number>,
+function mergeIdentityTotals(
+  existingTotals: Map<string, AggregateIdentityTotal>,
+  sourceTotals: Map<string, AggregateIdentityTotal>,
 ) {
-  const merged = new Map<string, number>();
-  const lineIds = new Set([...existingTotals.keys(), ...sourceTotals.keys()]);
+  const merged = new Map<string, AggregateIdentityTotal>();
+  const keys = new Set([...existingTotals.keys(), ...sourceTotals.keys()]);
 
-  lineIds.forEach((lineId) => {
-    merged.set(
-      lineId,
-      Math.max(existingTotals.get(lineId) ?? 0, sourceTotals.get(lineId) ?? 0),
-    );
+  keys.forEach((key) => {
+    const existing = existingTotals.get(key);
+    const source = sourceTotals.get(key);
+    const identity = source ?? existing;
+    if (!identity) return;
+
+    merged.set(key, {
+      ...identity,
+      total: Math.max(existing?.total ?? 0, source?.total ?? 0),
+    });
   });
 
   return merged;
 }
 
+function rowIdentity(
+  row: AggregateEventRow,
+): Omit<AggregateIdentityTotal, "total"> {
+  return {
+    cameraId: row.camera_id ?? "",
+    lineCountId: row.line_count_id ?? "",
+    metricType: row.metric_type ?? DEFAULT_METRIC_TYPE,
+    objectClass: row.object_class ?? "",
+  };
+}
+
+function rowIdentityKey(identity: Omit<AggregateIdentityTotal, "total">) {
+  return [
+    identity.cameraId,
+    identity.lineCountId,
+    identity.metricType,
+    identity.objectClass,
+  ].join("|");
+}
+
 function createAggregateRow(
   bucket: Date,
-  lineCountId: string,
-  total: number,
+  identity: AggregateIdentityTotal,
 ): AggregateEventRow {
   return {
     bucket: bucket.toISOString(),
-    camera_id: "",
-    line_count_id: lineCountId,
-    metric_type: DEFAULT_METRIC_TYPE,
-    total,
+    camera_id: identity.cameraId,
+    line_count_id: identity.lineCountId || undefined,
+    metric_type: identity.metricType || DEFAULT_METRIC_TYPE,
+    object_class: identity.objectClass || undefined,
+    total: identity.total,
   };
 }
 
@@ -2665,8 +2831,8 @@ function aggregateReportScopeRowsByBucket(
   rows.forEach((row) => {
     if (!row.camera_id || !cameraIds.has(row.camera_id)) return;
 
-    const date = new Date(row.bucket);
-    if (Number.isNaN(date.getTime())) return;
+    const date = parseAggregateBucket(row.bucket, granularity);
+    if (!date) return;
 
     const key = bucketKeyForGranularity(date, granularity);
     totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0));
@@ -2709,8 +2875,8 @@ function aggregateScenarioRowsByBucket(
     const multiplier = multipliers.get(row.line_count_id);
     if (multiplier === undefined) return;
 
-    const date = new Date(row.bucket);
-    if (Number.isNaN(date.getTime())) return;
+    const date = parseAggregateBucket(row.bucket, granularity);
+    if (!date) return;
 
     const key = bucketKeyForGranularity(date, granularity);
     totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0) * multiplier);
@@ -3123,17 +3289,24 @@ function bucketKeyForGranularity(date: Date, granularity: AggregateGranularity) 
   if (granularity === "minute") return startOfMinute(date).getTime();
   if (granularity === "hour") return startOfHour(date).getTime();
   if (granularity === "day") {
-    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+    return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
   }
-  if (granularity === "week") return startOfUtcWeek(date).getTime();
+  if (granularity === "week") {
+    const weekStart = startOfWeek(date);
+    return Date.UTC(
+      weekStart.getFullYear(),
+      weekStart.getMonth(),
+      weekStart.getDate(),
+    );
+  }
   if (granularity === "month") {
-    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
+    return Date.UTC(date.getFullYear(), date.getMonth(), 1);
   }
   if (granularity === "semester") {
-    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() < 6 ? 0 : 6, 1);
+    return Date.UTC(date.getFullYear(), date.getMonth() < 6 ? 0 : 6, 1);
   }
 
-  return Date.UTC(date.getUTCFullYear(), 0, 1);
+  return Date.UTC(date.getFullYear(), 0, 1);
 }
 
 function bucketLabel(date: Date, granularity: AggregateGranularity) {
@@ -3183,16 +3356,6 @@ function startOfWeek(date: Date) {
   const day = next.getDay();
   const diff = day === 0 ? -6 : 1 - day;
   next.setDate(next.getDate() + diff);
-  return next;
-}
-
-function startOfUtcWeek(date: Date) {
-  const next = new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
-  );
-  const day = next.getUTCDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  next.setUTCDate(next.getUTCDate() + diff);
   return next;
 }
 

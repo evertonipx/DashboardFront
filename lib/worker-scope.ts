@@ -1,11 +1,8 @@
-import { getEntityCompanyId, withCompanyScope } from "@/lib/master-company-scope";
 import type { Worker } from "@/lib/types";
 
 export type WorkerScopeRow = Worker & {
   company_id?: string | null;
   client_id?: string | null;
-  __scoped_company_id?: string | null;
-  __scope_source?: string | null;
   __identity_alias_ids?: string[];
   __duplicate_record_count?: number;
 };
@@ -13,42 +10,11 @@ export type WorkerScopeRow = Worker & {
 export type WorkerScopePartition<T extends WorkerScopeRow> = {
   scopedRows: T[];
   foreignRows: T[];
-  inferredRows: T[];
   unscopedRows: T[];
 };
 
-export function withWorkerCompanyScope<T extends object>(
-  body: T,
-  companyId?: string | null,
-) {
-  const cleanCompanyId = companyId?.trim();
-  if (!cleanCompanyId) return body;
-
-  const scopedBody = withCompanyScope(body, cleanCompanyId);
-  const record = scopedBody as Record<string, unknown>;
-
-  return {
-    ...scopedBody,
-    client_id: cleanString(record.client_id) || cleanCompanyId,
-  };
-}
-
-export function withWorkerClientScope<T extends object>(
-  body: T,
-  companyId?: string | null,
-) {
-  const cleanCompanyId = companyId?.trim();
-  if (!cleanCompanyId) return body;
-
-  const record = body as Record<string, unknown>;
-  return {
-    ...body,
-    client_id: cleanString(record.client_id) || cleanCompanyId,
-  };
-}
-
 export function resolveWorkerCompanyId(worker: unknown) {
-  return resolveWorkerExplicitCompanyId(worker) || resolveWorkerInferredCompanyId(worker);
+  return resolveWorkerExplicitCompanyId(worker);
 }
 
 export function normalizeWorkerRows(value: unknown): WorkerScopeRow[] {
@@ -159,33 +125,9 @@ export function workerIdentityIds(worker: WorkerScopeRow) {
 }
 
 export function resolveWorkerExplicitCompanyId(worker: unknown) {
-  return getEntityCompanyId(worker);
-}
-
-export function resolveWorkerInferredCompanyId(worker: unknown) {
   if (!worker || typeof worker !== "object") return "";
-
-  const record = worker as Record<string, unknown>;
-  return (
-    cleanString(record.__scoped_company_id) ||
-    cleanString(record.scoped_company_id) ||
-    cleanString(record.company_scope_id)
-  );
-}
-
-export function annotateWorkerCompanyScope<T extends object>(
-  worker: T,
-  companyId?: string | null,
-  source = "consulta escopada",
-) {
-  const cleanCompanyId = companyId?.trim();
-  if (!cleanCompanyId) return worker;
-
-  return {
-    ...worker,
-    __scoped_company_id: cleanCompanyId,
-    __scope_source: source,
-  };
+  const companyId = (worker as Record<string, unknown>).company_id;
+  return typeof companyId === "string" ? companyId.trim() : "";
 }
 
 export function partitionWorkersByCompanyScope<T extends WorkerScopeRow>(
@@ -197,36 +139,29 @@ export function partitionWorkersByCompanyScope<T extends WorkerScopeRow>(
     return {
       scopedRows: rows,
       foreignRows: [],
-      inferredRows: [],
       unscopedRows: [],
     };
   }
 
   const scopedRows: T[] = [];
   const foreignRows: T[] = [];
-  const inferredRows: T[] = [];
   const unscopedRows: T[] = [];
 
   rows.forEach((row) => {
     const explicitCompanyId = resolveWorkerExplicitCompanyId(row);
-    const inferredCompanyId = resolveWorkerInferredCompanyId(row);
-    const rowCompanyId = explicitCompanyId || inferredCompanyId;
-
-    if (!rowCompanyId) {
+    if (!explicitCompanyId) {
       unscopedRows.push(row);
-      scopedRows.push(row);
       return;
     }
 
-    if (scopeIds.includes(rowCompanyId)) {
-      if (!explicitCompanyId && inferredCompanyId) inferredRows.push(row);
+    if (scopeIds.includes(explicitCompanyId)) {
       scopedRows.push(row);
     } else {
       foreignRows.push(row);
     }
   });
 
-  return { scopedRows, foreignRows, inferredRows, unscopedRows };
+  return { scopedRows, foreignRows, unscopedRows };
 }
 
 export function workerScopeStatus(
@@ -235,13 +170,12 @@ export function workerScopeStatus(
 ) {
   const cleanCompanyId = companyId?.trim();
   const explicitCompanyId = resolveWorkerExplicitCompanyId(worker);
-  const inferredCompanyId = resolveWorkerInferredCompanyId(worker);
-  const workerCompanyId = explicitCompanyId || inferredCompanyId;
+  const workerCompanyId = explicitCompanyId;
 
   if (!cleanCompanyId) return workerCompanyId ? "linked" : "unscoped";
   if (!workerCompanyId) return "unscoped";
   if (workerCompanyId !== cleanCompanyId) return "foreign";
-  return explicitCompanyId ? "linked" : "inferred";
+  return "linked";
 }
 
 export function workerScopeDisplay(
@@ -250,23 +184,12 @@ export function workerScopeDisplay(
 ) {
   const status = workerScopeStatus(worker, companyId);
   const workerCompanyId = resolveWorkerCompanyId(worker);
-  const source =
-    worker.__scope_source?.trim() ||
-    (resolveWorkerInferredCompanyId(worker) ? "consulta escopada" : "");
 
   if (status === "linked") {
     return {
       label: "Vinculado",
       detail: workerCompanyId,
       variant: "success" as const,
-    };
-  }
-
-  if (status === "inferred") {
-    return {
-      label: "Vinculo inferido",
-      detail: `${source}: ${workerCompanyId}`,
-      variant: "warning" as const,
     };
   }
 
@@ -279,8 +202,8 @@ export function workerScopeDisplay(
   }
 
   return {
-    label: "Sem vinculo",
-    detail: "API nao retornou company_id/client_id",
+    label: "Sem vinculo explicito",
+    detail: "API nao retornou company_id",
     variant: "warning" as const,
   };
 }

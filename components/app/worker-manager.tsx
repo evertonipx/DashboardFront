@@ -43,11 +43,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError, apiFetch } from "@/lib/api";
-import {
-  useEffectiveCompanyScopeId,
-  withCompanyScope,
-} from "@/lib/master-company-scope";
+import { apiFetch } from "@/lib/api";
+import { useEffectiveCompanyScopeId } from "@/lib/master-company-scope";
 import { canManageWorkers } from "@/lib/permissions";
 import type {
   CreateWorkerResponse,
@@ -57,13 +54,10 @@ import type {
 import { cn, formatDateTime, formatNumber } from "@/lib/utils";
 import { getWorkerDisplayInfo } from "@/lib/worker-display";
 import {
-  annotateWorkerCompanyScope,
   normalizeWorkerRows,
   partitionWorkersByCompanyScope,
   resolveWorkerCompanyId,
   sortWorkersByActivity,
-  withWorkerClientScope,
-  withWorkerCompanyScope,
   workerScopeDisplay,
   type WorkerScopeRow,
 } from "@/lib/worker-scope";
@@ -119,9 +113,9 @@ export function WorkerManager() {
     setLoading(true);
     setScopeWarning("");
     try {
-      const rows = await fetchCompanyWorkers(effectiveCompanyId);
+      const rows = await fetchCompanyWorkers();
       if (effectiveCompanyId) {
-        const { scopedRows, foreignRows, inferredRows, unscopedRows } =
+        const { scopedRows, foreignRows, unscopedRows } =
           partitionWorkersByCompanyScope(rows, effectiveCompanyId);
 
         setWorkers(sortWorkersByActivity(scopedRows));
@@ -129,7 +123,6 @@ export function WorkerManager() {
           buildWorkerScopeWarning(
             foreignRows.length,
             unscopedRows.length,
-            inferredRows.length,
           ),
         );
       } else {
@@ -194,7 +187,6 @@ export function WorkerManager() {
           `/workers/${editingWorker.id}`,
           "PUT",
           body,
-          effectiveCompanyId,
         );
         toast.success("Worker atualizado.");
       } else {
@@ -202,7 +194,6 @@ export function WorkerManager() {
           "/workers",
           "POST",
           body,
-          effectiveCompanyId,
         );
         await ensureCreatedWorkerScope(created, effectiveCompanyId);
         setKeyNotice({
@@ -229,7 +220,6 @@ export function WorkerManager() {
     try {
       await apiFetch(`/workers/${worker.id}`, {
         method: "DELETE",
-        headers: companyScopeHeaders(effectiveCompanyId),
       });
       toast.success("Worker excluído.");
       await loadWorkers();
@@ -252,7 +242,6 @@ export function WorkerManager() {
         `/workers/${worker.id}/rotate-key`,
         {
           method: "POST",
-          headers: companyScopeHeaders(effectiveCompanyId),
         },
       );
       setKeyNotice({
@@ -532,56 +521,16 @@ function WorkerScopeBadge({
   );
 }
 
-function companyScopeHeaders(companyId?: string | null) {
-  const cleanCompanyId = companyId?.trim();
-  return cleanCompanyId ? { "X-Company-ID": cleanCompanyId } : undefined;
-}
-
-async function fetchCompanyWorkers(companyId?: string | null) {
-  const headers = companyScopeHeaders(companyId);
-  return apiFetch<unknown>("/workers", { headers }).then(
-    (response) =>
-      normalizeWorkerRows(response).map((row) =>
-        annotateWorkerCompanyScope(row, companyId, "GET /workers"),
-      ),
-  );
+async function fetchCompanyWorkers() {
+  return apiFetch<unknown>("/workers").then(normalizeWorkerRows);
 }
 
 async function mutateWorker<T>(
   path: string,
   method: "POST" | "PUT",
   body: { name: string; description?: string },
-  companyId: string,
 ) {
-  const headers = companyScopeHeaders(companyId);
-  const attempts = [
-    withWorkerCompanyScope(body, companyId),
-    withCompanyScope(body, companyId),
-    withWorkerClientScope(body, companyId),
-    body,
-  ];
-  let lastError: unknown;
-
-  for (const attemptBody of attempts) {
-    try {
-      return await apiFetch<T>(withWorkerScopeQuery(path, companyId), {
-        method,
-        headers,
-        body: attemptBody,
-      });
-    } catch (error) {
-      lastError = error;
-      if (!isWorkerPayloadShapeError(error)) throw error;
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Falha ao salvar worker.");
-}
-
-function isWorkerPayloadShapeError(error: unknown) {
-  return error instanceof ApiError && (error.status === 400 || error.status === 422);
+  return apiFetch<T>(path, { method, body });
 }
 
 async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId: string) {
@@ -596,8 +545,9 @@ async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId:
     return;
   }
 
-  const rows = await fetchCompanyWorkers(companyId).catch(() => []);
-  const { scopedRows, foreignRows } = partitionWorkersByCompanyScope(rows, companyId);
+  const rows = await fetchCompanyWorkers().catch(() => []);
+  const { scopedRows, foreignRows, unscopedRows } =
+    partitionWorkersByCompanyScope(rows, companyId);
   const workerId = worker.id?.trim();
   const apiKeyPrefix = worker.api_key_prefix?.trim();
   const matchesWorker = (row: WorkerRow) =>
@@ -608,12 +558,7 @@ async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId:
     );
 
   const scopedWorker = scopedRows.find(matchesWorker);
-  if (scopedWorker) {
-    toast.warning(
-      "Worker criado, mas a API não retornou company_id/client_id no cadastro; o vínculo foi confirmado pela consulta escopada.",
-    );
-    return;
-  }
+  if (scopedWorker) return;
 
   const foreignWorker = foreignRows.find(matchesWorker);
   if (foreignWorker) {
@@ -622,25 +567,20 @@ async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId:
     );
   }
 
+  if (unscopedRows.some(matchesWorker)) {
+    throw new Error(
+      "A API criou o worker, mas o GET /workers não retornou company_id. O vínculo não pode ser considerado válido sem esse campo explícito.",
+    );
+  }
+
   throw new Error(
     "A API criou o worker, mas ele não foi retornado para a empresa ativa. A chave não foi exibida para evitar registrar o worker na empresa errada.",
   );
 }
 
-function withWorkerScopeQuery(path: string, companyId: string) {
-  const [pathname, hashFragment = ""] = path.split("#", 2);
-  const [basePath, queryString = ""] = pathname.split("?", 2);
-  const params = new URLSearchParams(queryString);
-  if (!params.has("company_id")) params.set("company_id", companyId);
-
-  const query = params.toString();
-  return `${basePath}${query ? `?${query}` : ""}${hashFragment ? `#${hashFragment}` : ""}`;
-}
-
 function buildWorkerScopeWarning(
   foreignCount: number,
   unscopedCount: number,
-  inferredCount: number,
 ) {
   const messages = [];
   if (foreignCount) {
@@ -648,14 +588,9 @@ function buildWorkerScopeWarning(
       `${formatNumber(foreignCount)} worker(s) de outras empresas foram ocultados.`,
     );
   }
-  if (inferredCount) {
-    messages.push(
-      `${formatNumber(inferredCount)} worker(s) tiveram o vínculo inferido pela consulta da empresa, porque a API não retornou company_id/client_id no corpo.`,
-    );
-  }
   if (unscopedCount) {
     messages.push(
-      `${formatNumber(unscopedCount)} worker(s) vieram sem company_id/client_id; foram exibidos por terem sido retornados pela consulta escopada, mas o backend precisa persistir esse vínculo.`,
+      `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram ocultados porque o vínculo não pode ser comprovado.`,
     );
   }
 

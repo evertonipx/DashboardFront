@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 
 import {
   apiFetch,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/api";
 import { hasDeclaredManagerAccess, hasMasterAccess } from "@/lib/access";
 import { readCachedCompany, writeCompanyCache } from "@/lib/company-cache";
+import { migrateLegacyLiveDefault } from "@/lib/legacy-dashboard-view-migration";
 import {
   clearStoredCurrentCompanyScope,
   clearStoredMasterCompanyScope,
@@ -24,6 +26,13 @@ import {
 } from "@/lib/master-company-scope";
 import { hasAnyOperationalPermission } from "@/lib/permissions";
 import type { CurrentUser, CurrentUserCompany, UserPermission } from "@/lib/types";
+import {
+  clearUserGridSync,
+  hydrateUserGridFromServer,
+  startUserGridSync,
+  USER_GRID_SYNC_STATUS_EVENT,
+  type UserGridSyncStatusDetail,
+} from "@/lib/user-grid";
 
 type AuthContextValue = {
   user: CurrentUser | null;
@@ -41,6 +50,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = React.useState<CurrentUser | null>(null);
   const [isManager, setIsManager] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
+  const gridSyncErrorShown = React.useRef(false);
 
   const resolveManagerAccess = React.useCallback(async (currentUser: CurrentUser | null) => {
     if (!currentUser) return false;
@@ -51,7 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refreshUser = React.useCallback(async () => {
     try {
-      const currentUser = await hydrateCurrentUser(
+      const currentUser = await hydrateAuthenticatedUser(
         await currentUserRequest(),
       );
       const canManage = await resolveManagerAccess(currentUser);
@@ -60,6 +70,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return currentUser;
     } catch {
       clearStoredSession();
+      clearUserGridSync();
       setUser(null);
       setIsManager(false);
       return null;
@@ -91,8 +102,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refreshUser]);
 
   React.useEffect(() => {
+    if (!user?.id) return;
+    return startUserGridSync(user.id);
+  }, [user?.id]);
+
+  React.useEffect(() => {
+    function handleGridSyncStatus(event: Event) {
+      const detail = (event as CustomEvent<UserGridSyncStatusDetail>).detail;
+      if (detail?.status === "error" && !gridSyncErrorShown.current) {
+        gridSyncErrorShown.current = true;
+        toast.error(
+          "Não foi possível sincronizar as configurações com o servidor. As alterações continuam disponíveis neste navegador e serão reenviadas automaticamente.",
+        );
+        return;
+      }
+
+      if (detail?.status === "ready" || detail?.status === "saved") {
+        gridSyncErrorShown.current = false;
+      }
+    }
+
+    window.addEventListener(USER_GRID_SYNC_STATUS_EVENT, handleGridSyncStatus);
+    return () => {
+      window.removeEventListener(
+        USER_GRID_SYNC_STATUS_EVENT,
+        handleGridSyncStatus,
+      );
+    };
+  }, []);
+
+  React.useEffect(() => {
     function handleSessionExpired() {
       clearStoredSession();
+      clearUserGridSync();
       setUser(null);
       setIsManager(false);
       router.replace("/login");
@@ -106,7 +148,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = React.useCallback(async (email: string, password: string) => {
     await loginRequest(email, password);
-    const currentUser = await hydrateCurrentUser(
+    const currentUser = await hydrateAuthenticatedUser(
       await currentUserRequest(),
     );
     const canManage = await resolveManagerAccess(currentUser);
@@ -126,6 +168,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     clearStoredSession();
+    clearUserGridSync();
     setUser(null);
     setIsManager(false);
     router.replace("/login");
@@ -203,6 +246,19 @@ async function hydrateCurrentUser(user: CurrentUser) {
     }
   }
 
+  return hydratedUser;
+}
+
+async function hydrateAuthenticatedUser(user: CurrentUser) {
+  const hydratedUser = await hydrateCurrentUser(user);
+  await hydrateUserGridFromServer(hydratedUser.id);
+  const companyId = getCurrentUserCompanyId(hydratedUser);
+  if (companyId) {
+    await migrateLegacyLiveDefault({
+      companyId,
+      userId: hydratedUser.id,
+    }).catch(() => false);
+  }
   return hydratedUser;
 }
 

@@ -33,7 +33,7 @@ export type WidgetViewPreset = {
   updatedAt: string;
 };
 
-type WidgetViewStorageEntry = {
+export type WidgetViewStorageEntry = {
   baseKey: string;
   value: string;
 };

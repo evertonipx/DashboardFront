@@ -8,6 +8,7 @@ import {
   MonitorUp,
   Plus,
   RefreshCw,
+  Save,
   Settings2,
   Trash2,
 } from "lucide-react";
@@ -15,6 +16,7 @@ import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
+import { VideoWallManager } from "@/components/app/video-wall-manager";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -35,6 +37,12 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import {
   filterScopedApiRows,
   getStoredMasterCompanyScope,
   useEffectiveCompanyScopeId,
@@ -43,6 +51,7 @@ import { apiFetch } from "@/lib/api";
 import { canManageViews } from "@/lib/permissions";
 import type { Scenario } from "@/lib/types";
 import { toDateTimeLocalValue } from "@/lib/utils";
+import { saveLiveViewPreset } from "@/lib/video-wall";
 
 const viewOptions = [
   {
@@ -116,6 +125,7 @@ export function ViewsManager() {
   const { user } = useAuth();
   const canAccessViews = canManageViews(user);
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const [workspaceTab, setWorkspaceTab] = React.useState("video-wall");
   const [origin, setOrigin] = React.useState("");
   const [chart, setChart] = React.useState<ViewChart>("today-scenario");
   const [title, setTitle] = React.useState("Hoje por cenário");
@@ -285,11 +295,7 @@ export function ViewsManager() {
     async function loadScenarios() {
       setLoadingScenarios(true);
       try {
-        const rows = await apiFetch<Scenario[]>("/scenarios", {
-          headers: companyScopeId
-            ? ({ "X-Company-ID": companyScopeId } satisfies HeadersInit)
-            : undefined,
-        });
+        const rows = await apiFetch<Scenario[]>("/scenarios");
         const scopedRows = filterScopedApiRows(rows, companyScopeId);
         setScenarios(scopedRows);
         setSelectedScenarioIds((current) =>
@@ -404,6 +410,23 @@ export function ViewsManager() {
     window.open(generatedUrl, "_blank", "noopener,noreferrer");
   }
 
+  function saveGeneratedView() {
+    if (!generatedUrl) return;
+    const saved = saveLiveViewPreset(
+      {
+        name: title.trim() || "Visão Ao Vivo",
+        url: generatedUrl,
+      },
+      companyScopeId,
+      user?.id,
+    );
+    if (!saved) {
+      toast.error("Não foi possível salvar esta visão.");
+      return;
+    }
+    toast.success("Visão salva na biblioteca do video wall.");
+  }
+
   if (!canAccessViews) {
     return (
       <Card>
@@ -418,7 +441,30 @@ export function ViewsManager() {
   }
 
   return (
-    <section className="space-y-4">
+    <Tabs value={workspaceTab} onValueChange={setWorkspaceTab}>
+      <TabsList className="mb-2">
+        <TabsTrigger value="video-wall" className="gap-2">
+          <MonitorUp className="h-4 w-4" />
+          Video wall
+        </TabsTrigger>
+        <TabsTrigger value="view-builder" className="gap-2">
+          <Link2 className="h-4 w-4" />
+          Construtor de visões
+        </TabsTrigger>
+      </TabsList>
+
+      <TabsContent value="video-wall">
+        <VideoWallManager
+          companyId={companyScopeId}
+          loadingScenarios={loadingScenarios}
+          onOpenViewBuilder={() => setWorkspaceTab("view-builder")}
+          scenarios={scenarios}
+          userId={user?.id}
+        />
+      </TabsContent>
+
+      <TabsContent value="view-builder">
+        <section className="space-y-4">
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <Card>
           <CardHeader>
@@ -860,7 +906,20 @@ export function ViewsManager() {
             </FormField>
 
             <div className="flex flex-wrap gap-2">
-              <Button type="button" onClick={copyUrl} disabled={!generatedUrl}>
+              <Button
+                type="button"
+                onClick={saveGeneratedView}
+                disabled={!generatedUrl}
+              >
+                <Save className="h-4 w-4" />
+                Salvar visão
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={copyUrl}
+                disabled={!generatedUrl}
+              >
                 <Copy className="h-4 w-4" />
                 Copiar URL
               </Button>
@@ -939,7 +998,9 @@ export function ViewsManager() {
           </CardContent>
         </Card>
       </div>
-    </section>
+        </section>
+      </TabsContent>
+    </Tabs>
   );
 }
 

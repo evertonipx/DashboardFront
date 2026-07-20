@@ -88,10 +88,10 @@ import type {
 import { cn, formatDateTime, formatNumber } from "@/lib/utils";
 import { getWorkerDisplayInfo } from "@/lib/worker-display";
 import {
-  annotateWorkerCompanyScope,
   collapseWorkerIdentityChains,
   normalizeWorkerRows,
   partitionWorkersByCompanyScope,
+  resolveWorkerCompanyId,
   sortWorkersByActivity,
   workerScopeDisplay,
   type WorkerScopeRow,
@@ -264,10 +264,6 @@ const algorithmModuleDefinitions: Array<{
   },
 ];
 
-function companyScopeHeaders(companyId: string) {
-  return { "X-Company-ID": companyId } satisfies HeadersInit;
-}
-
 export function SuperAdminDashboard() {
   const router = useRouter();
   const { user: currentUser } = useAuth();
@@ -396,19 +392,26 @@ export function SuperAdminDashboard() {
   const loadCompanies = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [companyRows, moduleRows, permissionRows, masterUserRows] =
-        await Promise.all([
+      const [companyRows, moduleRows, permissionRows] = await Promise.all([
         apiFetch<Company[]>("/companies"),
         apiFetch<IpxModule[]>("/modules").catch(() => []),
         apiFetch<Permission[]>("/permissions").catch(() => []),
-        apiFetch<ManagedUser[]>("/users").catch(() => []),
       ]);
+      const companyUserRows = await Promise.all(
+        companyRows.map((company) =>
+          apiFetch<ManagedUser[]>(`/companies/${company.id}/users`).catch(
+            () => [],
+          ),
+        ),
+      );
 
       setCompanies(companyRows);
       writeCompanyCache(companyRows);
       setModules(moduleRows);
       setPermissionCatalog(permissionRows);
-      setMasterUsers(masterUserRows.filter((user) => user.is_master));
+      setMasterUsers(
+        uniqueRowsById(companyUserRows.flat()).filter((user) => user.is_master),
+      );
       const storedScope = getStoredMasterCompanyScope();
       const declaredCompanyId = getCurrentUserCompanyId(currentUser);
       setSelectedCompanyId((current) =>
@@ -448,14 +451,11 @@ export function SuperAdminDashboard() {
     setLoadingDetails(true);
     setWorkerScopeWarning("");
     try {
-      const selectedCompanyHeaders = companyScopeHeaders(selectedCompanyId);
       const [userRows, moduleRows] = await Promise.all([
-        apiFetch<ManagedUser[]>(`/companies/${selectedCompanyId}/users`, {
-          headers: selectedCompanyHeaders,
-        }),
-        apiFetch<CompanyModule[]>(`/companies/${selectedCompanyId}/modules`, {
-          headers: selectedCompanyHeaders,
-        }).catch(() => []),
+        apiFetch<ManagedUser[]>(`/companies/${selectedCompanyId}/users`),
+        apiFetch<CompanyModule[]>(
+          `/companies/${selectedCompanyId}/modules`,
+        ).catch(() => []),
       ]);
       const companyScopeIds = uniqueScopeIds(selectedCompanyId);
       const scopedUserRows = userRows.filter((user) => {
@@ -469,11 +469,11 @@ export function SuperAdminDashboard() {
         scenarioRows,
         occupancyScenarioRows,
       ] = await Promise.all([
-        fetchScopedWorkers(companyScopeIds),
-        fetchScopedRows<Location>("/locations", companyScopeIds),
-        fetchScopedRows<Camera>("/cameras", companyScopeIds),
-        fetchScopedRows<Scenario>("/scenarios", companyScopeIds),
-        fetchScopedOccupancyScenarios(companyScopeIds),
+        fetchScopedWorkers(),
+        fetchScopedRows<Location>("/locations"),
+        fetchScopedRows<Camera>("/cameras"),
+        fetchScopedRows<Scenario>("/scenarios"),
+        fetchScopedOccupancyScenarios(),
       ]);
       const workerScopePartition = partitionWorkersByCompanyScope(
         workerRows,
@@ -522,8 +522,11 @@ export function SuperAdminDashboard() {
         buildWorkerScopeWarning(
           workerScopePartition.foreignRows.length,
           workerScopePartition.unscopedRows.length,
-          workerScopePartition.inferredRows.length,
           collapsedWorkerDuplicateCount,
+          selectedCompanyId,
+          uniqueScopeIds(
+            workerScopePartition.foreignRows.map(resolveWorkerCompanyId),
+          ),
         ),
       );
     } catch (error) {
@@ -682,7 +685,6 @@ export function SuperAdminDashboard() {
     try {
       const permissions = await apiFetch<UserPermission[]>(
         `/users/${userId}/permissions`,
-        { headers: companyScopeHeaders(selectedCompanyId) },
       );
       const permissionState = createPermissionState(
         permissions,
@@ -738,7 +740,6 @@ export function SuperAdminDashboard() {
       if (editingCompany) {
         await apiFetch(`/companies/${editingCompany.id}`, {
           method: "PUT",
-          headers: companyScopeHeaders(editingCompany.id),
           body,
         });
         toast.success("Empresa atualizada.");
@@ -779,7 +780,6 @@ export function SuperAdminDashboard() {
     try {
       await apiFetch(`/companies/${company.id}`, {
         method: "DELETE",
-        headers: companyScopeHeaders(company.id),
       });
       toast.success("Empresa excluída.");
 
@@ -837,7 +837,6 @@ export function SuperAdminDashboard() {
           name,
           email,
           is_master: true,
-          company_id: companyId,
           ...(editingUser ? { active: userForm.active === "true" } : undefined),
           ...(password ? { password } : undefined),
         };
@@ -845,14 +844,12 @@ export function SuperAdminDashboard() {
         if (editingUser) {
           await apiFetch(`/users/${editingUser.id}`, {
             method: "PUT",
-            headers: companyScopeHeaders(companyId),
             body,
           });
           toast.success("Usuário promovido a super-admin.");
         } else {
-          await apiFetch("/users", {
+          await apiFetch(`/companies/${companyId}/users`, {
             method: "POST",
-            headers: companyScopeHeaders(companyId),
             body,
           });
           toast.success("Super-admin criado.");
@@ -870,8 +867,18 @@ export function SuperAdminDashboard() {
       if (editingUser) {
         savedUser = editingUser;
         if (profileChanged) {
-          toast(
-            "Os acessos serão salvos, mas alterações de cadastro do usuário não foram enviadas porque a API não localiza usuários de outra empresa em /users/{id}.",
+          savedUser = await apiFetch<ManagedUser>(
+            `/users/${editingUser.id}`,
+            {
+              method: "PUT",
+              body: {
+                name,
+                email,
+                is_master: false,
+                active: userForm.active === "true",
+                ...(password ? { password } : undefined),
+              },
+            },
           );
         }
       } else {
@@ -879,13 +886,11 @@ export function SuperAdminDashboard() {
           `/companies/${selectedCompanyId}/users`,
           {
             method: "POST",
-            headers: companyScopeHeaders(selectedCompanyId),
             body: {
               name,
               email,
               password,
               is_master: false,
-              company_id: selectedCompanyId,
             },
           },
         );
@@ -943,7 +948,6 @@ export function SuperAdminDashboard() {
     try {
       await apiFetch(`/users/${user.id}`, {
         method: "DELETE",
-        headers: companyScopeHeaders(selectedCompanyId),
       });
       toast.success("Usuário excluído.");
       if (editingUser?.id === user.id) {
@@ -992,25 +996,20 @@ export function SuperAdminDashboard() {
         name,
         email,
         is_master: true,
-        company_id: companyId,
         ...(editingMasterUser
           ? { active: masterUserForm.active === "true" }
           : undefined),
         ...(password ? { password } : undefined),
       };
-      const headers = companyScopeHeaders(companyId);
-
       if (editingMasterUser) {
         await apiFetch(`/users/${editingMasterUser.id}`, {
           method: "PUT",
-          headers,
           body,
         });
         toast.success("Super-admin atualizado.");
       } else {
-        await apiFetch("/users", {
+        await apiFetch(`/companies/${companyId}/users`, {
           method: "POST",
-          headers,
           body,
         });
         toast.success("Super-admin criado.");
@@ -1037,7 +1036,9 @@ export function SuperAdminDashboard() {
 
     setDeletingUserId(user.id);
     try {
-      await apiFetch(`/users/${user.id}`, { method: "DELETE" });
+      await apiFetch(`/users/${user.id}`, {
+        method: "DELETE",
+      });
       toast.success("Super-admin excluído.");
       if (editingMasterUser?.id === user.id) {
         setMasterUserDialog(false);
@@ -1105,7 +1106,6 @@ export function SuperAdminDashboard() {
 
     const rows = await apiFetch<ManagedUser[]>(
       `/companies/${selectedCompanyId}/users`,
-      { headers: companyScopeHeaders(selectedCompanyId) },
     ).catch(() => []);
     const found = rows.find(
       (user) => user.email.trim().toLowerCase() === normalizedEmail,
@@ -1120,10 +1120,8 @@ export function SuperAdminDashboard() {
     );
     if (!availableOptions.length) return;
 
-    const scopedHeaders = companyScopeHeaders(selectedCompanyId);
     const currentPermissions = await apiFetch<UserPermission[]>(
       `/users/${userId}/permissions`,
-      { headers: scopedHeaders },
     ).catch(() => []);
     const grantedSlugs = new Set(
       currentPermissions
@@ -1148,7 +1146,6 @@ export function SuperAdminDashboard() {
         await grantUserPermission(
           userId,
           option,
-          scopedHeaders,
           grantedSlugs,
           enabledCompanyModuleIds,
         );
@@ -1165,7 +1162,7 @@ export function SuperAdminDashboard() {
 
           const permissionId = getPermissionRecordId(permission);
           if (!permissionId) continue;
-          await revokeUserPermission(userId, permissionId, scopedHeaders);
+          await revokeUserPermission(userId, permissionId);
           if (permission.slug) {
             grantedSlugs.delete(permission.slug);
           }
@@ -1184,14 +1181,12 @@ export function SuperAdminDashboard() {
       if (!assignment) {
         await apiFetch(`/companies/${selectedCompanyId}/modules`, {
           method: "POST",
-          headers: companyScopeHeaders(selectedCompanyId),
           body: { module_id: module.id, enabled: true },
         });
         toast.success("Módulo habilitado.");
       } else {
         await apiFetch(`/companies/${selectedCompanyId}/modules/${module.id}`, {
           method: "PUT",
-          headers: companyScopeHeaders(selectedCompanyId),
           body: { enabled: !assignment.enabled },
         });
         toast.success(assignment.enabled ? "Módulo desabilitado." : "Módulo habilitado.");
@@ -2503,23 +2498,25 @@ function WorkerScopeBadge({
 function buildWorkerScopeWarning(
   foreignCount: number,
   unscopedCount: number,
-  inferredCount: number,
   duplicateCount: number,
+  selectedCompanyId?: string,
+  foreignCompanyIds: string[] = [],
 ) {
   const messages = [];
   if (foreignCount) {
+    const returnedScopes = foreignCompanyIds.length
+      ? ` A API retornou company_id ${foreignCompanyIds.join(", ")}`
+      : "";
+    const requestedScope = selectedCompanyId
+      ? ` ao solicitar a empresa ${selectedCompanyId}`
+      : "";
     messages.push(
-      `${formatNumber(foreignCount)} worker(s) de outras empresas foram omitidos.`,
-    );
-  }
-  if (inferredCount) {
-    messages.push(
-      `${formatNumber(inferredCount)} worker(s) tiveram o vínculo inferido pela consulta da empresa, porque a API não retornou company_id/client_id no corpo.`,
+      `${formatNumber(foreignCount)} worker(s) foram ocultados por pertencerem a outra empresa.${returnedScopes}${requestedScope}. O JWT atual não autorizou dados operacionais dessa empresa.`,
     );
   }
   if (unscopedCount) {
     messages.push(
-      `${formatNumber(unscopedCount)} worker(s) vieram sem company_id/client_id; foram exibidos por terem sido retornados pela consulta escopada, mas o backend precisa persistir esse vínculo.`,
+      `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram ocultados porque o vínculo não pode ser comprovado.`,
     );
   }
   if (duplicateCount) {
@@ -2537,12 +2534,8 @@ async function fetchCompanySubLocations(
 ) {
   const rows = await Promise.all(
     locations.map((location) => {
-      const locationCompanyId =
-        getScopedRowCompanyId(location) || companyScopeIds[0] || "";
-
       return apiFetch<SubLocation[]>(
         `/locations/${location.id}/sub-locations`,
-        { headers: companyScopeHeaders(locationCompanyId) },
       ).catch(() => []);
     }),
   );
@@ -2552,47 +2545,21 @@ async function fetchCompanySubLocations(
 
 async function fetchScopedRows<T extends { id?: string | null }>(
   path: string,
-  companyScopeIds: string[],
 ) {
-  const rows = await Promise.all(
-    companyScopeIds.map((companyId) =>
-      apiFetch<T[]>(path, { headers: companyScopeHeaders(companyId) }).catch(
-        () => [],
-      ),
-    ),
-  );
-
-  return uniqueRowsById(rows.flat());
+  return apiFetch<T[]>(path).then(uniqueRowsById).catch(() => []);
 }
 
-async function fetchScopedWorkers(companyScopeIds: string[]) {
-  const rows = await Promise.all(
-    companyScopeIds.map(async (companyId) => {
-      const headers = companyScopeHeaders(companyId);
-      return apiFetch<unknown>("/workers", { headers })
-        .then((response) =>
-          normalizeWorkerRows(response).map((row) =>
-            annotateWorkerCompanyScope(row, companyId, "GET /workers"),
-          ),
-        );
-    }),
-  );
-
-  return uniqueRowsById(rows.flat());
+async function fetchScopedWorkers() {
+  return apiFetch<unknown>("/workers")
+    .then(normalizeWorkerRows)
+    .then(uniqueRowsById);
 }
 
-async function fetchScopedOccupancyScenarios(companyScopeIds: string[]) {
-  const rows = await Promise.all(
-    companyScopeIds.map((companyId) =>
-      apiFetch<OccupancyScenarioListResponse>("/occupancy/scenarios", {
-        headers: companyScopeHeaders(companyId),
-      })
-        .then(normalizeOccupancyScenarioList)
-        .catch(() => []),
-    ),
-  );
-
-  return uniqueRowsById(rows.flat());
+async function fetchScopedOccupancyScenarios() {
+  return apiFetch<OccupancyScenarioListResponse>("/occupancy/scenarios")
+    .then(normalizeOccupancyScenarioList)
+    .then(uniqueRowsById)
+    .catch(() => []);
 }
 
 function filterRowsByCompanyScopes<T>(
@@ -2792,7 +2759,6 @@ function userPermissionMatchesOption(
 async function grantUserPermission(
   userId: string,
   option: PermissionOption,
-  headers: HeadersInit,
   existingSlugs: Set<string>,
   enabledModuleIds: Set<string>,
 ) {
@@ -2808,7 +2774,6 @@ async function grantUserPermission(
     try {
       await apiFetch(`/users/${userId}/permissions`, {
         method: "POST",
-        headers,
         body: { slug },
       });
       existingSlugs.add(slug);
@@ -2826,7 +2791,7 @@ async function grantUserPermission(
 
       if (error instanceof ApiError && error.status === 500) {
         throw new Error(
-          `Falha ao conceder "${option.label}" (${slug}). Este POST em /users/{id}/permissions é apenas para admin da empresa; super-admin deve ser salvo com is_master=true em /users. A API retornou erro interno e parece usar a empresa do token logado, não a empresa selecionada.`,
+          `Falha ao conceder "${option.label}" (${slug}). Esta rota usa a empresa assinada no JWT e não possui operação cross-company documentada para o superadmin.`,
         );
       }
 
@@ -2841,12 +2806,10 @@ async function grantUserPermission(
 async function revokeUserPermission(
   userId: string,
   permissionId: string,
-  headers: HeadersInit,
 ) {
   try {
     return await apiFetch(`/users/${userId}/permissions/${permissionId}`, {
       method: "DELETE",
-      headers,
     });
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) return;

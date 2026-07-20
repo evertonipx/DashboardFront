@@ -91,7 +91,11 @@ import {
 } from "@/components/ui/table";
 import { hasVisualAdminAccess } from "@/lib/access";
 import { apiFetch } from "@/lib/api";
-import { aggregateQueryIso } from "@/lib/aggregate-time";
+import {
+  aggregateBucketInRange,
+  aggregateQueryIso,
+  parseAggregateBucket,
+} from "@/lib/aggregate-time";
 import {
   CAMERA_GROUPS_UPDATED_EVENT,
   type CameraGroup,
@@ -171,7 +175,6 @@ import type {
 } from "@/lib/types";
 import { cn, formatNumber, formatTime } from "@/lib/utils";
 import {
-  annotateWorkerCompanyScope,
   collapseWorkerIdentityChains,
   normalizeWorkerRows,
   partitionWorkersByCompanyScope,
@@ -179,7 +182,11 @@ import {
 } from "@/lib/worker-scope";
 
 type RealtimeDashboardProps = {
+  companyId?: string;
+  initialScopeId?: string;
+  initialScopeMode?: "scenario" | "location" | "sub_location";
   manager?: boolean;
+  presentationMode?: boolean;
 };
 
 type LoadOptions = {
@@ -298,6 +305,7 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 const MAX_REALTIME_BUCKETS = 2_000;
+const RECENT_DAY_RECONCILIATION_COUNT = 3;
 const DEFAULT_METRIC_TYPE = "count";
 const CURRENT_MONTH_DAYS_ID = "live_current_month_days";
 const OPERATIONAL_COMPARISON_HOURS_ID = "live_operational_comparison_hours";
@@ -365,10 +373,20 @@ function scenarioWidgetOption(widgetType: RealtimeScenarioWidgetType) {
   );
 }
 
-export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
+export function RealtimeDashboard({
+  companyId: companyIdOverride,
+  initialScopeId = "",
+  initialScopeMode = "scenario",
+  manager = false,
+  presentationMode = false,
+}: RealtimeDashboardProps) {
   const { user } = useAuth();
-  const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
-  const companyScopeId = useEffectiveCompanyScopeId(user);
+  const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode({
+    initialMode: presentationMode,
+    requestFullscreen: !presentationMode,
+  });
+  const storedCompanyScopeId = useEffectiveCompanyScopeId(user);
+  const companyScopeId = companyIdOverride?.trim() || storedCompanyScopeId;
   const canEditVisual = hasVisualAdminAccess(user);
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
   const [cameras, setCameras] = React.useState<Camera[]>([]);
@@ -379,8 +397,8 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
   const [workerLocationAssignments, setWorkerLocationAssignments] =
     React.useState<WorkerLocationAssignments>({});
   const [scopeMode, setScopeMode] =
-    React.useState<RealtimeScopeMode>("scenario");
-  const [selectedId, setSelectedId] = React.useState("");
+    React.useState<RealtimeScopeMode>(initialScopeMode);
+  const [selectedId, setSelectedId] = React.useState(initialScopeId);
   const [chartData, setChartData] = React.useState<
     Record<string, RealtimeChartState>
   >({});
@@ -510,17 +528,21 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
       loadLiveOperationalSettings(companyScopeId, preferenceScope),
     );
   }, [companyScopeId, preferenceScope]);
-  const hourRows = chartData.live_chart_hour?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const hourState = chartData.live_chart_hour;
+  const hourRows = hourState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const monthRows = chartData.live_chart_month?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const comparisonHourState = chartData[OPERATIONAL_COMPARISON_HOURS_ID];
   const comparisonHourRows =
-    chartData[OPERATIONAL_COMPARISON_HOURS_ID]?.rows ?? EMPTY_AGGREGATE_ROWS;
+    comparisonHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const currentMonthDayState = chartData[CURRENT_MONTH_DAYS_ID];
   const currentMonthDayRows =
     currentMonthDayState?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const previousMonthDayState = chartData[OPERATIONAL_PREVIOUS_MONTH_ID];
   const previousMonthDayRows =
-    chartData[OPERATIONAL_PREVIOUS_MONTH_ID]?.rows ?? EMPTY_AGGREGATE_ROWS;
+    previousMonthDayState?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const lastYearMonthDayState = chartData[OPERATIONAL_LAST_YEAR_MONTH_ID];
   const lastYearMonthDayRows =
-    chartData[OPERATIONAL_LAST_YEAR_MONTH_ID]?.rows ?? EMPTY_AGGREGATE_ROWS;
+    lastYearMonthDayState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const operationalTrendRows =
     chartData[OPERATIONAL_TREND_DAYS_ID]?.rows ?? EMPTY_AGGREGATE_ROWS;
   const operationalMonthHourState = chartData[OPERATIONAL_MONTH_HOURS_ID];
@@ -530,6 +552,10 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     operationalSettings.monthComparison === "last_year"
       ? lastYearMonthDayRows
       : previousMonthDayRows;
+  const baselineMonthDayGranularity =
+    operationalSettings.monthComparison === "last_year"
+      ? lastYearMonthDayState?.granularity ?? "day"
+      : previousMonthDayState?.granularity ?? "day";
 
   const loadScenarios = React.useCallback(async () => {
     setLoadingScenarios(true);
@@ -608,6 +634,12 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
 
   const loadCharts = React.useCallback(
     async ({ force = false, silent = false }: LoadOptions = {}) => {
+      if (!companyScopeId) {
+        setChartData({});
+        setLoadingCharts(false);
+        return;
+      }
+
       if (runningRef.current) {
         if (!force) return;
         requestRef.current?.abort();
@@ -634,17 +666,13 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         buildOperationalTrendDaysDefinition(now),
         buildOperationalMonthHoursDefinition(now),
       ];
-      const headers = companyScopeId
-        ? ({ "X-Company-ID": companyScopeId } satisfies HeadersInit)
-        : undefined;
-
       try {
         const entries = await Promise.all(
           [...definitions, ...supportDefinitions].map(async (definition) => {
             try {
               const response = await apiFetch<AggregateEventsResponse>(
                 aggregatePath(definition),
-                { headers, signal: controller.signal },
+                { signal: controller.signal },
               );
               const state: RealtimeChartState = {
                 rows: response.data ?? [],
@@ -754,11 +782,12 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     setLocations([]);
     setSubLocations([]);
     setWorkers([]);
-    setSelectedId("");
+    setScopeMode(initialScopeMode);
+    setSelectedId(initialScopeId);
     setChartData({});
     setHasLoadedCharts(false);
     hasLoadedChartsRef.current = false;
-  }, [companyScopeId]);
+  }, [companyScopeId, initialScopeId, initialScopeMode]);
 
   React.useEffect(() => {
     setCustomWidgetForm((current) => {
@@ -822,7 +851,13 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
 
   const initialLoading = (loadingScenarios || loadingCharts) && !hasLoadedCharts;
   const todayTotal = selectedScope
-    ? sumScopeRowsInRange(hourRows, selectedScope, startOfDay(clock), addDays(startOfDay(clock), 1))
+    ? sumScopeRowsInRange(
+        hourRows,
+        selectedScope,
+        startOfDay(clock),
+        addDays(startOfDay(clock), 1),
+        hourState?.granularity ?? "hour",
+      )
     : 0;
   const comparisonDayStart = operationalComparisonDayStart(
     clock,
@@ -840,6 +875,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         selectedScope,
         startOfDay(clock),
         startOfHour(clock),
+        hourState?.granularity ?? "hour",
       )
     : 0;
   const comparisonComparableTotal = selectedScope
@@ -848,6 +884,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         selectedScope,
         comparisonDayStart,
         addHours(comparisonDayStart, completedHourCount),
+        comparisonHourState?.granularity ?? "hour",
       )
     : 0;
   const comparisonDelta = percentageDelta(
@@ -862,6 +899,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         selectedScope,
         startOfMonth(clock),
         addDays(startOfDay(clock), 1),
+        currentMonthDayState?.granularity ?? "day",
       )
     : 0;
   const currentMonthClosedTotal = selectedScope
@@ -870,6 +908,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         selectedScope,
         startOfMonth(clock),
         startOfDay(clock),
+        currentMonthDayState?.granularity ?? "day",
       )
     : 0;
   const previousMonthStart = addMonths(startOfMonth(clock), -1);
@@ -884,6 +923,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         selectedScope,
         previousMonthStart,
         comparableMonthEnd(previousMonthStart, completedMonthDayCount),
+        previousMonthDayState?.granularity ?? "day",
       )
     : 0;
   const lastYearMonthComparableTotal = selectedScope
@@ -892,6 +932,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         selectedScope,
         lastYearMonthStart,
         comparableMonthEnd(lastYearMonthStart, completedMonthDayCount),
+        lastYearMonthDayState?.granularity ?? "day",
       )
     : 0;
   const previousMonthDelta = percentageDelta(
@@ -911,12 +952,16 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
             selectedScope,
             clock,
             operationalSettings.monthComparison,
+            currentMonthDayState?.granularity ?? "day",
+            baselineMonthDayGranularity,
           )
         : [],
     [
       baselineMonthDayRows,
+      baselineMonthDayGranularity,
       clock,
       currentMonthDayRows,
+      currentMonthDayState?.granularity,
       operationalSettings.monthComparison,
       selectedScope,
     ],
@@ -1095,8 +1140,14 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         currentMonthDayRows,
         startOfMonth(clock),
         addDays(startOfDay(clock), 1),
+        currentMonthDayState?.granularity ?? "day",
       ),
-    [clock, currentMonthDayRows, rankingScenarios],
+    [
+      clock,
+      currentMonthDayRows,
+      currentMonthDayState?.granularity,
+      rankingScenarios,
+    ],
   );
   const roseScenarioPoints = React.useMemo(
     () =>
@@ -1105,8 +1156,14 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         currentMonthDayRows,
         startOfMonth(clock),
         addDays(startOfDay(clock), 1),
+        currentMonthDayState?.granularity ?? "day",
       ),
-    [clock, currentMonthDayRows, roseScenarios],
+    [
+      clock,
+      currentMonthDayRows,
+      currentMonthDayState?.granularity,
+      roseScenarios,
+    ],
   );
   const cumulativeScenarioPoints = React.useMemo(
     () =>
@@ -1206,8 +1263,14 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     ],
   );
   const scenarioTodayComparisonPoints = React.useMemo(
-    () => buildScenarioTodayComparisonPoints(scenarios, hourRows, clock),
-    [clock, hourRows, scenarios],
+    () =>
+      buildScenarioTodayComparisonPoints(
+        scenarios,
+        hourRows,
+        clock,
+        hourState?.granularity ?? "hour",
+      ),
+    [clock, hourRows, hourState?.granularity, scenarios],
   );
   const locationTodayComparisonPoints = React.useMemo(
     () =>
@@ -1225,12 +1288,14 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         }),
         hourRows,
         clock,
+        hourState?.granularity ?? "hour",
       ),
     [
       cameraGroups,
       cameras,
       clock,
       hourRows,
+      hourState?.granularity,
       locations,
       manager,
       scenarios,
@@ -1247,20 +1312,22 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
           groups: cameraGroups,
           locations,
           manager,
-        mode: "sub_location",
-        scenarios,
-        subLocations,
-        workerLocationAssignments,
-        workers,
-      }),
-      hourRows,
-      clock,
-    ),
+          mode: "sub_location",
+          scenarios,
+          subLocations,
+          workerLocationAssignments,
+          workers,
+        }),
+        hourRows,
+        clock,
+        hourState?.granularity ?? "hour",
+      ),
     [
       cameraGroups,
       cameras,
       clock,
       hourRows,
+      hourState?.granularity,
       locations,
       manager,
       scenarios,
@@ -2233,7 +2300,6 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
     liveCardIds,
     companyScopeId,
     {
-      syncServer: false,
       userId: user?.id,
       viewId: selectedScope?.id,
     },
@@ -2546,6 +2612,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
         currentMonthDayRows,
         monthStart,
         monthEnd,
+        currentMonthDayState?.granularity ?? "day",
       );
 
       if (widget.widgetType === "ranking") {
@@ -2741,10 +2808,7 @@ export function RealtimeDashboard({ manager = false }: RealtimeDashboardProps) {
               settings,
               new Date(),
             );
-            const rows = await fetchScenarioComparisonRows(
-              definition,
-              companyScopeId,
-            );
+            const rows = await fetchScenarioComparisonRows(definition);
             const reportChart = buildScenarioComparisonReportChart({
                 definition,
                 rows,
@@ -3551,8 +3615,15 @@ function CustomScenarioWidgetCard({
         currentMonthDayRows,
         monthStart,
         monthEnd,
+        currentMonthDayGranularity,
       ),
-    [currentMonthDayRows, monthEnd, monthStart, selectedScenarios],
+    [
+      currentMonthDayGranularity,
+      currentMonthDayRows,
+      monthEnd,
+      monthStart,
+      selectedScenarios,
+    ],
   );
   const peakPoints = React.useMemo(
     () =>
@@ -5131,12 +5202,18 @@ function buildOperationalTrendDaysDefinition(now: Date): RealtimeChartDefinition
 function buildOperationalMonthHoursDefinition(
   now: Date,
 ): RealtimeChartDefinition {
+  const currentMonthStart = startOfMonth(now);
+  const recentDayStart = addDays(
+    startOfDay(now),
+    1 - RECENT_DAY_RECONCILIATION_COUNT,
+  );
+
   return {
     id: OPERATIONAL_MONTH_HOURS_ID,
     label: "Mapa de calor dia x hora",
     description: "Distribuição horária do fluxo no mês em andamento.",
     granularity: "hour",
-    from: startOfMonth(now),
+    from: recentDayStart < currentMonthStart ? recentDayStart : currentMonthStart,
     to: addHours(startOfHour(now), 1),
   };
 }
@@ -5274,6 +5351,45 @@ function hydrateRealtimeOpenBuckets(
     next.live_chart_hour?.rows ?? [],
     "hour",
   );
+
+  const recentDayStart = addDays(
+    todayStart,
+    1 - RECENT_DAY_RECONCILIATION_COUNT,
+  );
+  const tomorrowStart = addDays(todayStart, 1);
+  const monthHourRows = next[OPERATIONAL_MONTH_HOURS_ID]?.rows ?? [];
+  replaceDailyBucketsFromHourlySource(
+    next,
+    "live_chart_day",
+    recentDayStart,
+    tomorrowStart,
+    monthHourRows,
+  );
+  replaceDailyBucketsFromHourlySource(
+    next,
+    OPERATIONAL_TREND_DAYS_ID,
+    recentDayStart,
+    tomorrowStart,
+    monthHourRows,
+  );
+  replaceDailyBucketsFromHourlySource(
+    next,
+    CURRENT_MONTH_DAYS_ID,
+    recentDayStart < currentMonthStart ? currentMonthStart : recentDayStart,
+    tomorrowStart,
+    monthHourRows,
+  );
+
+  if (recentDayStart < currentMonthStart) {
+    replaceDailyBucketsFromHourlySource(
+      next,
+      OPERATIONAL_PREVIOUS_MONTH_ID,
+      recentDayStart,
+      currentMonthStart,
+      monthHourRows,
+    );
+  }
+
   replaceBucketRowsFromSource(
     next,
     "live_chart_week",
@@ -5292,8 +5408,42 @@ function hydrateRealtimeOpenBuckets(
     next[CURRENT_MONTH_DAYS_ID]?.rows ?? [],
     "day",
   );
+  const previousMonthStart = addMonths(currentMonthStart, -1);
+  replaceBucketRowsFromSource(
+    next,
+    "live_chart_month",
+    "month",
+    previousMonthStart,
+    currentMonthStart,
+    next[OPERATIONAL_PREVIOUS_MONTH_ID]?.rows ?? [],
+    "day",
+  );
 
   return next;
+}
+
+function replaceDailyBucketsFromHourlySource(
+  data: Record<string, RealtimeChartState>,
+  targetId: string,
+  from: Date,
+  to: Date,
+  sourceRows: AggregateEventRow[],
+) {
+  let cursor = startOfDay(from);
+
+  while (cursor < to) {
+    const nextDay = addDays(cursor, 1);
+    replaceBucketRowsFromSource(
+      data,
+      targetId,
+      "day",
+      cursor,
+      nextDay,
+      sourceRows,
+      "hour",
+    );
+    cursor = nextDay;
+  }
 }
 
 function replaceBucketRowsFromSource(
@@ -5330,9 +5480,9 @@ function replaceBucketRowsFromSource(
 
   target.rows = [
     ...target.rows.filter((row) => {
-      const date = new Date(row.bucket);
+      const date = parseAggregateBucket(row.bucket, targetGranularity);
       return (
-        Number.isNaN(date.getTime()) ||
+        !date ||
         bucketKeyForGranularity(date, targetGranularity) !== fromKey
       );
     }),
@@ -5356,8 +5506,8 @@ function aggregateRowsByIdentity(
     const identity = rowIdentity(row);
     if (!identity.cameraId && !identity.lineCountId) return;
 
-    const bucket = new Date(row.bucket);
-    if (Number.isNaN(bucket.getTime())) return;
+    const bucket = parseAggregateBucket(row.bucket, granularity);
+    if (!bucket) return;
 
     const inRange =
       granularity === "minute" || granularity === "hour"
@@ -5446,17 +5596,9 @@ async function fetchSubLocations(
   return filterScopedApiRows(rows.flat(), companyScopeId);
 }
 
-function companyScopeHeaders(companyId?: string | null) {
-  const cleanCompanyId = companyId?.trim();
-  return cleanCompanyId ? { "X-Company-ID": cleanCompanyId } : undefined;
-}
-
 async function fetchRealtimeWorkers(companyId?: string | null) {
-  const headers = companyScopeHeaders(companyId);
-  const rows = await apiFetch<unknown>("/workers", { headers }).then((response) =>
-    normalizeWorkerRows(response).map((row) =>
-      annotateWorkerCompanyScope(row, companyId, "GET /workers"),
-    ),
+  const rows = await apiFetch<unknown>("/workers").then((response) =>
+    normalizeWorkerRows(response),
   );
   const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
   return sortWorkersByActivity(collapseWorkerIdentityChains(scopedRows));
@@ -5614,6 +5756,7 @@ function buildScenarioTodayComparisonPoints(
   scenarios: Scenario[],
   rows: AggregateEventRow[],
   now: Date,
+  sourceGranularity: AggregateGranularity,
 ): ScenarioComparisonPoint[] {
   const todayStart = startOfDay(now);
   const tomorrowStart = addDays(todayStart, 1);
@@ -5623,6 +5766,7 @@ function buildScenarioTodayComparisonPoints(
     rows,
     todayStart,
     tomorrowStart,
+    sourceGranularity,
   );
 }
 
@@ -5631,12 +5775,19 @@ function buildScenarioPeriodComparisonPoints(
   rows: AggregateEventRow[],
   from: Date,
   to: Date,
+  sourceGranularity: AggregateGranularity,
 ): ScenarioComparisonPoint[] {
   return scenarios
     .map((scenario) => ({
       id: scenario.id,
       name: scenario.name,
-      total: sumScenarioRowsInRange(rows, scenario, from, to),
+      total: sumScenarioRowsInRange(
+        rows,
+        scenario,
+        from,
+        to,
+        sourceGranularity,
+      ),
     }))
     .sort(
       (left, right) =>
@@ -5648,6 +5799,7 @@ function buildScopeTodayComparisonPoints(
   scopes: RealtimeScopeOption[],
   rows: AggregateEventRow[],
   now: Date,
+  sourceGranularity: AggregateGranularity,
 ): TodayComparisonPoint[] {
   const todayStart = startOfDay(now);
   const tomorrowStart = addDays(todayStart, 1);
@@ -5656,7 +5808,13 @@ function buildScopeTodayComparisonPoints(
     .map((scope) => ({
       id: scope.id,
       name: scope.name,
-      total: sumScopeRowsInRange(rows, scope, todayStart, tomorrowStart),
+      total: sumScopeRowsInRange(
+        rows,
+        scope,
+        todayStart,
+        tomorrowStart,
+        sourceGranularity,
+      ),
     }))
     .sort(
       (left, right) =>
@@ -5670,6 +5828,8 @@ function buildOperationalMonthComparisonPoints(
   scope: RealtimeScopeOption,
   now: Date,
   mode: LiveOperationalSettings["monthComparison"],
+  currentGranularity: AggregateGranularity,
+  baselineGranularity: AggregateGranularity,
 ): OperationalMonthComparisonPoint[] {
   const currentStart = startOfMonth(now);
   const baselineStart =
@@ -5701,6 +5861,7 @@ function buildOperationalMonthComparisonPoints(
             scope,
             baselineFrom,
             addDays(baselineFrom, 1),
+            baselineGranularity,
           )
         : null,
       current: currentClosedOrOpen
@@ -5709,6 +5870,7 @@ function buildOperationalMonthComparisonPoints(
             scope,
             currentFrom,
             addDays(currentFrom, 1),
+            currentGranularity,
           )
         : null,
       day,
@@ -5784,10 +5946,9 @@ function sumScenarioRowsInRange(
   scenario: Scenario,
   from: Date,
   to: Date,
+  sourceGranularity: AggregateGranularity,
 ) {
   const multipliers = scenarioMultiplierMap(scenario);
-  const fromTime = from.getTime();
-  const toTime = to.getTime();
 
   return rows.reduce((sum, row) => {
     const multiplier = row.line_count_id
@@ -5795,8 +5956,7 @@ function sumScenarioRowsInRange(
       : undefined;
     if (multiplier === undefined) return sum;
 
-    const bucket = new Date(row.bucket).getTime();
-    if (Number.isNaN(bucket) || bucket < fromTime || bucket >= toTime) {
+    if (!aggregateBucketInRange(row.bucket, sourceGranularity, from, to)) {
       return sum;
     }
 
@@ -5819,8 +5979,8 @@ function aggregateScopeRowsByBucket(
   rows.forEach((row) => {
     if (!row.camera_id || !cameraIds.has(row.camera_id)) return;
 
-    const date = new Date(row.bucket);
-    if (Number.isNaN(date.getTime())) return;
+    const date = parseAggregateBucket(row.bucket, granularity);
+    if (!date) return;
 
     const key = bucketKeyForGranularity(date, granularity);
     totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0));
@@ -5843,8 +6003,8 @@ function aggregateScenarioRowsByBucket(
       : undefined;
     if (multiplier === undefined) return;
 
-    const date = new Date(row.bucket);
-    if (Number.isNaN(date.getTime())) return;
+    const date = parseAggregateBucket(row.bucket, granularity);
+    if (!date) return;
 
     const key = bucketKeyForGranularity(date, granularity);
     totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0) * multiplier);
@@ -5935,17 +6095,15 @@ function sumScopeRowsInRange(
   scope: RealtimeScopeOption,
   from: Date,
   to: Date,
+  sourceGranularity: AggregateGranularity,
 ) {
   if (!scope.scenario) {
     const cameraIds = new Set(scope.cameraIds);
-    const fromTime = from.getTime();
-    const toTime = to.getTime();
 
     return rows.reduce((sum, row) => {
       if (!row.camera_id || !cameraIds.has(row.camera_id)) return sum;
 
-      const bucket = new Date(row.bucket).getTime();
-      if (Number.isNaN(bucket) || bucket < fromTime || bucket >= toTime) {
+      if (!aggregateBucketInRange(row.bucket, sourceGranularity, from, to)) {
         return sum;
       }
 
@@ -5955,8 +6113,6 @@ function sumScopeRowsInRange(
 
   const scenario = scope.scenario;
   const multipliers = scenarioMultiplierMap(scenario);
-  const fromTime = from.getTime();
-  const toTime = to.getTime();
 
   return rows.reduce((sum, row) => {
     const multiplier = row.line_count_id
@@ -5964,8 +6120,7 @@ function sumScopeRowsInRange(
       : undefined;
     if (multiplier === undefined) return sum;
 
-    const bucket = new Date(row.bucket).getTime();
-    if (Number.isNaN(bucket) || bucket < fromTime || bucket >= toTime) {
+    if (!aggregateBucketInRange(row.bucket, sourceGranularity, from, to)) {
       return sum;
     }
 
@@ -7866,17 +8021,24 @@ function bucketKeyForGranularity(date: Date, granularity: AggregateGranularity) 
   if (granularity === "minute") return startOfMinute(date).getTime();
   if (granularity === "hour") return startOfHour(date).getTime();
   if (granularity === "day") {
-    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+    return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
   }
-  if (granularity === "week") return startOfUtcWeek(date).getTime();
+  if (granularity === "week") {
+    const weekStart = startOfWeek(date);
+    return Date.UTC(
+      weekStart.getFullYear(),
+      weekStart.getMonth(),
+      weekStart.getDate(),
+    );
+  }
   if (granularity === "month") {
-    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
+    return Date.UTC(date.getFullYear(), date.getMonth(), 1);
   }
   if (granularity === "semester") {
-    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() < 6 ? 0 : 6, 1);
+    return Date.UTC(date.getFullYear(), date.getMonth() < 6 ? 0 : 6, 1);
   }
 
-  return Date.UTC(date.getUTCFullYear(), 0, 1);
+  return Date.UTC(date.getFullYear(), 0, 1);
 }
 
 function bucketLabel(date: Date, granularity: AggregateGranularity) {
@@ -8034,16 +8196,6 @@ function startOfWeek(date: Date) {
   const day = next.getDay();
   const diff = day === 0 ? -6 : 1 - day;
   next.setDate(next.getDate() + diff);
-  return next;
-}
-
-function startOfUtcWeek(date: Date) {
-  const next = new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
-  );
-  const day = next.getUTCDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  next.setUTCDate(next.getUTCDate() + diff);
   return next;
 }
 

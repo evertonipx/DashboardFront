@@ -6,24 +6,32 @@ import { Maximize2, Minimize2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-export function useMonitorMode() {
-  const [monitorMode, setMonitorMode] = React.useState(false);
+type MonitorModeOptions = {
+  initialMode?: boolean;
+  requestFullscreen?: boolean;
+};
+
+export function useMonitorMode({
+  initialMode = false,
+  requestFullscreen = true,
+}: MonitorModeOptions = {}) {
+  const [monitorMode, setMonitorMode] = React.useState(initialMode);
 
   const exitMonitorMode = React.useCallback(() => {
     setMonitorMode(false);
 
-    if (document.fullscreenElement) {
+    if (requestFullscreen && document.fullscreenElement) {
       document.exitFullscreen().catch(() => undefined);
     }
-  }, []);
+  }, [requestFullscreen]);
 
   const enterMonitorMode = React.useCallback(() => {
     setMonitorMode(true);
 
-    if (!document.fullscreenElement) {
+    if (requestFullscreen && !document.fullscreenElement) {
       document.documentElement.requestFullscreen?.().catch(() => undefined);
     }
-  }, []);
+  }, [requestFullscreen]);
 
   React.useEffect(() => {
     if (!monitorMode) return;
@@ -38,7 +46,7 @@ export function useMonitorMode() {
     }
 
     function handleFullscreenChange() {
-      if (!document.fullscreenElement) {
+      if (requestFullscreen && !document.fullscreenElement) {
         setMonitorMode(false);
       }
     }
@@ -51,7 +59,7 @@ export function useMonitorMode() {
       window.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
     };
-  }, [monitorMode]);
+  }, [monitorMode, requestFullscreen]);
 
   return {
     enterMonitorMode,
