@@ -94,8 +94,36 @@
     overflow: hidden;
   }
 
+  [data-layout-card-id] {
+    container-type: inline-size;
+  }
+
+  [data-card-layout-root] {
+    container-type: inline-size;
+  }
+
+  [data-scenario-picker] {
+    container-type: inline-size;
+  }
+
+  [data-card-layout-grid] > [data-layout-card-id] {
+    grid-column: span 1 / span 1 !important;
+  }
+
   [data-layout-card-id] [data-card-header] {
     flex: 0 0 auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  [data-layout-card-id] [data-card-header] > *,
+  [data-layout-card-id] [data-card-header] > * > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  [data-layout-card-id] [data-card-header] h3 {
+    overflow-wrap: anywhere;
   }
 
   [data-layout-card-id] [data-card-description] {
@@ -106,21 +134,28 @@
   }
 
   [data-layout-card-id] [data-card-content] {
+    display: flex;
+    min-height: 0;
     min-width: 0;
+    flex: 1 1 0%;
+    flex-direction: column;
+    overflow: auto;
   }
 
   [data-layout-card-id] [data-card-content]:has([data-echart]) {
-    display: flex;
-    min-height: 0;
-    flex: 1 1 0%;
-    flex-direction: column;
     overflow: hidden;
+  }
+
+  [data-layout-card-id] [data-card-content] > * {
+    min-height: 0;
+    max-height: 100%;
   }
 
   [data-layout-card-id] [data-card-content] > :has([data-echart]),
   [data-layout-card-id] [data-card-content] :has(> [data-echart]) {
     min-height: 0 !important;
     min-width: 0 !important;
+    height: 100% !important;
     max-height: none !important;
     max-width: 100% !important;
     flex: 1 1 0%;
@@ -146,5 +181,90 @@
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+}
+
+/* Container queries live outside Tailwind layers so they override viewport
+   utilities when a user resizes an individual dashboard widget. */
+@container (min-width: 460px) {
+  [data-scenario-picker-heading],
+  [data-scenario-picker-selection] {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  [data-scenario-picker-mode] {
+    width: 13.75rem;
+  }
+
+  [data-scenario-picker-edit] {
+    width: auto;
+  }
+}
+
+@container (min-width: 640px) {
+  [data-card-layout-grid] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  [data-card-layout-grid]
+    > [data-layout-card-id][data-layout-card-size="wide"],
+  [data-card-layout-grid]
+    > [data-layout-card-id][data-layout-card-size="large"],
+  [data-card-layout-grid]
+    > [data-layout-card-id][data-layout-card-size="full"] {
+    grid-column: span 2 / span 2 !important;
+  }
+}
+
+@container (min-width: 1080px) {
+  [data-card-layout-grid] {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  [data-card-layout-grid]
+    > [data-layout-card-id][data-layout-card-size="wide"] {
+    grid-column: span 2 / span 2 !important;
+  }
+
+  [data-card-layout-grid]
+    > [data-layout-card-id][data-layout-card-size="large"] {
+    grid-column: span 3 / span 3 !important;
+  }
+
+  [data-card-layout-grid]
+    > [data-layout-card-id][data-layout-card-size="full"] {
+    grid-column: span 4 / span 4 !important;
+  }
+}
+
+@container (max-width: 480px) {
+  [data-layout-card-id] [data-card-header] > .flex {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  [data-layout-card-id] [data-card-header] > .flex > .flex:last-child {
+    width: 100%;
+    justify-content: flex-start !important;
+  }
+}
+
+@container (max-width: 360px) {
+  [data-layout-card-id] [data-card-header] {
+    padding: 0.75rem;
+    padding-bottom: 0.5rem;
+  }
+
+  [data-layout-card-id] [data-card-header] h3 {
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+
+  [data-layout-card-id] [data-card-description] {
+    -webkit-line-clamp: 1;
+    font-size: 0.75rem;
+    line-height: 1rem;
   }
 }

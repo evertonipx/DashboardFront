@@ -15,6 +15,7 @@ export type PeriodAnalysisWidgetKind =
   | "cumulative"
   | "trend"
   | "hour_profile"
+  | "hourly_occupancy"
   | "peak_days"
   | "rose"
   | "totals_table";
@@ -27,11 +28,14 @@ export type PeriodAnalysisBaseline =
 export type PeriodAnalysisWidget = {
   baseline: PeriodAnalysisBaseline;
   createdAt: string;
+  entryScenarioIds: string[];
+  exitScenarioIds: string[];
   granularity: ScenarioAnalyticsGranularity;
   id: string;
   kind: PeriodAnalysisWidgetKind;
   scenarioIds: string[];
   selectionMode: ScenarioSelectionMode;
+  startHour: number;
   title: string;
   updatedAt: string;
 };
@@ -53,6 +57,7 @@ export const PERIOD_ANALYSIS_WIDGETS_UPDATED_EVENT =
   "ipxdata:period-analysis-widgets-updated";
 
 const WIDGETS_STORAGE_KEY = "ipxdata.period-analysis-widgets.v1";
+const WIDGETS_SCHEMA_VERSION_KEY = "ipxdata.period-analysis-widgets.schema.v2";
 const SETTINGS_STORAGE_KEY = "ipxdata.period-analysis-settings.v1";
 
 const defaultWidgetDefinitions: Array<
@@ -85,6 +90,13 @@ const defaultWidgetDefinitions: Array<
     id: "analysis_heatmap",
     kind: "heatmap",
     title: "Mapa de calor dia x hora",
+  },
+  {
+    baseline: "previous_period",
+    granularity: "hour",
+    id: "analysis_hourly_occupancy",
+    kind: "hourly_occupancy",
+    title: "Ocupação hora a hora",
   },
   {
     baseline: "previous_month",
@@ -121,8 +133,11 @@ export function createDefaultPeriodAnalysisWidgets() {
   return defaultWidgetDefinitions.map<PeriodAnalysisWidget>((widget) => ({
     ...widget,
     createdAt: now,
+    entryScenarioIds: [],
+    exitScenarioIds: [],
     scenarioIds: [],
     selectionMode: "all",
+    startHour: 0,
     updatedAt: now,
   }));
 }
@@ -145,12 +160,19 @@ export function loadPeriodAnalysisWidgets(
     const stored = window.localStorage.getItem(
       scopedKey(WIDGETS_STORAGE_KEY, companyId, userId),
     );
-    if (stored === null) return createDefaultPeriodAnalysisWidgets();
+    if (stored === null) {
+      return migratePeriodAnalysisWidgets(
+        createDefaultPeriodAnalysisWidgets(),
+        companyId,
+        userId,
+      );
+    }
     const parsed = JSON.parse(stored) as unknown;
     if (!Array.isArray(parsed)) return createDefaultPeriodAnalysisWidgets();
-    return parsed
+    const normalized = parsed
       .map(normalizeWidget)
       .filter((widget): widget is PeriodAnalysisWidget => Boolean(widget));
+    return migratePeriodAnalysisWidgets(normalized, companyId, userId);
   } catch {
     return createDefaultPeriodAnalysisWidgets();
   }
@@ -190,11 +212,16 @@ export function upsertPeriodAnalysisWidget(
   const widget: PeriodAnalysisWidget = {
     baseline: input.baseline,
     createdAt: current?.createdAt ?? now,
+    entryScenarioIds: normalizeIds(input.entryScenarioIds),
+    exitScenarioIds: normalizeIds(input.exitScenarioIds).filter(
+      (scenarioId) => !input.entryScenarioIds.includes(scenarioId),
+    ),
     granularity: input.granularity,
     id: input.id || createWidgetId(),
     kind: input.kind,
     scenarioIds: input.scenarioIds,
     selectionMode: input.selectionMode,
+    startHour: normalizeHour(input.startHour),
     title: input.title.trim() || widgetKindLabel(input.kind),
     updatedAt: now,
   };
@@ -268,9 +295,10 @@ export function widgetKindLabel(kind: PeriodAnalysisWidgetKind) {
       cumulative: "Acumulado diário x base",
       heatmap: "Mapa de calor dia x hora",
       hour_profile: "Perfil horário",
+      hourly_occupancy: "Ocupação hora a hora",
       peak_days: "Top 5 dias de pico",
       ranking: "Ranking de cenários",
-      rose: "Distribuição radial por cenário",
+      rose: "Composição por cenário",
       summary: "Resumo do período",
       timeline: "Fluxo por período",
       totals_table: "Totais por cenário",
@@ -298,20 +326,16 @@ function normalizeWidget(value: unknown): PeriodAnalysisWidget | null {
       typeof record.createdAt === "string"
         ? record.createdAt
         : new Date().toISOString(),
+    entryScenarioIds: normalizeIds(record.entryScenarioIds),
+    exitScenarioIds: normalizeIds(record.exitScenarioIds).filter(
+      (scenarioId) => !normalizeIds(record.entryScenarioIds).includes(scenarioId),
+    ),
     granularity: record.granularity === "hour" ? "hour" : "day",
     id: record.id,
     kind: record.kind,
-    scenarioIds: Array.isArray(record.scenarioIds)
-      ? Array.from(
-          new Set(
-            record.scenarioIds.filter(
-              (scenarioId): scenarioId is string =>
-                typeof scenarioId === "string" && Boolean(scenarioId.trim()),
-            ),
-          ),
-        )
-      : [],
+    scenarioIds: normalizeIds(record.scenarioIds),
     selectionMode: record.selectionMode === "custom" ? "custom" : "all",
+    startHour: normalizeHour(record.startHour),
     title: record.title,
     updatedAt:
       typeof record.updatedAt === "string"
@@ -330,10 +354,58 @@ function isWidgetKind(value: unknown): value is PeriodAnalysisWidgetKind {
     "cumulative",
     "trend",
     "hour_profile",
+    "hourly_occupancy",
     "peak_days",
     "rose",
     "totals_table",
   ].includes(String(value));
+}
+
+function migratePeriodAnalysisWidgets(
+  widgets: PeriodAnalysisWidget[],
+  companyId?: string | null,
+  userId?: string | null,
+) {
+  const versionKey = scopedKey(
+    WIDGETS_SCHEMA_VERSION_KEY,
+    companyId,
+    userId,
+  );
+  if (window.localStorage.getItem(versionKey) === "2") return widgets;
+
+  const occupancyDefault = createDefaultPeriodAnalysisWidgets().find(
+    (widget) => widget.kind === "hourly_occupancy",
+  );
+  const migrated =
+    occupancyDefault &&
+    !widgets.some((widget) => widget.kind === "hourly_occupancy")
+      ? [...widgets, occupancyDefault]
+      : widgets;
+
+  window.localStorage.setItem(
+    scopedKey(WIDGETS_STORAGE_KEY, companyId, userId),
+    JSON.stringify(migrated),
+  );
+  window.localStorage.setItem(versionKey, "2");
+  return migrated;
+}
+
+function normalizeIds(value: unknown) {
+  return Array.isArray(value)
+    ? Array.from(
+        new Set(
+          value.filter(
+            (scenarioId): scenarioId is string =>
+              typeof scenarioId === "string" && Boolean(scenarioId.trim()),
+          ),
+        ),
+      )
+    : [];
+}
+
+function normalizeHour(value: unknown) {
+  const hour = Number(value);
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : 0;
 }
 
 function isBaseline(value: unknown): value is PeriodAnalysisBaseline {

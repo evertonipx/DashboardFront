@@ -18,7 +18,13 @@ import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useWidgetColor } from "@/components/app/widget-appearance";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   buildAnnualAccumulatedComparisonChartOption,
@@ -449,55 +455,58 @@ function AccessRankingCard({
     <Card className="h-full min-w-0 overflow-hidden">
       <CardHeader className="border-b px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
+          <div className="min-w-[min(100%,16rem)] flex-1">
             <CardTitle className="text-sm">Ranking dos acessos</CardTitle>
-            <p className="mt-1 text-[10px] text-muted-foreground">
+            <CardDescription className="mt-1 text-[10px] leading-4">
               Cada acesso corresponde a um cenário; os picos horários consideram
               o período selecionado.
-            </p>
+            </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline" className="text-[10px]">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <Badge
+              variant="outline"
+              className="max-w-[180px] truncate text-[10px]"
+              title={formatCountingIntelligencePeriod(model)}
+            >
               {formatCountingIntelligencePeriod(model)}
             </Badge>
             <Badge variant="outline" className="text-[10px]">
-              {model.accesses.length} acessos
-            </Badge>
-            <Badge variant="outline" className="text-[10px]">
-              100% da seleção
+              {model.accesses.length} acessos · 100%
             </Badge>
             <div className="inline-flex overflow-hidden rounded-md border bg-card">
               <Button
                 type="button"
                 variant={order === "desc" ? "secondary" : "ghost"}
-                size="sm"
-                className="rounded-none border-0"
+                size="icon"
+                className="h-8 w-8 rounded-none border-0"
                 onClick={() => onOrderChange("desc")}
+                aria-label="Ordenar do maior para o menor"
                 title="Ordenar do maior para o menor"
               >
                 <ArrowDown className="h-3.5 w-3.5" />
-                Maior
               </Button>
               <Button
                 type="button"
                 variant={order === "asc" ? "secondary" : "ghost"}
-                size="sm"
-                className="rounded-none border-0 border-l"
+                size="icon"
+                className="h-8 w-8 rounded-none border-0 border-l"
                 onClick={() => onOrderChange("asc")}
+                aria-label="Ordenar do menor para o maior"
                 title="Ordenar do menor para o maior"
               >
                 <ArrowUp className="h-3.5 w-3.5" />
-                Menor
               </Button>
             </div>
             <Button
               type="button"
               variant={settingsOpen ? "default" : "outline"}
-              size="sm"
+              size="icon"
+              className="h-8 w-8"
               onClick={() => setSettingsOpen((current) => !current)}
+              aria-label="Selecionar cenários do ranking"
+              title="Selecionar cenários"
             >
               <Settings2 className="h-3.5 w-3.5" />
-              Cenários
             </Button>
           </div>
         </div>

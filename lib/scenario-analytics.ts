@@ -218,6 +218,7 @@ export function buildScenarioHourlyOccupancy({
   exitScenarios,
   rows,
   sourceGranularity,
+  startHour = 0,
   through,
 }: {
   day: Date;
@@ -225,14 +226,23 @@ export function buildScenarioHourlyOccupancy({
   exitScenarios: Scenario[];
   rows: AggregateEventRow[];
   sourceGranularity: AggregateGranularity;
+  startHour?: number;
   through: Date;
 }): ScenarioHourlyOccupancyPoint[] {
-  const from = new Date(day.getFullYear(), day.getMonth(), day.getDate());
-  const dayEnd = new Date(
-    from.getFullYear(),
-    from.getMonth(),
-    from.getDate() + 1,
+  const normalizedStartHour = normalizeStartHour(startHour);
+  const dayStart = new Date(
+    day.getFullYear(),
+    day.getMonth(),
+    day.getDate(),
   );
+  const from = new Date(
+    day.getFullYear(),
+    day.getMonth(),
+    day.getDate(),
+    normalizedStartHour,
+  );
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
   const to = new Date(
     Math.min(dayEnd.getTime(), Math.max(from.getTime(), through.getTime())),
   );
@@ -257,12 +267,13 @@ export function buildScenarioHourlyOccupancy({
 
   return Array.from({ length: 24 }, (_, hour) => {
     const bucket = new Date(
-      from.getFullYear(),
-      from.getMonth(),
-      from.getDate(),
+      dayStart.getFullYear(),
+      dayStart.getMonth(),
+      dayStart.getDate(),
       hour,
     );
-    const included = bucket < to;
+    const beforeStart = hour < normalizedStartHour;
+    const included = !beforeStart && bucket < to;
 
     if (included) {
       cumulativeEntries += entryTotals.get(bucketKey(bucket, "hour")) ?? 0;
@@ -275,9 +286,17 @@ export function buildScenarioHourlyOccupancy({
       exits: cumulativeExits,
       hour,
       label: `${String(hour).padStart(2, "0")}h`,
-      occupancy: included ? cumulativeEntries - cumulativeExits : null,
+      occupancy: beforeStart
+        ? 0
+        : included
+          ? cumulativeEntries - cumulativeExits
+          : null,
     };
   });
+}
+
+export function formatOccupancyStartHour(startHour: number) {
+  return `${String(normalizeStartHour(startHour)).padStart(2, "0")}:00`;
 }
 
 export function sumSelectedScenarioRows({
@@ -544,4 +563,8 @@ function formatPeakDayLabel(date: Date) {
   }).format(date);
 
   return `${weekday} ${dayMonth}`;
+}
+
+function normalizeStartHour(value: number) {
+  return Number.isInteger(value) && value >= 0 && value <= 23 ? value : 0;
 }

@@ -540,6 +540,7 @@ export function OccupancyScenarioDashboard() {
           label: "Cenário de ocupação",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
+          standardHeightClassName: "row-span-3 sm:row-span-2",
           node: (
             <OccupancyScenarioDetailCard
               history={history}
@@ -602,7 +603,7 @@ export function OccupancyScenarioDashboard() {
             <Skeleton className="h-10 w-32" />
           </div>
         ) : visibleScenarios.length ? (
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-end 2xl:justify-between">
             <div className="min-w-0 flex-1 space-y-2">
               <div className="text-sm font-medium">Cenário de ocupação</div>
               <Select value={selectedId} onValueChange={setSelectedId}>
@@ -857,11 +858,11 @@ function OccupancyChartCard({
       </CardHeader>
       <CardContent>
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-[190px] w-full sm:h-[300px]" />
         ) : state?.error ? (
           <EmptyChartState text={state.error} />
         ) : hasData ? (
-          <div className="h-[300px] w-full">
+          <div className="h-[190px] w-full sm:h-[300px]">
             <EChart option={option} />
           </div>
         ) : (
@@ -1080,7 +1081,7 @@ function EmptyOccupancyCard({ title }: { title: string }) {
 
 function EmptyChartState({ text }: { text: string }) {
   return (
-    <div className="flex h-[330px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+    <div className="flex h-[190px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground sm:h-[330px]">
       {text}
     </div>
   );
@@ -1519,6 +1520,21 @@ function buildOccupancyChartOption(
           color: series.fill,
         },
         name: series.name,
+        label:
+          series.kind === "current"
+            ? {
+                color: palette.legendText,
+                distance: 7,
+                fontSize: 10,
+                fontWeight: 600,
+                formatter: (params: { value?: number | null }) =>
+                  params.value === null || params.value === undefined
+                    ? ""
+                    : formatOccupancyValue(Number(params.value)),
+                position: "top",
+                show: true,
+              }
+            : { show: false },
         rippleEffect: series.effect
           ? {
               brushType: "stroke",

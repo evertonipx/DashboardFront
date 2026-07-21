@@ -5,6 +5,14 @@ import { ChevronDown, Search, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { Scenario } from "@/lib/types";
 import { cn, formatNumber } from "@/lib/utils";
@@ -100,8 +108,14 @@ export function ScenarioPicker({
   }
 
   return (
-    <div className={cn("rounded-md border bg-background p-2", className)}>
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+    <div
+      data-scenario-picker
+      className={cn("rounded-md border bg-background p-2", className)}
+    >
+      <div
+        data-scenario-picker-heading
+        className="flex flex-col gap-2"
+      >
         <div className="min-w-0">
           <div className="text-xs font-medium uppercase text-muted-foreground">
             {label}
@@ -109,7 +123,10 @@ export function ScenarioPicker({
           <div className="truncate text-sm font-semibold">{selectedSummary}</div>
         </div>
         {allowAll ? (
-          <div className="grid grid-cols-2 gap-2 sm:w-[220px]">
+          <div
+            data-scenario-picker-mode
+            className="grid w-full grid-cols-2 gap-2"
+          >
             <Button
               type="button"
               size="sm"
@@ -132,7 +149,10 @@ export function ScenarioPicker({
 
       {mode === "custom" ? (
         <div className="mt-2 rounded-md bg-muted/20 p-2">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div
+            data-scenario-picker-selection
+            className="flex flex-col gap-2"
+          >
             <div className="flex min-w-0 flex-wrap gap-1.5">
               {selectedScenarios.slice(0, 4).map((scenario) => (
                 <Badge
@@ -159,7 +179,8 @@ export function ScenarioPicker({
               type="button"
               size="sm"
               variant="ghost"
-              className="shrink-0"
+              className="w-full shrink-0"
+              data-scenario-picker-edit
               onClick={() => setOpen((value) => !value)}
               aria-expanded={open}
             >
@@ -170,97 +191,113 @@ export function ScenarioPicker({
             </Button>
           </div>
 
-          {open ? (
-            <div className="mt-2 rounded-md border bg-card p-2">
-              <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                    placeholder="Filtrar por palavras: entrada, saída..."
-                    className="pl-9"
-                  />
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={selectFiltered}
-                  disabled={!filteredScenarios.length}
-                >
-                  Selecionar filtrados
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={removeFiltered}
-                  disabled={
-                    !filteredScenarios.some((scenario) =>
-                      selectedIdSet.has(scenario.id),
-                    )
-                  }
-                >
-                  Remover filtrados
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => onSelectedIdsChange([])}
-                  disabled={!selectedIds.length}
-                >
-                  <X className="h-3.5 w-3.5" />
-                  Limpar
-                </Button>
-              </div>
-
-              <div className="mt-2 max-h-[260px] overflow-y-auto rounded-md border bg-background p-1">
-                {loading ? (
-                  <div className="px-3 py-4 text-sm text-muted-foreground">
-                    Carregando cenários...
-                  </div>
-                ) : filteredScenarios.length ? (
-                  <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3">
-                    {filteredScenarios.map((scenario) => {
-                      const selected = selectedIdSet.has(scenario.id);
-
-                      return (
-                        <button
-                          key={scenario.id}
-                          type="button"
-                          className={cn(
-                            "min-w-0 rounded-md border px-3 py-2 text-left text-sm transition",
-                            selected
-                              ? "border-primary bg-primary/10 text-primary"
-                              : "border-transparent bg-card hover:border-primary/40",
-                          )}
-                          onClick={() => toggleScenario(scenario.id)}
-                        >
-                          <span className="block truncate font-medium">
-                            {scenario.name}
-                          </span>
-                          <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                            {formatNumber(scenario.lines?.length ?? 0)} linhas
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="px-3 py-4 text-sm text-muted-foreground">
-                    Nenhum cenário encontrado.
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-2 flex justify-end">
-                <Button type="button" size="sm" onClick={() => setOpen(false)}>
-                  Concluir
-                </Button>
-              </div>
-            </div>
-          ) : null}
         </div>
       ) : null}
+
+      <Dialog
+        open={open && mode === "custom"}
+        onOpenChange={(nextOpen) => {
+          setOpen(nextOpen);
+          if (!nextOpen) setSearch("");
+        }}
+      >
+        <DialogContent className="grid max-h-[calc(100dvh-1rem)] grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden p-3 sm:max-w-4xl sm:p-4">
+          <DialogHeader className="min-w-0 pr-8">
+            <DialogTitle className="break-words">Selecionar {label}</DialogTitle>
+            <DialogDescription>
+              {formatNumber(selectedScenarios.length)} de {formatNumber(scenarios.length)} cenário(s) selecionado(s)
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex min-w-0 flex-col gap-2 lg:flex-row lg:items-center">
+            <div className="relative min-w-0 flex-1">
+              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Filtrar por palavras: entrada, saída..."
+                className="pl-9"
+              />
+            </div>
+            <div className="grid min-w-0 gap-2 sm:grid-cols-2 lg:flex lg:shrink-0">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={selectFiltered}
+                disabled={!filteredScenarios.length}
+              >
+                Selecionar filtrados
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={removeFiltered}
+                disabled={
+                  !filteredScenarios.some((scenario) =>
+                    selectedIdSet.has(scenario.id),
+                  )
+                }
+              >
+                Remover filtrados
+              </Button>
+            </div>
+          </div>
+
+          <div className="min-h-0 overflow-y-auto rounded-md border bg-background p-1">
+            {loading ? (
+              <div className="px-3 py-4 text-sm text-muted-foreground">
+                Carregando cenários...
+              </div>
+            ) : filteredScenarios.length ? (
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-1">
+                {filteredScenarios.map((scenario) => {
+                  const selected = selectedIdSet.has(scenario.id);
+
+                  return (
+                    <button
+                      key={scenario.id}
+                      type="button"
+                      className={cn(
+                        "min-w-0 rounded-md border px-3 py-2 text-left text-sm transition",
+                        selected
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-transparent bg-card hover:border-primary/40",
+                      )}
+                      onClick={() => toggleScenario(scenario.id)}
+                    >
+                      <span className="block truncate font-medium">
+                        {scenario.name}
+                      </span>
+                      <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                        {formatNumber(scenario.lines?.length ?? 0)} linhas
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="px-3 py-4 text-sm text-muted-foreground">
+                Nenhum cenário encontrado.
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => onSelectedIdsChange([])}
+              disabled={!selectedIds.length}
+            >
+              <X className="h-3.5 w-3.5" />
+              Limpar seleção
+            </Button>
+            <Button type="button" onClick={() => setOpen(false)}>
+              Concluir
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

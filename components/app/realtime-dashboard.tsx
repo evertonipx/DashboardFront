@@ -36,7 +36,10 @@ import {
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
-import { useWidgetColor } from "@/components/app/widget-appearance";
+import {
+  useWidgetChartType,
+  useWidgetColor,
+} from "@/components/app/widget-appearance";
 import {
   MonitorModeButton,
   MonitorModeExitHint,
@@ -134,6 +137,13 @@ import {
   pastelBarColor,
 } from "@/lib/chart-palette";
 import {
+  buildScenarioCompositionOption,
+  normalizeScenarioCompositionChartType,
+  scenarioCompositionDescription,
+  type ScenarioCompositionChartType,
+} from "@/lib/chart-composition";
+import { buildHourlyOccupancyOption } from "@/lib/hourly-occupancy-chart";
+import {
   DAY_OF_MONTH_AXIS_LABELS,
   buildCalendarAxisLabel,
   buildCalendarMarkArea,
@@ -156,13 +166,14 @@ import {
   buildScenarioCumulativeTotals,
   buildScenarioHourlyOccupancy,
   buildTopScenarioPeakDays,
+  formatOccupancyStartHour,
   scenarioSelectionSummary,
   selectScenarios,
   type ScenarioCumulativeTotalPoint,
   type ScenarioHourlyOccupancyPoint,
   type ScenarioPeakDayPoint,
 } from "@/lib/scenario-analytics";
-import { inferScenarioDirection } from "@/lib/scenario-direction";
+import { inferOccupancyScenarios } from "@/lib/scenario-direction";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -313,6 +324,8 @@ const OPERATIONAL_PREVIOUS_MONTH_ID = "live_operational_previous_month";
 const OPERATIONAL_LAST_YEAR_MONTH_ID = "live_operational_last_year_month";
 const OPERATIONAL_TREND_DAYS_ID = "live_operational_trend_days";
 const OPERATIONAL_MONTH_HOURS_ID = "live_operational_month_hours";
+const OCCUPANCY_HOURS_ID = "live_hourly_occupancy_data";
+const OCCUPANCY_START_HOURS = Array.from({ length: 24 }, (_, hour) => hour);
 const HOUR_AXIS_LABELS = Array.from(
   { length: 24 },
   (_, hour) =>
@@ -341,7 +354,7 @@ const SCENARIO_WIDGET_OPTIONS: Array<{
   },
   {
     description: "Participação proporcional dos cenários no fluxo mensal.",
-    label: "Distribuição radial por cenário",
+    label: "Composição por cenário",
     value: "rose",
   },
   {
@@ -530,6 +543,9 @@ export function RealtimeDashboard({
   }, [companyScopeId, preferenceScope]);
   const hourState = chartData.live_chart_hour;
   const hourRows = hourState?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const occupancyHourState = chartData[OCCUPANCY_HOURS_ID];
+  const occupancyHourRows =
+    occupancyHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const monthRows = chartData.live_chart_month?.rows ?? EMPTY_AGGREGATE_ROWS;
   const comparisonHourState = chartData[OPERATIONAL_COMPARISON_HOURS_ID];
   const comparisonHourRows =
@@ -665,6 +681,10 @@ export function RealtimeDashboard({
         buildOperationalBaselineMonthDefinition(now, "last_year"),
         buildOperationalTrendDaysDefinition(now),
         buildOperationalMonthHoursDefinition(now),
+        buildHourlyOccupancyDataDefinition(
+          now,
+          operationalSettings.occupancyStartHour,
+        ),
       ];
       try {
         const entries = await Promise.all(
@@ -727,7 +747,11 @@ export function RealtimeDashboard({
         }
       }
     },
-    [companyScopeId, operationalSettings.intradayComparison],
+    [
+      companyScopeId,
+      operationalSettings.intradayComparison,
+      operationalSettings.occupancyStartHour,
+    ],
   );
 
   React.useEffect(() => {
@@ -1250,16 +1274,18 @@ export function RealtimeDashboard({
         day: clock,
         entryScenarios: occupancyEntryScenarios,
         exitScenarios: occupancyExitScenarios,
-        rows: hourRows,
-        sourceGranularity: chartData.live_chart_hour?.granularity ?? "hour",
+        rows: occupancyHourRows,
+        sourceGranularity: occupancyHourState?.granularity ?? "hour",
+        startHour: operationalSettings.occupancyStartHour,
         through: clock,
       }),
     [
-      chartData.live_chart_hour?.granularity,
       clock,
-      hourRows,
       occupancyEntryScenarios,
       occupancyExitScenarios,
+      occupancyHourRows,
+      occupancyHourState?.granularity,
+      operationalSettings.occupancyStartHour,
     ],
   );
   const scenarioTodayComparisonPoints = React.useMemo(
@@ -1806,6 +1832,7 @@ export function RealtimeDashboard({
               : occupancyEntryScenarios.map((scenario) => scenario.id)
           }
           entryScenarios={occupancyEntryScenarios}
+          error={occupancyHourState?.error}
           exitScenarioIds={
             operationalSettings.occupancySelectionMode === "custom"
               ? operationalSettings.occupancyExitScenarioIds
@@ -1865,9 +1892,13 @@ export function RealtimeDashboard({
               };
             })
           }
+          onStartHourChange={(occupancyStartHour) =>
+            updateOperationalSettings({ occupancyStartHour })
+          }
           points={hourlyOccupancyPoints}
           scenarios={scenarios}
           selectionMode={operationalSettings.occupancySelectionMode}
+          startHour={operationalSettings.occupancyStartHour}
         />
       ),
     },
@@ -1901,6 +1932,8 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      standardHeightClassName: "row-span-4 sm:row-span-2",
+      tallHeightClassName: "row-span-4 sm:row-span-3",
       node: (
         <ScenarioTotalsTableCard
           canConfigure={canEditVisual}
@@ -2034,7 +2067,8 @@ export function RealtimeDashboard({
     },
     {
       id: "live_scenario_rose",
-      label: "Distribuição radial por cenário",
+      chartTypes: ["rose", "treemap"] as const,
+      label: "Composição por cenário",
       defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
@@ -2185,13 +2219,27 @@ export function RealtimeDashboard({
     if (widget.kind === "scenario_widget") {
       return {
         id: `live_custom_${widget.id}`,
+        chartTypes:
+          widget.widgetType === "rose"
+            ? (["rose", "treemap"] as const)
+            : undefined,
         label: widget.title,
         defaultHeight:
-          widget.widgetType === "heatmap" ? ("tall" as const) : ("standard" as const),
+          widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
+            ? ("tall" as const)
+            : ("standard" as const),
         defaultSize:
           widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
             ? ("full" as const)
             : ("wide" as const),
+        standardHeightClassName:
+          widget.widgetType === "totals_table"
+            ? "row-span-4 sm:row-span-2"
+            : undefined,
+        tallHeightClassName:
+          widget.widgetType === "totals_table"
+            ? "row-span-4 sm:row-span-3"
+            : undefined,
         node: (
           <CustomScenarioWidgetCard
             canConfigure={canEditVisual}
@@ -2488,6 +2536,7 @@ export function RealtimeDashboard({
       entryScenarios: occupancyEntryScenarios,
       exitScenarios: occupancyExitScenarios,
       points: hourlyOccupancyPoints,
+      startHour: operationalSettings.occupancyStartHour,
       widgetColor: liveColorByCardId.get("live_hourly_occupancy"),
     }),
   ]);
@@ -2515,6 +2564,10 @@ export function RealtimeDashboard({
         operationalSettings.roseScenarioIds,
       ),
       liveColorByCardId.get("live_scenario_rose"),
+      undefined,
+      normalizeScenarioCompositionChartType(
+        liveChartTypeByCardId.get("live_scenario_rose"),
+      ),
     ),
   ]);
   liveChartEntries.push([
@@ -2634,6 +2687,9 @@ export function RealtimeDashboard({
             selectionLabel,
             widgetColor,
             widget.title,
+            normalizeScenarioCompositionChartType(
+              liveChartTypeByCardId.get(cardId),
+            ),
           ),
         ]);
         return;
@@ -2901,7 +2957,7 @@ export function RealtimeDashboard({
           </div>
         ) : scopeOptions.length ? (
           <div className="space-y-3">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-end 2xl:justify-between">
             <div className="grid min-w-0 flex-1 gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
               <div className="space-y-2">
                 <div className="text-sm font-medium">Visão</div>
@@ -3934,6 +3990,7 @@ function HourlyOccupancyCard({
   canConfigure,
   entryScenarioIds,
   entryScenarios,
+  error,
   exitScenarioIds,
   exitScenarios,
   loading,
@@ -3941,13 +3998,16 @@ function HourlyOccupancyCard({
   onEntryScenarioIdsChange,
   onExitScenarioIdsChange,
   onSelectionModeChange,
+  onStartHourChange,
   points,
   scenarios,
   selectionMode,
+  startHour,
 }: {
   canConfigure: boolean;
   entryScenarioIds: string[];
   entryScenarios: Scenario[];
+  error?: string;
   exitScenarioIds: string[];
   exitScenarios: Scenario[];
   loading: boolean;
@@ -3955,9 +4015,11 @@ function HourlyOccupancyCard({
   onEntryScenarioIdsChange: (ids: string[]) => void;
   onExitScenarioIdsChange: (ids: string[]) => void;
   onSelectionModeChange: (mode: "auto" | "custom") => void;
+  onStartHourChange: (hour: number) => void;
   points: ScenarioHourlyOccupancyPoint[];
   scenarios: Scenario[];
   selectionMode: "auto" | "custom";
+  startHour: number;
 }) {
   const widgetColor = useWidgetColor();
   const [settingsOpen, setSettingsOpen] = React.useState(false);
@@ -3969,9 +4031,7 @@ function HourlyOccupancyCard({
     .reverse()
     .find((point) => point.occupancy !== null);
   const hasSelection = entryScenarios.length + exitScenarios.length > 0;
-  const hasData = points.some(
-    (point) => point.entries > 0 || point.exits > 0,
-  );
+  const hasData = points.some((point) => point.occupancy !== null);
 
   React.useEffect(() => {
     if (monitorMode) setSettingsOpen(false);
@@ -3987,13 +4047,17 @@ function HourlyOccupancyCard({
               Ocupação hora a hora
             </CardTitle>
             <CardDescription className="mt-1">
-              Saldo acumulado desde 00h: cenários de entrada menos cenários de
-              saída. A hora atual permanece parcial e atualiza a cada 5 segundos.
+              Saldo acumulado diariamente a partir de
+              {` ${formatOccupancyStartHour(startHour)}`}: entradas menos saídas.
+              Antes desse horário, o saldo permanece zerado.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               E {entryScenarios.length} · S {exitScenarios.length}
+            </Badge>
+            <Badge variant="outline">
+              Início {formatOccupancyStartHour(startHour)}
             </Badge>
             {latestPoint && latestPoint.occupancy !== null ? (
               <>
@@ -4015,8 +4079,8 @@ function HourlyOccupancyCard({
                 size="icon"
                 className="h-8 w-8"
                 onClick={() => setSettingsOpen((current) => !current)}
-                aria-label="Configurar cenários de ocupação"
-                title="Configurar cenários"
+                aria-label="Configurar ocupação"
+                title="Configurar ocupação"
               >
                 <Settings2 className="h-4 w-4" />
               </Button>
@@ -4057,6 +4121,24 @@ function HourlyOccupancyCard({
                 </Button>
               </div>
             </div>
+            <div className="max-w-[220px] space-y-1.5">
+              <Label>Início da contagem</Label>
+              <Select
+                value={String(startHour)}
+                onValueChange={(value) => onStartHourChange(Number(value))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {OCCUPANCY_START_HOURS.map((hour) => (
+                    <SelectItem key={hour} value={String(hour)}>
+                      {formatOccupancyStartHour(hour)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             {selectionMode === "custom" ? (
               <div className="grid gap-3 xl:grid-cols-2">
                 <ScenarioPicker
@@ -4088,6 +4170,8 @@ function HourlyOccupancyCard({
           />
         ) : loading ? (
           <Skeleton className="h-[320px] w-full" />
+        ) : error ? (
+          <EmptyChartState className="h-[220px]" text={error} />
         ) : hasData ? (
           <EChart option={option} className="h-[320px]" />
         ) : (
@@ -4317,7 +4401,7 @@ function ScenarioTotalsTableCard({
         ) : loading ? (
           <Skeleton className="h-[240px] w-full" />
         ) : (
-          <div className="max-h-[460px] overflow-auto rounded-md border">
+          <div className="max-h-[440px] overflow-auto rounded-md border sm:max-h-[460px]">
             <Table className="min-w-[640px]">
               <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
@@ -4641,7 +4725,7 @@ function ScenarioRoseCard({
   scenarios,
   selectedIds,
   selectionMode,
-  title = "Distribuição radial por cenário",
+  title = "Composição por cenário",
 }: {
   action?: React.ReactNode;
   canConfigure: boolean;
@@ -4656,6 +4740,9 @@ function ScenarioRoseCard({
   title?: string;
 }) {
   const widgetColor = useWidgetColor();
+  const chartType = normalizeScenarioCompositionChartType(
+    useWidgetChartType(),
+  );
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const visiblePoints = React.useMemo(
     () =>
@@ -4668,8 +4755,8 @@ function ScenarioRoseCard({
     [points],
   );
   const option = React.useMemo(
-    () => buildScenarioRoseOption(visiblePoints, widgetColor),
-    [visiblePoints, widgetColor],
+    () => buildScenarioRoseOption(visiblePoints, widgetColor, chartType),
+    [chartType, visiblePoints, widgetColor],
   );
   const total = visiblePoints.reduce((sum, point) => sum + point.total, 0);
   const selectedScenarioCount = selectScenarios(
@@ -4692,8 +4779,7 @@ function ScenarioRoseCard({
               {title}
             </CardTitle>
             <CardDescription className="mt-1">
-              Participação do fluxo mensal por cenário. O raio de cada pétala
-              acompanha o volume relativo.
+              {scenarioCompositionDescription(chartType)}
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -4710,7 +4796,7 @@ function ScenarioRoseCard({
                 size="icon"
                 className="h-8 w-8"
                 onClick={() => setSettingsOpen((current) => !current)}
-                aria-label="Configurar cenários da distribuição radial"
+                aria-label="Configurar cenários da composição"
                 title="Configurar cenários"
               >
                 <Settings2 className="h-4 w-4" />
@@ -4733,7 +4819,7 @@ function ScenarioRoseCard({
         {!selectedScenarioCount ? (
           <EmptyChartState
             className="h-[220px]"
-            text="Selecione ao menos um cenário para montar a distribuição radial."
+            text="Selecione ao menos um cenário para montar a composição."
           />
         ) : loading ? (
           <Skeleton className="h-[320px] w-full" />
@@ -5218,6 +5304,27 @@ function buildOperationalMonthHoursDefinition(
   };
 }
 
+function buildHourlyOccupancyDataDefinition(
+  now: Date,
+  startHour: number,
+): RealtimeChartDefinition {
+  const from = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+    startHour,
+  );
+
+  return {
+    id: OCCUPANCY_HOURS_ID,
+    label: "Ocupação hora a hora",
+    description: `Contagem diária a partir de ${formatOccupancyStartHour(startHour)}.`,
+    granularity: "hour",
+    from,
+    to: addDays(startOfDay(now), 1),
+  };
+}
+
 function buildCustomWidgetDefinition(
   widget: RealtimeScopeCustomWidget,
   definitions: RealtimeChartDefinition[],
@@ -5309,6 +5416,15 @@ function hydrateRealtimeOpenBuckets(
   replaceBucketRowsFromSource(
     next,
     "live_chart_hour",
+    "hour",
+    currentHourStart,
+    addHours(currentHourStart, 1),
+    next.live_chart_minute?.rows ?? [],
+    "minute",
+  );
+  replaceBucketRowsFromSource(
+    next,
+    OCCUPANCY_HOURS_ID,
     "hour",
     currentHourStart,
     addHours(currentHourStart, 1),
@@ -6021,18 +6137,6 @@ function scenarioMultiplierMap(scenario: Scenario) {
   );
 }
 
-function inferOccupancyScenarios(scenarios: Scenario[]) {
-  return scenarios.reduce(
-    (groups, scenario) => {
-      const direction = inferScenarioDirection(scenario);
-      if (direction === "entry") groups.entries.push(scenario);
-      if (direction === "exit") groups.exits.push(scenario);
-      return groups;
-    },
-    { entries: [] as Scenario[], exits: [] as Scenario[] },
-  );
-}
-
 function scenarioNamesSummary(scenarios: Scenario[]) {
   if (!scenarios.length) return "nenhum cenário";
   const visibleNames = scenarios.slice(0, 3).map((scenario) => scenario.name);
@@ -6353,91 +6457,6 @@ function buildOperationalHeatmapOption(
         name: "Intensidade horária",
         progressive: 1_000,
         type: "heatmap",
-      },
-    ],
-  };
-}
-
-function buildHourlyOccupancyOption(
-  points: ScenarioHourlyOccupancyPoint[],
-  widgetColor = "#1267C4",
-): EnterpriseChartOption {
-  return {
-    grid: { bottom: 8, containLabel: true, left: 8, right: 12, top: 18 },
-    tooltip: {
-      backgroundColor: "#ffffff",
-      borderColor: "#D8E3F2",
-      borderWidth: 1,
-      confine: true,
-      formatter: (rawParams: unknown) => {
-        const params = Array.isArray(rawParams) ? rawParams[0] : rawParams;
-        if (!params || typeof params !== "object") return "";
-        const data = (params as { data?: unknown }).data;
-        if (!data || typeof data !== "object") return "";
-        const point = data as {
-          entries?: number;
-          exits?: number;
-          hourLabel?: string;
-          value?: number;
-        };
-
-        return [
-          `<strong>${point.hourLabel ?? "Hora"}</strong>`,
-          `Entradas acumuladas: ${formatNumber(point.entries ?? 0)}`,
-          `Saídas acumuladas: ${formatNumber(point.exits ?? 0)}`,
-          `Ocupação estimada: ${formatNumber(point.value ?? 0)}`,
-        ].join("<br />");
-      },
-      padding: [10, 12],
-      textStyle: { color: "#13233A", fontSize: 12 },
-      trigger: "item",
-    },
-    xAxis: {
-      axisLabel: { color: "#66758A", fontSize: 9, interval: 1 },
-      axisLine: { lineStyle: { color: "#D8E3F2" } },
-      axisTick: { show: false },
-      data: points.map((point) => point.label),
-      type: "category",
-    },
-    yAxis: {
-      axisLabel: { color: "#66758A", fontSize: 10 },
-      minInterval: 1,
-      splitLine: { lineStyle: { color: "#E8EEF6" } },
-      type: "value",
-    },
-    series: [
-      {
-        barCategoryGap: "34%",
-        barMaxWidth: 30,
-        data: points.map((point) =>
-          point.occupancy === null
-            ? null
-            : {
-                entries: point.entries,
-                exits: point.exits,
-                itemStyle: {
-                  borderRadius:
-                    point.occupancy >= 0 ? [3, 3, 0, 0] : [0, 0, 3, 3],
-                  color: point.occupancy >= 0 ? widgetColor : "#D999A2",
-                },
-                hourLabel: point.label,
-                label: {
-                  position: point.occupancy >= 0 ? "top" : "bottom",
-                },
-                value: point.occupancy,
-              },
-        ),
-        label: {
-          color: "#526477",
-          fontSize: 9,
-          formatter: (params: { value?: number }) => {
-            const value = Number(params.value ?? 0);
-            return value ? formatNumber(value) : "";
-          },
-          show: true,
-        },
-        name: "Ocupação estimada",
-        type: "bar",
       },
     ],
   };
@@ -7036,78 +7055,13 @@ function buildOperationalTrendOption(
 function buildScenarioRoseOption(
   points: ScenarioComparisonPoint[],
   widgetColor: string,
+  chartType: ScenarioCompositionChartType = "rose",
 ): EnterpriseChartOption {
-  const orderedPoints = [...points].sort(
-    (left, right) =>
-      right.total - left.total || left.name.localeCompare(right.name, "pt-BR"),
+  return buildScenarioCompositionOption(
+    points.map((point) => ({ name: point.name, value: point.total })),
+    widgetColor,
+    chartType,
   );
-  const total = orderedPoints.reduce((sum, point) => sum + point.total, 0);
-  const visibleLabelLimit =
-    orderedPoints.length > 8 ? 4 : Math.min(orderedPoints.length, 6);
-
-  return {
-    legend: {
-      bottom: 0,
-      itemGap: 12,
-      itemHeight: 9,
-      itemWidth: 9,
-      textStyle: { color: "#526477", fontSize: 10 },
-      type: "scroll",
-    },
-    tooltip: {
-      backgroundColor: "#ffffff",
-      borderColor: "#D8E3F2",
-      borderWidth: 1,
-      confine: true,
-      formatter: (params: unknown) => {
-        const record = params as {
-          data?: { value?: number };
-          name?: string;
-          value?: number;
-        };
-        const value = Number(record.value ?? record.data?.value ?? 0);
-        const share = total ? value / total : 0;
-        return `${record.name ?? "Cenário"}<br/>${formatNumber(value)} eventos · ${new Intl.NumberFormat(
-          "pt-BR",
-          { maximumFractionDigits: 1, style: "percent" },
-        ).format(share)}`;
-      },
-      textStyle: { color: "#13233A", fontSize: 12 },
-      trigger: "item",
-    },
-    series: [
-      {
-        center: ["50%", "44%"],
-        data: orderedPoints.map((point, index) => ({
-          itemStyle: {
-            color: index === 0 ? widgetColor : pastelBarColor(index),
-          },
-          label: { show: index < visibleLabelLimit },
-          name: point.name,
-          value: point.total,
-        })),
-        label: {
-          color: "#526477",
-          fontSize: 10,
-          formatter: (params: { name?: string; value?: number }) => {
-            const value = Number(params.value ?? 0);
-            const share = total ? value / total : 0;
-            return `${params.name ?? ""}\n${formatNumber(value)} · ${new Intl.NumberFormat(
-              "pt-BR",
-              { maximumFractionDigits: 0, style: "percent" },
-            ).format(share)}`;
-          },
-          show: false,
-        },
-        labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
-        labelLine: { length: 7, length2: 5, smooth: 0.15 },
-        minAngle: 4,
-        radius: ["18%", "68%"],
-        roseType: "area",
-        type: "pie",
-      },
-    ],
-  };
 }
 
 function buildMonthlyAccessRankingOption(
@@ -7578,11 +7532,13 @@ function buildHourlyOccupancyReportChart({
   entryScenarios,
   exitScenarios,
   points,
+  startHour,
   widgetColor = "#1267C4",
 }: {
   entryScenarios: Scenario[];
   exitScenarios: Scenario[];
   points: ScenarioHourlyOccupancyPoint[];
+  startHour: number;
   widgetColor?: string;
 }): ReportPayload["charts"][number] {
   const latestPoint = [...points]
@@ -7595,9 +7551,11 @@ function buildHourlyOccupancyReportChart({
           latestPoint.entries,
         )} · Saídas: ${formatNumber(latestPoint.exits)}`
       : "Sem saldo calculado no dia atual",
-    description: `Saldo acumulado desde 00h. Entradas: ${scenarioNamesSummary(
-      entryScenarios,
-    )}. Saídas: ${scenarioNamesSummary(exitScenarios)}.`,
+    description: `Saldo acumulado diariamente a partir de ${formatOccupancyStartHour(
+      startHour,
+    )}. Entradas: ${scenarioNamesSummary(entryScenarios)}. Saídas: ${scenarioNamesSummary(
+      exitScenarios,
+    )}.`,
     option: buildHourlyOccupancyOption(points, widgetColor),
     table: {
       title: "Dados - Ocupação hora a hora",
@@ -7898,16 +7856,16 @@ function buildScenarioRoseReportChart(
   points: ScenarioComparisonPoint[],
   scopeName: string,
   widgetColor = "#1267C4",
-  title = "Distribuição radial por cenário",
+  title = "Composição por cenário",
+  chartType: ScenarioCompositionChartType = "rose",
 ): ReportPayload["charts"][number] {
   const visiblePoints = points.filter((point) => point.total > 0);
   const total = visiblePoints.reduce((sum, point) => sum + point.total, 0);
 
   return {
     comparison: `${formatNumber(total)} eventos · ${scopeName}`,
-    description:
-      "Participação proporcional de cada cenário no fluxo do mês em andamento.",
-    option: buildScenarioRoseOption(visiblePoints, widgetColor),
+    description: scenarioCompositionDescription(chartType),
+    option: buildScenarioRoseOption(visiblePoints, widgetColor, chartType),
     table: {
       title: `Dados - ${title}`,
       columns: [

@@ -14,6 +14,8 @@ import {
   Eye,
   LogOut,
   MapPinned,
+  PanelLeftClose,
+  PanelLeftOpen,
   ServerCog,
   ShieldCheck,
 } from "lucide-react";
@@ -105,6 +107,7 @@ const managerNavItems: NavItem[] = [
 ];
 
 const masterNavItem = { href: "/manager/master", label: "Master", icon: ShieldCheck };
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "ipxdata.sidebar-collapsed.v1";
 
 export function AppShell({
   mode,
@@ -119,6 +122,7 @@ export function AppShell({
   const [masterCompanyScope, setMasterCompanyScope] =
     React.useState<MasterCompanyScope | null>(null);
   const [masterScopeReady, setMasterScopeReady] = React.useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
   const companyName = getCompanyDisplayName(user, masterCompanyScope, mode);
   const navItems =
     mode === "manager"
@@ -161,6 +165,28 @@ export function AppShell({
     };
   }, [isMaster, user]);
 
+  React.useEffect(() => {
+    const storedPreference = window.localStorage.getItem(
+      SIDEBAR_COLLAPSED_STORAGE_KEY,
+    );
+    setSidebarCollapsed(
+      storedPreference === null
+        ? window.matchMedia("(max-width: 1279px)").matches
+        : storedPreference === "true",
+    );
+  }, []);
+
+  function toggleSidebar() {
+    setSidebarCollapsed((collapsed) => {
+      const next = !collapsed;
+      window.localStorage.setItem(
+        SIDEBAR_COLLAPSED_STORAGE_KEY,
+        String(next),
+      );
+      return next;
+    });
+  }
+
   const requiresMasterCompanyScope =
     isMaster && !(mode === "manager" && pathname === "/manager/master");
   const content =
@@ -177,18 +203,57 @@ export function AppShell({
 
   return (
     <div ref={shellRef} className="min-h-screen bg-background">
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-border bg-card text-card-foreground lg:flex">
-        <div className="flex h-16 items-center gap-3 border-b border-border px-4">
+      <aside
+        id="app-sidebar"
+        className={cn(
+          "fixed inset-y-0 left-0 z-30 hidden w-20 flex-col border-r border-border bg-card text-card-foreground transition-[width] duration-200 lg:flex",
+          !sidebarCollapsed && "lg:w-64",
+        )}
+      >
+        <div
+          className={cn(
+            "flex h-16 items-center justify-center gap-3 border-b border-border px-2",
+            !sidebarCollapsed && "lg:justify-start lg:px-4",
+          )}
+        >
           <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary text-sm font-black text-primary-foreground shadow-sm">
             IPX
           </div>
-          <div>
+          <div
+            className={cn(
+              "hidden min-w-0",
+              !sidebarCollapsed && "lg:block",
+            )}
+          >
             <div className="text-base font-semibold tracking-normal">IPXData</div>
             <div className="text-xs text-muted-foreground">Analytics Platform</div>
           </div>
         </div>
 
-        <div className="px-4 py-4">
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="absolute -right-3 top-[18px] z-10 hidden h-7 w-7 rounded-full bg-card shadow-sm lg:inline-flex"
+          onClick={toggleSidebar}
+          aria-controls="app-sidebar"
+          aria-label={sidebarCollapsed ? "Expandir menu lateral" : "Recolher menu lateral"}
+          aria-expanded={!sidebarCollapsed}
+          title={sidebarCollapsed ? "Expandir menu lateral" : "Recolher menu lateral"}
+        >
+          {sidebarCollapsed ? (
+            <PanelLeftOpen className="h-3.5 w-3.5" />
+          ) : (
+            <PanelLeftClose className="h-3.5 w-3.5" />
+          )}
+        </Button>
+
+        <div
+          className={cn(
+            "hidden px-4 py-4",
+            !sidebarCollapsed && "lg:block",
+          )}
+        >
           <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             {isMaster ? "Escopo" : "Empresa"}
           </div>
@@ -197,7 +262,12 @@ export function AppShell({
           </div>
         </div>
 
-        <nav className="space-y-1 px-2">
+        <nav
+          className={cn(
+            "space-y-1 px-2 pt-4",
+            !sidebarCollapsed && "lg:pt-0",
+          )}
+        >
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = pathname === item.href;
@@ -211,29 +281,64 @@ export function AppShell({
                   if (liveItem) requestLiveRefresh();
                 }}
                 className={cn(
-                  "flex items-center justify-between rounded-md px-3 py-2.5 text-sm text-muted-foreground transition hover:bg-secondary hover:text-foreground",
+                  "flex items-center justify-center rounded-md px-2 py-2.5 text-sm text-muted-foreground transition hover:bg-secondary hover:text-foreground lg:justify-between lg:px-3",
+                  sidebarCollapsed &&
+                    "lg:justify-center lg:px-2",
                   active && "bg-primary/10 font-medium text-primary",
                 )}
+                title={item.label}
                 data-premium-hover
                 data-premium-nav-item
               >
-                <span className="flex items-center gap-3">
+                <span
+                  className={cn(
+                    "flex items-center gap-0",
+                    !sidebarCollapsed && "lg:gap-3",
+                  )}
+                >
                   <Icon className="h-4 w-4" />
-                  {item.label}
+                  <span
+                    className={cn(
+                      "hidden",
+                      !sidebarCollapsed && "lg:inline",
+                    )}
+                  >
+                    {item.label}
+                  </span>
                 </span>
-                <ChevronRight className="h-4 w-4 text-muted-foreground/60" />
+                <ChevronRight
+                  className={cn(
+                    "hidden h-4 w-4 text-muted-foreground/60",
+                    !sidebarCollapsed && "lg:block",
+                  )}
+                />
               </Link>
             );
           })}
         </nav>
 
-        <div className="mt-auto px-4 pb-5">
+        <div
+          className={cn(
+            "mt-auto px-2 pb-5",
+            !sidebarCollapsed && "lg:px-4",
+          )}
+        >
           <Separator className="mb-4 bg-border" />
-          <div className="mb-4 flex items-center gap-3">
+          <div
+            className={cn(
+              "mb-4 flex items-center justify-center gap-3",
+              !sidebarCollapsed && "lg:justify-start",
+            )}
+          >
             <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 text-sm font-semibold text-primary">
               {initials(user?.name)}
             </div>
-            <div className="min-w-0">
+            <div
+              className={cn(
+                "hidden min-w-0",
+                !sidebarCollapsed && "lg:block",
+              )}
+            >
               <div className="truncate text-sm font-medium">{user?.name}</div>
               <div className="truncate text-xs text-muted-foreground">{user?.email}</div>
             </div>
@@ -241,31 +346,51 @@ export function AppShell({
           <Button
             type="button"
             variant="ghost"
-            className="w-full justify-start text-muted-foreground hover:bg-secondary hover:text-foreground"
+            className={cn(
+              "w-full justify-center px-0 text-muted-foreground hover:bg-secondary hover:text-foreground",
+              !sidebarCollapsed && "lg:justify-start lg:px-4",
+            )}
             onClick={logout}
+            title="Sair"
           >
             <LogOut className="h-4 w-4" />
-            Sair
+            <span
+              className={cn(
+                "hidden",
+                !sidebarCollapsed && "lg:inline",
+              )}
+            >
+              Sair
+            </span>
           </Button>
           <ThemeToggle
+            className={cn(
+              "mt-2 w-full text-muted-foreground hover:bg-secondary hover:text-foreground",
+              !sidebarCollapsed && "lg:hidden",
+            )}
+          />
+          <ThemeToggle
             showLabel
-            className="mt-2 text-muted-foreground hover:bg-secondary hover:text-foreground"
+            className={cn(
+              "mt-2 hidden text-muted-foreground hover:bg-secondary hover:text-foreground",
+              !sidebarCollapsed && "lg:flex",
+            )}
           />
         </div>
       </aside>
 
       <header className="sticky top-0 z-20 border-b border-border bg-card/95 px-4 py-3 backdrop-blur lg:hidden">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2">
             <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-xs font-black text-primary-foreground">
               IPX
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="text-sm font-semibold">IPXData</div>
-              <div className="text-xs text-muted-foreground">{pageTitle}</div>
+              <div className="truncate text-xs text-muted-foreground">{pageTitle}</div>
             </div>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
             <ThemeToggle />
             <Button variant="ghost" size="icon" onClick={logout} aria-label="Sair">
               <LogOut className="h-4 w-4" />
@@ -300,7 +425,12 @@ export function AppShell({
         </div>
       </header>
 
-      <main className="lg:pl-64">
+      <main
+        className={cn(
+          "min-w-0 transition-[padding] duration-200 lg:pl-20",
+          !sidebarCollapsed && "lg:pl-64",
+        )}
+      >
         <div className="w-full p-4">
           <div className="mb-4 max-w-4xl">
             <h1
@@ -316,7 +446,11 @@ export function AppShell({
               {pageDescription}
             </p>
           </div>
-          <div key={contentKey} data-premium-content>
+          <div
+            key={contentKey}
+            className="min-w-0 max-w-full"
+            data-premium-content
+          >
             {content}
           </div>
         </div>

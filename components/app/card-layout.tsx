@@ -6,11 +6,13 @@ import {
   ArrowUp,
   BarChart3,
   CheckCircle2,
+  ChartPie,
   ChartSpline,
   Eye,
   EyeOff,
   GripVertical,
   LayoutTemplate,
+  LayoutGrid,
   Maximize2,
   Minimize2,
   Palette,
@@ -60,11 +62,16 @@ import {
 
 type LayoutCard = {
   chartTypeEnabled?: boolean;
+  chartTypes?: readonly CardChartType[];
   id: string;
   label?: string;
   defaultHeight?: CardHeight;
   defaultSize?: CardSize;
+  minHeight?: CardHeight;
   className?: string;
+  shortHeightClassName?: string;
+  standardHeightClassName?: string;
+  tallHeightClassName?: string;
   node: React.ReactNode;
 };
 
@@ -306,9 +313,18 @@ export function CardLayout({
   }
 
   function resizeCardHeight(cardId: string, height: CardHeight) {
+    const card = cards.find((candidate) => candidate.id === cardId);
+    const preference = preferences.find((candidate) => candidate.id === cardId);
+    const currentSize = preference?.size ?? card?.defaultSize;
+    const nextHeight = card
+      ? clampCardHeight(height, minimumCardHeight(card, currentSize))
+      : height;
+
     persistPreferences(
       preferences.map((preference) =>
-        preference.id === cardId ? { ...preference, height } : preference,
+        preference.id === cardId
+          ? { ...preference, height: nextHeight }
+          : preference,
       ),
     );
     flashSaved();
@@ -338,6 +354,7 @@ export function CardLayout({
 
   return (
     <div
+      data-card-layout-root
       className={cn(
         "min-w-0 max-w-full",
         monitorMode ? "space-y-0" : "space-y-4",
@@ -432,8 +449,9 @@ export function CardLayout({
       ) : null}
 
       <div
+        data-card-layout-grid
         className={cn(
-          "grid min-w-0 grid-flow-row-dense auto-rows-[164px] grid-cols-[minmax(0,1fr)] sm:grid-cols-2 xl:grid-cols-4",
+          "grid min-w-0 grid-flow-row-dense auto-rows-[164px] grid-cols-[minmax(0,1fr)]",
           monitorMode ? "gap-3" : "gap-4",
         )}
       >
@@ -532,20 +550,28 @@ function CardLayoutItem({
   reorderEnabled: boolean;
 }) {
   const currentSize = preference?.size ?? card.defaultSize;
-  const currentHeight =
-    preference?.height ??
-    card.defaultHeight ??
-    (currentSize === "compact" ? "short" : "standard");
+  const minimumHeight = minimumCardHeight(card, currentSize);
+  const currentHeight = resolveCardHeight(card, preference, currentSize);
+  const chartTypes = supportedChartTypes(card);
 
   return (
     <div
       data-layout-card-id={card.id}
+      data-layout-card-height={currentHeight}
+      data-layout-card-min-compact-height={minimumCardHeight(card, "compact")}
+      data-layout-card-min-height={minimumHeight}
+      data-layout-card-size={currentSize ?? "compact"}
       onDragOver={onDragOver}
       onDrop={onDrop}
       className={cn(
         "group relative h-full min-h-0 min-w-0 transition",
         sizeClassName(currentSize, card.className),
-        heightClassName(currentHeight),
+        heightClassName(
+          currentHeight,
+          card.shortHeightClassName,
+          card.standardHeightClassName,
+          card.tallHeightClassName,
+        ),
         reorderEnabled &&
           "rounded-md ring-1 ring-primary/25 ring-offset-2 ring-offset-background",
         draggingId === card.id && "opacity-50",
@@ -570,7 +596,7 @@ function CardLayoutItem({
         </button>
       ) : null}
       <WidgetAppearanceProvider
-        chartType={card.chartTypeEnabled ? preference?.chartType : "bar"}
+        chartType={resolveCardChartType(preference?.chartType, chartTypes)}
         color={preference?.color}
       >
         {card.node}
@@ -629,14 +655,14 @@ function WidgetOrganizerDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="grid max-h-[92vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-4xl">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <DialogHeader className="min-w-0">
             <DialogTitle>Configurar widgets</DialogTitle>
             <DialogDescription>
               Adicione, reordene e ajuste a aparência dos widgets.
             </DialogDescription>
           </DialogHeader>
-          <div className="flex shrink-0 flex-wrap items-center gap-2 sm:pr-8">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 lg:shrink-0 lg:pr-8">
             <Button
               type="button"
               variant="outline"
@@ -659,10 +685,17 @@ function WidgetOrganizerDialog({
             const preference = getPreference(preferences, card.id);
             const visible = preference?.visible !== false;
             const currentSize = preference?.size ?? card.defaultSize;
-            const currentHeight =
-              preference?.height ??
-              card.defaultHeight ??
-              (currentSize === "compact" ? "short" : "standard");
+            const minimumHeight = minimumCardHeight(card, currentSize);
+            const currentHeight = resolveCardHeight(
+              card,
+              preference,
+              currentSize,
+            );
+            const chartTypes = supportedChartTypes(card);
+            const currentChartType = resolveCardChartType(
+              preference?.chartType,
+              chartTypes,
+            );
             const first = index === 0;
             const last = index === cards.length - 1;
 
@@ -677,7 +710,7 @@ function WidgetOrganizerDialog({
                 onDrop={(event) => onDrop(event, card.id)}
                 onDragEnd={onDragEnd}
                 className={cn(
-                  "grid gap-3 rounded-md border bg-card p-3 transition sm:grid-cols-[auto_minmax(0,1fr)] lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:items-center",
+                  "grid gap-3 rounded-md border bg-card p-3 transition sm:grid-cols-[auto_minmax(0,1fr)]",
                   draggingId === card.id && "opacity-50",
                   overId === card.id &&
                     draggingId !== card.id &&
@@ -706,11 +739,12 @@ function WidgetOrganizerDialog({
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 sm:col-span-2 sm:pl-12 lg:col-span-1 lg:pl-0 lg:justify-end">
-                  {card.chartTypeEnabled ? (
+                <div className="flex min-w-0 flex-wrap items-center gap-2 sm:col-span-2 sm:pl-12">
+                  {chartTypes.length ? (
                     <WidgetChartTypePicker
                       cardId={card.id}
-                      chartType={preference?.chartType ?? "bar"}
+                      chartType={currentChartType}
+                      chartTypes={chartTypes}
                       onChange={onChartTypeChange}
                     />
                   ) : null}
@@ -791,14 +825,24 @@ function WidgetOrganizerDialog({
                   >
                     <SizeButton
                       active={currentHeight === "short"}
+                      disabled={isCardHeightBelow("short", minimumHeight)}
                       icon={Minimize2}
-                      label="Altura baixa"
+                      label={
+                        isCardHeightBelow("short", minimumHeight)
+                          ? "Altura baixa indisponível para este widget"
+                          : "Altura baixa"
+                      }
                       onClick={() => onHeightChange(card.id, "short")}
                     />
                     <SizeButton
                       active={currentHeight === "standard"}
+                      disabled={isCardHeightBelow("standard", minimumHeight)}
                       icon={PanelTop}
-                      label="Altura padrão"
+                      label={
+                        isCardHeightBelow("standard", minimumHeight)
+                          ? "Altura padrão indisponível para este widget"
+                          : "Altura padrão"
+                      }
                       onClick={() => onHeightChange(card.id, "standard")}
                     />
                     <SizeButton
@@ -843,10 +887,12 @@ function WidgetOrganizerDialog({
 function WidgetChartTypePicker({
   cardId,
   chartType,
+  chartTypes,
   onChange,
 }: {
   cardId: string;
   chartType: CardChartType;
+  chartTypes: readonly CardChartType[];
   onChange: (cardId: string, chartType: CardChartType) => void;
 }) {
   return (
@@ -855,35 +901,61 @@ function WidgetChartTypePicker({
       aria-label="Tipo de gráfico"
       role="group"
     >
-      <button
-        type="button"
-        className={cn(
-          "flex h-6 w-7 items-center justify-center rounded-sm text-muted-foreground transition hover:text-foreground",
-          chartType === "bar" && "bg-primary text-primary-foreground shadow-sm hover:text-primary-foreground",
-        )}
-        onClick={() => onChange(cardId, "bar")}
-        aria-label="Exibir como barras"
-        aria-pressed={chartType === "bar"}
-        title="Barras"
-      >
-        <BarChart3 className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        className={cn(
-          "flex h-6 w-7 items-center justify-center rounded-sm text-muted-foreground transition hover:text-foreground",
-          chartType === "line" && "bg-primary text-primary-foreground shadow-sm hover:text-primary-foreground",
-        )}
-        onClick={() => onChange(cardId, "line")}
-        aria-label="Exibir como linha"
-        aria-pressed={chartType === "line"}
-        title="Linha"
-      >
-        <ChartSpline className="h-3.5 w-3.5" />
-      </button>
+      {chartTypes.map((type) => {
+        const option = WIDGET_CHART_TYPE_OPTIONS[type];
+        const Icon = option.icon;
+
+        return (
+          <button
+            key={type}
+            type="button"
+            className={cn(
+              "flex h-6 w-7 items-center justify-center rounded-sm text-muted-foreground transition hover:text-foreground",
+              chartType === type &&
+                "bg-primary text-primary-foreground shadow-sm hover:text-primary-foreground",
+            )}
+            onClick={() => onChange(cardId, type)}
+            aria-label={option.ariaLabel}
+            aria-pressed={chartType === type}
+            title={option.label}
+          >
+            <Icon className="h-3.5 w-3.5" />
+          </button>
+        );
+      })}
     </div>
   );
 }
+
+const WIDGET_CHART_TYPE_OPTIONS = {
+  bar: {
+    ariaLabel: "Exibir como barras",
+    icon: BarChart3,
+    label: "Barras",
+  },
+  line: {
+    ariaLabel: "Exibir como linha",
+    icon: ChartSpline,
+    label: "Linha",
+  },
+  rose: {
+    ariaLabel: "Exibir como gráfico de rosa",
+    icon: ChartPie,
+    label: "Rosa",
+  },
+  treemap: {
+    ariaLabel: "Exibir como retângulos",
+    icon: LayoutGrid,
+    label: "Retângulos",
+  },
+} satisfies Record<
+  CardChartType,
+  {
+    ariaLabel: string;
+    icon: React.ComponentType<{ className?: string }>;
+    label: string;
+  }
+>;
 
 function WidgetColorPicker({
   cardId,
@@ -963,11 +1035,13 @@ function widgetColorPreviewStyle(
 
 function SizeButton({
   active,
+  disabled = false,
   icon: Icon,
   label,
   onClick,
 }: {
   active: boolean;
+  disabled?: boolean;
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   onClick: () => void;
@@ -978,6 +1052,7 @@ function SizeButton({
       variant={active ? "secondary" : "ghost"}
       size="icon"
       className="h-7 w-7"
+      disabled={disabled}
       onClick={onClick}
       aria-label={label}
       title={label}
@@ -995,10 +1070,78 @@ function sizeClassName(size: CardSize | undefined, fallback: string | undefined)
   return undefined;
 }
 
-function heightClassName(height: CardHeight) {
-  if (height === "tall") return "row-span-3";
-  if (height === "standard") return "row-span-2";
-  return "row-span-1";
+function heightClassName(
+  height: CardHeight,
+  shortHeightClassName?: string,
+  standardHeightClassName?: string,
+  tallHeightClassName?: string,
+) {
+  if (height === "tall") return tallHeightClassName ?? "row-span-3";
+  if (height === "standard") return standardHeightClassName ?? "row-span-2";
+  return shortHeightClassName ?? "row-span-1";
+}
+
+const CARTESIAN_CHART_TYPES = ["bar", "line"] as const;
+
+function supportedChartTypes(card: LayoutCard): readonly CardChartType[] {
+  if (card.chartTypes?.length) return card.chartTypes;
+  return card.chartTypeEnabled ? CARTESIAN_CHART_TYPES : [];
+}
+
+function resolveCardChartType(
+  chartType: CardChartType | undefined,
+  supportedTypes: readonly CardChartType[],
+): CardChartType {
+  if (chartType && supportedTypes.includes(chartType)) return chartType;
+  return supportedTypes[0] ?? "bar";
+}
+
+const CARD_HEIGHT_ORDER: Record<CardHeight, number> = {
+  short: 0,
+  standard: 1,
+  tall: 2,
+};
+
+function minimumCardHeight(
+  card: LayoutCard,
+  currentSize: CardSize | undefined,
+): CardHeight {
+  if (card.minHeight) {
+    const compactingWideWidget =
+      card.minHeight === "short" &&
+      currentSize === "compact" &&
+      card.defaultSize !== undefined &&
+      card.defaultSize !== "compact";
+    return compactingWideWidget ? "standard" : card.minHeight;
+  }
+
+  const isComplexWidget =
+    supportedChartTypes(card).length > 0 ||
+    (card.defaultSize !== undefined && card.defaultSize !== "compact") ||
+    card.className?.includes("col-span");
+
+  return isComplexWidget ? "standard" : "short";
+}
+
+function isCardHeightBelow(height: CardHeight, minimum: CardHeight) {
+  return CARD_HEIGHT_ORDER[height] < CARD_HEIGHT_ORDER[minimum];
+}
+
+function clampCardHeight(height: CardHeight, minimum: CardHeight): CardHeight {
+  return isCardHeightBelow(height, minimum) ? minimum : height;
+}
+
+function resolveCardHeight(
+  card: LayoutCard,
+  preference: CardPreference | undefined,
+  currentSize: CardSize | undefined,
+) {
+  const requestedHeight =
+    preference?.height ??
+    card.defaultHeight ??
+    (currentSize === "compact" ? "short" : "standard");
+
+  return clampCardHeight(requestedHeight, minimumCardHeight(card, currentSize));
 }
 
 function orderByAllCardPreferences(cards: LayoutCard[], preferences: CardPreference[]) {

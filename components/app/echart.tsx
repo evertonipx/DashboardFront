@@ -8,6 +8,7 @@ import {
   LineChart,
   PieChart,
   ScatterChart,
+  TreemapChart,
 } from "echarts/charts";
 import {
   AriaComponent,
@@ -39,6 +40,7 @@ echarts.use([
   LineChart,
   PieChart,
   ScatterChart,
+  TreemapChart,
   AriaComponent,
   DataZoomComponent,
   GridComponent,
@@ -460,7 +462,10 @@ function isDecorativeChartSeries(series: Record<string, unknown>) {
     name.includes("média-base") ||
     name.includes("média móvel") ||
     name.includes("meta") ||
-    name.includes("limiar")
+    name.includes("limiar") ||
+    name.includes("limite ") ||
+    name === "base" ||
+    name === "intervalo"
   );
 }
 

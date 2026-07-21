@@ -8,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  DoorOpen,
   Grid3X3,
   Layers3,
   Plus,
@@ -102,9 +103,11 @@ import {
 } from "@/lib/period-analysis-widgets";
 import type { ReportPayload } from "@/lib/report-export";
 import {
+  formatOccupancyStartHour,
   scenarioSelectionSummary,
   type ScenarioAnalyticsGranularity,
 } from "@/lib/scenario-analytics";
+import { inferOccupancyScenarios } from "@/lib/scenario-direction";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -135,6 +138,7 @@ const HOUR_MS = 60 * MINUTE_MS;
 const LIVE_ANALYSIS_REFRESH_MS = 5_000;
 const RECENT_DAY_RECONCILIATION_COUNT = 3;
 const DEFAULT_METRIC_TYPE = "count";
+const OCCUPANCY_START_HOURS = Array.from({ length: 24 }, (_, hour) => hour);
 
 const widgetKindOptions: Array<{
   label: string;
@@ -148,8 +152,9 @@ const widgetKindOptions: Array<{
   { label: "Acumulado diário x base", value: "cumulative" },
   { label: "Tendência 7 x 30 dias", value: "trend" },
   { label: "Perfil horário", value: "hour_profile" },
+  { label: "Ocupação hora a hora", value: "hourly_occupancy" },
   { label: "Top 5 dias de pico", value: "peak_days" },
-  { label: "Distribuição radial por cenário", value: "rose" },
+  { label: "Composição por cenário", value: "rose" },
   { label: "Totais por cenário", value: "totals_table" },
 ];
 
@@ -170,6 +175,7 @@ const widgetIcons: Record<
   cumulative: TrendingUp,
   heatmap: Grid3X3,
   hour_profile: BarChart3,
+  hourly_occupancy: DoorOpen,
   peak_days: BarChart3,
   ranking: BarChart3,
   rose: Grid3X3,
@@ -269,6 +275,7 @@ export function PeriodAnalysisDashboard({
             (widget) =>
               widget.kind === "heatmap" ||
               widget.kind === "hour_profile" ||
+              widget.kind === "hourly_occupancy" ||
               ((widget.kind === "timeline" || widget.kind === "comparison") &&
                 widget.granularity === "hour"),
           ),
@@ -422,6 +429,7 @@ export function PeriodAnalysisDashboard({
         widgets.map((widget) => [
           widget.id,
           buildPeriodAnalysisWidgetModel({
+            chartType: widgetChartTypeById.get(widget.id),
             color: widgetColorById.get(widget.id),
             data,
             period,
@@ -430,27 +438,43 @@ export function PeriodAnalysisDashboard({
           }),
         ]),
       ),
-    [data, period, scenarios, widgetColorById, widgets],
+    [
+      data,
+      period,
+      scenarios,
+      widgetChartTypeById,
+      widgetColorById,
+      widgets,
+    ],
   );
   const layoutCards = widgets.map((widget) => ({
+    chartTypes:
+      widget.kind === "rose" ? (["rose", "treemap"] as const) : undefined,
     chartTypeEnabled:
       widget.kind === "timeline" ||
       widget.kind === "comparison" ||
       widget.kind === "cumulative" ||
       widget.kind === "trend" ||
-      widget.kind === "hour_profile",
+      widget.kind === "hour_profile" ||
+      widget.kind === "hourly_occupancy",
     className:
       widget.kind === "summary" ||
       widget.kind === "heatmap" ||
-      widget.kind === "totals_table"
+      widget.kind === "totals_table" ||
+      widget.kind === "hourly_occupancy"
         ? "sm:col-span-2 xl:col-span-4"
         : "sm:col-span-2 xl:col-span-2",
     defaultSize:
       widget.kind === "summary" ||
       widget.kind === "heatmap" ||
-      widget.kind === "totals_table"
+      widget.kind === "totals_table" ||
+      widget.kind === "hourly_occupancy"
         ? ("full" as const)
         : ("wide" as const),
+    defaultHeight: widget.kind === "summary" ? ("short" as const) : undefined,
+    minHeight: widget.kind === "summary" ? ("short" as const) : undefined,
+    shortHeightClassName:
+      widget.kind === "summary" ? "row-span-2 sm:row-span-1" : undefined,
     id: widget.id,
     label: widget.title,
     node: (
@@ -462,11 +486,7 @@ export function PeriodAnalysisDashboard({
         monitorMode={monitorMode}
         onEdit={() => openEditWidget(widget)}
         onRemove={() => removeWidget(widget.id)}
-        scenarioSummary={scenarioSelectionSummary(
-          scenarios,
-          widget.selectionMode,
-          widget.scenarioIds,
-        )}
+        scenarioSummary={periodAnalysisScenarioSummary(widget, scenarios)}
         widget={widget}
       />
     ),
@@ -578,11 +598,14 @@ export function PeriodAnalysisDashboard({
   function openEditWidget(widget: PeriodAnalysisWidget) {
     setWidgetForm({
       baseline: widget.baseline,
+      entryScenarioIds: widget.entryScenarioIds,
+      exitScenarioIds: widget.exitScenarioIds,
       granularity: widget.granularity,
       id: widget.id,
       kind: widget.kind,
       scenarioIds: widget.scenarioIds,
       selectionMode: widget.selectionMode,
+      startHour: widget.startHour,
       title: widget.title,
     });
     setWidgetDialogOpen(true);
@@ -594,7 +617,9 @@ export function PeriodAnalysisDashboard({
       return {
         ...current,
         granularity:
-          kind === "heatmap" || kind === "hour_profile"
+          kind === "heatmap" ||
+          kind === "hour_profile" ||
+          kind === "hourly_occupancy"
             ? "hour"
             : kind === "timeline" || kind === "comparison"
               ? current.granularity
@@ -610,6 +635,17 @@ export function PeriodAnalysisDashboard({
 
   function saveWidget() {
     if (
+      widgetForm.kind === "hourly_occupancy" &&
+      widgetForm.selectionMode === "custom" &&
+      (!widgetForm.entryScenarioIds.length ||
+        !widgetForm.exitScenarioIds.length)
+    ) {
+      toast.error("Selecione ao menos uma entrada e uma saída para o widget.");
+      return;
+    }
+
+    if (
+      widgetForm.kind !== "hourly_occupancy" &&
       widgetForm.selectionMode === "custom" &&
       !widgetForm.scenarioIds.length
     ) {
@@ -636,19 +672,8 @@ export function PeriodAnalysisDashboard({
 
   function applySavedLiveView(preset: WidgetViewPreset) {
     if (preset.snapshot.menuKey !== "live") return false;
-    const sourceScenarioId = preset.snapshot.sourceScope?.id;
-    const scenario = scenarios.find(
-      (candidate) => candidate.id === sourceScenarioId,
-    );
-    if (!scenario) {
-      toast.error(
-        "O cenário de origem desta visão do Ao Vivo não está disponível para a empresa atual.",
-      );
-      return false;
-    }
-
     const imported = buildLiveAnalysisImport({
-      scenario,
+      scenarios,
       snapshot: preset.snapshot,
     });
     if (!imported.widgets.length) {
@@ -665,10 +690,20 @@ export function PeriodAnalysisDashboard({
       user?.id,
     );
     setWidgets(imported.widgets);
-    toast.success(
+    const notes = [
+      imported.sourceResolution === "scenario_name"
+        ? "o cenário foi reconciliado pelo nome"
+        : imported.sourceResolution === "all_scenarios"
+          ? "o escopo original não era um cenário disponível; os widgets de escopo usam todos os cenários desta empresa"
+          : "",
       imported.unsupportedCount
-        ? `Visão “${preset.name}” carregada com ${imported.widgets.length} widget(s); ${imported.unsupportedCount} item(ns) sem equivalente foram ignorados.`
-        : `Visão “${preset.name}” carregada em Análises.`,
+        ? `${imported.unsupportedCount} item(ns) sem equivalente foram ignorados`
+        : "",
+    ].filter(Boolean);
+    toast.success(
+      `Visão “${preset.name}” carregada em Análises com ${imported.widgets.length} widget(s)${
+        notes.length ? `; ${notes.join("; ")}` : ""
+      }.`,
     );
     return true;
   }
@@ -961,17 +996,20 @@ function PeriodAnalysisCard({
   widget: PeriodAnalysisWidget;
 }) {
   const Icon = widgetIcons[widget.kind];
+  const compactSummary = widget.kind === "summary";
 
   return (
     <Card className={cn("min-w-0 overflow-hidden", monitorMode && "h-full")}>
-      <CardHeader className="pb-2">
+      <CardHeader className={cn("pb-2", compactSummary && "p-3 pb-1.5")}>
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <Icon className="h-4 w-4 shrink-0 text-primary" />
               <span className="truncate">{widget.title}</span>
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription
+              className={cn(compactSummary ? "mt-0.5 text-xs leading-4" : "mt-1")}
+            >
               {model.description}
             </CardDescription>
           </div>
@@ -983,11 +1021,18 @@ function PeriodAnalysisCard({
             >
               {scenarioSummary}
             </Badge>
-            {(widget.kind === "timeline" || widget.kind === "comparison") && (
+            {(widget.kind === "timeline" ||
+              widget.kind === "comparison" ||
+              widget.kind === "hourly_occupancy") && (
               <Badge variant="outline">
                 {effectiveGranularity === "hour" ? "Hora a hora" : "Dia a dia"}
               </Badge>
             )}
+            {widget.kind === "hourly_occupancy" ? (
+              <Badge variant="outline">
+                Início {formatOccupancyStartHour(widget.startHour)}
+              </Badge>
+            ) : null}
             {widget.kind === "cumulative" ? (
               <Badge variant="outline">
                 {periodAnalysisBaselineLabel(widget.baseline)}
@@ -1022,13 +1067,15 @@ function PeriodAnalysisCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0">
+      <CardContent
+        className={cn("min-w-0", compactSummary && "px-3 pb-3")}
+      >
         {loading ? (
           <Skeleton style={{ height: model.height }} className="w-full" />
         ) : model.error ? (
           <EmptyState text={model.error} height={model.height} />
         ) : model.metrics ? (
-          <MetricGrid metrics={model.metrics} />
+          <MetricGrid compact={compactSummary} metrics={model.metrics} />
         ) : model.hasData && model.option ? (
           <div className="overflow-x-auto">
             <div
@@ -1048,21 +1095,46 @@ function PeriodAnalysisCard({
   );
 }
 
-function MetricGrid({ metrics }: { metrics: NonNullable<PeriodAnalysisWidgetModel["metrics"]> }) {
+function MetricGrid({
+  compact = false,
+  metrics,
+}: {
+  compact?: boolean;
+  metrics: NonNullable<PeriodAnalysisWidgetModel["metrics"]>;
+}) {
   return (
-    <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border xl:grid-cols-4">
+    <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border sm:grid-cols-4">
       {metrics.map((metric) => (
-        <div key={metric.label} className="min-w-0 bg-card p-4">
-          <div className="text-xs font-medium uppercase text-muted-foreground">
+        <div
+          key={metric.label}
+          className={cn("min-w-0 bg-card", compact ? "p-2.5" : "p-4")}
+        >
+          <div
+            className={cn(
+              "font-medium uppercase text-muted-foreground",
+              compact ? "text-[10px] leading-3" : "text-xs",
+            )}
+          >
             {metric.label}
           </div>
-          <div className="mt-2 truncate text-2xl font-semibold tabular-nums">
+          <div
+            className={cn(
+              "truncate font-semibold tabular-nums",
+              compact ? "mt-1 text-xl leading-6" : "mt-2 text-2xl",
+            )}
+          >
             {typeof metric.value === "number"
               ? formatNumber(metric.value)
               : metric.value}
           </div>
           {metric.description ? (
-            <div className="mt-1 truncate text-xs text-muted-foreground">
+            <div
+              className={cn(
+                "truncate text-muted-foreground",
+                compact ? "mt-0.5 text-[10px] leading-3" : "mt-1 text-xs",
+              )}
+              title={metric.description}
+            >
               {metric.description}
             </div>
           ) : null}
@@ -1091,6 +1163,12 @@ function WidgetDialog({
 }) {
   const configurableGranularity =
     form.kind === "timeline" || form.kind === "comparison";
+  const hourlyOccupancy = form.kind === "hourly_occupancy";
+  const invalidCustomSelection =
+    form.selectionMode === "custom" &&
+    (hourlyOccupancy
+      ? !form.entryScenarioIds.length || !form.exitScenarioIds.length
+      : !form.scenarioIds.length);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1179,18 +1257,135 @@ function WidgetDialog({
             </Field>
           ) : null}
 
-          <ScenarioPicker
-            className="sm:col-span-2"
-            mode={form.selectionMode}
-            onModeChange={(selectionMode) =>
-              onFormChange((current) => ({ ...current, selectionMode }))
-            }
-            onSelectedIdsChange={(scenarioIds) =>
-              onFormChange((current) => ({ ...current, scenarioIds }))
-            }
-            scenarios={scenarios}
-            selectedIds={form.scenarioIds}
-          />
+          {hourlyOccupancy ? (
+            <div className="space-y-3 sm:col-span-2">
+              <div className="max-w-[220px] space-y-2">
+                <Label>Início da contagem diária</Label>
+                <Select
+                  value={String(form.startHour)}
+                  onValueChange={(value) =>
+                    onFormChange((current) => ({
+                      ...current,
+                      startHour: Number(value),
+                    }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {OCCUPANCY_START_HOURS.map((hour) => (
+                      <SelectItem key={hour} value={String(hour)}>
+                        {formatOccupancyStartHour(hour)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="rounded-md border bg-background p-2">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium uppercase text-muted-foreground">
+                      Cenários de ocupação
+                    </div>
+                    <div className="text-sm font-semibold">
+                      {form.selectionMode === "all"
+                        ? "Detecção automática por nome e direção"
+                        : "Entradas e saídas escolhidas manualmente"}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 sm:w-[260px]">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={form.selectionMode === "all" ? "default" : "outline"}
+                      onClick={() =>
+                        onFormChange((current) => ({
+                          ...current,
+                          selectionMode: "all",
+                        }))
+                      }
+                    >
+                      Automático
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={form.selectionMode === "custom" ? "default" : "outline"}
+                      onClick={() =>
+                        onFormChange((current) => ({
+                          ...current,
+                          selectionMode: "custom",
+                        }))
+                      }
+                    >
+                      Escolher
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {form.selectionMode === "custom" ? (
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <ScenarioPicker
+                    allowAll={false}
+                    label="Cenários de entrada"
+                    mode="custom"
+                    onModeChange={() => undefined}
+                    onSelectedIdsChange={(entryScenarioIds) =>
+                      onFormChange((current) => ({
+                        ...current,
+                        entryScenarioIds,
+                        exitScenarioIds: current.exitScenarioIds.filter(
+                          (scenarioId) => !entryScenarioIds.includes(scenarioId),
+                        ),
+                      }))
+                    }
+                    scenarios={scenarios.filter(
+                      (scenario) =>
+                        !form.exitScenarioIds.includes(scenario.id) ||
+                        form.entryScenarioIds.includes(scenario.id),
+                    )}
+                    selectedIds={form.entryScenarioIds}
+                  />
+                  <ScenarioPicker
+                    allowAll={false}
+                    label="Cenários de saída"
+                    mode="custom"
+                    onModeChange={() => undefined}
+                    onSelectedIdsChange={(exitScenarioIds) =>
+                      onFormChange((current) => ({
+                        ...current,
+                        entryScenarioIds: current.entryScenarioIds.filter(
+                          (scenarioId) => !exitScenarioIds.includes(scenarioId),
+                        ),
+                        exitScenarioIds,
+                      }))
+                    }
+                    scenarios={scenarios.filter(
+                      (scenario) =>
+                        !form.entryScenarioIds.includes(scenario.id) ||
+                        form.exitScenarioIds.includes(scenario.id),
+                    )}
+                    selectedIds={form.exitScenarioIds}
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <ScenarioPicker
+              className="sm:col-span-2"
+              mode={form.selectionMode}
+              onModeChange={(selectionMode) =>
+                onFormChange((current) => ({ ...current, selectionMode }))
+              }
+              onSelectedIdsChange={(scenarioIds) =>
+                onFormChange((current) => ({ ...current, scenarioIds }))
+              }
+              scenarios={scenarios}
+              selectedIds={form.scenarioIds}
+            />
+          )}
         </div>
 
         <DialogFooter>
@@ -1200,9 +1395,7 @@ function WidgetDialog({
           <Button
             type="button"
             onClick={onSave}
-            disabled={
-              form.selectionMode === "custom" && !form.scenarioIds.length
-            }
+            disabled={invalidCustomSelection}
           >
             {form.id ? "Salvar alterações" : "Adicionar widget"}
           </Button>
@@ -1235,12 +1428,42 @@ function EmptyState({ text, height }: { text: string; height: number }) {
 function emptyWidgetForm(): PeriodAnalysisWidgetInput {
   return {
     baseline: "previous_period",
+    entryScenarioIds: [],
+    exitScenarioIds: [],
     granularity: "day",
     kind: "timeline",
     scenarioIds: [],
     selectionMode: "all",
+    startHour: 0,
     title: "Fluxo por período",
   };
+}
+
+function periodAnalysisScenarioSummary(
+  widget: PeriodAnalysisWidget,
+  scenarios: Scenario[],
+) {
+  if (widget.kind !== "hourly_occupancy") {
+    return scenarioSelectionSummary(
+      scenarios,
+      widget.selectionMode,
+      widget.scenarioIds,
+    );
+  }
+
+  if (widget.selectionMode === "all") {
+    const automatic = inferOccupancyScenarios(scenarios);
+    return `Automático · ${formatNumber(automatic.entries.length)} entradas · ${formatNumber(automatic.exits.length)} saídas`;
+  }
+
+  const availableIds = new Set(scenarios.map((scenario) => scenario.id));
+  const entries = widget.entryScenarioIds.filter((scenarioId) =>
+    availableIds.has(scenarioId),
+  ).length;
+  const exits = widget.exitScenarioIds.filter((scenarioId) =>
+    availableIds.has(scenarioId),
+  ).length;
+  return `${formatNumber(entries)} entradas · ${formatNumber(exits)} saídas`;
 }
 
 function composePeriodAnalysisReport({

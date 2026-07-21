@@ -60,7 +60,7 @@ export function CountingReportPeriodControl({
   }
 
   return (
-    <div className="grid min-w-0 gap-3 rounded-md border bg-muted/15 p-3 xl:grid-cols-[minmax(230px,0.8fr)_minmax(0,2fr)] xl:items-start">
+    <div className="grid min-w-0 gap-3 rounded-md border bg-muted/15 p-3 2xl:grid-cols-[minmax(230px,0.8fr)_minmax(0,2fr)] 2xl:items-start">
       <div className="flex min-w-0 items-start gap-2 text-left">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border bg-background text-primary">
           <CalendarRange className="h-4 w-4" />
@@ -73,7 +73,7 @@ export function CountingReportPeriodControl({
         </div>
       </div>
 
-      <div className="grid min-w-0 gap-2 sm:grid-cols-2 lg:grid-cols-[170px_minmax(145px,1fr)_minmax(145px,1fr)_190px_auto] lg:items-end">
+      <div className="grid min-w-0 gap-2 sm:grid-cols-2 2xl:grid-cols-[170px_minmax(145px,1fr)_minmax(145px,1fr)_190px_auto] 2xl:items-end">
         <div className="space-y-1">
           <label
             htmlFor="counting-report-period-preset"

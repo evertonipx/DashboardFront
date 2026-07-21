@@ -4,7 +4,7 @@ export type CardSize = "compact" | "wide" | "large" | "full";
 
 export type CardHeight = "short" | "standard" | "tall";
 
-export type CardChartType = "bar" | "line";
+export type CardChartType = "bar" | "line" | "rose" | "treemap";
 
 export type CardPreference = {
   chartType?: CardChartType;
@@ -101,8 +101,8 @@ export const cardViewMenus: CardMenuDefinition[] = [
       },
       {
         id: "live_scenario_rose",
-        label: "Distribuição radial por cenário",
-        description: "Participação mensal dos cenários em pétalas proporcionais.",
+        label: "Composição por cenário",
+        description: "Participação mensal em gráfico rosa ou retângulos.",
       },
       {
         id: "live_chart_week",
@@ -574,7 +574,12 @@ function isCardHeight(value: unknown): value is CardHeight {
 }
 
 function isCardChartType(value: unknown): value is CardChartType {
-  return value === "bar" || value === "line";
+  return (
+    value === "bar" ||
+    value === "line" ||
+    value === "rose" ||
+    value === "treemap"
+  );
 }
 
 function isCardColor(value: unknown): value is string {

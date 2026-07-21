@@ -552,7 +552,10 @@ function normalizeSnapshot(
         return [
           {
             chartType:
-              item.chartType === "bar" || item.chartType === "line"
+              item.chartType === "bar" ||
+              item.chartType === "line" ||
+              item.chartType === "rose" ||
+              item.chartType === "treemap"
                 ? item.chartType
                 : undefined,
             color:

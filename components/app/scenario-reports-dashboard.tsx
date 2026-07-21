@@ -1437,7 +1437,7 @@ export function ScenarioReportsDashboard({
                 updateCountingViewSettings({ includeOpenPeriod })
               }
             />
-            <div className="grid gap-4 border-t pt-4 xl:grid-cols-[minmax(340px,1.25fr)_minmax(420px,1fr)]">
+            <div className="grid gap-4 border-t pt-4 2xl:grid-cols-[minmax(340px,1.25fr)_minmax(420px,1fr)]">
               <div className="grid min-w-0 gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
                 <div className="space-y-2">
                   <div className="text-sm font-medium">Visão</div>
@@ -1479,7 +1479,7 @@ export function ScenarioReportsDashboard({
                 </div>
               </div>
 
-              <div className="space-y-3 xl:border-l xl:pl-4">
+              <div className="space-y-3 2xl:border-l 2xl:pl-4">
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="outline" className="gap-1 bg-card">
                     <BarChart3 className="h-3.5 w-3.5" />

@@ -65,6 +65,18 @@ export function inferScenarioDirection(
   return null;
 }
 
+export function inferOccupancyScenarios(scenarios: Scenario[]) {
+  return scenarios.reduce(
+    (groups, scenario) => {
+      const direction = inferScenarioDirection(scenario);
+      if (direction === "entry") groups.entries.push(scenario);
+      if (direction === "exit") groups.exits.push(scenario);
+      return groups;
+    },
+    { entries: [] as Scenario[], exits: [] as Scenario[] },
+  );
+}
+
 function matchesDirectionWord(word: string, aliases: string[]) {
   return aliases.some(
     (alias) => word === alias || new RegExp(`^${alias}\\d+$`).test(word),

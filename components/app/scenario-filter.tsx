@@ -622,7 +622,7 @@ export function ScenarioFilter({
               className={cn(
                 "grid gap-4",
                 preset === "custom"
-                  ? "xl:grid-cols-[minmax(240px,1fr)_170px_190px_190px_auto]"
+                  ? "2xl:grid-cols-[minmax(240px,1fr)_170px_190px_190px_auto]"
                   : "md:grid-cols-[minmax(240px,1fr)_170px_auto]",
               )}
             >

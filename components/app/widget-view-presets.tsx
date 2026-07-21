@@ -30,6 +30,7 @@ import { cn } from "@/lib/utils";
 import {
   flushUserGridSync,
   requestUserGridSync,
+  USER_GRID_HYDRATED_EVENT,
 } from "@/lib/user-grid";
 import {
   applyWidgetViewPreset,
@@ -142,12 +143,14 @@ export function WidgetViewPresetsDialog({
       refreshPresets();
     }
     window.addEventListener(WIDGET_VIEW_PRESETS_UPDATED_EVENT, syncPresets);
+    window.addEventListener(USER_GRID_HYDRATED_EVENT, syncPresets);
     window.addEventListener("storage", syncPresets);
     return () => {
       window.removeEventListener(
         WIDGET_VIEW_PRESETS_UPDATED_EVENT,
         syncPresets,
       );
+      window.removeEventListener(USER_GRID_HYDRATED_EVENT, syncPresets);
       window.removeEventListener("storage", syncPresets);
     };
   }, [refreshPresets]);
@@ -176,6 +179,7 @@ export function WidgetViewPresetsDialog({
       userId,
     });
     setPresets(next);
+    requestUserGridSync();
     setName(defaultPresetName(menu.label, currentScope));
     toast.success("Visão salva com todas as configurações dos widgets.");
   }
@@ -190,6 +194,7 @@ export function WidgetViewPresetsDialog({
       userId,
     });
     setPresets(next);
+    requestUserGridSync();
 
     if (preset.isDefault) {
       applyPresetToScopes(
@@ -228,6 +233,7 @@ export function WidgetViewPresetsDialog({
         userId,
       );
       setPresets(next);
+      requestUserGridSync();
       toast.success("Visão padrão removida.");
       return;
     }
@@ -243,6 +249,7 @@ export function WidgetViewPresetsDialog({
     const targets = defaultTargets();
     applyPresetToScopes(nextPreset, targets);
     setPresets(next);
+    requestUserGridSync();
     toast.success(
       targets.length
         ? `Visão definida como padrão e aplicada em ${targets.length} tela(s).`
@@ -255,6 +262,7 @@ export function WidgetViewPresetsDialog({
     setPresets(
       deleteWidgetViewPreset(menuKey, presetId, companyId, userId),
     );
+    requestUserGridSync();
     setDeleteId(null);
     if (replicateId === presetId) setReplicateId(null);
     toast.success("Visão excluída.");
@@ -280,6 +288,7 @@ export function WidgetViewPresetsDialog({
       return;
     }
     applyPresetToScopes(preset, targets);
+    requestUserGridSync();
     setReplicateId(null);
     toast.success(`Visão replicada em ${targets.length} tela(s).`);
     reloadIfCurrentTarget(targets);

@@ -17,16 +17,17 @@ import type { WidgetViewSnapshot } from "@/lib/widget-view-presets";
 
 export type LiveAnalysisImportResult = {
   preferences: CardPreference[];
+  sourceResolution: "scenario_id" | "scenario_name" | "all_scenarios";
   sourceCardCount: number;
   unsupportedCount: number;
   widgets: PeriodAnalysisWidget[];
 };
 
 export function buildLiveAnalysisImport({
-  scenario,
+  scenarios,
   snapshot,
 }: {
-  scenario: Scenario;
+  scenarios: Scenario[];
   snapshot: WidgetViewSnapshot;
 }): LiveAnalysisImportResult {
   const customWidgets = normalizeRealtimeCustomWidgets(
@@ -46,6 +47,7 @@ export function buildLiveAnalysisImport({
   const operational = normalizeLiveOperationalSettings(
     snapshotStorageValue(snapshot, "ipxdata.live-operational-settings.v1"),
   );
+  const sourceSelection = resolveSourceScenarioSelection(snapshot, scenarios);
   const widgets: PeriodAnalysisWidget[] = [];
   const importedPreferences: CardPreference[] = [];
   let unsupportedCount = 0;
@@ -54,10 +56,13 @@ export function buildLiveAnalysisImport({
     sourcePreference: CardPreference,
     input: {
       baseline?: PeriodAnalysisBaseline;
+      entryScenarioIds?: string[];
+      exitScenarioIds?: string[];
       granularity?: "hour" | "day";
       kind: PeriodAnalysisWidgetKind;
       scenarioIds?: string[];
       selectionMode?: "all" | "custom";
+      startHour?: number;
       title: string;
     },
   ) => {
@@ -66,11 +71,16 @@ export function buildLiveAnalysisImport({
     widgets.push({
       baseline: input.baseline ?? "previous_period",
       createdAt: now,
+      entryScenarioIds: input.entryScenarioIds ?? [],
+      exitScenarioIds: input.exitScenarioIds ?? [],
       granularity: input.granularity ?? "day",
       id,
       kind: input.kind,
-      scenarioIds: input.scenarioIds ?? [scenario.id],
-      selectionMode: input.selectionMode ?? "custom",
+      scenarioIds:
+        input.scenarioIds ?? sourceSelection.selection.scenarioIds,
+      selectionMode:
+        input.selectionMode ?? sourceSelection.selection.selectionMode,
+      startHour: input.startHour ?? 0,
       title: input.title,
       updatedAt: now,
     });
@@ -85,7 +95,7 @@ export function buildLiveAnalysisImport({
   };
 
   preferences.forEach((preference) => {
-    const common = { scenarioIds: [scenario.id], selectionMode: "custom" as const };
+    const common = sourceSelection.selection;
     const operationalBaseline: PeriodAnalysisBaseline =
       operational.monthComparison === "last_year"
         ? "last_year"
@@ -119,6 +129,24 @@ export function buildLiveAnalysisImport({
           title: "Hora a Hora",
         });
         return;
+      case "live_chart_minute":
+        add(preference, {
+          ...common,
+          granularity: "hour",
+          kind: "timeline",
+          title: "Fluxo intradiário",
+        });
+        return;
+      case "live_chart_day":
+      case "live_chart_week":
+      case "live_chart_month":
+        add(preference, {
+          ...common,
+          granularity: "day",
+          kind: "timeline",
+          title: "Fluxo por período",
+        });
+        return;
       case "live_moving_average_trend":
         add(preference, {
           ...common,
@@ -131,6 +159,7 @@ export function buildLiveAnalysisImport({
           ...selectionFromSettings(
             operational.cumulativeSelectionMode,
             operational.cumulativeScenarioIds,
+            scenarios,
           ),
           kind: "totals_table",
           title: "Acumulado por cenário",
@@ -141,6 +170,7 @@ export function buildLiveAnalysisImport({
           ...selectionFromSettings(
             operational.scenarioTableSelectionMode,
             operational.scenarioTableIds,
+            scenarios,
           ),
           kind: "totals_table",
           title: "Tabela acumulada por cenário",
@@ -151,17 +181,46 @@ export function buildLiveAnalysisImport({
           ...selectionFromSettings(
             operational.heatmapSelectionMode,
             operational.heatmapScenarioIds,
+            scenarios,
           ),
           granularity: "hour",
           kind: "heatmap",
           title: "Mapa de calor dia x hora",
         });
         return;
+      case "live_hourly_occupancy": {
+        const availableIds = new Set(scenarios.map((scenario) => scenario.id));
+        const entryScenarioIds = uniqueStrings(
+          operational.occupancyEntryScenarioIds,
+        ).filter((scenarioId) => availableIds.has(scenarioId));
+        const entryIdSet = new Set(entryScenarioIds);
+        const exitScenarioIds = uniqueStrings(
+          operational.occupancyExitScenarioIds,
+        ).filter(
+          (scenarioId) =>
+            availableIds.has(scenarioId) && !entryIdSet.has(scenarioId),
+        );
+        add(preference, {
+          entryScenarioIds,
+          exitScenarioIds,
+          granularity: "hour",
+          kind: "hourly_occupancy",
+          scenarioIds: [],
+          selectionMode:
+            operational.occupancySelectionMode === "custom"
+              ? "custom"
+              : "all",
+          startHour: operational.occupancyStartHour,
+          title: "Ocupação hora a hora",
+        });
+        return;
+      }
       case "live_month_access_ranking":
         add(preference, {
           ...selectionFromSettings(
             operational.rankingSelectionMode,
             operational.rankingScenarioIds,
+            scenarios,
           ),
           kind: "ranking",
           title: "Ranking dos acessos",
@@ -172,6 +231,7 @@ export function buildLiveAnalysisImport({
           ...selectionFromSettings(
             operational.peakDaySelectionMode,
             operational.peakDayScenarioIds,
+            scenarios,
           ),
           kind: "peak_days",
           title: "Top 5 dias de pico",
@@ -182,9 +242,10 @@ export function buildLiveAnalysisImport({
           ...selectionFromSettings(
             operational.roseSelectionMode,
             operational.roseScenarioIds,
+            scenarios,
           ),
           kind: "rose",
-          title: "Distribuição radial por cenário",
+          title: "Composição por cenário",
         });
         return;
       case "live_operational_month_comparison":
@@ -212,6 +273,24 @@ export function buildLiveAnalysisImport({
           title: "Comparativo de cenários",
         });
         return;
+      case "live_scenario_period_comparison":
+        add(preference, {
+          granularity: "day",
+          kind: "comparison",
+          scenarioIds: [],
+          selectionMode: "all",
+          title: "Comparativo de cenários",
+        });
+        return;
+      case "live_scenario_detail":
+        add(preference, {
+          granularity: "day",
+          kind: "totals_table",
+          scenarioIds: [],
+          selectionMode: "all",
+          title: "Totais por cenário",
+        });
+        return;
       default:
         break;
     }
@@ -222,13 +301,22 @@ export function buildLiveAnalysisImport({
       return;
     }
 
-    if (!addCustomWidget(add, preference, customWidget, snapshot)) {
+    if (
+      !addCustomWidget(
+        add,
+        preference,
+        customWidget,
+        snapshot,
+        scenarios,
+      )
+    ) {
       unsupportedCount += 1;
     }
   });
 
   return {
     preferences: importedPreferences,
+    sourceResolution: sourceSelection.resolution,
     sourceCardCount: preferences.length,
     unsupportedCount,
     widgets,
@@ -240,26 +328,36 @@ function addCustomWidget(
     sourcePreference: CardPreference,
     input: {
       baseline?: PeriodAnalysisBaseline;
+      entryScenarioIds?: string[];
+      exitScenarioIds?: string[];
       granularity?: "hour" | "day";
       kind: PeriodAnalysisWidgetKind;
       scenarioIds?: string[];
       selectionMode?: "all" | "custom";
+      startHour?: number;
       title: string;
     },
   ) => void,
   preference: CardPreference,
   widget: RealtimeCustomWidget,
   snapshot: WidgetViewSnapshot,
+  scenarios: Scenario[],
 ) {
   if (widget.kind === "scope") {
     if (widget.scopeMode !== "scenario") return false;
+    const scenario = resolveScenario(
+      scenarios,
+      widget.scopeId,
+      widget.scopeName,
+    );
+    if (!scenario) return false;
     add(preference, {
       granularity:
         widget.granularity === "hour" || widget.granularity === "minute"
           ? "hour"
           : "day",
       kind: "timeline",
-      scenarioIds: [widget.scopeId],
+      scenarioIds: [scenario.id],
       selectionMode: "custom",
       title: widget.title,
     });
@@ -277,8 +375,11 @@ function addCustomWidget(
       granularity:
         settings.granularity === "hour" ? "hour" : "day",
       kind: "comparison",
-      scenarioIds: settings.selectedScenarioIds,
-      selectionMode: settings.selectionMode,
+      ...selectionFromSettings(
+        settings.selectionMode,
+        settings.selectedScenarioIds,
+        scenarios,
+      ),
       title: widget.title,
     });
     return true;
@@ -299,8 +400,11 @@ function addCustomWidget(
     baseline: "previous_month",
     granularity: widget.widgetType === "heatmap" ? "hour" : "day",
     kind: kindByType[widget.widgetType],
-    scenarioIds: widget.scenarioIds,
-    selectionMode: widget.selectionMode,
+    ...selectionFromSettings(
+      widget.selectionMode,
+      widget.scenarioIds,
+      scenarios,
+    ),
     title: widget.title,
   });
   return true;
@@ -309,11 +413,83 @@ function addCustomWidget(
 function selectionFromSettings(
   selectionMode: "all" | "custom",
   scenarioIds: string[],
+  scenarios: Scenario[],
 ) {
+  if (selectionMode === "all") {
+    return { scenarioIds: [], selectionMode };
+  }
+
+  const availableIds = new Set(scenarios.map((scenario) => scenario.id));
   return {
-    scenarioIds,
+    scenarioIds: uniqueStrings(scenarioIds).filter((scenarioId) =>
+      availableIds.has(scenarioId),
+    ),
     selectionMode,
   };
+}
+
+function resolveSourceScenarioSelection(
+  snapshot: WidgetViewSnapshot,
+  scenarios: Scenario[],
+) {
+  const sourceScope = snapshot.sourceScope;
+  const byId = sourceScope
+    ? scenarios.find((scenario) => scenario.id === sourceScope.id)
+    : undefined;
+  if (byId) {
+    return {
+      resolution: "scenario_id" as const,
+      selection: {
+        scenarioIds: [byId.id],
+        selectionMode: "custom" as const,
+      },
+    };
+  }
+
+  const byName = sourceScope
+    ? uniqueScenarioByName(scenarios, sourceScope.name)
+    : undefined;
+  if (byName) {
+    return {
+      resolution: "scenario_name" as const,
+      selection: {
+        scenarioIds: [byName.id],
+        selectionMode: "custom" as const,
+      },
+    };
+  }
+
+  return {
+    resolution: "all_scenarios" as const,
+    selection: {
+      scenarioIds: [],
+      selectionMode: "all" as const,
+    },
+  };
+}
+
+function resolveScenario(
+  scenarios: Scenario[],
+  scenarioId: string,
+  scenarioName: string,
+) {
+  return (
+    scenarios.find((scenario) => scenario.id === scenarioId) ??
+    uniqueScenarioByName(scenarios, scenarioName)
+  );
+}
+
+function uniqueScenarioByName(scenarios: Scenario[], name: string) {
+  const normalizedName = normalizeScenarioName(name);
+  if (!normalizedName) return undefined;
+  const matches = scenarios.filter(
+    (scenario) => normalizeScenarioName(scenario.name) === normalizedName,
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function normalizeScenarioName(value: string) {
+  return value.trim().toLocaleLowerCase("pt-BR");
 }
 
 function completeSourcePreferences(

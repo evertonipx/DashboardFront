@@ -522,7 +522,7 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
             <Skeleton className="h-10 w-32" />
           </div>
         ) : scopeOptions.length ? (
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-end 2xl:justify-between">
             <div className="grid min-w-0 flex-1 gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
               <div className="space-y-2">
                 <div className="text-sm font-medium">Visão</div>

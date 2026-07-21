@@ -9,6 +9,7 @@ export type LiveOperationalSettings = {
   occupancyEntryScenarioIds: string[];
   occupancyExitScenarioIds: string[];
   occupancySelectionMode: "auto" | "custom";
+  occupancyStartHour: number;
   cumulativeScenarioIds: string[];
   cumulativeSelectionMode: "all" | "custom";
   scenarioTableIds: string[];
@@ -31,6 +32,7 @@ const defaultSettings: LiveOperationalSettings = {
   occupancyEntryScenarioIds: [],
   occupancyExitScenarioIds: [],
   occupancySelectionMode: "auto",
+  occupancyStartHour: 0,
   cumulativeScenarioIds: [],
   cumulativeSelectionMode: "all",
   scenarioTableIds: [],
@@ -105,6 +107,7 @@ export function normalizeLiveOperationalSettings(
     occupancyExitScenarioIds: normalizeIds(settings.occupancyExitScenarioIds),
     occupancySelectionMode:
       settings.occupancySelectionMode === "custom" ? "custom" : "auto",
+    occupancyStartHour: normalizeHour(settings.occupancyStartHour),
     cumulativeScenarioIds: normalizeIds(settings.cumulativeScenarioIds),
     cumulativeSelectionMode:
       settings.cumulativeSelectionMode === "custom" ? "custom" : "all",
@@ -133,6 +136,11 @@ function normalizeIds(value: unknown) {
         ),
       )
     : [];
+}
+
+function normalizeHour(value: unknown) {
+  const hour = Number(value);
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : 0;
 }
 
 function storageKey(

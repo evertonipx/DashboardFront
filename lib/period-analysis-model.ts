@@ -8,6 +8,13 @@ import {
   monochromeHeatmapPalette,
   pastelBarColor,
 } from "@/lib/chart-palette";
+import {
+  buildScenarioCompositionOption,
+  normalizeScenarioCompositionChartType,
+  scenarioCompositionDescription,
+  type ScenarioCompositionChartType,
+} from "@/lib/chart-composition";
+import { buildHourlyOccupancyOption } from "@/lib/hourly-occupancy-chart";
 import type {
   PeriodAnalysisBaseline,
   PeriodAnalysisWidget,
@@ -15,16 +22,21 @@ import type {
 import type { ReportMetric, ReportTable } from "@/lib/report-export";
 import {
   buildCombinedScenarioPoints,
+  buildScenarioHourlyOccupancy,
   buildScenarioRanking,
+  formatOccupancyStartHour,
   selectScenarios,
   type ScenarioAnalyticsPoint,
+  type ScenarioHourlyOccupancyPoint,
 } from "@/lib/scenario-analytics";
+import { inferOccupancyScenarios } from "@/lib/scenario-direction";
 import type {
   AggregateEventRow,
   AggregateGranularity,
   Scenario,
 } from "@/lib/types";
 import { formatNumber } from "@/lib/utils";
+import type { CardChartType } from "@/lib/view-preferences";
 
 export type PeriodAnalysisRange = {
   from: Date;
@@ -63,18 +75,24 @@ const HOUR_LABELS = Array.from(
 );
 
 export function buildPeriodAnalysisWidgetModel({
+  chartType,
   color = DEFAULT_COLOR,
   data,
   period,
   scenarios,
   widget,
 }: {
+  chartType?: CardChartType;
   color?: string;
   data: PeriodAnalysisData;
   period: PeriodAnalysisRange;
   scenarios: Scenario[];
   widget: PeriodAnalysisWidget;
 }): PeriodAnalysisWidgetModel {
+  if (widget.kind === "hourly_occupancy") {
+    return buildHourlyOccupancyModel(widget, data, period, scenarios, color);
+  }
+
   const selectedScenarios = selectScenarios(
     scenarios,
     widget.selectionMode,
@@ -115,7 +133,13 @@ export function buildPeriodAnalysisWidgetModel({
     return buildPeakDaysModel(data, period, selectedScenarios, color);
   }
   if (widget.kind === "rose") {
-    return buildRoseModel(data, period, selectedScenarios, color);
+    return buildRoseModel(
+      data,
+      period,
+      selectedScenarios,
+      color,
+      normalizeScenarioCompositionChartType(chartType),
+    );
   }
   if (widget.kind === "totals_table") {
     return buildScenarioTotalsModel(data, period, selectedScenarios);
@@ -184,6 +208,7 @@ export function periodAnalysisEffectiveGranularity(
   widget: PeriodAnalysisWidget,
   period: PeriodAnalysisRange,
 ) {
+  if (widget.kind === "hourly_occupancy") return "hour";
   return isSingleDayAnalysisPeriod(period) &&
     (widget.kind === "timeline" || widget.kind === "comparison")
     ? "hour"
@@ -531,6 +556,7 @@ function buildRoseModel(
   period: PeriodAnalysisRange,
   scenarios: Scenario[],
   color: string,
+  chartType: ScenarioCompositionChartType,
 ): PeriodAnalysisWidgetModel {
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
@@ -543,56 +569,17 @@ function buildRoseModel(
     sourceGranularity: data.day.granularity,
     to: effectivePeriod.to,
   });
-  const total = ranking.reduce((sum, point) => sum + point.total, 0);
-
   return {
-    description: "Participação proporcional dos cenários escolhidos no período.",
+    description: scenarioCompositionDescription(chartType),
     emptyText: "Sem fluxo para calcular a distribuição dos cenários.",
     error: data.day.error,
     hasData: ranking.length > 0,
     height: 340,
-    option: {
-      series: [
-        {
-          center: ["50%", "48%"],
-          data: ranking.map((point, index) => ({
-            itemStyle: {
-              color: index === 0 ? color : pastelBarColor(index),
-            },
-            name: point.name,
-            value: point.total,
-          })),
-          label: {
-            color: "#526477",
-            formatter: (params: { name?: string; value?: number }) => {
-              const value = Number(params.value ?? 0);
-              return `${params.name ?? ""}\n${formatNumber(value)} · ${formatPercent(
-                total ? value / total : 0,
-              )}`;
-            },
-            fontSize: 10,
-          },
-          labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
-          labelLine: { length: 8, length2: 6, smooth: 0.15 },
-          minAngle: 4,
-          radius: ["18%", "70%"],
-          roseType: "area",
-          type: "pie",
-        },
-      ],
-      tooltip: {
-        formatter: (params: {
-          name?: string;
-          value?: number;
-        }) => {
-          const value = Number(params.value ?? 0);
-          return `${params.name ?? "Cenário"}<br/><strong>${formatNumber(
-            value,
-          )}</strong> · ${formatPercent(total ? value / total : 0)}`;
-        },
-        trigger: "item",
-      },
-    } as EnterpriseChartOption,
+    option: buildScenarioCompositionOption(
+      ranking.map((point) => ({ name: point.name, value: point.total })),
+      color,
+      chartType,
+    ),
     table: {
       columns: [
         { key: "scenario", label: "Cenário", width: 34 },
@@ -605,7 +592,7 @@ function buildRoseModel(
         share: formatPercent(point.share),
         total: point.total,
       })),
-      title: "Distribuição radial por cenário",
+      title: "Composição por cenário",
     },
   };
 }
@@ -972,6 +959,118 @@ function buildTrendModel(
   };
 }
 
+function buildHourlyOccupancyModel(
+  widget: PeriodAnalysisWidget,
+  data: PeriodAnalysisData,
+  period: PeriodAnalysisRange,
+  scenarios: Scenario[],
+  color: string,
+): PeriodAnalysisWidgetModel {
+  const availableById = new Map(
+    scenarios.map((scenario) => [scenario.id, scenario]),
+  );
+  const automatic = inferOccupancyScenarios(scenarios);
+  const entryScenarios =
+    widget.selectionMode === "custom"
+      ? widget.entryScenarioIds.flatMap((scenarioId) => {
+          const scenario = availableById.get(scenarioId);
+          return scenario ? [scenario] : [];
+        })
+      : automatic.entries;
+  const entryIds = new Set(entryScenarios.map((scenario) => scenario.id));
+  const exitScenarios = (
+    widget.selectionMode === "custom"
+      ? widget.exitScenarioIds.flatMap((scenarioId) => {
+          const scenario = availableById.get(scenarioId);
+          return scenario ? [scenario] : [];
+        })
+      : automatic.exits
+  ).filter((scenario) => !entryIds.has(scenario.id));
+
+  if (!entryScenarios.length || !exitScenarios.length) {
+    return {
+      description: widgetDescription(widget),
+      emptyText:
+        "Configure ao menos um cenário de entrada e um cenário de saída.",
+      error: data.hour.error,
+      hasData: false,
+      height: 340,
+    };
+  }
+
+  const effectivePeriod = periodRangeThroughNow(period);
+  const singleDay = isSingleDayAnalysisPeriod(period);
+  const points = listDayStarts(effectivePeriod.from, effectivePeriod.to).flatMap(
+    (day) => {
+      const through = new Date(
+        Math.min(addDays(day, 1).getTime(), effectivePeriod.to.getTime()),
+      );
+      return buildScenarioHourlyOccupancy({
+        day,
+        entryScenarios,
+        exitScenarios,
+        rows: data.hour.rows,
+        sourceGranularity: data.hour.granularity,
+        startHour: widget.startHour,
+        through,
+      })
+        .filter((point) => point.occupancy !== null)
+        .map<ScenarioHourlyOccupancyPoint>((point) => ({
+          ...point,
+          label: singleDay
+            ? point.label
+            : `${formatShortDate(day)} ${point.label}`,
+        }));
+    },
+  );
+
+  return {
+    description: singleDay
+      ? `Entradas acumuladas menos saídas a partir de ${formatOccupancyStartHour(
+          widget.startHour,
+        )}; antes desse horário, o saldo é zero.`
+      : `Saldo hora a hora reiniciado diariamente, com contagem a partir de ${formatOccupancyStartHour(
+          widget.startHour,
+        )}.`,
+    emptyText: "Sem eventos horários nos cenários de entrada e saída.",
+    error: data.hour.error,
+    hasData: points.length > 0,
+    height: 340,
+    option: buildHourlyOccupancyOption(points, color),
+    table: {
+      columns: [
+        { key: "period", label: singleDay ? "Hora" : "Data e hora", width: 20 },
+        {
+          key: "entries",
+          label: "Entradas acumuladas",
+          numeric: true,
+          width: 22,
+        },
+        {
+          key: "exits",
+          label: "Saídas acumuladas",
+          numeric: true,
+          width: 22,
+        },
+        {
+          key: "occupancy",
+          label: "Ocupação estimada",
+          numeric: true,
+          width: 22,
+        },
+      ],
+      description: formatPeriodAnalysisRange(period),
+      rows: points.map((point) => ({
+        entries: point.entries,
+        exits: point.exits,
+        occupancy: point.occupancy ?? 0,
+        period: point.label,
+      })),
+      title: widget.title,
+    },
+  };
+}
+
 function buildHourProfileModel(
   data: PeriodAnalysisData,
   period: PeriodAnalysisRange,
@@ -1334,6 +1433,9 @@ function widgetDescription(widget: PeriodAnalysisWidget) {
   if (widget.kind === "cumulative") return "Acumulado contra uma base comparável.";
   if (widget.kind === "trend") return "Médias móveis de 7 e 30 dias.";
   if (widget.kind === "hour_profile") return "Perfil médio das 24 horas.";
+  if (widget.kind === "hourly_occupancy") {
+    return "Saldo acumulado entre cenários de entrada e saída.";
+  }
   if (widget.kind === "peak_days") return "Dias com os maiores picos do período.";
   if (widget.kind === "rose") return "Distribuição proporcional por cenário.";
   if (widget.kind === "totals_table") return "Totais individuais por cenário.";
