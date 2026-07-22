@@ -61,14 +61,23 @@ export type PeriodAnalysisWidgetModel = {
   error?: string;
   hasData: boolean;
   height: number;
+  insights?: PeriodAnalysisInsight[];
   metrics?: ReportMetric[];
-  minWidth?: number;
   option?: EnterpriseChartOption;
   table?: ReportTable;
 };
 
+export type PeriodAnalysisInsight = {
+  label: string;
+  tone?: "default" | "muted" | "positive" | "negative" | "primary";
+  value: string;
+};
+
 const DEFAULT_COLOR = "#1267C4";
-const MUTED_BASE_COLOR = "#AEB8C6";
+const MUTED_BASE_COLOR = "#A3AFBF";
+const POSITIVE_COLOR = "#0F766E";
+const NEGATIVE_COLOR = "#C2410C";
+const NEUTRAL_COLOR = "#64748B";
 const HOUR_LABELS = Array.from(
   { length: 24 },
   (_, hour) => `${String(hour).padStart(2, "0")}h`,
@@ -319,6 +328,12 @@ function buildTimelineModel(
     granularity,
   );
   const option = buildBarTimelineOption(points, color);
+  const total = points.reduce((sum, point) => sum + point.total, 0);
+  const peak = points.reduce<ScenarioAnalyticsPoint | null>(
+    (largest, point) =>
+      !largest || point.total > largest.total ? point : largest,
+    null,
+  );
 
   return {
     description: `${granularityLabel(granularity)} dos cenários selecionados em ${formatPeriodAnalysisRange(period)}.`,
@@ -326,7 +341,18 @@ function buildTimelineModel(
     error: dataset.error,
     hasData: points.some((point) => point.total !== 0),
     height: 330,
-    minWidth: points.length > 40 ? Math.min(1600, points.length * 26) : undefined,
+    insights: [
+      { label: "Total", tone: "primary", value: formatNumber(total) },
+      ...(peak && peak.total
+        ? [
+            {
+              label: "Pico",
+              tone: "muted" as const,
+              value: `${peak.label} · ${formatNumber(peak.total)}`,
+            },
+          ]
+        : []),
+    ],
     option,
     table: pointsTable(widget.title, points),
   };
@@ -349,6 +375,17 @@ function buildComparisonModel(
   }));
   const option = buildMultiScenarioOption(series, color);
   const labels = series[0]?.points.map((point) => point.label) ?? [];
+  const scenarioTotals = series
+    .map((item) => ({
+      name: item.name,
+      total: item.points.reduce((sum, point) => sum + point.total, 0),
+    }))
+    .sort((left, right) => right.total - left.total);
+  const combinedTotal = scenarioTotals.reduce(
+    (sum, item) => sum + item.total,
+    0,
+  );
+  const leader = scenarioTotals[0];
 
   return {
     description: `${granularityLabel(granularity)} com uma série para cada cenário escolhido.`,
@@ -358,7 +395,22 @@ function buildComparisonModel(
       item.points.some((point) => point.total !== 0),
     ),
     height: 360,
-    minWidth: labels.length > 40 ? Math.min(1800, labels.length * 28) : undefined,
+    insights: [
+      {
+        label: "Total combinado",
+        tone: "primary",
+        value: formatNumber(combinedTotal),
+      },
+      ...(leader?.total
+        ? [
+            {
+              label: "Maior volume",
+              tone: "muted" as const,
+              value: `${leader.name} · ${formatNumber(leader.total)}`,
+            },
+          ]
+        : []),
+    ],
     option,
     table: {
       columns: [
@@ -402,6 +454,8 @@ function buildRankingModel(
   });
   const displayed = [...ranking].reverse();
   const height = Math.max(290, ranking.length * 34 + 60);
+  const leader = ranking[0];
+  const total = ranking.reduce((sum, point) => sum + point.total, 0);
 
   return {
     description: isSingleDayAnalysisPeriod(period)
@@ -411,19 +465,43 @@ function buildRankingModel(
     error: data.day.error,
     hasData: ranking.length > 0,
     height,
+    insights: [
+      { label: "Total", tone: "primary", value: formatNumber(total) },
+      ...(leader
+        ? [
+            {
+              label: "Líder",
+              tone: "muted" as const,
+              value: `${leader.name} · ${formatPercent(leader.share)}`,
+            },
+          ]
+        : []),
+    ],
     option: {
-      color: [color],
-      grid: { bottom: 24, containLabel: true, left: 16, right: 72, top: 12 },
+      grid: { bottom: 8, containLabel: true, left: 8, right: 112, top: 8 },
       series: [
         {
-          barMaxWidth: 22,
-          data: displayed.map((point) => point.total),
-          itemStyle: { borderRadius: [0, 3, 3, 0], color },
+          barCategoryGap: "28%",
+          barMaxWidth: 24,
+          data: displayed.map((point, index) => ({
+            itemStyle: {
+              borderRadius: [0, 3, 3, 0],
+              color:
+                index === displayed.length - 1
+                  ? color
+                  : pastelBarColor(displayed.length - index),
+            },
+            value: point.total,
+          })),
           label: {
             color: "#526477",
-            formatter: (params: { dataIndex?: number }) => {
+            distance: 6,
+            fontSize: 10,
+            formatter: (params: { dataIndex?: number; value?: number }) => {
               const point = displayed[params.dataIndex ?? 0];
-              return point ? `${formatPercent(point.share)}` : "";
+              return point
+                ? `${formatPercent(point.share)} · ${formatNumber(Number(params.value ?? 0))}`
+                : "";
             },
             position: "right",
             show: true,
@@ -432,6 +510,7 @@ function buildRankingModel(
         },
       ],
       tooltip: {
+        ...operationalTooltip(),
         formatter: (params: { dataIndex?: number }) => {
           const point = displayed[params.dataIndex ?? 0];
           return point
@@ -441,13 +520,18 @@ function buildRankingModel(
         trigger: "item",
       },
       xAxis: {
-        axisLabel: { color: "#66758A", hideOverlap: true },
-        splitNumber: 4,
+        axisLabel: { color: "#66758A", fontSize: 10 },
+        minInterval: 1,
         splitLine: { lineStyle: { color: "#E8EEF6" } },
         type: "value",
       },
       yAxis: {
-        axisLabel: { color: "#526477", width: 180, overflow: "truncate" },
+        axisLabel: {
+          color: "#526477",
+          fontSize: 10,
+          overflow: "truncate",
+          width: 150,
+        },
         axisLine: { show: false },
         axisTick: { show: false },
         data: displayed.map((point) => point.name),
@@ -493,6 +577,7 @@ function buildPeakDaysModel(
     .sort((left, right) => right.total - left.total)
     .slice(0, 5);
   const displayed = [...ranked].reverse();
+  const peak = ranked[0];
 
   return {
     description: `Cinco dias com maior fluxo em ${formatPeriodAnalysisRange(
@@ -502,16 +587,35 @@ function buildPeakDaysModel(
     error: data.day.error,
     hasData: ranked.length > 0,
     height: 300,
+    insights: peak
+      ? [
+          {
+            label: "Maior pico",
+            tone: "primary",
+            value: `${peak.label} · ${formatNumber(peak.total)}`,
+          },
+        ]
+      : undefined,
     option: {
-      color: [color],
-      grid: { bottom: 18, containLabel: true, left: 18, right: 72, top: 12 },
+      grid: { bottom: 8, containLabel: true, left: 8, right: 72, top: 8 },
       series: [
         {
-          barMaxWidth: 24,
-          data: displayed.map((point) => point.total),
-          itemStyle: { borderRadius: [0, 3, 3, 0], color },
+          barCategoryGap: "34%",
+          barMaxWidth: 28,
+          data: displayed.map((point, index) => ({
+            itemStyle: {
+              borderRadius: [0, 3, 3, 0],
+              color:
+                index === displayed.length - 1
+                  ? color
+                  : pastelBarColor(displayed.length - index + 1),
+            },
+            value: point.total,
+          })),
           label: {
             color: "#526477",
+            distance: 6,
+            fontSize: 10,
             formatter: (params: { value?: number }) =>
               formatNumber(Number(params.value ?? 0)),
             position: "right",
@@ -520,14 +624,19 @@ function buildPeakDaysModel(
           type: "bar",
         },
       ],
-      tooltip: { trigger: "axis", valueFormatter: numberTooltip },
+      tooltip: {
+        ...operationalTooltip(),
+        trigger: "axis",
+        valueFormatter: numberTooltip,
+      },
       xAxis: {
-        axisLabel: { color: "#66758A" },
+        axisLabel: { color: "#66758A", fontSize: 10 },
+        minInterval: 1,
         splitLine: { lineStyle: { color: "#E8EEF6" } },
         type: "value",
       },
       yAxis: {
-        axisLabel: { color: "#526477" },
+        axisLabel: { color: "#526477", fontSize: 11 },
         axisLine: { show: false },
         axisTick: { show: false },
         data: displayed.map((point) => point.label),
@@ -569,12 +678,26 @@ function buildRoseModel(
     sourceGranularity: data.day.granularity,
     to: effectivePeriod.to,
   });
+  const total = ranking.reduce((sum, point) => sum + point.total, 0);
+  const leader = ranking[0];
   return {
     description: scenarioCompositionDescription(chartType),
     emptyText: "Sem fluxo para calcular a distribuição dos cenários.",
     error: data.day.error,
     hasData: ranking.length > 0,
     height: 340,
+    insights: [
+      { label: "Total", tone: "primary", value: formatNumber(total) },
+      ...(leader
+        ? [
+            {
+              label: "Maior participação",
+              tone: "muted" as const,
+              value: `${leader.name} · ${formatPercent(leader.share)}`,
+            },
+          ]
+        : []),
+    ],
     option: buildScenarioCompositionOption(
       ranking.map((point) => ({ name: point.name, value: point.total })),
       color,
@@ -633,6 +756,14 @@ function buildScenarioTotalsModel(
     error: data.day.error,
     hasData: ranking.length > 0,
     height: Math.max(180, Math.ceil(metrics.length / 4) * 110),
+    insights: [
+      { label: "Total", tone: "primary", value: formatNumber(total) },
+      {
+        label: "Cenários com fluxo",
+        tone: "muted",
+        value: formatNumber(ranking.length),
+      },
+    ],
     metrics,
     table: {
       columns: [
@@ -669,14 +800,16 @@ function buildHeatmapModel(
   const dayIndexes = new Map(
     days.map((day, index) => [calendarDayKey(day), index]),
   );
-  const heatmapData = points.map((point) => {
-    const bucket = new Date(point.bucket);
-    return [
-      dayIndexes.get(calendarDayKey(bucket)) ?? 0,
-      bucket.getHours(),
-      point.total,
-    ];
-  });
+  const heatmapData = points
+    .filter((point) => point.total > 0)
+    .map((point) => {
+      const bucket = new Date(point.bucket);
+      return [
+        dayIndexes.get(calendarDayKey(bucket)) ?? 0,
+        bucket.getHours(),
+        point.total,
+      ];
+    });
   const max = Math.max(1, ...points.map((point) => point.total));
   const saturdayIndexes = days.flatMap((day, index) =>
     day.getDay() === 6 ? [index] : [],
@@ -685,6 +818,12 @@ function buildHeatmapModel(
     day.getDay() === 0 ? [index] : [],
   );
   const labels = days.map(formatShortDate);
+  const peak = points.reduce<ScenarioAnalyticsPoint | null>(
+    (largest, point) =>
+      !largest || point.total > largest.total ? point : largest,
+    null,
+  );
+  const peakDate = peak ? new Date(peak.bucket) : null;
 
   return {
     description: isSingleDayAnalysisPeriod(period)
@@ -694,49 +833,79 @@ function buildHeatmapModel(
     error: data.hour.error,
     hasData: points.some((point) => point.total > 0),
     height: 500,
-    minWidth:
-      days.length > 45 ? Math.min(2200, days.length * 30) : undefined,
+    insights:
+      peak && peakDate && peak.total
+        ? [
+            {
+              label: "Maior intensidade",
+              tone: "primary",
+              value: `${formatShortDate(peakDate)} ${HOUR_LABELS[peakDate.getHours()]} · ${formatNumber(peak.total)}`,
+            },
+          ]
+        : undefined,
     option: {
-      grid: { bottom: 56, containLabel: true, left: 52, right: 18, top: 58 },
+      grid: { bottom: 72, containLabel: true, left: 18, right: 18, top: 18 },
       series: [
         {
           data: heatmapData,
           emphasis: {
-            itemStyle: { shadowBlur: 8, shadowColor: "rgba(15, 35, 55, 0.22)" },
+            itemStyle: {
+              borderColor: "#13233A",
+              borderWidth: 1,
+              shadowBlur: 8,
+              shadowColor: "rgba(18, 35, 58, 0.24)",
+            },
           },
           itemStyle: { borderWidth: 0 },
           markArea: buildCalendarMarkArea(days),
-          progressive: 1500,
+          name: "Intensidade horária",
+          progressive: 1_000,
           type: "heatmap",
         },
       ],
       tooltip: {
+        ...operationalTooltip(),
         formatter: (params: { data?: [number, number, number] }) => {
           const value = params.data ?? [0, 0, 0];
-          return `${labels[value[0]] ?? ""} · ${HOUR_LABELS[value[1]]}<br/><strong>${formatNumber(value[2])}</strong>`;
+          const intensity = max ? value[2] / max : 0;
+          return [
+            `<strong>${labels[value[0]] ?? ""} · ${HOUR_LABELS[value[1]]}</strong>`,
+            `${formatNumber(value[2])} eventos`,
+            `${new Intl.NumberFormat("pt-BR", {
+              maximumFractionDigits: 0,
+              style: "percent",
+            }).format(intensity)} do maior pico`,
+          ].join("<br />");
         },
         position: "top",
+        trigger: "item",
       },
       visualMap: {
         calculable: true,
         inRange: { color: monochromeHeatmapPalette(color) },
+        itemHeight: 210,
+        itemWidth: 10,
         left: "center",
         max,
         min: 0,
         orient: "horizontal",
         precision: 0,
-        top: 0,
+        seriesIndex: 0,
+        text: ["Maior fluxo", "Menor fluxo"],
+        textGap: 8,
+        textStyle: { color: "#526477", fontSize: 10 },
+        bottom: 4,
       },
       xAxis: {
         axisLabel: buildCalendarAxisLabel({
+          fontSize: 9,
           hideOverlap: true,
           holidayIndexes: holidayCategoryIndexes(days),
           interval: 0,
-          rotate: days.length > 31 ? 45 : 0,
           saturdayIndexes,
           sundayIndexes,
         }),
-        axisLine: { show: false },
+        axisLine: { lineStyle: { color: "#D8E3F2" } },
         axisTick: { show: false },
         data: labels,
         splitArea: { show: false },
@@ -744,8 +913,8 @@ function buildHeatmapModel(
         type: "category",
       },
       yAxis: {
-        axisLabel: { color: "#66758A", fontSize: 10 },
-        axisLine: { show: false },
+        axisLabel: { color: "#66758A", fontSize: 9, interval: 0 },
+        axisLine: { lineStyle: { color: "#D8E3F2" } },
         axisTick: { show: false },
         data: HOUR_LABELS,
         inverse: false,
@@ -815,6 +984,10 @@ function buildCumulativeModel(
     };
   });
   const baselineLabel = periodAnalysisBaselineLabel(widget.baseline);
+  const latest = points.at(-1);
+  const variation = latest
+    ? ratioVariation(latest.current, latest.baseline)
+    : 0;
 
   return {
     description: `${isSingleDayAnalysisPeriod(period) ? "Mês até a data escolhida" : "Período selecionado"} contra ${baselineLabel.toLowerCase()}. Base à esquerda e período atual à direita.`,
@@ -822,7 +995,30 @@ function buildCumulativeModel(
     error: data.day.error ?? baselineDataset.error,
     hasData: points.some((point) => point.current !== 0 || point.baseline !== 0),
     height: 340,
-    minWidth: points.length > 45 ? Math.min(1800, points.length * 28) : undefined,
+    insights: latest
+      ? [
+          {
+            label: "Acumulado atual",
+            tone: "primary",
+            value: formatNumber(latest.current),
+          },
+          {
+            label: "Acumulado-base",
+            tone: "muted",
+            value: formatNumber(latest.baseline),
+          },
+          {
+            label: "Variação",
+            tone:
+              variation > 0
+                ? "positive"
+                : variation < 0
+                  ? "negative"
+                  : "default",
+            value: formatSignedPercent(variation),
+          },
+        ]
+      : undefined,
     option: buildCurrentBaselineBarOption(
       points.map((point) => point.currentDate),
       points.map((point) => point.baseline),
@@ -830,6 +1026,7 @@ function buildCumulativeModel(
       baselineLabel,
       "Período selecionado",
       color,
+      current.map((point) => point.bucket),
     ),
     table: {
       columns: [
@@ -883,6 +1080,21 @@ function buildTrendModel(
     point.isSunday ? [index] : [],
   );
   const calendarDates = trendPoints.map((point) => point.bucket);
+  const direction7 = seriesDirection(
+    trendPoints.map((point) => point.average7),
+  );
+  const direction30 = seriesDirection(
+    trendPoints.map((point) => point.average30),
+  );
+  const latest = [...trendPoints]
+    .reverse()
+    .find((point) => point.average7 !== null || point.average30 !== null);
+  const directionColor = (direction: number) =>
+    direction > 0
+      ? POSITIVE_COLOR
+      : direction < 0
+        ? NEGATIVE_COLOR
+        : NEUTRAL_COLOR;
 
   return {
     description: isSingleDayAnalysisPeriod(period)
@@ -894,35 +1106,81 @@ function buildTrendModel(
       historyPoints.some((point) => point.total !== 0) &&
       trendPoints.some((point) => point.average7 !== null),
     height: 330,
-    minWidth: trendPoints.length > 45 ? Math.min(1600, trendPoints.length * 26) : undefined,
+    insights: latest
+      ? [
+          {
+            label: "MM7",
+            tone: trendTone(direction7),
+            value: formatOptionalNumber(latest.average7),
+          },
+          {
+            label: "MM30",
+            tone: trendTone(direction30),
+            value: formatOptionalNumber(latest.average30),
+          },
+        ]
+      : undefined,
     option: {
-      color: [color, pastelBarColor(1)],
-      grid: { bottom: 30, containLabel: true, left: 48, right: 18, top: 48 },
-      legend: { data: ["Média móvel 7 dias", "Média móvel 30 dias"], top: 0 },
+      color: [
+        color,
+        directionColor(direction30),
+        directionColor(direction7),
+      ],
+      grid: { bottom: 8, containLabel: true, left: 8, right: 12, top: 52 },
+      legend: {
+        itemGap: 14,
+        itemHeight: 9,
+        itemWidth: 14,
+        left: 0,
+        textStyle: { color: "#526477", fontSize: 11 },
+        top: 0,
+      },
       series: [
         {
-          connectNulls: false,
-          data: trendPoints.map((point) => point.average7),
-          lineStyle: { type: "dashed", width: 1.3 },
+          barMaxWidth: 14,
+          data: trendPoints.map((point) => point.total),
+          itemStyle: { color, opacity: 0.24 },
           markArea: buildCalendarMarkArea(calendarDates),
-          name: "Média móvel 7 dias",
-          showSymbol: false,
-          smooth: 0.2,
-          type: "line",
+          name: "Volume diário",
+          type: "bar",
         },
         {
           connectNulls: false,
           data: trendPoints.map((point) => point.average30),
-          lineStyle: { width: 2.8 },
+          lineStyle: {
+            color: directionColor(direction30),
+            opacity: 0.9,
+            type: "solid",
+            width: 2.5,
+          },
           name: "Média móvel 30 dias",
           showSymbol: false,
-          smooth: 0.2,
+          smooth: 0.18,
+          type: "line",
+        },
+        {
+          connectNulls: false,
+          data: trendPoints.map((point) => point.average7),
+          lineStyle: {
+            color: directionColor(direction7),
+            opacity: 0.76,
+            type: "dashed",
+            width: 1.25,
+          },
+          name: "Média móvel 7 dias",
+          showSymbol: false,
+          smooth: 0.18,
           type: "line",
         },
       ],
-      tooltip: { trigger: "axis", valueFormatter: numberTooltip },
+      tooltip: {
+        ...operationalTooltip(),
+        trigger: "axis",
+        valueFormatter: numberTooltip,
+      },
       xAxis: {
         axisLabel: buildCalendarAxisLabel({
+          fontSize: 9,
           hideOverlap: true,
           holidayIndexes: holidayCategoryIndexes(calendarDates),
           interval: 0,
@@ -935,7 +1193,8 @@ function buildTrendModel(
         type: "category",
       },
       yAxis: {
-        axisLabel: { color: "#66758A" },
+        axisLabel: { color: "#66758A", fontSize: 10 },
+        minInterval: 1,
         splitLine: { lineStyle: { color: "#E8EEF6" } },
         type: "value",
       },
@@ -1023,6 +1282,9 @@ function buildHourlyOccupancyModel(
         }));
     },
   );
+  const latest = [...points]
+    .reverse()
+    .find((point) => point.occupancy !== null);
 
   return {
     description: singleDay
@@ -1036,6 +1298,30 @@ function buildHourlyOccupancyModel(
     error: data.hour.error,
     hasData: points.length > 0,
     height: 340,
+    insights: latest
+      ? [
+          {
+            label: "Entradas",
+            tone: "muted",
+            value: formatNumber(latest.entries),
+          },
+          {
+            label: "Saídas",
+            tone: "muted",
+            value: formatNumber(latest.exits),
+          },
+          {
+            label: "Saldo",
+            tone:
+              (latest.occupancy ?? 0) > 0
+                ? "positive"
+                : (latest.occupancy ?? 0) < 0
+                  ? "negative"
+                  : "default",
+            value: formatNumber(latest.occupancy ?? 0),
+          },
+        ]
+      : undefined,
     option: buildHourlyOccupancyOption(points, color),
     table: {
       columns: [
@@ -1088,6 +1374,12 @@ function buildHourProfileModel(
   });
   const divisor = Math.max(1, dayKeys.size);
   const averages = totals.map((total) => total / divisor);
+  const peakIndex = averages.reduce(
+    (largest, value, index) =>
+      value > averages[largest] ? index : largest,
+    0,
+  );
+  const averageTotal = averages.reduce((sum, value) => sum + value, 0);
 
   return {
     description: "Média por faixa horária para localizar as horas de maior fluxo.",
@@ -1095,28 +1387,56 @@ function buildHourProfileModel(
     error: data.hour.error,
     hasData: totals.some((total) => total !== 0),
     height: 320,
+    insights: [
+      {
+        label: "Média diária",
+        tone: "primary",
+        value: formatNumber(Math.round(averageTotal)),
+      },
+      ...(averages[peakIndex]
+        ? [
+            {
+              label: "Hora mais intensa",
+              tone: "muted" as const,
+              value: `${HOUR_LABELS[peakIndex]} · ${formatNumber(Math.round(averages[peakIndex]))}`,
+            },
+          ]
+        : []),
+    ],
     option: {
       color: [color],
-      grid: { bottom: 24, containLabel: true, left: 48, right: 18, top: 22 },
+      grid: { bottom: 8, containLabel: true, left: 8, right: 10, top: 18 },
       series: [
         {
+          barCategoryGap: "42%",
           barMaxWidth: 24,
           data: averages,
-          itemStyle: { borderRadius: [3, 3, 0, 0] },
+          itemStyle: { borderRadius: [2, 2, 0, 0], color },
           name: "Média por dia",
           type: "bar",
         },
       ],
-      tooltip: { trigger: "axis", valueFormatter: numberTooltip },
+      tooltip: {
+        ...operationalTooltip(),
+        axisPointer: { type: "shadow" },
+        trigger: "axis",
+        valueFormatter: numberTooltip,
+      },
       xAxis: {
-        axisLabel: { color: "#66758A", interval: 2 },
+        axisLabel: {
+          color: "#66758A",
+          fontSize: 10,
+          hideOverlap: true,
+          interval: 1,
+        },
         axisLine: { lineStyle: { color: "#D8E3F2" } },
         axisTick: { show: false },
         data: HOUR_LABELS,
         type: "category",
       },
       yAxis: {
-        axisLabel: { color: "#66758A" },
+        axisLabel: { color: "#66758A", fontSize: 10 },
+        minInterval: 1,
         splitLine: { lineStyle: { color: "#E8EEF6" } },
         type: "value",
       },
@@ -1152,24 +1472,34 @@ function buildBarTimelineOption(
 
   return {
     color: [color],
-    grid: { bottom: 30, containLabel: true, left: 48, right: 18, top: 22 },
+    grid: { bottom: 8, containLabel: true, left: 8, right: 10, top: 18 },
     series: [
       {
+        barCategoryGap: "50%",
         barMaxWidth: 28,
         data: points.map((point) => point.total),
-        itemStyle: { borderRadius: [3, 3, 0, 0] },
+        itemStyle: { borderRadius: [2, 2, 0, 0], color },
         markArea: buildCalendarMarkArea(calendarDates),
         name: "Fluxo",
         type: "bar",
       },
     ],
-    tooltip: { trigger: "axis", valueFormatter: numberTooltip },
+    tooltip: {
+      ...operationalTooltip(),
+      axisPointer: {
+        shadowStyle: { color: "rgba(18, 103, 196, 0.06)" },
+        type: "shadow",
+      },
+      trigger: "axis",
+      valueFormatter: (value) =>
+        `${formatNumber(Number(value ?? 0))} eventos`,
+    },
     xAxis: {
       axisLabel: buildCalendarAxisLabel({
+        fontSize: 10,
         hideOverlap: true,
         holidayIndexes: holidayCategoryIndexes(calendarDates),
         interval: 0,
-        rotate: points.length > 48 ? 45 : 0,
         saturdayIndexes,
         sundayIndexes,
       }),
@@ -1179,7 +1509,8 @@ function buildBarTimelineOption(
       type: "category",
     },
     yAxis: {
-      axisLabel: { color: "#66758A" },
+      axisLabel: { color: "#66758A", fontSize: 10 },
+      minInterval: 1,
       splitLine: { lineStyle: { color: "#E8EEF6" } },
       type: "value",
     },
@@ -1204,33 +1535,54 @@ function buildMultiScenarioOption(
   const calendarDates = calendarPoints.map((point) => point.bucket);
 
   return {
-    color: series.map((_, index) => (index === 0 ? color : pastelBarColor(index))),
+    color: series.map((_, index) =>
+      index === 0 ? color : pastelBarColor(index + 1),
+    ),
     grid: {
-      bottom: 30,
+      bottom: 8,
       containLabel: true,
-      left: 48,
-      right: 18,
-      top: series.length > 1 ? 58 : 22,
+      left: 8,
+      right: 10,
+      top: series.length > 1 ? 52 : 18,
     },
     legend:
       series.length > 1
-        ? { left: 0, right: 0, top: 0, type: "scroll" }
+        ? {
+            itemGap: 12,
+            itemHeight: 9,
+            itemWidth: 12,
+            left: 0,
+            right: 0,
+            textStyle: { color: "#526477", fontSize: 11 },
+            top: 0,
+            type: "scroll",
+          }
         : undefined,
     series: series.map((item, index) => ({
+      barCategoryGap: "42%",
       barMaxWidth: 24,
       data: item.points.map((point) => point.total),
-      itemStyle: { borderRadius: [3, 3, 0, 0] },
+      itemStyle: {
+        borderRadius: [2, 2, 0, 0],
+        color: index === 0 ? color : pastelBarColor(index + 1),
+      },
       markArea: index === 0 ? buildCalendarMarkArea(calendarDates) : undefined,
       name: item.name,
       type: "bar",
     })),
-    tooltip: { trigger: "axis", valueFormatter: numberTooltip },
+    tooltip: {
+      ...operationalTooltip(),
+      axisPointer: { type: "shadow" },
+      trigger: "axis",
+      valueFormatter: (value) =>
+        `${formatNumber(Number(value ?? 0))} eventos`,
+    },
     xAxis: {
       axisLabel: buildCalendarAxisLabel({
+        fontSize: 10,
         hideOverlap: true,
         holidayIndexes: holidayCategoryIndexes(calendarDates),
         interval: 0,
-        rotate: calendarPoints.length > 48 ? 45 : 0,
         saturdayIndexes,
         sundayIndexes,
       }),
@@ -1240,7 +1592,8 @@ function buildMultiScenarioOption(
       type: "category",
     },
     yAxis: {
-      axisLabel: { color: "#66758A" },
+      axisLabel: { color: "#66758A", fontSize: 10 },
+      minInterval: 1,
       splitLine: { lineStyle: { color: "#E8EEF6" } },
       type: "value",
     },
@@ -1254,37 +1607,75 @@ function buildCurrentBaselineBarOption(
   baselineLabel: string,
   currentLabel: string,
   color: string,
+  calendarDates: Array<Date | string>,
 ): EnterpriseChartOption {
+  const saturdayIndexes = calendarDates.flatMap((rawDate, index) => {
+    const date = new Date(rawDate);
+    return !Number.isNaN(date.getTime()) && date.getDay() === 6 ? [index] : [];
+  });
+  const sundayIndexes = calendarDates.flatMap((rawDate, index) => {
+    const date = new Date(rawDate);
+    return !Number.isNaN(date.getTime()) && date.getDay() === 0 ? [index] : [];
+  });
+
   return {
     color: [MUTED_BASE_COLOR, color],
-    grid: { bottom: 30, containLabel: true, left: 48, right: 18, top: 52 },
-    legend: { data: [baselineLabel, currentLabel], top: 0 },
+    grid: { bottom: 8, containLabel: true, left: 8, right: 10, top: 52 },
+    legend: {
+      data: [baselineLabel, currentLabel],
+      itemGap: 14,
+      itemHeight: 9,
+      itemWidth: 12,
+      left: 0,
+      textStyle: { color: "#526477", fontSize: 11 },
+      top: 0,
+    },
     series: [
       {
+        barCategoryGap: "40%",
         barMaxWidth: 22,
         data: baseline,
-        itemStyle: { borderRadius: [3, 3, 0, 0] },
+        itemStyle: {
+          borderRadius: [2, 2, 0, 0],
+          color: MUTED_BASE_COLOR,
+          opacity: 0.78,
+        },
+        markArea: buildCalendarMarkArea(calendarDates),
         name: baselineLabel,
         type: "bar",
       },
       {
+        barGap: "8%",
         barMaxWidth: 22,
         data: current,
-        itemStyle: { borderRadius: [3, 3, 0, 0] },
+        itemStyle: { borderRadius: [2, 2, 0, 0], color },
         name: currentLabel,
         type: "bar",
       },
     ],
-    tooltip: { trigger: "axis", valueFormatter: numberTooltip },
+    tooltip: {
+      ...operationalTooltip(),
+      axisPointer: { type: "shadow" },
+      trigger: "axis",
+      valueFormatter: numberTooltip,
+    },
     xAxis: {
-      axisLabel: { color: "#66758A", hideOverlap: true, interval: 0 },
+      axisLabel: buildCalendarAxisLabel({
+        fontSize: 9,
+        hideOverlap: true,
+        holidayIndexes: holidayCategoryIndexes(calendarDates),
+        interval: 0,
+        saturdayIndexes,
+        sundayIndexes,
+      }),
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
       data: labels,
       type: "category",
     },
     yAxis: {
-      axisLabel: { color: "#66758A" },
+      axisLabel: { color: "#66758A", fontSize: 10 },
+      minInterval: 1,
       splitLine: { lineStyle: { color: "#E8EEF6" } },
       type: "value",
     },
@@ -1326,6 +1717,20 @@ function movingAverage(
   if (index + 1 < windowSize) return null;
   const window = points.slice(index + 1 - windowSize, index + 1);
   return window.reduce((sum, point) => sum + point.total, 0) / windowSize;
+}
+
+function seriesDirection(values: Array<number | null>) {
+  const comparable = values.filter(
+    (value): value is number => value !== null && Number.isFinite(value),
+  );
+  if (comparable.length < 2) return 0;
+  return comparable[comparable.length - 1] - comparable[comparable.length - 2];
+}
+
+function trendTone(direction: number): PeriodAnalysisInsight["tone"] {
+  if (direction > 0) return "positive";
+  if (direction < 0) return "negative";
+  return "default";
 }
 
 function listDayStarts(from: Date, to: Date) {
@@ -1409,6 +1814,35 @@ function formatVariation(current: number, baseline: number) {
     signDisplay: "always",
     style: "percent",
   }).format((current - baseline) / Math.abs(baseline));
+}
+
+function ratioVariation(current: number, baseline: number) {
+  if (!baseline) return current ? 1 : 0;
+  return (current - baseline) / Math.abs(baseline);
+}
+
+function formatSignedPercent(value: number) {
+  return new Intl.NumberFormat("pt-BR", {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: 1,
+    signDisplay: "always",
+    style: "percent",
+  }).format(value);
+}
+
+function formatOptionalNumber(value: number | null) {
+  return value === null ? "-" : formatNumber(Math.round(value));
+}
+
+function operationalTooltip() {
+  return {
+    backgroundColor: "#ffffff",
+    borderColor: "#D8E3F2",
+    borderWidth: 1,
+    confine: true,
+    padding: [10, 12],
+    textStyle: { color: "#13233A", fontSize: 12 },
+  };
 }
 
 function numberTooltip(value: unknown) {

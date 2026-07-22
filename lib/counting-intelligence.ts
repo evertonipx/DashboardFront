@@ -1,4 +1,5 @@
 import type { EnterpriseChartOption } from "@/components/app/echart";
+import { parseAggregateBucket } from "@/lib/aggregate-time";
 import { pastelBarColor } from "@/lib/chart-palette";
 import {
   inferDirectionFromText,
@@ -1183,7 +1184,7 @@ function aggregateScenarioDirections(
     const rowBindings = bindings.get(row.line_count_id);
     if (!rowBindings?.length) return;
 
-    const date = parseBucket(row.bucket);
+    const date = parseAggregateBucket(row.bucket, "hour");
     if (!date) return;
     const rawTotal = Math.abs(finiteTotal(row.total));
 
@@ -1663,14 +1664,9 @@ function isValidDate(date: Date) {
   return !Number.isNaN(date.getTime());
 }
 
-function parseBucket(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
 function monthlyBucketKey(value: string) {
-  const date = parseBucket(value);
-  return date ? monthKey(date.getUTCFullYear(), date.getUTCMonth()) : null;
+  const date = parseAggregateBucket(value, "month");
+  return date ? monthKey(date.getFullYear(), date.getMonth()) : null;
 }
 
 function isMonthlyBucketInRange(value: string, from: Date, to: Date) {

@@ -1,6 +1,9 @@
 import type { AggregateGranularity } from "@/lib/types";
 
 const CALENDAR_BUCKET_PATTERN = /^(\d{4})-(\d{2})-(\d{2})/;
+const ISO_DATE_TIME_WITHOUT_ZONE_PATTERN =
+  /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+const ISO_TIME_ZONE_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/i;
 
 export function aggregateQueryIso(
   date: Date,
@@ -57,7 +60,14 @@ export function parseAggregateBucket(
     }
   }
 
-  const date = new Date(value);
+  // RFC3339 buckets are UTC instants. A zone-less value must not inherit the
+  // browser timezone, otherwise the same API response changes between clients.
+  const normalizedValue =
+    ISO_DATE_TIME_WITHOUT_ZONE_PATTERN.test(value) &&
+    !ISO_TIME_ZONE_PATTERN.test(value)
+      ? `${value}Z`
+      : value;
+  const date = new Date(normalizedValue);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 

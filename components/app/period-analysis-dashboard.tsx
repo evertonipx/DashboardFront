@@ -357,6 +357,7 @@ export function PeriodAnalysisDashboard({
             "hour",
             operationalPeriod,
             controller.signal,
+            isSingleDayAnalysisPeriod(period) ? period : undefined,
           )
         : Promise.resolve(emptyDataset("hour")),
       Promise.all(
@@ -404,7 +405,13 @@ export function PeriodAnalysisDashboard({
       });
 
     return () => controller.abort();
-  }, [companyScopeId, dataRequirementsKey, operationalPeriod, queryVersion]);
+  }, [
+    companyScopeId,
+    dataRequirementsKey,
+    operationalPeriod,
+    period,
+    queryVersion,
+  ]);
 
   React.useEffect(() => {
     if (!autoRefreshEnabled) return;
@@ -461,17 +468,26 @@ export function PeriodAnalysisDashboard({
       widget.kind === "summary" ||
       widget.kind === "heatmap" ||
       widget.kind === "totals_table" ||
-      widget.kind === "hourly_occupancy"
+      widget.kind === "hourly_occupancy" ||
+      widget.kind === "cumulative"
         ? "sm:col-span-2 xl:col-span-4"
         : "sm:col-span-2 xl:col-span-2",
     defaultSize:
       widget.kind === "summary" ||
       widget.kind === "heatmap" ||
       widget.kind === "totals_table" ||
-      widget.kind === "hourly_occupancy"
+      widget.kind === "hourly_occupancy" ||
+      widget.kind === "cumulative"
         ? ("full" as const)
         : ("wide" as const),
-    defaultHeight: widget.kind === "summary" ? ("short" as const) : undefined,
+    defaultHeight:
+      widget.kind === "summary"
+        ? ("short" as const)
+        : widget.kind === "heatmap" ||
+            widget.kind === "totals_table" ||
+            widget.kind === "cumulative"
+          ? ("tall" as const)
+          : ("standard" as const),
     minHeight: widget.kind === "summary" ? ("short" as const) : undefined,
     shortHeightClassName:
       widget.kind === "summary" ? "row-span-2 sm:row-span-1" : undefined,
@@ -999,13 +1015,15 @@ function PeriodAnalysisCard({
   const compactSummary = widget.kind === "summary";
 
   return (
-    <Card className={cn("min-w-0 overflow-hidden", monitorMode && "h-full")}>
+    <Card className="h-full min-w-0 overflow-hidden">
       <CardHeader className={cn("pb-2", compactSummary && "p-3 pb-1.5")}>
         <div className="flex flex-wrap items-start justify-between gap-2">
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <CardTitle className="flex items-center gap-2">
               <Icon className="h-4 w-4 shrink-0 text-primary" />
-              <span className="truncate">{widget.title}</span>
+              <span className="min-w-0 break-words leading-5">
+                {widget.title}
+              </span>
             </CardTitle>
             <CardDescription
               className={cn(compactSummary ? "mt-0.5 text-xs leading-4" : "mt-1")}
@@ -1013,31 +1031,7 @@ function PeriodAnalysisCard({
               {model.description}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Badge
-              variant="outline"
-              className="max-w-[220px] truncate"
-              title={scenarioSummary}
-            >
-              {scenarioSummary}
-            </Badge>
-            {(widget.kind === "timeline" ||
-              widget.kind === "comparison" ||
-              widget.kind === "hourly_occupancy") && (
-              <Badge variant="outline">
-                {effectiveGranularity === "hour" ? "Hora a hora" : "Dia a dia"}
-              </Badge>
-            )}
-            {widget.kind === "hourly_occupancy" ? (
-              <Badge variant="outline">
-                Início {formatOccupancyStartHour(widget.startHour)}
-              </Badge>
-            ) : null}
-            {widget.kind === "cumulative" ? (
-              <Badge variant="outline">
-                {periodAnalysisBaselineLabel(widget.baseline)}
-              </Badge>
-            ) : null}
+          <div className="flex shrink-0 items-center justify-end gap-0.5">
             {canConfigure && !monitorMode ? (
               <>
                 <Button
@@ -1066,29 +1060,72 @@ function PeriodAnalysisCard({
             ) : null}
           </div>
         </div>
+        <div className="min-w-0 pt-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <Badge
+              variant="outline"
+              className="max-w-full truncate"
+              title={scenarioSummary}
+            >
+              {scenarioSummary}
+            </Badge>
+            {(widget.kind === "timeline" ||
+              widget.kind === "comparison" ||
+              widget.kind === "hourly_occupancy") && (
+              <Badge variant="outline">
+                {effectiveGranularity === "hour" ? "Hora a hora" : "Dia a dia"}
+              </Badge>
+            )}
+            {widget.kind === "hourly_occupancy" ? (
+              <Badge variant="outline">
+                Início {formatOccupancyStartHour(widget.startHour)}
+              </Badge>
+            ) : null}
+            {widget.kind === "cumulative" ? (
+              <Badge variant="outline">
+                {periodAnalysisBaselineLabel(widget.baseline)}
+              </Badge>
+            ) : null}
+            {model.insights?.map((insight) => (
+              <Badge
+                key={`${insight.label}-${insight.value}`}
+                variant={insight.tone === "primary" ? "secondary" : "outline"}
+                className={cn(
+                  "max-w-full gap-1 tabular-nums",
+                  insight.tone === "primary" && "bg-primary/10 text-primary",
+                  insight.tone === "muted" && "text-muted-foreground",
+                  insight.tone === "positive" &&
+                    "border-emerald-600/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                  insight.tone === "negative" &&
+                    "border-orange-600/25 bg-orange-500/10 text-orange-700 dark:text-orange-300",
+                )}
+                title={`${insight.label}: ${insight.value}`}
+              >
+                <span className="font-normal opacity-75">{insight.label}</span>
+                <span className="truncate font-semibold">{insight.value}</span>
+              </Badge>
+            ))}
+          </div>
+        </div>
       </CardHeader>
       <CardContent
-        className={cn("min-w-0", compactSummary && "px-3 pb-3")}
+        className={cn(
+          "min-h-0 min-w-0 flex-1",
+          compactSummary && "px-3 pb-3",
+        )}
       >
         {loading ? (
-          <Skeleton style={{ height: model.height }} className="w-full" />
+          <Skeleton className="h-full min-h-[160px] w-full" />
         ) : model.error ? (
-          <EmptyState text={model.error} height={model.height} />
+          <EmptyState text={model.error} />
         ) : model.metrics ? (
           <MetricGrid compact={compactSummary} metrics={model.metrics} />
         ) : model.hasData && model.option ? (
-          <div className="overflow-x-auto">
-            <div
-              style={{
-                height: model.height,
-                minWidth: model.minWidth,
-              }}
-            >
-              <EChart option={model.option} />
-            </div>
+          <div className="h-full min-h-0 w-full">
+            <EChart option={model.option} />
           </div>
         ) : (
-          <EmptyState text={model.emptyText} height={Math.min(260, model.height)} />
+          <EmptyState text={model.emptyText} />
         )}
       </CardContent>
     </Card>
@@ -1414,12 +1451,9 @@ function Field({ children, label }: { children: React.ReactNode; label: string }
   );
 }
 
-function EmptyState({ text, height }: { text: string; height: number }) {
+function EmptyState({ text }: { text: string }) {
   return (
-    <div
-      style={{ height }}
-      className="flex items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground"
-    >
+    <div className="flex h-full min-h-[160px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
       {text}
     </div>
   );
@@ -1513,6 +1547,7 @@ async function fetchAnalysisDataset(
   granularity: "hour" | "day",
   range: PeriodAnalysisRange,
   signal?: AbortSignal,
+  exactHourlyRange?: PeriodAnalysisRange,
 ): Promise<PeriodAnalysisDataset> {
   try {
     const response = await fetchAnalysisAggregate(granularity, range, signal);
@@ -1520,7 +1555,12 @@ async function fetchAnalysisDataset(
     let rows = response.data ?? [];
     try {
       if (granularity === "hour" && responseGranularity === "hour") {
-        rows = await reconcileCurrentAnalysisHour(rows, range, signal);
+        rows = await reconcileAnalysisHours(
+          rows,
+          range,
+          exactHourlyRange,
+          signal,
+        );
       } else if (granularity === "day" && responseGranularity === "day") {
         rows = await reconcileRecentAnalysisDays(rows, range, signal);
       }
@@ -1564,25 +1604,34 @@ function fetchAnalysisAggregate(
   );
 }
 
-async function reconcileCurrentAnalysisHour(
+async function reconcileAnalysisHours(
   hourlyRows: AggregateEventRow[],
-  range: PeriodAnalysisRange,
+  queryRange: PeriodAnalysisRange,
+  exactHourlyRange?: PeriodAnalysisRange,
   signal?: AbortSignal,
 ) {
   const now = new Date();
+  const todayStart = startOfDay(now);
   const currentHourStart = startOfHour(now);
   const currentHourEnd = addHours(currentHourStart, 1);
-  if (currentHourEnd <= range.from || currentHourStart >= range.to) {
-    return hourlyRows;
-  }
-
+  // Closed single-day analyses are rebuilt from minute buckets so an incomplete
+  // hourly continuous aggregate cannot freeze the accumulated balance.
+  const historicalExactRange =
+    exactHourlyRange && exactHourlyRange.to <= todayStart
+      ? exactHourlyRange
+      : null;
+  const reconciliationFrom = historicalExactRange?.from ?? currentHourStart;
+  const reconciliationTo = historicalExactRange?.to ?? currentHourEnd;
   const minuteFrom = new Date(
-    Math.max(currentHourStart.getTime(), range.from.getTime()),
+    Math.max(reconciliationFrom.getTime(), queryRange.from.getTime()),
   );
   const minuteTo = new Date(
     Math.min(
-      addMinutes(startOfMinute(now), 1).getTime(),
-      range.to.getTime(),
+      reconciliationTo.getTime(),
+      queryRange.to.getTime(),
+      historicalExactRange
+        ? reconciliationTo.getTime()
+        : addMinutes(startOfMinute(now), 1).getTime(),
     ),
   );
   if (minuteTo <= minuteFrom) return hourlyRows;
@@ -1592,14 +1641,26 @@ async function reconcileCurrentAnalysisHour(
     { from: minuteFrom, to: minuteTo },
     signal,
   );
-  return replaceAggregateBucketRows(
-    hourlyRows,
-    "hour",
-    currentHourStart,
-    currentHourEnd,
-    minuteResponse.data ?? [],
-    minuteResponse.granularity ?? "minute",
-  );
+  const minuteRows = minuteResponse.data ?? [];
+  if (!minuteRows.length) return hourlyRows;
+
+  let reconciledRows = [...hourlyRows];
+  let hourStart = startOfHour(minuteFrom);
+  while (hourStart < minuteTo) {
+    const hourEnd = addHours(hourStart, 1);
+    reconciledRows = replaceAggregateBucketRows(
+      reconciledRows,
+      "hour",
+      hourStart,
+      hourEnd,
+      minuteRows,
+      minuteResponse.granularity ?? "minute",
+      true,
+    );
+    hourStart = hourEnd;
+  }
+
+  return reconciledRows;
 }
 
 async function reconcileRecentAnalysisDays(
@@ -1686,6 +1747,7 @@ function replaceAggregateBucketRows(
   bucketEnd: Date,
   sourceRows: AggregateEventRow[],
   sourceGranularity: AggregateGranularity,
+  preferSource = false,
 ) {
   const existingTotals = aggregateRowsByIdentity(
     targetRows,
@@ -1699,8 +1761,10 @@ function replaceAggregateBucketRows(
     bucketStart,
     bucketEnd,
   );
-  const mergedTotals = mergeIdentityTotals(existingTotals, sourceTotals);
-  if (!mergedTotals.size) return targetRows;
+  const mergedTotals = preferSource
+    ? sourceTotals
+    : mergeIdentityTotals(existingTotals, sourceTotals);
+  if (!mergedTotals.size && !preferSource) return targetRows;
 
   const bucketKey = aggregateBucketKey(bucketStart, targetGranularity);
   return [
