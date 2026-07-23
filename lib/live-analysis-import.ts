@@ -81,7 +81,7 @@ export function buildLiveAnalysisImport({
       selectionMode:
         input.selectionMode ?? sourceSelection.selection.selectionMode,
       startHour: input.startHour ?? 0,
-      title: input.title,
+      title: sourcePreference.title ?? input.title,
       updatedAt: now,
     });
     importedPreferences.push({
@@ -91,6 +91,7 @@ export function buildLiveAnalysisImport({
       id,
       size: sourcePreference.size,
       visible: true,
+      zoom: sourcePreference.zoom,
     });
   };
 

@@ -26,6 +26,11 @@ import {
 } from "@/lib/camera-groups";
 import { pastelBarColor } from "@/lib/chart-palette";
 import {
+  buildFixedHourlyAxisValues,
+  HOUR_OF_DAY_LABELS,
+  latestHourlyPointHour,
+} from "@/lib/hourly-axis";
+import {
   filterScopedApiRows,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
@@ -1193,8 +1198,19 @@ function buildComparisonChartOption(points: ChartPoint[]): EnterpriseChartOption
 }
 
 function buildHourlyChartOption(points: ChartPoint[]): EnterpriseChartOption {
+  const fixedHourlyAxis = pointsShareOneCalendarDay(points);
+
   return buildBarChartOption(points, {
     bottom: 36,
+    data: fixedHourlyAxis
+      ? buildFixedHourlyAxisValues(
+          points.map((point) => ({
+            bucket: point.id,
+            total: point.total,
+          })),
+        )
+      : undefined,
+    labels: fixedHourlyAxis ? HOUR_OF_DAY_LABELS : undefined,
     labelRotate: 0,
     maxBarWidth: 34,
   });
@@ -1204,7 +1220,23 @@ function buildScenarioComparisonChartOption(
   series: ScenarioComparisonSeries[],
   granularity: ScenarioCompareGranularity,
 ): EnterpriseChartOption {
-  const bucketLabels = series[0]?.points.map((point) => point.name) ?? [];
+  const fixedHourlyAxis =
+    granularity === "hour" &&
+    series.length > 0 &&
+    series.every((item) => pointsShareOneCalendarDay(item.points));
+  const hourlyThrough = fixedHourlyAxis
+    ? latestHourlyPointHour(
+        series.flatMap((item) =>
+          item.points.map((point) => ({
+            bucket: point.id,
+            total: point.total,
+          })),
+        ),
+      )
+    : -1;
+  const bucketLabels = fixedHourlyAxis
+    ? HOUR_OF_DAY_LABELS
+    : series[0]?.points.map((point) => point.name) ?? [];
   const dense = bucketLabels.length > 12;
   const manySeries = series.length > 12;
   const veryManySeries = series.length > 24;
@@ -1291,8 +1323,23 @@ function buildScenarioComparisonChartOption(
     series: series.map((item, index) => ({
       barCategoryGap: manySeries ? "18%" : series.length > 4 ? "28%" : "38%",
       barGap: veryManySeries ? "2%" : manySeries ? "4%" : "8%",
-      barMaxWidth: veryManySeries ? 10 : manySeries ? 14 : granularity === "hour" ? 18 : 28,
-      data: item.points.map((point) => point.total),
+      barMaxWidth:
+        veryManySeries
+          ? 10
+          : manySeries
+            ? 14
+            : granularity === "hour"
+              ? 18
+              : 28,
+      data: fixedHourlyAxis
+        ? buildFixedHourlyAxisValues(
+            item.points.map((point) => ({
+              bucket: point.id,
+              total: point.total,
+            })),
+            hourlyThrough,
+          )
+        : item.points.map((point) => point.total),
       emphasis: {
         focus: "series",
         itemStyle: {
@@ -1313,10 +1360,14 @@ function buildBarChartOption(
   points: ChartPoint[],
   {
     bottom,
+    data,
+    labels,
     labelRotate,
     maxBarWidth,
   }: {
     bottom: number;
+    data?: Array<number | null>;
+    labels?: readonly string[];
     labelRotate: number;
     maxBarWidth: number;
   },
@@ -1367,7 +1418,7 @@ function buildBarChartOption(
       axisTick: {
         show: false,
       },
-      data: points.map((point) => point.name),
+      data: labels ?? points.map((point) => point.name),
       type: "category",
     },
     yAxis: {
@@ -1387,11 +1438,11 @@ function buildBarChartOption(
       {
         barCategoryGap: "36%",
         barMaxWidth: maxBarWidth,
-        data: points.map((point, index) => ({
+        data: (data ?? points.map((point) => point.total)).map((value, index) => ({
           itemStyle: {
             color: pastelBarColor(index),
           },
-          value: point.total,
+          value,
         })),
         emphasis: {
           itemStyle: {
@@ -1406,6 +1457,22 @@ function buildBarChartOption(
       },
     ],
   };
+}
+
+function pointsShareOneCalendarDay(points: readonly ChartPoint[]) {
+  if (!points.length) return false;
+
+  const days = new Set<string>();
+  for (const point of points) {
+    const date = new Date(point.id);
+    if (Number.isNaN(date.getTime())) return false;
+    days.add(
+      `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`,
+    );
+    if (days.size > 1) return false;
+  }
+
+  return days.size === 1;
 }
 
 function startOfMinute(date: Date) {

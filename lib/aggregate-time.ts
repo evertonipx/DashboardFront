@@ -1,9 +1,8 @@
 import type { AggregateGranularity } from "@/lib/types";
 
 const CALENDAR_BUCKET_PATTERN = /^(\d{4})-(\d{2})-(\d{2})/;
-const ISO_DATE_TIME_WITHOUT_ZONE_PATTERN =
-  /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
-const ISO_TIME_ZONE_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+const LOCAL_DATE_TIME_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/;
 
 export function aggregateQueryIso(
   date: Date,
@@ -60,14 +59,13 @@ export function parseAggregateBucket(
     }
   }
 
-  // RFC3339 buckets are UTC instants. A zone-less value must not inherit the
-  // browser timezone, otherwise the same API response changes between clients.
-  const normalizedValue =
-    ISO_DATE_TIME_WITHOUT_ZONE_PATTERN.test(value) &&
-    !ISO_TIME_ZONE_PATTERN.test(value)
-      ? `${value}Z`
-      : value;
-  const date = new Date(normalizedValue);
+  // The aggregate API also returns SQL timestamp buckets without an offset.
+  // Those values are company-local wall-clock buckets, not UTC instants.
+  const localDateTime = parseLocalDateTime(value);
+  if (localDateTime) return localDateTime;
+
+  // Zone-aware RFC3339 values remain absolute instants.
+  const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
@@ -89,4 +87,35 @@ export function isCalendarGranularity(granularity: AggregateGranularity) {
     granularity === "semester" ||
     granularity === "year"
   );
+}
+
+function parseLocalDateTime(value: string) {
+  const match = LOCAL_DATE_TIME_PATTERN.exec(value);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6] ?? 0);
+  const millisecond = Number((match[7] ?? "").padEnd(3, "0").slice(0, 3));
+  const date = new Date(
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    millisecond,
+  );
+
+  return date.getFullYear() === year &&
+    date.getMonth() === month &&
+    date.getDate() === day &&
+    date.getHours() === hour &&
+    date.getMinutes() === minute &&
+    date.getSeconds() === second
+    ? date
+    : null;
 }

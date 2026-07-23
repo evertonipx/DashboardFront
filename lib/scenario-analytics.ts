@@ -4,6 +4,11 @@ import type {
   Scenario,
 } from "@/lib/types";
 import { parseAggregateBucket } from "@/lib/aggregate-time";
+import {
+  buildHourlyOccupancySeries,
+  normalizeOccupancyStartHour,
+  type HourlyOccupancySeriesPoint,
+} from "@/lib/hourly-occupancy-series";
 
 export type ScenarioSelectionMode = "all" | "custom";
 export type ScenarioAnalyticsGranularity = "hour" | "day";
@@ -30,14 +35,7 @@ export type ScenarioPeakDayPoint = {
   total: number;
 };
 
-export type ScenarioHourlyOccupancyPoint = {
-  bucket: string;
-  entries: number;
-  exits: number;
-  hour: number;
-  label: string;
-  occupancy: number | null;
-};
+export type ScenarioHourlyOccupancyPoint = HourlyOccupancySeriesPoint;
 
 export type ScenarioCumulativeTotalPoint = {
   id: string;
@@ -229,7 +227,7 @@ export function buildScenarioHourlyOccupancy({
   startHour?: number;
   through: Date;
 }): ScenarioHourlyOccupancyPoint[] {
-  const normalizedStartHour = normalizeStartHour(startHour);
+  const normalizedStartHour = normalizeOccupancyStartHour(startHour);
   const dayStart = new Date(
     day.getFullYear(),
     day.getMonth(),
@@ -247,6 +245,7 @@ export function buildScenarioHourlyOccupancy({
     Math.min(dayEnd.getTime(), Math.max(from.getTime(), through.getTime())),
   );
   const entryTotals = aggregateScenarioMagnitudesByBucket({
+    deduplicateLines: true,
     from,
     granularity: "hour",
     rows,
@@ -255,6 +254,7 @@ export function buildScenarioHourlyOccupancy({
     to,
   });
   const exitTotals = aggregateScenarioMagnitudesByBucket({
+    deduplicateLines: true,
     from,
     granularity: "hour",
     rows,
@@ -262,41 +262,47 @@ export function buildScenarioHourlyOccupancy({
     sourceGranularity,
     to,
   });
-  let cumulativeEntries = 0;
-  let cumulativeExits = 0;
-
-  return Array.from({ length: 24 }, (_, hour) => {
+  const entriesByHour = Array.from({ length: 24 }, (_, hour) => {
     const bucket = new Date(
       dayStart.getFullYear(),
       dayStart.getMonth(),
       dayStart.getDate(),
       hour,
     );
-    const beforeStart = hour < normalizedStartHour;
-    const included = !beforeStart && bucket < to;
-
-    if (included) {
-      cumulativeEntries += entryTotals.get(bucketKey(bucket, "hour")) ?? 0;
-      cumulativeExits += exitTotals.get(bucketKey(bucket, "hour")) ?? 0;
-    }
-
-    return {
-      bucket: bucket.toISOString(),
-      entries: cumulativeEntries,
-      exits: cumulativeExits,
+    return entryTotals.get(bucketKey(bucket, "hour")) ?? 0;
+  });
+  const exitsByHour = Array.from({ length: 24 }, (_, hour) => {
+    const bucket = new Date(
+      dayStart.getFullYear(),
+      dayStart.getMonth(),
+      dayStart.getDate(),
       hour,
-      label: `${String(hour).padStart(2, "0")}h`,
-      occupancy: beforeStart
-        ? 0
-        : included
-          ? cumulativeEntries - cumulativeExits
-          : null,
-    };
+    );
+    return exitTotals.get(bucketKey(bucket, "hour")) ?? 0;
+  });
+
+  return buildHourlyOccupancySeries({
+    day: dayStart,
+    entriesByHour,
+    exitsByHour,
+    startHour: normalizedStartHour,
+    through,
   });
 }
 
+export function sharedScenarioLineIds(
+  firstGroup: Scenario[],
+  secondGroup: Scenario[],
+) {
+  const firstLineIds = activeScenarioLineIds(firstGroup);
+  const secondLineIds = activeScenarioLineIds(secondGroup);
+  return Array.from(firstLineIds).filter((lineId) =>
+    secondLineIds.has(lineId),
+  );
+}
+
 export function formatOccupancyStartHour(startHour: number) {
-  return `${String(normalizeStartHour(startHour)).padStart(2, "0")}:00`;
+  return `${String(normalizeOccupancyStartHour(startHour)).padStart(2, "0")}:00`;
 }
 
 export function sumSelectedScenarioRows({
@@ -435,6 +441,7 @@ function aggregateIndividualScenarioTotals({
 }
 
 function aggregateScenarioMagnitudesByBucket({
+  deduplicateLines = false,
   from,
   granularity,
   rows,
@@ -442,6 +449,7 @@ function aggregateScenarioMagnitudesByBucket({
   sourceGranularity,
   to,
 }: {
+  deduplicateLines?: boolean;
   from: Date;
   granularity: ScenarioAnalyticsGranularity;
   rows: AggregateEventRow[];
@@ -449,6 +457,17 @@ function aggregateScenarioMagnitudesByBucket({
   sourceGranularity: AggregateGranularity;
   to: Date;
 }) {
+  if (deduplicateLines) {
+    return aggregateUniqueLineMagnitudesByBucket({
+      from,
+      granularity,
+      rows,
+      scenarios,
+      sourceGranularity,
+      to,
+    });
+  }
+
   const contributions = buildLineScenarioContributions(scenarios);
   const scenarioTotalsByBucket = new Map<number, Map<string, number>>();
   const fromTime = from.getTime();
@@ -483,6 +502,55 @@ function aggregateScenarioMagnitudesByBucket({
         0,
       ),
     ]),
+  );
+}
+
+function aggregateUniqueLineMagnitudesByBucket({
+  from,
+  granularity,
+  rows,
+  scenarios,
+  sourceGranularity,
+  to,
+}: {
+  from: Date;
+  granularity: ScenarioAnalyticsGranularity;
+  rows: AggregateEventRow[];
+  scenarios: Scenario[];
+  sourceGranularity: AggregateGranularity;
+  to: Date;
+}) {
+  const lineIds = activeScenarioLineIds(scenarios);
+  const totals = new Map<number, number>();
+  const fromTime = from.getTime();
+  const toTime = to.getTime();
+
+  rows.forEach((row) => {
+    if (!row.line_count_id || !lineIds.has(row.line_count_id)) return;
+    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    if (!bucket) return;
+    const bucketTime = bucket.getTime();
+    if (bucketTime < fromTime || bucketTime >= toTime) return;
+
+    const key = bucketKey(bucket, granularity);
+    const magnitude = Math.abs(
+      Number.isFinite(row.total) ? row.total : 0,
+    );
+    totals.set(key, (totals.get(key) ?? 0) + magnitude);
+  });
+
+  return totals;
+}
+
+function activeScenarioLineIds(scenarios: Scenario[]) {
+  return new Set(
+    scenarios.flatMap((scenario) =>
+      scenario.lines.flatMap((line) =>
+        line.line_count_id && line.action_multiplier !== 0
+          ? [line.line_count_id]
+          : [],
+      ),
+    ),
   );
 }
 
@@ -563,8 +631,4 @@ function formatPeakDayLabel(date: Date) {
   }).format(date);
 
   return `${weekday} ${dayMonth}`;
-}
-
-function normalizeStartHour(value: number) {
-  return Number.isInteger(value) && value >= 0 && value <= 23 ? value : 0;
 }

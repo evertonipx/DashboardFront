@@ -21,6 +21,8 @@ import {
   Settings2,
   StretchHorizontal,
   StretchVertical,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -33,6 +35,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { useAuth } from "@/components/app/auth-provider";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
 import { WidgetViewPresetsDialog } from "@/components/app/widget-view-presets";
@@ -51,6 +54,7 @@ import {
   type WidgetViewScope,
 } from "@/lib/widget-view-presets";
 import {
+  CARD_ZOOM_LEVELS,
   orderByCardPreferences,
   saveCardPreferences,
   type CardPreference,
@@ -58,6 +62,7 @@ import {
   type CardHeight,
   type CardMenuKey,
   type CardSize,
+  type CardZoom,
 } from "@/lib/view-preferences";
 
 type LayoutCard = {
@@ -72,6 +77,8 @@ type LayoutCard = {
   shortHeightClassName?: string;
   standardHeightClassName?: string;
   tallHeightClassName?: string;
+  titleEditable?: boolean;
+  zoomEnabled?: boolean;
   node: React.ReactNode;
 };
 
@@ -258,6 +265,8 @@ export function CardLayout({
           color: preference?.color,
           height: preference?.height,
           size: preference?.size,
+          title: preference?.title,
+          zoom: preference?.zoom,
         };
       }),
     );
@@ -352,6 +361,26 @@ export function CardLayout({
     flashSaved();
   }
 
+  function setCardTitle(cardId: string, title?: string) {
+    persistPreferences(
+      preferences.map((preference) =>
+        preference.id === cardId ? { ...preference, title } : preference,
+      ),
+    );
+    flashSaved();
+  }
+
+  function setCardZoom(cardId: string, zoom: CardZoom) {
+    persistPreferences(
+      preferences.map((preference) =>
+        preference.id === cardId
+          ? { ...preference, zoom: zoom === 100 ? undefined : zoom }
+          : preference,
+      ),
+    );
+    flashSaved();
+  }
+
   return (
     <div
       data-card-layout-root
@@ -423,7 +452,9 @@ export function CardLayout({
           onHeightChange={resizeCardHeight}
           onResize={resizeCard}
           onRestoreDefault={restoreDefaultOrder}
+          onTitleChange={setCardTitle}
           onToggleVisibility={toggleCardVisibility}
+          onZoomChange={setCardZoom}
           open={organizerOpen}
           overId={organizerOverId}
           preferences={preferences}
@@ -598,6 +629,8 @@ function CardLayoutItem({
       <WidgetAppearanceProvider
         chartType={resolveCardChartType(preference?.chartType, chartTypes)}
         color={preference?.color}
+        title={preference?.title}
+        zoom={preference?.zoom}
       >
         {card.node}
       </WidgetAppearanceProvider>
@@ -623,7 +656,9 @@ function WidgetOrganizerDialog({
   onHeightChange,
   onResize,
   onRestoreDefault,
+  onTitleChange,
   onToggleVisibility,
+  onZoomChange,
   open,
   overId,
   preferences,
@@ -646,7 +681,9 @@ function WidgetOrganizerDialog({
   onHeightChange: (cardId: string, height: CardHeight) => void;
   onResize: (cardId: string, size: CardSize) => void;
   onRestoreDefault: () => void;
+  onTitleChange: (cardId: string, title?: string) => void;
   onToggleVisibility: (cardId: string) => void;
+  onZoomChange: (cardId: string, zoom: CardZoom) => void;
   open: boolean;
   overId: string | null;
   preferences: CardPreference[];
@@ -696,6 +733,7 @@ function WidgetOrganizerDialog({
               preference?.chartType,
               chartTypes,
             );
+            const currentZoom = preference?.zoom ?? 100;
             const first = index === 0;
             const last = index === cards.length - 1;
 
@@ -725,7 +763,7 @@ function WidgetOrganizerDialog({
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="truncate text-sm font-semibold text-foreground">
-                      {card.label ?? card.id}
+                      {preference?.title ?? card.label ?? card.id}
                     </div>
                     <Badge variant={visible ? "outline" : "secondary"}>
                       {visible ? "Visível" : "Oculto"}
@@ -740,12 +778,27 @@ function WidgetOrganizerDialog({
                 </div>
 
                 <div className="flex min-w-0 flex-wrap items-center gap-2 sm:col-span-2 sm:pl-12">
+                  {card.titleEditable ? (
+                    <WidgetTitleEditor
+                      cardId={card.id}
+                      defaultTitle={card.label ?? card.id}
+                      onChange={onTitleChange}
+                      title={preference?.title}
+                    />
+                  ) : null}
                   {chartTypes.length ? (
                     <WidgetChartTypePicker
                       cardId={card.id}
                       chartType={currentChartType}
                       chartTypes={chartTypes}
                       onChange={onChartTypeChange}
+                    />
+                  ) : null}
+                  {card.zoomEnabled ? (
+                    <WidgetZoomPicker
+                      cardId={card.id}
+                      onChange={onZoomChange}
+                      zoom={currentZoom}
                     />
                   ) : null}
                   <WidgetColorPicker
@@ -881,6 +934,133 @@ function WidgetOrganizerDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function WidgetTitleEditor({
+  cardId,
+  defaultTitle,
+  onChange,
+  title,
+}: {
+  cardId: string;
+  defaultTitle: string;
+  onChange: (cardId: string, title?: string) => void;
+  title?: string;
+}) {
+  const [value, setValue] = React.useState(title ?? defaultTitle);
+
+  React.useEffect(() => {
+    setValue(title ?? defaultTitle);
+  }, [defaultTitle, title]);
+
+  function commit() {
+    const normalized = value.trim().slice(0, 120);
+    if (!normalized || normalized === defaultTitle) {
+      setValue(defaultTitle);
+      if (title) onChange(cardId, undefined);
+      return;
+    }
+    setValue(normalized);
+    if (normalized !== title) onChange(cardId, normalized);
+  }
+
+  return (
+    <div className="flex min-w-[220px] flex-1 items-center gap-1.5">
+      <Input
+        aria-label={`Título de ${defaultTitle}`}
+        className="h-8 min-w-0"
+        maxLength={120}
+        onBlur={commit}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") {
+            setValue(title ?? defaultTitle);
+            event.currentTarget.blur();
+          }
+        }}
+        placeholder={defaultTitle}
+        value={value}
+      />
+      {title ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0"
+          onClick={() => {
+            setValue(defaultTitle);
+            onChange(cardId, undefined);
+          }}
+          aria-label="Restaurar título padrão"
+          title="Restaurar título padrão"
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function WidgetZoomPicker({
+  cardId,
+  onChange,
+  zoom,
+}: {
+  cardId: string;
+  onChange: (cardId: string, zoom: CardZoom) => void;
+  zoom: CardZoom;
+}) {
+  const currentIndex = CARD_ZOOM_LEVELS.indexOf(zoom);
+  const canZoomOut = currentIndex > 0;
+  const canZoomIn = currentIndex < CARD_ZOOM_LEVELS.length - 1;
+
+  return (
+    <div
+      className="inline-flex h-8 items-center rounded-md border bg-background p-0.5"
+      aria-label={`Zoom do gráfico: ${zoom}%`}
+      role="group"
+    >
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7"
+        disabled={!canZoomOut}
+        onClick={() => {
+          if (canZoomOut) {
+            onChange(cardId, CARD_ZOOM_LEVELS[currentIndex - 1]);
+          }
+        }}
+        aria-label="Diminuir zoom do gráfico"
+        title="Diminuir zoom"
+      >
+        <ZoomOut className="h-3.5 w-3.5" />
+      </Button>
+      <span
+        className="w-10 text-center text-[11px] font-medium tabular-nums text-muted-foreground"
+        aria-hidden="true"
+      >
+        {zoom}%
+      </span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7"
+        disabled={!canZoomIn}
+        onClick={() => {
+          if (canZoomIn) {
+            onChange(cardId, CARD_ZOOM_LEVELS[currentIndex + 1]);
+          }
+        }}
+        aria-label="Aumentar zoom do gráfico"
+        title="Aumentar zoom"
+      >
+        <ZoomIn className="h-3.5 w-3.5" />
+      </Button>
+    </div>
   );
 }
 

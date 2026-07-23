@@ -6,7 +6,10 @@ import { BarChart3, Clock3, Settings2 } from "lucide-react";
 import { useAuth } from "@/components/app/auth-provider";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
-import { useWidgetColor } from "@/components/app/widget-appearance";
+import {
+  useWidgetColor,
+  useWidgetTitle,
+} from "@/components/app/widget-appearance";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +42,11 @@ import {
   holidayCategoryIndexes,
 } from "@/lib/chart-calendar-axis";
 import { pastelBarColor } from "@/lib/chart-palette";
+import {
+  buildFixedHourlyAxisValues,
+  HOUR_OF_DAY_LABELS,
+  latestHourlyPointHour,
+} from "@/lib/hourly-axis";
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
 import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
 import type { ReportPayload } from "@/lib/report-export";
@@ -174,6 +182,7 @@ export function ScenarioComparisonCard({
 }: ScenarioComparisonCardProps) {
   const { user } = useAuth();
   const widgetColor = useWidgetColor();
+  const resolvedTitle = useWidgetTitle(title);
   const [settings, setSettings] = React.useState<ScenarioComparisonSettings>(
     () => createDefaultScenarioComparisonSettings(),
   );
@@ -345,7 +354,7 @@ export function ScenarioComparisonCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              {title}
+              {resolvedTitle}
             </CardTitle>
             <CardDescription className="mt-1">
               {settingsOpen && !monitorMode ? description : configurationSummary}
@@ -1140,7 +1149,24 @@ export function buildScenarioComparisonChartOption(
   granularity: AggregateGranularity,
   widgetColor?: string,
 ): EnterpriseChartOption {
-  const bucketLabels = series[0]?.points.map((point) => point.name) ?? [];
+  const fixedHourlyAxis =
+    granularity === "hour" &&
+    series.length > 0 &&
+    series.every((item) => pointsShareOneCalendarDay(item.points));
+  const hourlyThrough = fixedHourlyAxis
+    ? latestHourlyPointHour(
+        series.flatMap((item) =>
+          item.points.flatMap((point) =>
+            point.total === null
+              ? []
+              : [{ bucket: point.id, total: point.total }],
+          ),
+        ),
+      )
+    : -1;
+  const bucketLabels = fixedHourlyAxis
+    ? HOUR_OF_DAY_LABELS
+    : series[0]?.points.map((point) => point.name) ?? [];
   const dense = bucketLabels.length > 12;
   const manySeries = series.length > 12;
   const veryManySeries = series.length > 24;
@@ -1257,31 +1283,64 @@ export function buildScenarioComparisonChartOption(
           : pastelBarColor(item.colorIndex);
 
       return {
-      barCategoryGap: manySeries ? "18%" : series.length > 4 ? "28%" : "38%",
-      barGap: veryManySeries ? "2%" : manySeries ? "4%" : "8%",
-      barMaxWidth: veryManySeries ? 10 : manySeries ? 14 : granularity === "hour" ? 18 : 28,
-      data: item.points.map((point) => point.total),
-      emphasis: {
-        focus: "series",
-        itemStyle: {
-          color,
-          opacity: 1,
+        barCategoryGap:
+          manySeries ? "18%" : series.length > 4 ? "28%" : "38%",
+        barGap: veryManySeries ? "2%" : manySeries ? "4%" : "8%",
+        barMaxWidth:
+          veryManySeries
+            ? 10
+            : manySeries
+              ? 14
+              : granularity === "hour"
+                ? 18
+                : 28,
+        data: fixedHourlyAxis
+          ? buildFixedHourlyAxisValues(
+              item.points.flatMap((point) =>
+                point.total === null
+                  ? []
+                  : [{ bucket: point.id, total: point.total }],
+              ),
+              hourlyThrough,
+            )
+          : item.points.map((point) => point.total),
+        emphasis: {
+          focus: "series",
+          itemStyle: {
+            color,
+            opacity: 1,
+          },
         },
-      },
-      itemStyle: {
-        borderRadius: [3, 3, 0, 0],
-        color,
-        opacity: item.temporalRole === "baseline" ? 0.42 : 0.96,
-      },
-      markArea:
-        seriesIndex === 0 && granularity === "day"
-          ? buildCalendarMarkArea(calendarDates)
-          : undefined,
-      name: item.name,
-      type: "bar",
-    };
+        itemStyle: {
+          borderRadius: [3, 3, 0, 0],
+          color,
+          opacity: item.temporalRole === "baseline" ? 0.42 : 0.96,
+        },
+        markArea:
+          seriesIndex === 0 && granularity === "day"
+            ? buildCalendarMarkArea(calendarDates)
+            : undefined,
+        name: item.name,
+        type: "bar",
+      };
     }),
   };
+}
+
+function pointsShareOneCalendarDay(points: readonly ChartPoint[]) {
+  if (!points.length) return false;
+
+  const days = new Set<string>();
+  for (const point of points) {
+    const date = new Date(point.id);
+    if (Number.isNaN(date.getTime())) return false;
+    days.add(
+      `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`,
+    );
+    if (days.size > 1) return false;
+  }
+
+  return days.size === 1;
 }
 
 export function buildScenarioComparisonReportChart({

@@ -15,6 +15,11 @@ import {
   type ScenarioCompositionChartType,
 } from "@/lib/chart-composition";
 import { buildHourlyOccupancyOption } from "@/lib/hourly-occupancy-chart";
+import {
+  buildFixedHourlyAxisValues,
+  HOUR_OF_DAY_LABELS as HOUR_LABELS,
+  latestHourlyPointHour,
+} from "@/lib/hourly-axis";
 import type {
   PeriodAnalysisBaseline,
   PeriodAnalysisWidget,
@@ -26,6 +31,7 @@ import {
   buildScenarioRanking,
   formatOccupancyStartHour,
   selectScenarios,
+  sharedScenarioLineIds,
   type ScenarioAnalyticsPoint,
   type ScenarioHourlyOccupancyPoint,
 } from "@/lib/scenario-analytics";
@@ -51,6 +57,7 @@ export type PeriodAnalysisDataset = {
 
 export type PeriodAnalysisData = {
   baseline: Partial<Record<PeriodAnalysisBaseline, PeriodAnalysisDataset>>;
+  contextHour: PeriodAnalysisDataset;
   day: PeriodAnalysisDataset;
   hour: PeriodAnalysisDataset;
 };
@@ -78,10 +85,6 @@ const MUTED_BASE_COLOR = "#A3AFBF";
 const POSITIVE_COLOR = "#0F766E";
 const NEGATIVE_COLOR = "#C2410C";
 const NEUTRAL_COLOR = "#64748B";
-const HOUR_LABELS = Array.from(
-  { length: 24 },
-  (_, hour) => `${String(hour).padStart(2, "0")}h`,
-);
 
 export function buildPeriodAnalysisWidgetModel({
   chartType,
@@ -327,7 +330,11 @@ function buildTimelineModel(
     effectivePeriod,
     granularity,
   );
-  const option = buildBarTimelineOption(points, color);
+  const option = buildBarTimelineOption(
+    points,
+    color,
+    granularity === "hour" && isSingleDayAnalysisPeriod(period),
+  );
   const total = points.reduce((sum, point) => sum + point.total, 0);
   const peak = points.reduce<ScenarioAnalyticsPoint | null>(
     (largest, point) =>
@@ -373,7 +380,11 @@ function buildComparisonModel(
     name: scenario.name,
     points: combinedPoints(dataset, [scenario], effectivePeriod, granularity),
   }));
-  const option = buildMultiScenarioOption(series, color);
+  const option = buildMultiScenarioOption(
+    series,
+    color,
+    granularity === "hour" && isSingleDayAnalysisPeriod(period),
+  );
   const labels = series[0]?.points.map((point) => point.label) ?? [];
   const scenarioTotals = series
     .map((item) => ({
@@ -791,11 +802,17 @@ function buildHeatmapModel(
   scenarios: Scenario[],
   color: string,
 ): PeriodAnalysisWidgetModel {
+  const hourlyDataset = data.contextHour;
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
     : period;
   const effectivePeriod = periodRangeThroughNow(analysisPeriod);
-  const points = combinedPoints(data.hour, scenarios, effectivePeriod, "hour");
+  const points = combinedPoints(
+    hourlyDataset,
+    scenarios,
+    effectivePeriod,
+    "hour",
+  );
   const days = listDayStarts(effectivePeriod.from, effectivePeriod.to);
   const dayIndexes = new Map(
     days.map((day, index) => [calendarDayKey(day), index]),
@@ -830,7 +847,7 @@ function buildHeatmapModel(
       ? `Intensidade por dia e hora no mês até ${formatDate(period.from)}.`
       : "Intensidade combinada dos cenários escolhidos por dia e hora.",
     emptyText: "Sem eventos horários para montar o mapa de calor.",
-    error: data.hour.error,
+    error: hourlyDataset.error,
     hasData: points.some((point) => point.total > 0),
     height: 500,
     insights:
@@ -1257,6 +1274,19 @@ function buildHourlyOccupancyModel(
     };
   }
 
+  const sharedLineIds = sharedScenarioLineIds(
+    entryScenarios,
+    exitScenarios,
+  );
+  if (sharedLineIds.length) {
+    return {
+      description: widgetDescription(widget),
+      emptyText: `${sharedLineIds.length} linha(s) de contagem estão simultaneamente em cenários de entrada e saída. Use cenários com linhas distintas para evitar dupla contagem.`,
+      hasData: false,
+      height: 340,
+    };
+  }
+
   const effectivePeriod = periodRangeThroughNow(period);
   const singleDay = isSingleDayAnalysisPeriod(period);
   const points = listDayStarts(effectivePeriod.from, effectivePeriod.to).flatMap(
@@ -1273,7 +1303,7 @@ function buildHourlyOccupancyModel(
         startHour: widget.startHour,
         through,
       })
-        .filter((point) => point.occupancy !== null)
+        .filter((point) => singleDay || point.occupancy !== null)
         .map<ScenarioHourlyOccupancyPoint>((point) => ({
           ...point,
           label: singleDay
@@ -1296,7 +1326,7 @@ function buildHourlyOccupancyModel(
         )}.`,
     emptyText: "Sem eventos horários nos cenários de entrada e saída.",
     error: data.hour.error,
-    hasData: points.length > 0,
+    hasData: points.some((point) => point.occupancy !== null),
     height: 340,
     insights: latest
       ? [
@@ -1346,12 +1376,14 @@ function buildHourlyOccupancyModel(
         },
       ],
       description: formatPeriodAnalysisRange(period),
-      rows: points.map((point) => ({
-        entries: point.entries,
-        exits: point.exits,
-        occupancy: point.occupancy ?? 0,
-        period: point.label,
-      })),
+      rows: points
+        .filter((point) => point.occupancy !== null)
+        .map((point) => ({
+          entries: point.entries,
+          exits: point.exits,
+          occupancy: point.occupancy ?? 0,
+          period: point.label,
+        })),
       title: widget.title,
     },
   };
@@ -1461,6 +1493,7 @@ function buildHourProfileModel(
 function buildBarTimelineOption(
   points: ScenarioAnalyticsPoint[],
   color: string,
+  fixedHourlyAxis = false,
 ): EnterpriseChartOption {
   const saturdayIndexes = points.flatMap((point, index) =>
     point.isSaturday ? [index] : [],
@@ -1469,6 +1502,13 @@ function buildBarTimelineOption(
     point.isSunday ? [index] : [],
   );
   const calendarDates = points.map((point) => point.bucket);
+  const throughHour = fixedHourlyAxis ? latestHourlyPointHour(points) : -1;
+  const labels = fixedHourlyAxis
+    ? HOUR_LABELS
+    : points.map((point) => point.label);
+  const values = fixedHourlyAxis
+    ? buildFixedHourlyAxisValues(points, throughHour)
+    : points.map((point) => point.total);
 
   return {
     color: [color],
@@ -1477,7 +1517,7 @@ function buildBarTimelineOption(
       {
         barCategoryGap: "50%",
         barMaxWidth: 28,
-        data: points.map((point) => point.total),
+        data: values,
         itemStyle: { borderRadius: [2, 2, 0, 0], color },
         markArea: buildCalendarMarkArea(calendarDates),
         name: "Fluxo",
@@ -1505,7 +1545,7 @@ function buildBarTimelineOption(
       }),
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
-      data: points.map((point) => point.label),
+      data: labels,
       type: "category",
     },
     yAxis: {
@@ -1524,6 +1564,7 @@ function buildMultiScenarioOption(
     points: ScenarioAnalyticsPoint[];
   }>,
   color: string,
+  fixedHourlyAxis = false,
 ): EnterpriseChartOption {
   const calendarPoints = series[0]?.points ?? [];
   const saturdayIndexes = calendarPoints.flatMap((point, index) =>
@@ -1533,6 +1574,12 @@ function buildMultiScenarioOption(
     point.isSunday ? [index] : [],
   );
   const calendarDates = calendarPoints.map((point) => point.bucket);
+  const throughHour = fixedHourlyAxis
+    ? latestHourlyPointHour(calendarPoints)
+    : -1;
+  const labels = fixedHourlyAxis
+    ? HOUR_LABELS
+    : calendarPoints.map((point) => point.label);
 
   return {
     color: series.map((_, index) =>
@@ -1561,7 +1608,9 @@ function buildMultiScenarioOption(
     series: series.map((item, index) => ({
       barCategoryGap: "42%",
       barMaxWidth: 24,
-      data: item.points.map((point) => point.total),
+      data: fixedHourlyAxis
+        ? buildFixedHourlyAxisValues(item.points, throughHour)
+        : item.points.map((point) => point.total),
       itemStyle: {
         borderRadius: [2, 2, 0, 0],
         color: index === 0 ? color : pastelBarColor(index + 1),
@@ -1588,7 +1637,7 @@ function buildMultiScenarioOption(
       }),
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
-      data: calendarPoints.map((point) => point.label),
+      data: labels,
       type: "category",
     },
     yAxis: {

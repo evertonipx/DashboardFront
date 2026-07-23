@@ -29,7 +29,10 @@ import { LabelLayout } from "echarts/features";
 import { CanvasRenderer } from "echarts/renderers";
 
 import { useTheme } from "@/components/app/theme-provider";
-import { useWidgetChartType } from "@/components/app/widget-appearance";
+import {
+  useWidgetChartType,
+  useWidgetZoom,
+} from "@/components/app/widget-appearance";
 import type { CardChartType } from "@/lib/view-preferences";
 import { cn } from "@/lib/utils";
 
@@ -67,6 +70,7 @@ type EChartProps = {
 export function EChart({ option, className }: EChartProps) {
   const { effectiveTheme } = useTheme();
   const chartType = useWidgetChartType();
+  const zoom = useWidgetZoom();
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const chartRef = React.useRef<EChartsType | null>(null);
   const themedOption = React.useMemo(
@@ -107,13 +111,31 @@ export function EChart({ option, className }: EChartProps) {
     });
   }, [themedOption]);
 
+  React.useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      chartRef.current?.resize();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [zoom]);
+
   return (
     <div
-      ref={containerRef}
-      className={cn("h-full w-full", className)}
+      className={cn("relative h-full w-full overflow-hidden", className)}
       data-echart
       data-chart-type={chartType}
-    />
+      data-chart-zoom={Math.round(zoom * 100)}
+    >
+      <div
+        ref={containerRef}
+        className="absolute left-1/2 top-1/2"
+        style={{
+          height: `${100 / zoom}%`,
+          transform: `translate(-50%, -50%) scale(${zoom})`,
+          transformOrigin: "center",
+          width: `${100 / zoom}%`,
+        }}
+      />
+    </div>
   );
 }
 

@@ -6,13 +6,18 @@ export type CardHeight = "short" | "standard" | "tall";
 
 export type CardChartType = "bar" | "line" | "rose" | "treemap";
 
+export const CARD_ZOOM_LEVELS = [80, 90, 100, 110, 120] as const;
+export type CardZoom = (typeof CARD_ZOOM_LEVELS)[number];
+
 export type CardPreference = {
   chartType?: CardChartType;
   color?: string;
   height?: CardHeight;
   id: string;
+  title?: string;
   visible: boolean;
   size?: CardSize;
+  zoom?: CardZoom;
 };
 
 export type CardDefinition = {
@@ -46,7 +51,7 @@ export const cardViewMenus: CardMenuDefinition[] = [
     cards: [
       {
         id: "live_intraday_comparison",
-        label: "Hoje em tempo real",
+        label: "Hoje até agora",
         description: "Acumulado de hoje incluindo a hora parcial, com comparação nas horas fechadas.",
       },
       {
@@ -405,10 +410,12 @@ export function normalizeCardPreferences(
         ? byId.get(preference.id)?.height
         : undefined,
       id: preference.id,
+      title: normalizeCardTitle(byId.get(preference.id)?.title),
       visible: byId.get(preference.id)?.visible ?? true,
       size: isCardSize(byId.get(preference.id)?.size)
         ? byId.get(preference.id)?.size
         : undefined,
+      zoom: normalizeCardZoom(byId.get(preference.id)?.zoom),
     }));
   const normalizedIds = new Set(normalized.map((preference) => preference.id));
   const defaultOrder = Array.from(definitionIds);
@@ -431,8 +438,10 @@ export function normalizeCardPreferences(
         color: undefined,
         height: undefined,
         id,
+        title: undefined,
         visible: true,
         size: undefined,
+        zoom: undefined,
       },
     );
     normalizedIds.add(id);
@@ -584,4 +593,14 @@ function isCardChartType(value: unknown): value is CardChartType {
 
 function isCardColor(value: unknown): value is string {
   return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
+}
+
+function normalizeCardTitle(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const title = value.trim();
+  return title ? title.slice(0, 120) : undefined;
+}
+
+function normalizeCardZoom(value: unknown): CardZoom | undefined {
+  return CARD_ZOOM_LEVELS.find((level) => level === value);
 }

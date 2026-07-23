@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "test:analytics": "node --test tests/analytics-time.test.mjs",
     "check:production": "npm run typecheck && npm run build",
     "context:skeleton": "node tools/generate-code-skeleton.mjs",
     "context:pack": "repomix --config repomix.config.json",

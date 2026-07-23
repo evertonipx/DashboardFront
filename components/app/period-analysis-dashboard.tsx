@@ -260,8 +260,18 @@ export function PeriodAnalysisDashboard({
     [preferences],
   );
   const dataRequirementsKey = React.useMemo(
-    () =>
-      JSON.stringify({
+    () => {
+      const needsExactHour =
+        singleDayAnalysis ||
+        widgets.some(
+          (widget) =>
+            widget.kind === "hour_profile" ||
+            widget.kind === "hourly_occupancy" ||
+            ((widget.kind === "timeline" || widget.kind === "comparison") &&
+              widget.granularity === "hour"),
+        );
+
+      return JSON.stringify({
         baseline: Array.from(
           new Set(
             widgets
@@ -269,17 +279,10 @@ export function PeriodAnalysisDashboard({
               .map((widget) => widget.baseline),
           ),
         ).sort(),
-        hour:
-          singleDayAnalysis ||
-          widgets.some(
-            (widget) =>
-              widget.kind === "heatmap" ||
-              widget.kind === "hour_profile" ||
-              widget.kind === "hourly_occupancy" ||
-              ((widget.kind === "timeline" || widget.kind === "comparison") &&
-                widget.granularity === "hour"),
-          ),
-      }),
+        contextHour: widgets.some((widget) => widget.kind === "heatmap"),
+        hour: needsExactHour,
+      });
+    },
     [singleDayAnalysis, widgets],
   );
 
@@ -338,6 +341,7 @@ export function PeriodAnalysisDashboard({
   React.useEffect(() => {
     const requirements = JSON.parse(dataRequirementsKey) as {
       baseline: PeriodAnalysisBaseline[];
+      contextHour: boolean;
       hour: boolean;
     };
     const controller = new AbortController();
@@ -350,16 +354,28 @@ export function PeriodAnalysisDashboard({
       from: addDays(operationalPeriod.from, -29),
       to: operationalPeriod.to,
     };
-    Promise.all([
-      fetchAnalysisDataset("day", dayRange, controller.signal),
-      requirements.hour
-        ? fetchAnalysisDataset(
+    const hourPromise = requirements.hour
+      ? fetchAnalysisDataset(
+          "hour",
+          period,
+          controller.signal,
+          isSingleDayAnalysisPeriod(period) ? period : undefined,
+        )
+      : Promise.resolve(emptyDataset("hour"));
+    const contextHourPromise = requirements.contextHour
+      ? periodRangesEqual(period, operationalPeriod) && requirements.hour
+        ? hourPromise
+        : fetchAnalysisDataset(
             "hour",
             operationalPeriod,
             controller.signal,
-            isSingleDayAnalysisPeriod(period) ? period : undefined,
           )
-        : Promise.resolve(emptyDataset("hour")),
+      : Promise.resolve(emptyDataset("hour"));
+
+    Promise.all([
+      fetchAnalysisDataset("day", dayRange, controller.signal),
+      hourPromise,
+      contextHourPromise,
       Promise.all(
         requirements.baseline.map(async (baseline) => {
           const baselineRange = periodAnalysisBaselineRange(
@@ -375,15 +391,31 @@ export function PeriodAnalysisDashboard({
         }),
       ),
     ])
-      .then(([day, hour, baselineEntries]) => {
+      .then(([day, hour, rawContextHour, baselineEntries]) => {
         if (controller.signal.aborted) return;
-        setData({ baseline: Object.fromEntries(baselineEntries), day, hour });
+        const reconciledDay =
+          singleDayAnalysis && requirements.hour
+            ? mergeExactHoursIntoDays(day, hour, period)
+            : day;
+        const contextHour =
+          requirements.contextHour &&
+          requirements.hour &&
+          !periodRangesEqual(period, operationalPeriod)
+            ? mergeExactHoursIntoContext(rawContextHour, hour, period)
+            : rawContextHour;
+        setData({
+          baseline: Object.fromEntries(baselineEntries),
+          contextHour,
+          day: reconciledDay,
+          hour,
+        });
         hasLoadedDataRef.current = true;
         setLastUpdated(new Date());
         if (
           announceErrors &&
-          (day.error ||
+          (reconciledDay.error ||
             hour.error ||
+            contextHour.error ||
             baselineEntries.some(([, dataset]) => dataset.error))
         ) {
           toast.error("Alguns dados da análise não puderam ser carregados.");
@@ -411,6 +443,7 @@ export function PeriodAnalysisDashboard({
     operationalPeriod,
     period,
     queryVersion,
+    singleDayAnalysis,
   ]);
 
   React.useEffect(() => {
@@ -493,6 +526,8 @@ export function PeriodAnalysisDashboard({
       widget.kind === "summary" ? "row-span-2 sm:row-span-1" : undefined,
     id: widget.id,
     label: widget.title,
+    zoomEnabled:
+      widget.kind !== "summary" && widget.kind !== "totals_table",
     node: (
       <PeriodAnalysisCard
         canConfigure={canEditVisual}
@@ -1604,6 +1639,71 @@ function fetchAnalysisAggregate(
   );
 }
 
+function mergeExactHoursIntoContext(
+  context: PeriodAnalysisDataset,
+  exact: PeriodAnalysisDataset,
+  range: PeriodAnalysisRange,
+) {
+  if (
+    exact.error ||
+    !exact.rows.length ||
+    context.granularity !== "hour"
+  ) {
+    return context;
+  }
+
+  let rows = [...context.rows];
+  let hourStart = startOfHour(range.from);
+  while (hourStart < range.to) {
+    const hourEnd = addHours(hourStart, 1);
+    rows = replaceAggregateBucketRows(
+      rows,
+      "hour",
+      hourStart,
+      hourEnd,
+      exact.rows,
+      exact.granularity,
+      true,
+    );
+    hourStart = hourEnd;
+  }
+
+  return { ...context, rows };
+}
+
+function mergeExactHoursIntoDays(
+  dayDataset: PeriodAnalysisDataset,
+  exactHours: PeriodAnalysisDataset,
+  range: PeriodAnalysisRange,
+) {
+  if (
+    exactHours.error ||
+    !exactHours.rows.length ||
+    dayDataset.granularity !== "day" ||
+    exactHours.granularity !== "hour"
+  ) {
+    return dayDataset;
+  }
+
+  let rows = [...dayDataset.rows];
+  let dayStart = startOfDay(range.from);
+  while (dayStart < range.to) {
+    const dayEnd = addDays(dayStart, 1);
+    rows = replaceAggregateBucketRows(
+      rows,
+      "day",
+      dayStart,
+      dayEnd,
+      exactHours.rows,
+      exactHours.granularity,
+      true,
+    );
+    dayStart = dayEnd;
+  }
+
+  return { ...dayDataset, rows };
+}
+
 async function reconcileAnalysisHours(
   hourlyRows: AggregateEventRow[],
   queryRange: PeriodAnalysisRange,
@@ -1761,10 +1861,11 @@ function replaceAggregateBucketRows(
     bucketStart,
     bucketEnd,
   );
+  if (!sourceTotals.size) return targetRows;
+
   const mergedTotals = preferSource
-    ? sourceTotals
+    ? overlayIdentityTotals(existingTotals, sourceTotals)
     : mergeIdentityTotals(existingTotals, sourceTotals);
-  if (!mergedTotals.size && !preferSource) return targetRows;
 
   const bucketKey = aggregateBucketKey(bucketStart, targetGranularity);
   return [
@@ -1831,6 +1932,17 @@ function mergeIdentityTotals(
   return merged;
 }
 
+function overlayIdentityTotals(
+  existingTotals: Map<string, AggregateIdentityTotal>,
+  sourceTotals: Map<string, AggregateIdentityTotal>,
+) {
+  const overlaid = new Map(existingTotals);
+  sourceTotals.forEach((identity, key) => {
+    overlaid.set(key, identity);
+  });
+  return overlaid;
+}
+
 function aggregateRowIdentity(
   row: AggregateEventRow,
 ): Omit<AggregateIdentityTotal, "total"> {
@@ -1865,6 +1977,7 @@ function aggregateBucketKey(
 function emptyData(): PeriodAnalysisData {
   return {
     baseline: {},
+    contextHour: emptyDataset("hour"),
     day: emptyDataset("day"),
     hour: emptyDataset("hour"),
   };
@@ -1906,6 +2019,16 @@ function addDays(date: Date, amount: number) {
   const next = new Date(date);
   next.setDate(next.getDate() + amount);
   return next;
+}
+
+function periodRangesEqual(
+  first: PeriodAnalysisRange,
+  second: PeriodAnalysisRange,
+) {
+  return (
+    first.from.getTime() === second.from.getTime() &&
+    first.to.getTime() === second.to.getTime()
+  );
 }
 
 function parseDateInputValue(value: string) {

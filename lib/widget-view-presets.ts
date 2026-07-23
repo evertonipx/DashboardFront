@@ -2,6 +2,7 @@
 
 import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
 import {
+  CARD_ZOOM_LEVELS,
   getCardViewStorageKey,
   loadScopedCardPreferences,
   saveCardPreferences,
@@ -574,7 +575,12 @@ function normalizeSnapshot(
               item.size === "full"
                 ? item.size
                 : undefined,
+            title:
+              typeof item.title === "string" && item.title.trim()
+                ? item.title.trim().slice(0, 120)
+                : undefined,
             visible: item.visible !== false,
+            zoom: CARD_ZOOM_LEVELS.find((level) => level === item.zoom),
           } satisfies CardPreference,
         ];
       })

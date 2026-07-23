@@ -39,6 +39,7 @@ import { useCardPreferences } from "@/components/app/use-card-preferences";
 import {
   useWidgetChartType,
   useWidgetColor,
+  useWidgetTitle,
 } from "@/components/app/widget-appearance";
 import {
   MonitorModeButton,
@@ -143,6 +144,11 @@ import {
   type ScenarioCompositionChartType,
 } from "@/lib/chart-composition";
 import { buildHourlyOccupancyOption } from "@/lib/hourly-occupancy-chart";
+import {
+  buildFixedHourlyAxisValues,
+  HOUR_OF_DAY_LABELS,
+  latestHourlyPointHour,
+} from "@/lib/hourly-axis";
 import {
   DAY_OF_MONTH_AXIS_LABELS,
   buildCalendarAxisLabel,
@@ -1672,7 +1678,7 @@ export function RealtimeDashboard({
   const metricCards = [
     {
       id: "live_intraday_comparison",
-      label: "Hoje em tempo real",
+      label: "Hoje até agora",
       defaultSize: "compact" as const,
       node: (
         <MetricCard
@@ -1760,7 +1766,7 @@ export function RealtimeDashboard({
         />
       ),
     },
-  ];
+  ].map((card) => ({ ...card, titleEditable: true as const }));
 
   const operationalComparisonDefinition =
     buildOperationalComparisonHoursDefinition(
@@ -2124,7 +2130,11 @@ export function RealtimeDashboard({
         />
       ),
     },
-  ];
+  ].map((card) => ({
+    ...card,
+    titleEditable: true as const,
+    zoomEnabled: card.id !== "live_scenario_totals_table",
+  }));
   const comparisonCards = [
     scenarioTodayComparisonPoints.length > 1 &&
     scenarioTodayComparisonPoints.some((point) => point.total > 0)
@@ -2183,13 +2193,21 @@ export function RealtimeDashboard({
           ),
         }
       : null,
-  ].filter((card): card is NonNullable<typeof card> => Boolean(card));
+  ]
+    .filter((card): card is NonNullable<typeof card> => Boolean(card))
+    .map((card) => ({
+      ...card,
+      titleEditable: true as const,
+      zoomEnabled: true as const,
+    }));
 
   const customWidgetCards = customWidgets.map((widget) => {
     if (widget.kind === "scenario_comparison") {
       return {
         id: `live_custom_${widget.id}`,
         chartTypeEnabled: true,
+        titleEditable: true,
+        zoomEnabled: true,
         label: widget.title,
         defaultSize: "full" as const,
         className: "sm:col-span-2 xl:col-span-4",
@@ -2224,6 +2242,8 @@ export function RealtimeDashboard({
             ? (["rose", "treemap"] as const)
             : undefined,
         label: widget.title,
+        titleEditable: true,
+        zoomEnabled: widget.widgetType !== "totals_table",
         defaultHeight:
           widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
             ? ("tall" as const)
@@ -2297,6 +2317,8 @@ export function RealtimeDashboard({
     return {
       id: `live_custom_${widget.id}`,
       chartTypeEnabled: true,
+      titleEditable: true,
+      zoomEnabled: true,
       label: widget.title,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
@@ -2372,6 +2394,22 @@ export function RealtimeDashboard({
       ),
     [livePreferences],
   );
+  const liveTitleByCardId = React.useMemo(
+    () =>
+      new Map(
+        livePreferences.flatMap((preference) =>
+          preference.title
+            ? [[preference.id, preference.title] as const]
+            : [],
+        ),
+      ),
+    [livePreferences],
+  );
+  const resolveLiveTitle = React.useCallback(
+    (cardId: string, fallback: string) =>
+      liveTitleByCardId.get(cardId) ?? fallback,
+    [liveTitleByCardId],
+  );
   const visibleLiveCardIds = React.useMemo(() => {
     const cardIds = new Set(liveCardIdsKey ? liveCardIdsKey.split("|") : []);
     const preferenceIds = new Set(
@@ -2400,7 +2438,10 @@ export function RealtimeDashboard({
               operationalSettings.intradayComparison,
             ).toLowerCase()}`
           : "Atualização contínua; comparativo disponível após a primeira hora fechada",
-        label: "Hoje até agora",
+        label: resolveLiveTitle(
+          "live_intraday_comparison",
+          "Hoje até agora",
+        ),
         value: todayTotal,
       },
     ],
@@ -2410,7 +2451,10 @@ export function RealtimeDashboard({
         description: averageBaseDescription(
           operationalSettings.monthComparison,
         ),
-        label: "Hoje x média-base",
+        label: resolveLiveTitle(
+          "live_target_progress",
+          "Hoje x média-base",
+        ),
         value:
           targetProgress === null
             ? "Sem base"
@@ -2423,7 +2467,10 @@ export function RealtimeDashboard({
         description: `${formatDelta(previousMonthDelta)} contra ${formatNumber(
           previousMonthComparableTotal,
         )} até o último dia fechado do mês anterior`,
-        label: "Acumulado x mês anterior",
+        label: resolveLiveTitle(
+          "live_month_previous_comparison",
+          "Acumulado x mês anterior",
+        ),
         value: currentMonthRealtimeTotal,
       },
     ],
@@ -2433,7 +2480,10 @@ export function RealtimeDashboard({
         description: `${formatDelta(lastYearMonthDelta)} contra ${formatNumber(
           lastYearMonthComparableTotal,
         )} até o último dia fechado do ano anterior`,
-        label: "Acumulado x ano anterior",
+        label: resolveLiveTitle(
+          "live_month_year_comparison",
+          "Acumulado x ano anterior",
+        ),
         value: currentMonthRealtimeTotal,
       },
     ],
@@ -2790,13 +2840,16 @@ export function RealtimeDashboard({
     ([cardId, chart]) =>
       [
         cardId,
-        {
-          ...chart,
-          option: applyChartTypePreference(
-            chart.option,
-            liveChartTypeByCardId.get(cardId),
-          ),
-        },
+        renameReportChart(
+          {
+            ...chart,
+            option: applyChartTypePreference(
+              chart.option,
+              liveChartTypeByCardId.get(cardId),
+            ),
+          },
+          resolveLiveTitle(cardId, chart.title),
+        ),
       ] as const,
   );
 
@@ -2836,7 +2889,15 @@ export function RealtimeDashboard({
         .filter((metric): metric is ReportMetric => Boolean(metric)),
       charts,
       tables: visibleLiveCardIds
-        .map((id) => liveTableByCardId.get(id))
+        .map((id) => {
+          const table = liveTableByCardId.get(id);
+          return table
+            ? {
+                ...table,
+                title: resolveLiveTitle(id, table.title),
+              }
+            : undefined;
+        })
         .filter((table): table is ReportTable => Boolean(table)),
     };
   }
@@ -3381,20 +3442,20 @@ function MetricCard({
   tone: "primary" | "sky" | "indigo" | "slate";
   value: number | string;
 }) {
-  const toneClass = {
-    primary: "bg-primary/10 text-primary ring-primary/20",
-    sky: "bg-sky-500/10 text-sky-700 ring-sky-500/20 dark:text-sky-300",
-    indigo:
-      "bg-indigo-500/10 text-indigo-700 ring-indigo-500/20 dark:text-indigo-300",
-    slate: "bg-muted text-muted-foreground ring-border",
+  const iconToneClass = {
+    primary: "text-primary",
+    sky: "text-sky-700 dark:text-sky-300",
+    indigo: "text-indigo-700 dark:text-indigo-300",
+    slate: "text-muted-foreground",
   }[tone];
 
   return (
     <Card className="h-full overflow-hidden">
-      <CardContent className="flex h-full min-h-0 items-center justify-between gap-3 p-4">
+      <CardContent className="h-full min-h-0 p-4">
         <div className="min-w-0">
-          <div className="text-xs font-medium uppercase text-muted-foreground">
-            {label}
+          <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium uppercase text-muted-foreground">
+            <Icon className={cn("h-3.5 w-3.5 shrink-0", iconToneClass)} />
+            <ResolvedWidgetTitle fallback={label} />
           </div>
           {loading ? (
             <Skeleton className="mt-3 h-8 w-24" />
@@ -3419,17 +3480,13 @@ function MetricCard({
             {description}
           </div>
         </div>
-        <div
-          className={cn(
-            "flex h-11 w-11 shrink-0 items-center justify-center rounded-md ring-1",
-            toneClass,
-          )}
-        >
-          <Icon className="h-5 w-5" />
-        </div>
       </CardContent>
     </Card>
   );
+}
+
+function ResolvedWidgetTitle({ fallback }: { fallback: string }) {
+  return <>{useWidgetTitle(fallback)}</>;
 }
 
 function metricComparisonClassName(value: string) {
@@ -3478,7 +3535,7 @@ function RealtimeChartCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              {definition.label}
+              <ResolvedWidgetTitle fallback={definition.label} />
             </CardTitle>
             <CardDescription className="mt-1">
               {definition.description}
@@ -3571,7 +3628,7 @@ function OperationalHourlyChartCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              Hora a Hora
+              <ResolvedWidgetTitle fallback="Hora a Hora" />
             </CardTitle>
             <CardDescription className="mt-1">
               Base histórica à esquerda e hoje à direita. Linha tracejada: {averageDescription.toLowerCase()} convertida em média horária.
@@ -3926,7 +3983,7 @@ function OperationalHeatmapCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Grid3X3 className="h-4 w-4 text-primary" />
-              {title}
+              <ResolvedWidgetTitle fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Intensidade do fluxo nas 24 faixas horárias e nos dias 1 a 31
@@ -4044,7 +4101,7 @@ function HourlyOccupancyCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <DoorOpen className="h-4 w-4 text-primary" />
-              Ocupação hora a hora
+              <ResolvedWidgetTitle fallback="Ocupação hora a hora" />
             </CardTitle>
             <CardDescription className="mt-1">
               Saldo acumulado diariamente a partir de
@@ -4243,7 +4300,7 @@ function ScenarioCumulativeTotalsCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Sigma className="h-4 w-4 text-primary" />
-              {title}
+              <ResolvedWidgetTitle fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Total combinado e acumulado individual de hoje. A hora atual é
@@ -4349,7 +4406,7 @@ function ScenarioTotalsTableCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Table2 className="h-4 w-4 text-primary" />
-              {title}
+              <ResolvedWidgetTitle fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Totais de hoje e do mês atual, linha por linha, incluindo os
@@ -4482,7 +4539,7 @@ function CurrentYearComparisonCard({
               ) : (
                 <CalendarDays className="h-4 w-4 text-primary" />
               )}
-              {title}
+              <ResolvedWidgetTitle fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               {accumulated
@@ -4543,7 +4600,7 @@ function OperationalMonthComparisonCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <CalendarDays className="h-4 w-4 text-primary" />
-              Dias x meses
+              <ResolvedWidgetTitle fallback="Dias x meses" />
             </CardTitle>
             <CardDescription className="mt-1">
               {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Fins de semana e feriados nacionais e de São Paulo destacados.
@@ -4599,7 +4656,7 @@ function OperationalMonthCumulativeCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <TrendingUp className="h-4 w-4 text-primary" />
-              Acumulado diário x mês-base
+              <ResolvedWidgetTitle fallback="Acumulado diário x mês-base" />
             </CardTitle>
             <CardDescription className="mt-1">
               Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Fins de semana e feriados nacionais e de São Paulo destacados.
@@ -4660,7 +4717,7 @@ function OperationalTrendCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <TrendingUp className="h-4 w-4 text-primary" />
-              Tendência 7 x 30 dias
+              <ResolvedWidgetTitle fallback="Tendência 7 x 30 dias" />
             </CardTitle>
             <CardDescription className="mt-1">
               Dia atual parcial incluído e atualizado a cada 5 segundos. Eixo de 1 a 31; fins de semana e feriados nacionais e de São Paulo destacados.
@@ -4776,7 +4833,7 @@ function ScenarioRoseCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <ChartPie className="h-4 w-4 text-primary" />
-              {title}
+              <ResolvedWidgetTitle fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               {scenarioCompositionDescription(chartType)}
@@ -4888,7 +4945,7 @@ function MonthlyAccessRankingCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              {title}
+              <ResolvedWidgetTitle fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Volume e representatividade de cada cenário no mês em andamento.
@@ -4993,7 +5050,7 @@ function PeakDaysRankingCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Trophy className="h-4 w-4 text-primary" />
-              {title}
+              <ResolvedWidgetTitle fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Dias com maior volume acumulado nos cenários escolhidos; o dia
@@ -5072,7 +5129,9 @@ function MissingCustomWidgetCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              {title || "Widget personalizado"}
+              <ResolvedWidgetTitle
+                fallback={title || "Widget personalizado"}
+              />
             </CardTitle>
             <CardDescription>
               A visão vinculada a este widget não está mais disponível.
@@ -5118,7 +5177,7 @@ function TodayComparisonCard({
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2">
           <BarChart3 className="h-4 w-4 text-primary" />
-          {title}
+          <ResolvedWidgetTitle fallback={title} />
         </CardTitle>
         <CardDescription>{description}</CardDescription>
       </CardHeader>
@@ -5141,7 +5200,9 @@ function EmptyRealtimeCard({ title }: { title: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{title}</CardTitle>
+        <CardTitle>
+          <ResolvedWidgetTitle fallback={title} />
+        </CardTitle>
         <CardDescription>Selecione um cenário para ver o ao vivo.</CardDescription>
       </CardHeader>
       <CardContent>
@@ -6263,6 +6324,13 @@ function buildOperationalHourlyChartOption({
   targetPerHour: number;
   widgetColor: string;
 }): EnterpriseChartOption {
+  const throughHour = latestHourlyPointHour(currentPoints);
+  const currentValues = buildFixedHourlyAxisValues(currentPoints, throughHour);
+  const comparisonValues = buildFixedHourlyAxisValues(
+    comparisonPoints,
+    throughHour,
+  );
+
   return {
     color: ["#8FA7BF", widgetColor, "#D7A85B"],
     grid: { bottom: 6, containLabel: true, left: 6, right: 10, top: 50 },
@@ -6289,12 +6357,11 @@ function buildOperationalHourlyChartOption({
         color: "#66758A",
         fontSize: 10,
         hideOverlap: true,
-        interval:
-          currentPoints.length > 18 ? 2 : currentPoints.length > 12 ? 1 : 0,
+        interval: 1,
       },
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
-      data: currentPoints.map((point) => point.label),
+      data: HOUR_OF_DAY_LABELS,
       type: "category",
     },
     yAxis: {
@@ -6307,9 +6374,7 @@ function buildOperationalHourlyChartOption({
       {
         barCategoryGap: "44%",
         barMaxWidth: 24,
-        data: currentPoints.map(
-          (_, index) => comparisonPoints[index]?.total ?? 0,
-        ),
+        data: comparisonValues,
         itemStyle: {
           borderRadius: [2, 2, 0, 0],
           color: "#A3AFBF",
@@ -6321,7 +6386,7 @@ function buildOperationalHourlyChartOption({
       {
         barGap: "8%",
         barMaxWidth: 28,
-        data: currentPoints.map((point) => point.total),
+        data: currentValues,
         itemStyle: { borderRadius: [2, 2, 0, 0], color: widgetColor },
         markLine:
           targetPerHour > 0
@@ -7142,12 +7207,33 @@ function buildMonthlyAccessRankingOption(
   };
 }
 
+function isSingleDayHourlyDefinition(definition: RealtimeChartDefinition) {
+  if (definition.granularity !== "hour" || definition.to <= definition.from) {
+    return false;
+  }
+
+  const finalInstant = new Date(definition.to.getTime() - 1);
+  return (
+    definition.from.getFullYear() === finalInstant.getFullYear() &&
+    definition.from.getMonth() === finalInstant.getMonth() &&
+    definition.from.getDate() === finalInstant.getDate()
+  );
+}
+
 function buildChartOption(
   definition: RealtimeChartDefinition,
   points: ChartPoint[],
   widgetColor = "#1267C4",
   targetValue = 0,
 ): EnterpriseChartOption {
+  const fixedHourlyAxis = isSingleDayHourlyDefinition(definition);
+  const hourlyThrough = fixedHourlyAxis ? latestHourlyPointHour(points) : -1;
+  const axisLabels = fixedHourlyAxis
+    ? HOUR_OF_DAY_LABELS
+    : points.map((point) => point.label);
+  const seriesData = fixedHourlyAxis
+    ? buildFixedHourlyAxisValues(points, hourlyThrough)
+    : points.map((point) => point.total);
   const calendarDates =
     definition.granularity === "day"
       ? points.map((point) => point.bucket)
@@ -7228,7 +7314,7 @@ function buildChartOption(
         show: false,
       },
       boundaryGap: true,
-      data: points.map((point) => point.label),
+      data: axisLabels,
       type: "category",
     },
     yAxis: {
@@ -7249,7 +7335,7 @@ function buildChartOption(
         barCategoryGap:
           definition.granularity === "minute" ? "42%" : "50%",
         barMaxWidth: definition.granularity === "minute" ? 18 : 28,
-        data: points.map((point) => point.total),
+        data: seriesData,
         emphasis: {
           itemStyle: {
             color: widgetColor,
