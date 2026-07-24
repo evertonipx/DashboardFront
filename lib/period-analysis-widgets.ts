@@ -5,19 +5,28 @@ import type {
   ScenarioAnalyticsGranularity,
   ScenarioSelectionMode,
 } from "@/lib/scenario-analytics";
+import type { PeriodAnalysisScopeMode } from "@/lib/period-analysis-scope";
 
 export type PeriodAnalysisWidgetKind =
+  | "day_total"
+  | "target_progress"
+  | "cumulative_metric"
+  | "daily_comparison"
+  | "year_monthly"
+  | "year_accumulated"
   | "summary"
   | "timeline"
   | "comparison"
   | "ranking"
   | "heatmap"
   | "cumulative"
+  | "scenario_cumulative"
   | "trend"
   | "hour_profile"
   | "hourly_occupancy"
   | "peak_days"
   | "rose"
+  | "scope_totals"
   | "totals_table";
 
 export type PeriodAnalysisBaseline =
@@ -35,6 +44,7 @@ export type PeriodAnalysisWidget = {
   kind: PeriodAnalysisWidgetKind;
   scenarioIds: string[];
   selectionMode: ScenarioSelectionMode;
+  scopeMode: PeriodAnalysisScopeMode;
   startHour: number;
   title: string;
   updatedAt: string;
@@ -57,7 +67,7 @@ export const PERIOD_ANALYSIS_WIDGETS_UPDATED_EVENT =
   "ipxdata:period-analysis-widgets-updated";
 
 const WIDGETS_STORAGE_KEY = "ipxdata.period-analysis-widgets.v1";
-const WIDGETS_SCHEMA_VERSION_KEY = "ipxdata.period-analysis-widgets.schema.v2";
+const WIDGETS_SCHEMA_VERSION_KEY = "ipxdata.period-analysis-widgets.schema.v5";
 const SETTINGS_STORAGE_KEY = "ipxdata.period-analysis-settings.v1";
 
 const defaultWidgetDefinitions: Array<
@@ -65,7 +75,35 @@ const defaultWidgetDefinitions: Array<
 > = [
   {
     baseline: "previous_period",
+    granularity: "hour",
+    id: "analysis_day_total",
+    kind: "day_total",
+    title: "Total do dia",
+  },
+  {
+    baseline: "previous_month",
     granularity: "day",
+    id: "analysis_target_progress",
+    kind: "target_progress",
+    title: "Dia x média-base",
+  },
+  {
+    baseline: "previous_month",
+    granularity: "day",
+    id: "analysis_month_previous_metric",
+    kind: "cumulative_metric",
+    title: "Acumulado x mês anterior",
+  },
+  {
+    baseline: "last_year",
+    granularity: "day",
+    id: "analysis_month_year_metric",
+    kind: "cumulative_metric",
+    title: "Acumulado x ano anterior",
+  },
+  {
+    baseline: "previous_period",
+    granularity: "hour",
     id: "analysis_summary",
     kind: "summary",
     title: "Resumo do período",
@@ -101,6 +139,27 @@ const defaultWidgetDefinitions: Array<
   {
     baseline: "previous_month",
     granularity: "day",
+    id: "analysis_daily_comparison",
+    kind: "daily_comparison",
+    title: "Dias x meses",
+  },
+  {
+    baseline: "previous_month",
+    granularity: "month",
+    id: "analysis_year_monthly",
+    kind: "year_monthly",
+    title: "Comparativo mensal por ano",
+  },
+  {
+    baseline: "previous_month",
+    granularity: "month",
+    id: "analysis_year_accumulated",
+    kind: "year_accumulated",
+    title: "Comparativo acumulado por ano",
+  },
+  {
+    baseline: "previous_month",
+    granularity: "day",
     id: "analysis_cumulative",
     kind: "cumulative",
     title: "Acumulado diário x base",
@@ -121,6 +180,41 @@ const defaultWidgetDefinitions: Array<
   },
   {
     baseline: "previous_period",
+    granularity: "day",
+    id: "analysis_peak_days",
+    kind: "peak_days",
+    title: "Top 5 dias de pico",
+  },
+  {
+    baseline: "previous_period",
+    granularity: "day",
+    id: "analysis_rose",
+    kind: "rose",
+    title: "Composição por cenário",
+  },
+  {
+    baseline: "previous_period",
+    granularity: "day",
+    id: "analysis_scenario_cumulative",
+    kind: "scenario_cumulative",
+    title: "Acumulado por cenário",
+  },
+  {
+    baseline: "previous_period",
+    granularity: "day",
+    id: "analysis_scope_totals",
+    kind: "scope_totals",
+    title: "Totais por visão",
+  },
+  {
+    baseline: "previous_period",
+    granularity: "day",
+    id: "analysis_totals_table",
+    kind: "totals_table",
+    title: "Tabela acumulada por cenário",
+  },
+  {
+    baseline: "previous_period",
     granularity: "hour",
     id: "analysis_hour_profile",
     kind: "hour_profile",
@@ -137,6 +231,7 @@ export function createDefaultPeriodAnalysisWidgets() {
     exitScenarioIds: [],
     scenarioIds: [],
     selectionMode: "all",
+    scopeMode: "scenario",
     startHour: 0,
     updatedAt: now,
   }));
@@ -219,8 +314,11 @@ export function upsertPeriodAnalysisWidget(
     granularity: input.granularity,
     id: input.id || createWidgetId(),
     kind: input.kind,
-    scenarioIds: input.scenarioIds,
+    scenarioIds: normalizeIds(input.scenarioIds),
     selectionMode: input.selectionMode,
+    scopeMode: isPeriodAnalysisScopeMode(input.scopeMode)
+      ? input.scopeMode
+      : "scenario",
     startHour: normalizeHour(input.startHour),
     title: input.title.trim() || widgetKindLabel(input.kind),
     updatedAt: now,
@@ -293,16 +391,24 @@ export function widgetKindLabel(kind: PeriodAnalysisWidgetKind) {
     {
       comparison: "Comparativo de cenários",
       cumulative: "Acumulado diário x base",
+      cumulative_metric: "Acumulado x base",
+      daily_comparison: "Dias x meses",
+      day_total: "Total do dia",
       heatmap: "Mapa de calor dia x hora",
       hour_profile: "Perfil horário",
       hourly_occupancy: "Ocupação hora a hora",
       peak_days: "Top 5 dias de pico",
       ranking: "Ranking de cenários",
       rose: "Composição por cenário",
+      scenario_cumulative: "Acumulado por cenário",
+      scope_totals: "Totais por visão",
       summary: "Resumo do período",
       timeline: "Fluxo por período",
       totals_table: "Totais por cenário",
+      target_progress: "Dia x média-base",
       trend: "Tendência 7 x 30 dias",
+      year_accumulated: "Comparativo acumulado por ano",
+      year_monthly: "Comparativo mensal por ano",
     } satisfies Record<PeriodAnalysisWidgetKind, string>
   )[kind];
 }
@@ -330,11 +436,16 @@ function normalizeWidget(value: unknown): PeriodAnalysisWidget | null {
     exitScenarioIds: normalizeIds(record.exitScenarioIds).filter(
       (scenarioId) => !normalizeIds(record.entryScenarioIds).includes(scenarioId),
     ),
-    granularity: record.granularity === "hour" ? "hour" : "day",
+    granularity: isScenarioAnalyticsGranularity(record.granularity)
+      ? record.granularity
+      : "day",
     id: record.id,
     kind: record.kind,
     scenarioIds: normalizeIds(record.scenarioIds),
     selectionMode: record.selectionMode === "custom" ? "custom" : "all",
+    scopeMode: isPeriodAnalysisScopeMode(record.scopeMode)
+      ? record.scopeMode
+      : "scenario",
     startHour: normalizeHour(record.startHour),
     title: record.title,
     updatedAt:
@@ -347,6 +458,12 @@ function normalizeWidget(value: unknown): PeriodAnalysisWidget | null {
 function isWidgetKind(value: unknown): value is PeriodAnalysisWidgetKind {
   return [
     "summary",
+    "day_total",
+    "target_progress",
+    "cumulative_metric",
+    "daily_comparison",
+    "year_monthly",
+    "year_accumulated",
     "timeline",
     "comparison",
     "ranking",
@@ -357,6 +474,8 @@ function isWidgetKind(value: unknown): value is PeriodAnalysisWidgetKind {
     "hourly_occupancy",
     "peak_days",
     "rose",
+    "scenario_cumulative",
+    "scope_totals",
     "totals_table",
   ].includes(String(value));
 }
@@ -371,23 +490,69 @@ function migratePeriodAnalysisWidgets(
     companyId,
     userId,
   );
-  if (window.localStorage.getItem(versionKey) === "2") return widgets;
+  if (window.localStorage.getItem(versionKey) === "5") return widgets;
 
-  const occupancyDefault = createDefaultPeriodAnalysisWidgets().find(
-    (widget) => widget.kind === "hourly_occupancy",
+  const corrected = widgets.map((widget) =>
+    widget.kind === "totals_table" &&
+    normalizeTitle(widget.title) === normalizeTitle("Acumulado por cenário")
+      ? { ...widget, kind: "scenario_cumulative" as const }
+      : widget,
   );
-  const migrated =
-    occupancyDefault &&
-    !widgets.some((widget) => widget.kind === "hourly_occupancy")
-      ? [...widgets, occupancyDefault]
-      : widgets;
+  const defaults = createDefaultPeriodAnalysisWidgets();
+  const requiredDefaultIds = new Set([
+    "analysis_day_total",
+    "analysis_target_progress",
+    "analysis_month_previous_metric",
+    "analysis_month_year_metric",
+    "analysis_daily_comparison",
+    "analysis_year_monthly",
+    "analysis_year_accumulated",
+    "analysis_timeline",
+    "analysis_comparison",
+    "analysis_heatmap",
+    "analysis_hourly_occupancy",
+    "analysis_cumulative",
+    "analysis_trend",
+    "analysis_ranking",
+    "analysis_peak_days",
+    "analysis_rose",
+    "analysis_scenario_cumulative",
+    "analysis_scope_totals",
+    "analysis_totals_table",
+  ]);
+  const migrated = defaults
+    .filter((widget) => requiredDefaultIds.has(widget.id))
+    .reduce(
+      (current, defaultWidget) =>
+        hasEquivalentWidget(current, defaultWidget)
+          ? current
+          : [...current, defaultWidget],
+      corrected,
+    );
 
   window.localStorage.setItem(
     scopedKey(WIDGETS_STORAGE_KEY, companyId, userId),
     JSON.stringify(migrated),
   );
-  window.localStorage.setItem(versionKey, "2");
+  window.localStorage.setItem(versionKey, "5");
   return migrated;
+}
+
+function hasEquivalentWidget(
+  widgets: PeriodAnalysisWidget[],
+  candidate: PeriodAnalysisWidget,
+) {
+  return widgets.some((widget) => {
+    if (widget.id === candidate.id) return true;
+    if (widget.kind !== candidate.kind) return false;
+    return candidate.kind === "cumulative_metric"
+      ? widget.baseline === candidate.baseline
+      : true;
+  });
+}
+
+function normalizeTitle(value: string) {
+  return value.trim().toLocaleLowerCase("pt-BR");
 }
 
 function normalizeIds(value: unknown) {
@@ -406,6 +571,18 @@ function normalizeIds(value: unknown) {
 function normalizeHour(value: unknown) {
   const hour = Number(value);
   return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : 0;
+}
+
+function isScenarioAnalyticsGranularity(
+  value: unknown,
+): value is ScenarioAnalyticsGranularity {
+  return ["minute", "hour", "day", "week", "month"].includes(String(value));
+}
+
+function isPeriodAnalysisScopeMode(
+  value: unknown,
+): value is PeriodAnalysisScopeMode {
+  return ["scenario", "location", "sub_location"].includes(String(value));
 }
 
 function isBaseline(value: unknown): value is PeriodAnalysisBaseline {

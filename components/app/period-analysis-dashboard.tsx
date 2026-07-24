@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  Activity,
   BarChart3,
   CalendarDays,
   CalendarRange,
@@ -13,6 +14,8 @@ import {
   Layers3,
   Plus,
   Settings2,
+  Sigma,
+  Target,
   Trash2,
   TrendingUp,
 } from "lucide-react";
@@ -54,7 +57,10 @@ import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -66,6 +72,7 @@ import {
   parseAggregateBucket,
 } from "@/lib/aggregate-time";
 import { apiFetch } from "@/lib/api";
+import { readCameraGroups } from "@/lib/camera-groups";
 import {
   filterScopedApiRows,
   useEffectiveCompanyScopeId,
@@ -75,8 +82,8 @@ import {
   buildPeriodAnalysisWidgetModel,
   formatPeriodAnalysisRange,
   isSingleDayAnalysisPeriod,
+  periodAnalysisBaselineDataRange,
   periodAnalysisBaselineLabel,
-  periodAnalysisBaselineRange,
   periodAnalysisEffectiveGranularity,
   periodAnalysisOperationalRange,
   resolvePeriodAnalysisRange,
@@ -85,6 +92,13 @@ import {
   type PeriodAnalysisRange,
   type PeriodAnalysisWidgetModel,
 } from "@/lib/period-analysis-model";
+import {
+  buildPeriodAnalysisScopeOptions,
+  periodAnalysisScopeModeLabel,
+  periodAnalysisScopeModePluralLabel,
+  type PeriodAnalysisScopeMode,
+  type PeriodAnalysisScopeOption,
+} from "@/lib/period-analysis-scope";
 import {
   PERIOD_ANALYSIS_WIDGETS_UPDATED_EVENT,
   createDefaultPeriodAnalysisSettings,
@@ -112,7 +126,10 @@ import type {
   AggregateEventRow,
   AggregateEventsResponse,
   AggregateGranularity,
+  Camera,
+  Location,
   Scenario,
+  SubLocation,
 } from "@/lib/types";
 import { cn, formatNumber, formatTime } from "@/lib/utils";
 import {
@@ -141,22 +158,199 @@ const DEFAULT_METRIC_TYPE = "count";
 const OCCUPANCY_START_HOURS = Array.from({ length: 24 }, (_, hour) => hour);
 
 const widgetKindOptions: Array<{
+  description: string;
+  group: "indicator" | "period" | "scenario" | "context";
   label: string;
   value: PeriodAnalysisWidgetKind;
 }> = [
-  { label: "Resumo do período", value: "summary" },
-  { label: "Fluxo por período", value: "timeline" },
-  { label: "Comparativo de cenários", value: "comparison" },
-  { label: "Ranking de cenários", value: "ranking" },
-  { label: "Mapa de calor dia x hora", value: "heatmap" },
-  { label: "Acumulado diário x base", value: "cumulative" },
-  { label: "Tendência 7 x 30 dias", value: "trend" },
-  { label: "Perfil horário", value: "hour_profile" },
-  { label: "Ocupação hora a hora", value: "hourly_occupancy" },
-  { label: "Top 5 dias de pico", value: "peak_days" },
-  { label: "Composição por cenário", value: "rose" },
-  { label: "Totais por cenário", value: "totals_table" },
+  {
+    description: "Total exclusivo da data ou intervalo consultado.",
+    group: "indicator",
+    label: "Total do dia",
+    value: "day_total",
+  },
+  {
+    description: "Atingimento do dia contra a média diária da base.",
+    group: "indicator",
+    label: "Dia x média-base",
+    value: "target_progress",
+  },
+  {
+    description: "Indicador compacto do acumulado contra a base escolhida.",
+    group: "indicator",
+    label: "Acumulado x base",
+    value: "cumulative_metric",
+  },
+  {
+    description: "Indicadores consolidados da data ou intervalo selecionado.",
+    group: "period",
+    label: "Resumo do período",
+    value: "summary",
+  },
+  {
+    description: "Série combinada por hora ou por dia.",
+    group: "period",
+    label: "Fluxo por período",
+    value: "timeline",
+  },
+  {
+    description: "Uma série por cenário para comparação direta.",
+    group: "period",
+    label: "Comparativo de cenários",
+    value: "comparison",
+  },
+  {
+    description: "Perfil médio das 24 horas do período.",
+    group: "period",
+    label: "Perfil horário",
+    value: "hour_profile",
+  },
+  {
+    description: "Entradas menos saídas, acumuladas a partir da hora definida.",
+    group: "period",
+    label: "Ocupação hora a hora",
+    value: "hourly_occupancy",
+  },
+  {
+    description: "Ordem de volume e participação no período selecionado.",
+    group: "scenario",
+    label: "Ranking de cenários",
+    value: "ranking",
+  },
+  {
+    description: "Barras com o acumulado individual de cada cenário.",
+    group: "scenario",
+    label: "Acumulado por cenário",
+    value: "scenario_cumulative",
+  },
+  {
+    description:
+      "Barras verticais com o total de cenários, locais ou sublocais.",
+    group: "scenario",
+    label: "Totais por visão",
+    value: "scope_totals",
+  },
+  {
+    description: "Totais individuais e combinado em formato tabular.",
+    group: "scenario",
+    label: "Tabela acumulada por cenário",
+    value: "totals_table",
+  },
+  {
+    description: "Participação proporcional em rosa ou treemap.",
+    group: "scenario",
+    label: "Composição por cenário",
+    value: "rose",
+  },
+  {
+    description: "Intensidade de fluxo por dia e faixa horária.",
+    group: "context",
+    label: "Mapa de calor dia x hora",
+    value: "heatmap",
+  },
+  {
+    description: "Valores diários lado a lado contra a base escolhida.",
+    group: "context",
+    label: "Dias x meses",
+    value: "daily_comparison",
+  },
+  {
+    description: "Curva acumulada comparada a uma base histórica.",
+    group: "context",
+    label: "Acumulado diário x base",
+    value: "cumulative",
+  },
+  {
+    description: "Médias móveis para direção de curto e longo prazo.",
+    group: "context",
+    label: "Tendência 7 x 30 dias",
+    value: "trend",
+  },
+  {
+    description: "Cinco dias de maior volume no contexto consultado.",
+    group: "context",
+    label: "Top 5 dias de pico",
+    value: "peak_days",
+  },
+  {
+    description: "Valores mensais do ano da data consultada.",
+    group: "context",
+    label: "Comparativo mensal por ano",
+    value: "year_monthly",
+  },
+  {
+    description: "Soma progressiva dos meses do ano consultado.",
+    group: "context",
+    label: "Comparativo acumulado por ano",
+    value: "year_accumulated",
+  },
 ];
+
+const widgetKindGroups = [
+  { label: "Indicadores compactos", value: "indicator" },
+  { label: "Período selecionado", value: "period" },
+  { label: "Cenários", value: "scenario" },
+  { label: "Contexto e tendência", value: "context" },
+] as const;
+
+function isCompactAnalysisWidget(kind: PeriodAnalysisWidgetKind) {
+  return (
+    kind === "day_total" ||
+    kind === "target_progress" ||
+    kind === "cumulative_metric"
+  );
+}
+
+function isFullWidthAnalysisWidget(kind: PeriodAnalysisWidgetKind) {
+  return [
+    "cumulative",
+    "daily_comparison",
+    "heatmap",
+    "hourly_occupancy",
+    "scenario_cumulative",
+    "summary",
+    "totals_table",
+  ].includes(kind);
+}
+
+function isTallAnalysisWidget(kind: PeriodAnalysisWidgetKind) {
+  return [
+    "cumulative",
+    "daily_comparison",
+    "heatmap",
+    "scenario_cumulative",
+    "totals_table",
+  ].includes(kind);
+}
+
+function analysisWidgetSupportsChartType(kind: PeriodAnalysisWidgetKind) {
+  return [
+    "comparison",
+    "cumulative",
+    "daily_comparison",
+    "hour_profile",
+    "hourly_occupancy",
+    "scope_totals",
+    "timeline",
+    "trend",
+    "year_accumulated",
+    "year_monthly",
+  ].includes(kind);
+}
+
+function analysisGranularityLabel(
+  granularity: ScenarioAnalyticsGranularity,
+) {
+  return (
+    {
+      day: "Dia a dia",
+      hour: "Hora a hora",
+      minute: "Minuto a minuto",
+      month: "Mês a mês",
+      week: "Semana a semana",
+    } satisfies Record<ScenarioAnalyticsGranularity, string>
+  )[granularity];
+}
 
 const baselineOptions: Array<{
   label: string;
@@ -171,6 +365,9 @@ const widgetIcons: Record<
   PeriodAnalysisWidgetKind,
   React.ComponentType<{ className?: string }>
 > = {
+  cumulative_metric: Activity,
+  daily_comparison: CalendarDays,
+  day_total: Clock3,
   comparison: BarChart3,
   cumulative: TrendingUp,
   heatmap: Grid3X3,
@@ -179,11 +376,31 @@ const widgetIcons: Record<
   peak_days: BarChart3,
   ranking: BarChart3,
   rose: Grid3X3,
+  scenario_cumulative: Sigma,
+  scope_totals: BarChart3,
   summary: CalendarRange,
   timeline: BarChart3,
   totals_table: Layers3,
+  target_progress: Target,
   trend: TrendingUp,
+  year_accumulated: TrendingUp,
+  year_monthly: BarChart3,
 };
+
+const scenarioOnlyWidgetKinds = new Set<PeriodAnalysisWidgetKind>([
+  "comparison",
+  "heatmap",
+  "hourly_occupancy",
+  "peak_days",
+  "ranking",
+  "rose",
+  "scenario_cumulative",
+  "totals_table",
+]);
+
+function widgetSupportsScopeMode(kind: PeriodAnalysisWidgetKind) {
+  return !scenarioOnlyWidgetKinds.has(kind);
+}
 
 export function PeriodAnalysisDashboard({
   manager = false,
@@ -193,6 +410,9 @@ export function PeriodAnalysisDashboard({
   const canEditVisual = hasVisualAdminAccess(user);
   const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
+  const [scopeOptions, setScopeOptions] = React.useState<
+    PeriodAnalysisScopeOption[]
+  >([]);
   const [widgets, setWidgets] = React.useState<PeriodAnalysisWidget[]>([]);
   const [draftSettings, setDraftSettings] = React.useState<PeriodAnalysisSettings>(
     () => createDefaultPeriodAnalysisSettings(),
@@ -265,22 +485,38 @@ export function PeriodAnalysisDashboard({
         singleDayAnalysis ||
         widgets.some(
           (widget) =>
-            widget.kind === "hour_profile" ||
-            widget.kind === "hourly_occupancy" ||
-            ((widget.kind === "timeline" || widget.kind === "comparison") &&
-              widget.granularity === "hour"),
+              widget.kind === "hour_profile" ||
+              widget.kind === "hourly_occupancy" ||
+              ((widget.kind === "timeline" || widget.kind === "comparison") &&
+                widget.granularity === "hour"),
         );
+      const baselineKinds = new Set<PeriodAnalysisWidgetKind>([
+        "cumulative",
+        "cumulative_metric",
+        "daily_comparison",
+        "target_progress",
+      ]);
 
       return JSON.stringify({
         baseline: Array.from(
           new Set(
             widgets
-              .filter((widget) => widget.kind === "cumulative")
+              .filter((widget) => baselineKinds.has(widget.kind))
               .map((widget) => widget.baseline),
           ),
         ).sort(),
         contextHour: widgets.some((widget) => widget.kind === "heatmap"),
         hour: needsExactHour,
+        minute: widgets.some(
+          (widget) =>
+            (widget.kind === "timeline" || widget.kind === "comparison") &&
+            widget.granularity === "minute",
+        ),
+        month: widgets.some(
+          (widget) =>
+            widget.kind === "year_monthly" ||
+            widget.kind === "year_accumulated",
+        ),
       });
     },
     [singleDayAnalysis, widgets],
@@ -314,15 +550,48 @@ export function PeriodAnalysisDashboard({
   React.useEffect(() => {
     let cancelled = false;
     setLoadingScenarios(true);
-    apiFetch<Scenario[]>("/scenarios")
-      .then((rows) => {
+    setScenarios([]);
+    setScopeOptions([]);
+    Promise.all([
+      apiFetch<Scenario[]>("/scenarios"),
+      apiFetch<Camera[]>("/cameras").catch(() => []),
+      apiFetch<Location[]>("/locations").catch(() => []),
+    ])
+      .then(async ([scenarioRows, cameraRows, locationRows]) => {
         if (cancelled) return;
-        const scoped = filterScopedApiRows(rows, companyScopeId);
-        setScenarios(manager ? scoped : scoped.filter((scenario) => scenario.active));
+        const scopedScenarios = filterScopedApiRows(
+          scenarioRows,
+          companyScopeId,
+        );
+        const scopedCameras = filterScopedApiRows(cameraRows, companyScopeId);
+        const scopedLocations = filterScopedApiRows(
+          locationRows,
+          companyScopeId,
+        );
+        const subLocations = await fetchAnalysisSubLocations(
+          scopedLocations,
+          companyScopeId,
+        );
+        if (cancelled) return;
+        const visibleScenarios = manager
+          ? scopedScenarios
+          : scopedScenarios.filter((scenario) => scenario.active);
+        setScenarios(visibleScenarios);
+        setScopeOptions(
+          buildPeriodAnalysisScopeOptions({
+            cameras: scopedCameras,
+            groups: readCameraGroups(companyScopeId),
+            locations: scopedLocations,
+            manager,
+            scenarios: visibleScenarios,
+            subLocations,
+          }),
+        );
       })
       .catch((error) => {
         if (cancelled) return;
         setScenarios([]);
+        setScopeOptions([]);
         toast.error(
           error instanceof Error
             ? error.message
@@ -343,6 +612,8 @@ export function PeriodAnalysisDashboard({
       baseline: PeriodAnalysisBaseline[];
       contextHour: boolean;
       hour: boolean;
+      minute: boolean;
+      month: boolean;
     };
     const controller = new AbortController();
     requestRef.current?.abort();
@@ -371,15 +642,28 @@ export function PeriodAnalysisDashboard({
             controller.signal,
           )
       : Promise.resolve(emptyDataset("hour"));
+    const minutePromise = requirements.minute
+      ? fetchAnalysisDataset("minute", period, controller.signal)
+      : Promise.resolve(emptyDataset("minute"));
+    const referenceDate = new Date(period.to.getTime() - 1);
+    const monthRange = {
+      from: new Date(referenceDate.getFullYear(), 0, 1),
+      to: new Date(referenceDate.getFullYear() + 1, 0, 1),
+    };
+    const monthPromise = requirements.month
+      ? fetchAnalysisDataset("month", monthRange, controller.signal)
+      : Promise.resolve(emptyDataset("month"));
 
     Promise.all([
       fetchAnalysisDataset("day", dayRange, controller.signal),
       hourPromise,
       contextHourPromise,
+      minutePromise,
+      monthPromise,
       Promise.all(
         requirements.baseline.map(async (baseline) => {
-          const baselineRange = periodAnalysisBaselineRange(
-            operationalPeriod,
+          const baselineRange = periodAnalysisBaselineDataRange(
+            period,
             baseline,
           );
           const dataset = await fetchAnalysisDataset(
@@ -391,7 +675,15 @@ export function PeriodAnalysisDashboard({
         }),
       ),
     ])
-      .then(([day, hour, rawContextHour, baselineEntries]) => {
+      .then(
+        ([
+          day,
+          hour,
+          rawContextHour,
+          minute,
+          month,
+          baselineEntries,
+        ]) => {
         if (controller.signal.aborted) return;
         const reconciledDay =
           singleDayAnalysis && requirements.hour
@@ -408,6 +700,8 @@ export function PeriodAnalysisDashboard({
           contextHour,
           day: reconciledDay,
           hour,
+          minute,
+          month,
         });
         hasLoadedDataRef.current = true;
         setLastUpdated(new Date());
@@ -416,11 +710,14 @@ export function PeriodAnalysisDashboard({
           (reconciledDay.error ||
             hour.error ||
             contextHour.error ||
+            minute.error ||
+            month.error ||
             baselineEntries.some(([, dataset]) => dataset.error))
         ) {
           toast.error("Alguns dados da análise não puderam ser carregados.");
         }
-      })
+        },
+      )
       .catch((error) => {
         if (controller.signal.aborted) return;
         toast.error(
@@ -474,6 +771,7 @@ export function PeriodAnalysisDashboard({
             data,
             period,
             scenarios,
+            scopeOptions,
             widget,
           }),
         ]),
@@ -482,66 +780,69 @@ export function PeriodAnalysisDashboard({
       data,
       period,
       scenarios,
+      scopeOptions,
       widgetChartTypeById,
       widgetColorById,
       widgets,
     ],
   );
-  const layoutCards = widgets.map((widget) => ({
-    chartTypes:
-      widget.kind === "rose" ? (["rose", "treemap"] as const) : undefined,
-    chartTypeEnabled:
-      widget.kind === "timeline" ||
-      widget.kind === "comparison" ||
-      widget.kind === "cumulative" ||
-      widget.kind === "trend" ||
-      widget.kind === "hour_profile" ||
-      widget.kind === "hourly_occupancy",
-    className:
-      widget.kind === "summary" ||
-      widget.kind === "heatmap" ||
-      widget.kind === "totals_table" ||
-      widget.kind === "hourly_occupancy" ||
-      widget.kind === "cumulative"
-        ? "sm:col-span-2 xl:col-span-4"
-        : "sm:col-span-2 xl:col-span-2",
-    defaultSize:
-      widget.kind === "summary" ||
-      widget.kind === "heatmap" ||
-      widget.kind === "totals_table" ||
-      widget.kind === "hourly_occupancy" ||
-      widget.kind === "cumulative"
-        ? ("full" as const)
-        : ("wide" as const),
-    defaultHeight:
-      widget.kind === "summary"
+  const layoutCards = widgets.map((widget) => {
+    const compact = isCompactAnalysisWidget(widget.kind);
+    const fullWidth = isFullWidthAnalysisWidget(widget.kind);
+    const short = compact || widget.kind === "summary";
+    const tall = isTallAnalysisWidget(widget.kind);
+
+    return {
+      chartTypes:
+        widget.kind === "rose" ? (["rose", "treemap"] as const) : undefined,
+      chartTypeEnabled: analysisWidgetSupportsChartType(widget.kind),
+      className: compact
+        ? undefined
+        : fullWidth
+          ? "sm:col-span-2 xl:col-span-4"
+          : "sm:col-span-2 xl:col-span-2",
+      defaultHeight: short
         ? ("short" as const)
-        : widget.kind === "heatmap" ||
-            widget.kind === "totals_table" ||
-            widget.kind === "cumulative"
+        : tall
           ? ("tall" as const)
           : ("standard" as const),
-    minHeight: widget.kind === "summary" ? ("short" as const) : undefined,
-    shortHeightClassName:
-      widget.kind === "summary" ? "row-span-2 sm:row-span-1" : undefined,
-    id: widget.id,
-    label: widget.title,
-    zoomEnabled:
-      widget.kind !== "summary" && widget.kind !== "totals_table",
-    node: (
-      <PeriodAnalysisCard
-        canConfigure={canEditVisual}
-        effectiveGranularity={periodAnalysisEffectiveGranularity(widget, period)}
-        loading={loadingData || loadingScenarios}
-        model={modelByWidgetId.get(widget.id)!}
-        monitorMode={monitorMode}
-        onEdit={() => openEditWidget(widget)}
-        onRemove={() => removeWidget(widget.id)}
-        scenarioSummary={periodAnalysisScenarioSummary(widget, scenarios)}
-        widget={widget}
-      />
-    ),
-  }));
+      defaultSize: compact
+        ? ("compact" as const)
+        : fullWidth
+          ? ("full" as const)
+          : ("wide" as const),
+      id: widget.id,
+      label: widget.title,
+      minHeight: short ? ("short" as const) : undefined,
+      node: (
+        <PeriodAnalysisCard
+          canConfigure={canEditVisual}
+          effectiveGranularity={periodAnalysisEffectiveGranularity(widget)}
+          loading={loadingData || loadingScenarios}
+          model={modelByWidgetId.get(widget.id)!}
+          monitorMode={monitorMode}
+          onEdit={() => openEditWidget(widget)}
+          onRemove={() => removeWidget(widget.id)}
+          scenarioSummary={periodAnalysisScenarioSummary(
+            widget,
+            scenarios,
+            scopeOptions,
+          )}
+          widget={widget}
+        />
+      ),
+      shortHeightClassName:
+        widget.kind === "summary"
+          ? "row-span-2 sm:row-span-1"
+          : compact
+            ? "row-span-1"
+            : undefined,
+      zoomEnabled:
+        widget.kind !== "summary" &&
+        widget.kind !== "totals_table" &&
+        !compact,
+    };
+  });
   const visibleWidgetIds = new Set(
     preferences
       .filter((preference) => preference.visible !== false)
@@ -656,6 +957,9 @@ export function PeriodAnalysisDashboard({
       kind: widget.kind,
       scenarioIds: widget.scenarioIds,
       selectionMode: widget.selectionMode,
+      scopeMode: widgetSupportsScopeMode(widget.kind)
+        ? widget.scopeMode
+        : "scenario",
       startHour: widget.startHour,
       title: widget.title,
     });
@@ -672,10 +976,15 @@ export function PeriodAnalysisDashboard({
           kind === "hour_profile" ||
           kind === "hourly_occupancy"
             ? "hour"
+            : kind === "year_monthly" || kind === "year_accumulated"
+              ? "month"
             : kind === "timeline" || kind === "comparison"
               ? current.granularity
               : "day",
         kind,
+        scopeMode: widgetSupportsScopeMode(kind)
+          ? current.scopeMode
+          : "scenario",
         title:
           !current.title.trim() || current.title === currentDefaultTitle
             ? widgetKindLabel(kind)
@@ -700,7 +1009,11 @@ export function PeriodAnalysisDashboard({
       widgetForm.selectionMode === "custom" &&
       !widgetForm.scenarioIds.length
     ) {
-      toast.error("Selecione ao menos um cenário para o widget.");
+      toast.error(
+        `Selecione ao menos um ${periodAnalysisScopeModeLabel(
+          widgetForm.scopeMode,
+        ).toLowerCase()} para o widget.`,
+      );
       return;
     }
 
@@ -725,6 +1038,7 @@ export function PeriodAnalysisDashboard({
     if (preset.snapshot.menuKey !== "live") return false;
     const imported = buildLiveAnalysisImport({
       scenarios,
+      scopeOptions,
       snapshot: preset.snapshot,
     });
     if (!imported.widgets.length) {
@@ -742,8 +1056,9 @@ export function PeriodAnalysisDashboard({
     );
     setWidgets(imported.widgets);
     const notes = [
-      imported.sourceResolution === "scenario_name"
-        ? "o cenário foi reconciliado pelo nome"
+      imported.sourceResolution === "scenario_name" ||
+      imported.sourceResolution === "scope_name"
+        ? "a visão foi reconciliada pelo nome"
         : imported.sourceResolution === "all_scenarios"
           ? "o escopo original não era um cenário disponível; os widgets de escopo usam todos os cenários desta empresa"
           : "",
@@ -981,12 +1296,12 @@ export function PeriodAnalysisDashboard({
         </div>
       )}
 
-      {loadingScenarios && !scenarios.length ? (
+      {loadingScenarios && !scopeOptions.length ? (
         <div className="grid gap-4 sm:grid-cols-2">
           <Skeleton className="h-[320px] w-full" />
           <Skeleton className="h-[320px] w-full" />
         </div>
-      ) : scenarios.length ? (
+      ) : scopeOptions.length ? (
         <CardLayout
           cards={layoutCards}
           editActions={
@@ -1020,6 +1335,7 @@ export function PeriodAnalysisDashboard({
         onSave={saveWidget}
         open={widgetDialogOpen}
         scenarios={scenarios}
+        scopeOptions={scopeOptions}
       />
     </section>
   );
@@ -1048,10 +1364,12 @@ function PeriodAnalysisCard({
 }) {
   const Icon = widgetIcons[widget.kind];
   const compactSummary = widget.kind === "summary";
+  const compactWidget = isCompactAnalysisWidget(widget.kind);
+  const compactContent = compactSummary || compactWidget;
 
   return (
     <Card className="h-full min-w-0 overflow-hidden">
-      <CardHeader className={cn("pb-2", compactSummary && "p-3 pb-1.5")}>
+      <CardHeader className={cn("pb-2", compactContent && "p-3 pb-1.5")}>
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
             <CardTitle className="flex items-center gap-2">
@@ -1061,7 +1379,7 @@ function PeriodAnalysisCard({
               </span>
             </CardTitle>
             <CardDescription
-              className={cn(compactSummary ? "mt-0.5 text-xs leading-4" : "mt-1")}
+              className={cn(compactContent ? "mt-0.5 text-xs leading-4" : "mt-1")}
             >
               {model.description}
             </CardDescription>
@@ -1095,7 +1413,7 @@ function PeriodAnalysisCard({
             ) : null}
           </div>
         </div>
-        <div className="min-w-0 pt-1">
+        {!compactWidget ? <div className="min-w-0 pt-1">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             <Badge
               variant="outline"
@@ -1108,7 +1426,7 @@ function PeriodAnalysisCard({
               widget.kind === "comparison" ||
               widget.kind === "hourly_occupancy") && (
               <Badge variant="outline">
-                {effectiveGranularity === "hour" ? "Hora a hora" : "Dia a dia"}
+                {analysisGranularityLabel(effectiveGranularity)}
               </Badge>
             )}
             {widget.kind === "hourly_occupancy" ? (
@@ -1116,7 +1434,10 @@ function PeriodAnalysisCard({
                 Início {formatOccupancyStartHour(widget.startHour)}
               </Badge>
             ) : null}
-            {widget.kind === "cumulative" ? (
+            {(widget.kind === "cumulative" ||
+              widget.kind === "cumulative_metric" ||
+              widget.kind === "daily_comparison" ||
+              widget.kind === "target_progress") ? (
               <Badge variant="outline">
                 {periodAnalysisBaselineLabel(widget.baseline)}
               </Badge>
@@ -1141,20 +1462,22 @@ function PeriodAnalysisCard({
               </Badge>
             ))}
           </div>
-        </div>
+        </div> : null}
       </CardHeader>
       <CardContent
         className={cn(
           "min-h-0 min-w-0 flex-1",
-          compactSummary && "px-3 pb-3",
+          compactContent && "px-3 pb-3",
         )}
       >
         {loading ? (
           <Skeleton className="h-full min-h-[160px] w-full" />
         ) : model.error ? (
           <EmptyState text={model.error} />
+        ) : model.displayTable && model.table ? (
+          <AnalysisTable table={model.table} />
         ) : model.metrics ? (
-          <MetricGrid compact={compactSummary} metrics={model.metrics} />
+          <MetricGrid compact={compactContent} metrics={model.metrics} />
         ) : model.hasData && model.option ? (
           <div className="h-full min-h-0 w-full">
             <EChart option={model.option} />
@@ -1175,7 +1498,14 @@ function MetricGrid({
   metrics: NonNullable<PeriodAnalysisWidgetModel["metrics"]>;
 }) {
   return (
-    <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border sm:grid-cols-4">
+    <div
+      className={cn(
+        "grid gap-px overflow-hidden rounded-md border bg-border",
+        metrics.length === 1
+          ? "grid-cols-1"
+          : "grid-cols-2 sm:grid-cols-4",
+      )}
+    >
       {metrics.map((metric) => (
         <div
           key={metric.label}
@@ -1216,6 +1546,59 @@ function MetricGrid({
   );
 }
 
+function AnalysisTable({
+  table,
+}: {
+  table: NonNullable<PeriodAnalysisWidgetModel["table"]>;
+}) {
+  return (
+    <div className="h-full min-h-0 overflow-auto rounded-md border">
+      <table className="w-full border-collapse text-sm">
+        <thead className="sticky top-0 z-10 bg-muted/95 backdrop-blur">
+          <tr>
+            {table.columns.map((column) => (
+              <th
+                key={column.key}
+                className={cn(
+                  "border-b px-3 py-2 text-left text-xs font-semibold text-muted-foreground",
+                  column.numeric && "text-right",
+                )}
+              >
+                {column.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {table.rows.map((row, rowIndex) => (
+            <tr
+              key={`${String(row[table.columns[0]?.key] ?? rowIndex)}-${rowIndex}`}
+              className={cn(rowIndex === 0 ? "bg-primary/5 font-semibold" : "odd:bg-muted/25")}
+            >
+              {table.columns.map((column) => {
+                const value = row[column.key];
+                return (
+                  <td
+                    key={column.key}
+                    className={cn(
+                      "border-b px-3 py-2 last:border-b-0",
+                      column.numeric && "text-right tabular-nums",
+                    )}
+                  >
+                    {column.numeric && typeof value === "number"
+                      ? formatNumber(value)
+                      : String(value ?? "-")}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function WidgetDialog({
   form,
   onFormChange,
@@ -1224,6 +1607,7 @@ function WidgetDialog({
   onSave,
   open,
   scenarios,
+  scopeOptions,
 }: {
   form: PeriodAnalysisWidgetInput;
   onFormChange: React.Dispatch<React.SetStateAction<PeriodAnalysisWidgetInput>>;
@@ -1232,10 +1616,37 @@ function WidgetDialog({
   onSave: () => void;
   open: boolean;
   scenarios: Scenario[];
+  scopeOptions: PeriodAnalysisScopeOption[];
 }) {
   const configurableGranularity =
     form.kind === "timeline" || form.kind === "comparison";
   const hourlyOccupancy = form.kind === "hourly_occupancy";
+  const scopeModeConfigurable = widgetSupportsScopeMode(form.kind);
+  const availableScopeModes = React.useMemo(
+    () =>
+      (["scenario", "location", "sub_location"] as const).filter((mode) =>
+        scopeOptions.some((option) => option.mode === mode),
+      ),
+    [scopeOptions],
+  );
+  const selectableScopes = React.useMemo(
+    () => scopeOptions.filter((option) => option.mode === form.scopeMode),
+    [form.scopeMode, scopeOptions],
+  );
+  const selectableItems = React.useMemo(
+    () =>
+      form.scopeMode === "scenario"
+        ? scenarios
+        : selectableScopes.map<Scenario>((scope) => ({
+            active: true,
+            company_id: "",
+            description: scope.description,
+            id: scope.id,
+            lines: [],
+            name: scope.name,
+          })),
+    [form.scopeMode, scenarios, selectableScopes],
+  );
   const invalidCustomSelection =
     form.selectionMode === "custom" &&
     (hourlyOccupancy
@@ -1264,13 +1675,29 @@ function WidgetDialog({
             >
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
-                {widgetKindOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
+                {widgetKindGroups.map((group, groupIndex) => (
+                  <React.Fragment key={group.value}>
+                    {groupIndex ? <SelectSeparator /> : null}
+                    <SelectGroup>
+                      <SelectLabel>{group.label}</SelectLabel>
+                      {widgetKindOptions
+                        .filter((option) => option.group === group.value)
+                        .map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                    </SelectGroup>
+                  </React.Fragment>
                 ))}
               </SelectContent>
             </Select>
+            <p className="text-xs leading-4 text-muted-foreground">
+              {
+                widgetKindOptions.find((option) => option.value === form.kind)
+                  ?.description
+              }
+            </p>
           </Field>
 
           <Field label="Título">
@@ -1286,8 +1713,33 @@ function WidgetDialog({
             />
           </Field>
 
+          {scopeModeConfigurable && availableScopeModes.length > 1 ? (
+            <Field label="Tipo de visão">
+              <Select
+                value={form.scopeMode}
+                onValueChange={(value) =>
+                  onFormChange((current) => ({
+                    ...current,
+                    scenarioIds: [],
+                    selectionMode: "all",
+                    scopeMode: value as PeriodAnalysisScopeMode,
+                  }))
+                }
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {availableScopeModes.map((mode) => (
+                    <SelectItem key={mode} value={mode}>
+                      {periodAnalysisScopeModeLabel(mode)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          ) : null}
+
           {configurableGranularity ? (
-            <Field label="Agrupamento no modo Período">
+            <Field label="Granularidade">
               <Select
                 value={form.granularity}
                 onValueChange={(value) =>
@@ -1299,14 +1751,20 @@ function WidgetDialog({
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="day">Dia a dia</SelectItem>
+                  <SelectItem value="minute">Minuto a minuto</SelectItem>
                   <SelectItem value="hour">Hora a hora</SelectItem>
+                  <SelectItem value="day">Dia a dia</SelectItem>
+                  <SelectItem value="week">Semana a semana</SelectItem>
+                  <SelectItem value="month">Mês a mês</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
           ) : null}
 
-          {form.kind === "cumulative" ? (
+          {form.kind === "cumulative" ||
+          form.kind === "cumulative_metric" ||
+          form.kind === "daily_comparison" ||
+          form.kind === "target_progress" ? (
             <Field label="Base de comparação">
               <Select
                 value={form.baseline}
@@ -1447,15 +1905,27 @@ function WidgetDialog({
           ) : (
             <ScenarioPicker
               className="sm:col-span-2"
+              label={periodAnalysisScopeModePluralLabel(form.scopeMode)}
               mode={form.selectionMode}
+              nounPlural={periodAnalysisScopeModePluralLabel(
+                form.scopeMode,
+              ).toLowerCase()}
+              nounSingular={periodAnalysisScopeModeLabel(
+                form.scopeMode,
+              ).toLowerCase()}
               onModeChange={(selectionMode) =>
                 onFormChange((current) => ({ ...current, selectionMode }))
               }
               onSelectedIdsChange={(scenarioIds) =>
                 onFormChange((current) => ({ ...current, scenarioIds }))
               }
-              scenarios={scenarios}
+              scenarios={selectableItems}
               selectedIds={form.scenarioIds}
+              summaryForItem={
+                form.scopeMode === "scenario"
+                  ? undefined
+                  : (item) => item.description || "Visão de câmeras"
+              }
             />
           )}
         </div>
@@ -1499,10 +1969,11 @@ function emptyWidgetForm(): PeriodAnalysisWidgetInput {
     baseline: "previous_period",
     entryScenarioIds: [],
     exitScenarioIds: [],
-    granularity: "day",
+    granularity: "hour",
     kind: "timeline",
     scenarioIds: [],
     selectionMode: "all",
+    scopeMode: "scenario",
     startHour: 0,
     title: "Fluxo por período",
   };
@@ -1511,8 +1982,25 @@ function emptyWidgetForm(): PeriodAnalysisWidgetInput {
 function periodAnalysisScenarioSummary(
   widget: PeriodAnalysisWidget,
   scenarios: Scenario[],
+  scopeOptions: PeriodAnalysisScopeOption[],
 ) {
   if (widget.kind !== "hourly_occupancy") {
+    if (widget.scopeMode !== "scenario") {
+      const available = scopeOptions.filter(
+        (scope) => scope.mode === widget.scopeMode,
+      );
+      const selectedIds = new Set(widget.scenarioIds);
+      const count =
+        widget.selectionMode === "all"
+          ? available.length
+          : available.filter((scope) => selectedIds.has(scope.id)).length;
+      const label = periodAnalysisScopeModePluralLabel(
+        widget.scopeMode,
+      ).toLowerCase();
+      return widget.selectionMode === "all"
+        ? `Todos os ${label} (${formatNumber(count)})`
+        : `${formatNumber(count)} ${label} selecionado(s)`;
+    }
     return scenarioSelectionSummary(
       scenarios,
       widget.selectionMode,
@@ -1578,8 +2066,23 @@ function composePeriodAnalysisReport({
   };
 }
 
+async function fetchAnalysisSubLocations(
+  locations: Location[],
+  companyScopeId?: string | null,
+) {
+  const rows = await Promise.all(
+    locations.map((location) =>
+      apiFetch<SubLocation[]>(
+        `/locations/${location.id}/sub-locations`,
+      ).catch(() => []),
+    ),
+  );
+
+  return filterScopedApiRows(rows.flat(), companyScopeId);
+}
+
 async function fetchAnalysisDataset(
-  granularity: "hour" | "day",
+  granularity: AggregateGranularity,
   range: PeriodAnalysisRange,
   signal?: AbortSignal,
   exactHourlyRange?: PeriodAnalysisRange,
@@ -1646,7 +2149,6 @@ function mergeExactHoursIntoContext(
 ) {
   if (
     exact.error ||
-    !exact.rows.length ||
     context.granularity !== "hour"
   ) {
     return context;
@@ -1656,6 +2158,7 @@ function mergeExactHoursIntoContext(
   let hourStart = startOfHour(range.from);
   while (hourStart < range.to) {
     const hourEnd = addHours(hourStart, 1);
+    rows = removeAggregateBucketRows(rows, "hour", hourStart);
     rows = replaceAggregateBucketRows(
       rows,
       "hour",
@@ -1678,7 +2181,6 @@ function mergeExactHoursIntoDays(
 ) {
   if (
     exactHours.error ||
-    !exactHours.rows.length ||
     dayDataset.granularity !== "day" ||
     exactHours.granularity !== "hour"
   ) {
@@ -1689,6 +2191,7 @@ function mergeExactHoursIntoDays(
   let dayStart = startOfDay(range.from);
   while (dayStart < range.to) {
     const dayEnd = addDays(dayStart, 1);
+    rows = removeAggregateBucketRows(rows, "day", dayStart);
     rows = replaceAggregateBucketRows(
       rows,
       "day",
@@ -1702,6 +2205,18 @@ function mergeExactHoursIntoDays(
   }
 
   return { ...dayDataset, rows };
+}
+
+function removeAggregateBucketRows(
+  rows: AggregateEventRow[],
+  granularity: AggregateGranularity,
+  bucketStart: Date,
+) {
+  const bucketKey = aggregateBucketKey(bucketStart, granularity);
+  return rows.filter((row) => {
+    const bucket = parseAggregateBucket(row.bucket, granularity);
+    return !bucket || aggregateBucketKey(bucket, granularity) !== bucketKey;
+  });
 }
 
 async function reconcileAnalysisHours(
@@ -1980,6 +2495,8 @@ function emptyData(): PeriodAnalysisData {
     contextHour: emptyDataset("hour"),
     day: emptyDataset("day"),
     hour: emptyDataset("hour"),
+    minute: emptyDataset("minute"),
+    month: emptyDataset("month"),
   };
 }
 

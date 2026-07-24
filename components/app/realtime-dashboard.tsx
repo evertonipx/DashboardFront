@@ -137,6 +137,8 @@ import {
   monochromeHeatmapPalette,
   pastelBarColor,
 } from "@/lib/chart-palette";
+import { buildScenarioCumulativeTotalsOption } from "@/lib/scenario-cumulative-chart";
+import { buildScopeTotalsComparisonOption } from "@/lib/scope-totals-chart";
 import {
   buildScenarioCompositionOption,
   normalizeScenarioCompositionChartType,
@@ -162,6 +164,10 @@ import {
 import {
   COUNTING_MONTH_LABELS,
 } from "@/lib/counting-intelligence";
+import {
+  buildCurrentYearComparisonOption,
+  type CurrentYearMonthPoint,
+} from "@/lib/current-year-chart";
 import type {
   ReportMetric,
   ReportPayload,
@@ -254,13 +260,6 @@ type ScenarioTotalsTableRow = {
   name: string;
   share: number;
   today: number;
-};
-
-type CurrentYearMonthPoint = {
-  accumulated: number | null;
-  label: string;
-  month: number;
-  value: number | null;
 };
 
 type OperationalMonthComparisonPoint = {
@@ -4279,7 +4278,12 @@ function ScenarioCumulativeTotalsCard({
     [points],
   );
   const option = React.useMemo(
-    () => buildScenarioCumulativeTotalsOption(orderedPoints, widgetColor),
+    () =>
+      buildScenarioCumulativeTotalsOption(
+        orderedPoints,
+        widgetColor,
+        "Acumulado de hoje",
+      ),
     [orderedPoints, widgetColor],
   );
   const total = orderedPoints.reduce((sum, point) => sum + point.total, 0);
@@ -6527,211 +6531,6 @@ function buildOperationalHeatmapOption(
   };
 }
 
-function buildScenarioCumulativeTotalsOption(
-  points: ScenarioCumulativeTotalPoint[],
-  widgetColor = "#1267C4",
-): EnterpriseChartOption {
-  return {
-    grid: { bottom: 8, containLabel: true, left: 8, right: 82, top: 8 },
-    tooltip: {
-      backgroundColor: "#ffffff",
-      borderColor: "#D8E3F2",
-      borderWidth: 1,
-      confine: true,
-      formatter: (rawParams: unknown) => {
-        const params = Array.isArray(rawParams) ? rawParams[0] : rawParams;
-        if (!params || typeof params !== "object") return "";
-        const data = (params as { data?: unknown }).data;
-        if (!data || typeof data !== "object") return "";
-        const point = data as {
-          scenarioName?: string;
-          share?: number;
-          value?: number;
-        };
-
-        return [
-          `<strong>${point.scenarioName ?? "Cenário"}</strong>`,
-          `Acumulado: ${formatNumber(point.value ?? 0)}`,
-          `Participação: ${new Intl.NumberFormat("pt-BR", {
-            maximumFractionDigits: 1,
-            style: "percent",
-          }).format(point.share ?? 0)}`,
-        ].join("<br />");
-      },
-      padding: [10, 12],
-      textStyle: { color: "#13233A", fontSize: 12 },
-      trigger: "item",
-    },
-    xAxis: {
-      axisLabel: { color: "#66758A", fontSize: 10 },
-      minInterval: 1,
-      splitLine: { lineStyle: { color: "#E8EEF6" } },
-      type: "value",
-    },
-    yAxis: {
-      axisLabel: {
-        color: "#526477",
-        fontSize: 11,
-        overflow: "truncate",
-        width: 220,
-      },
-      axisLine: { show: false },
-      axisTick: { show: false },
-      data: points.map((point) => point.name),
-      inverse: true,
-      type: "category",
-    },
-    series: [
-      {
-        barCategoryGap: "34%",
-        barMaxWidth: 28,
-        data: points.map((point, index) => ({
-          itemStyle: {
-            borderRadius: [0, 3, 3, 0],
-            color: index === 0 ? widgetColor : pastelBarColor(index + 2),
-          },
-          scenarioName: point.name,
-          share: point.share,
-          value: point.total,
-        })),
-        label: {
-          color: "#526477",
-          distance: 6,
-          fontSize: 10,
-          formatter: (params: { value?: number }) =>
-            formatNumber(Number(params.value ?? 0)),
-          position: "right",
-          show: true,
-        },
-        name: "Acumulado de hoje",
-        type: "bar",
-      },
-    ],
-  };
-}
-
-function buildCurrentYearComparisonOption(
-  points: CurrentYearMonthPoint[],
-  accumulated: boolean,
-  year: number,
-  widgetColor = "#1267C4",
-): EnterpriseChartOption {
-  const values = points.map((point) =>
-    accumulated ? point.accumulated : point.value,
-  );
-  const recordedValues = points.flatMap((point) =>
-    point.value === null ? [] : [point.value],
-  );
-  const average = recordedValues.length
-    ? recordedValues.reduce((sum, value) => sum + value, 0) /
-      recordedValues.length
-    : 0;
-  const averageName = `Média mensal de ${year}`;
-
-  return {
-    color: [widgetColor, "#C48A38"],
-    grid: { bottom: 8, containLabel: true, left: 8, right: 10, top: 58 },
-    legend: {
-      data: [String(year), ...(!accumulated && average ? [averageName] : [])],
-      itemGap: 12,
-      itemHeight: 9,
-      itemWidth: 9,
-      left: 0,
-      textStyle: { color: "#526477", fontSize: 11 },
-      top: 0,
-    },
-    tooltip: {
-      axisPointer: { type: "shadow" },
-      backgroundColor: "#ffffff",
-      borderColor: "#D8E3F2",
-      borderWidth: 1,
-      confine: true,
-      textStyle: { color: "#13233A", fontSize: 12 },
-      trigger: "axis",
-      valueFormatter: (value) =>
-        value === null || value === undefined
-          ? "-"
-          : formatNumber(Number(value)),
-    },
-    xAxis: {
-      axisLabel: { color: "#66758A", fontSize: 10, interval: 0 },
-      axisLine: { lineStyle: { color: "#D8E3F2" } },
-      axisTick: { show: false },
-      data: points.map((point) => point.label),
-      type: "category",
-    },
-    yAxis: {
-      axisLabel: {
-        color: "#66758A",
-        fontSize: 10,
-        formatter: (value: number) => compactChartNumber(value),
-      },
-      minInterval: 1,
-      splitLine: { lineStyle: { color: "#E8EEF6" } },
-      type: "value",
-    },
-    series: [
-      {
-        barCategoryGap: "30%",
-        barMaxWidth: 28,
-        data: values,
-        emphasis: { focus: "series" },
-        itemStyle: {
-          borderRadius: [2, 2, 0, 0],
-          color: widgetColor,
-        },
-        label: {
-          align: "left",
-          color: "#526477",
-          distance: 7,
-          fontSize: 9,
-          formatter: (params: { value?: number | null }) => {
-            const value = params.value;
-            return value === null || value === undefined || value === 0
-              ? ""
-              : compactChartNumber(value);
-          },
-          position: "top",
-          rotate: 90,
-          show: true,
-          verticalAlign: "middle",
-        },
-        name: String(year),
-        type: "bar",
-      },
-      ...(!accumulated && average
-        ? [
-            {
-              animation: false,
-              data: points.map((point) =>
-                point.value === null ? null : average,
-              ),
-              itemStyle: { color: "#D49A45" },
-              lineStyle: {
-                color: "#C48A38",
-                opacity: 0.72,
-                type: "dashed",
-                width: 1,
-              },
-              name: averageName,
-              showSymbol: false,
-              silent: true,
-              symbol: "none",
-              type: "line",
-            },
-          ]
-        : []),
-    ],
-  };
-}
-
-function compactChartNumber(value: number) {
-  return new Intl.NumberFormat("pt-BR", {
-    maximumFractionDigits: 1,
-    notation: "compact",
-  }).format(value);
-}
-
 function buildPeakDaysRankingOption(
   points: ScenarioPeakDayPoint[],
   widgetColor = "#1267C4",
@@ -7381,99 +7180,7 @@ function buildScenarioComparisonOption(
   points: ScenarioComparisonPoint[],
   widgetColor = "#1267C4",
 ): EnterpriseChartOption {
-  const dense = points.length > 12;
-  const veryDense = points.length > 24;
-
-  return {
-    color: [widgetColor],
-    grid: {
-      bottom: veryDense ? 88 : dense ? 72 : 42,
-      containLabel: true,
-      left: 36,
-      right: 18,
-      top: 12,
-    },
-    tooltip: {
-      axisPointer: {
-        type: "shadow",
-      },
-      backgroundColor: "#ffffff",
-      borderColor: "#D8E3F2",
-      borderWidth: 1,
-      confine: true,
-      padding: [10, 12],
-      textStyle: {
-        color: "#13233A",
-        fontSize: 12,
-      },
-      trigger: "axis",
-      valueFormatter: (value) =>
-        value === null || value === undefined
-          ? "-"
-          : `${formatNumber(Number(value))} eventos`,
-    },
-    xAxis: {
-      axisLabel: {
-        color: "#66758A",
-        fontSize: 11,
-        hideOverlap: true,
-        interval: 0,
-        overflow: "truncate",
-        rotate: veryDense ? 45 : dense ? 28 : 0,
-        width: dense ? 92 : undefined,
-      },
-      axisLine: {
-        lineStyle: {
-          color: "#D8E3F2",
-        },
-      },
-      axisTick: {
-        show: false,
-      },
-      data: points.map((point) => point.name),
-      type: "category",
-    },
-    yAxis: {
-      axisLabel: {
-        color: "#66758A",
-        fontSize: 11,
-      },
-      axisLine: {
-        lineStyle: {
-          color: "#D8E3F2",
-        },
-      },
-      minInterval: 1,
-      splitLine: {
-        lineStyle: {
-          color: "#E8EEF6",
-        },
-      },
-      type: "value",
-    },
-    series: [
-      {
-        barCategoryGap: veryDense ? "18%" : dense ? "28%" : "36%",
-        barMaxWidth: veryDense ? 24 : dense ? 30 : 34,
-        data: points.map((point, index) => ({
-          itemStyle: {
-            color: index === 0 ? widgetColor : pastelBarColor(index),
-          },
-          value: point.total,
-        })),
-        emphasis: {
-          itemStyle: {
-          color: widgetColor,
-          },
-        },
-        itemStyle: {
-          borderRadius: [2, 2, 0, 0],
-        },
-        name: "Hoje",
-        type: "bar",
-      },
-    ],
-  };
+  return buildScopeTotalsComparisonOption(points, widgetColor, "Hoje");
 }
 
 function buildRealtimeScopeReportChart(
@@ -7693,7 +7400,11 @@ function buildScenarioCumulativeTotalsReportChart(
     comparison: `${formatNumber(total)} eventos nos cenários selecionados`,
     description:
       "Total combinado e acumulado individual de cada cenário no dia atual, incluindo a hora parcial.",
-    option: buildScenarioCumulativeTotalsOption(orderedPoints, widgetColor),
+    option: buildScenarioCumulativeTotalsOption(
+      orderedPoints,
+      widgetColor,
+      "Acumulado de hoje",
+    ),
     table: {
       title: "Dados - Acumulado por cenário",
       columns: [

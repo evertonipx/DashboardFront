@@ -11,13 +11,23 @@ import type {
   PeriodAnalysisWidget,
   PeriodAnalysisWidgetKind,
 } from "@/lib/period-analysis-widgets";
+import type {
+  PeriodAnalysisScopeMode,
+  PeriodAnalysisScopeOption,
+} from "@/lib/period-analysis-scope";
+import type { ScenarioAnalyticsGranularity } from "@/lib/scenario-analytics";
 import type { Scenario } from "@/lib/types";
 import type { CardPreference } from "@/lib/view-preferences";
 import type { WidgetViewSnapshot } from "@/lib/widget-view-presets";
 
 export type LiveAnalysisImportResult = {
   preferences: CardPreference[];
-  sourceResolution: "scenario_id" | "scenario_name" | "all_scenarios";
+  sourceResolution:
+    | "scope_id"
+    | "scope_name"
+    | "scenario_id"
+    | "scenario_name"
+    | "all_scenarios";
   sourceCardCount: number;
   unsupportedCount: number;
   widgets: PeriodAnalysisWidget[];
@@ -25,11 +35,17 @@ export type LiveAnalysisImportResult = {
 
 export function buildLiveAnalysisImport({
   scenarios,
+  scopeOptions = [],
   snapshot,
 }: {
   scenarios: Scenario[];
+  scopeOptions?: PeriodAnalysisScopeOption[];
   snapshot: WidgetViewSnapshot;
 }): LiveAnalysisImportResult {
+  const availableScopeOptions = completeScopeOptions(
+    scopeOptions,
+    scenarios,
+  );
   const customWidgets = normalizeRealtimeCustomWidgets(
     snapshotStorageValue(snapshot, "ipxdata.realtime-custom-widgets.v1"),
   );
@@ -47,7 +63,11 @@ export function buildLiveAnalysisImport({
   const operational = normalizeLiveOperationalSettings(
     snapshotStorageValue(snapshot, "ipxdata.live-operational-settings.v1"),
   );
-  const sourceSelection = resolveSourceScenarioSelection(snapshot, scenarios);
+  const sourceSelection = resolveSourceScopeSelection(
+    snapshot,
+    scenarios,
+    availableScopeOptions,
+  );
   const widgets: PeriodAnalysisWidget[] = [];
   const importedPreferences: CardPreference[] = [];
   let unsupportedCount = 0;
@@ -58,10 +78,11 @@ export function buildLiveAnalysisImport({
       baseline?: PeriodAnalysisBaseline;
       entryScenarioIds?: string[];
       exitScenarioIds?: string[];
-      granularity?: "hour" | "day";
+      granularity?: ScenarioAnalyticsGranularity;
       kind: PeriodAnalysisWidgetKind;
       scenarioIds?: string[];
       selectionMode?: "all" | "custom";
+      scopeMode?: PeriodAnalysisScopeMode;
       startHour?: number;
       title: string;
     },
@@ -80,6 +101,8 @@ export function buildLiveAnalysisImport({
         input.scenarioIds ?? sourceSelection.selection.scenarioIds,
       selectionMode:
         input.selectionMode ?? sourceSelection.selection.selectionMode,
+      scopeMode:
+        input.scopeMode ?? sourceSelection.selection.scopeMode,
       startHour: input.startHour ?? 0,
       title: sourcePreference.title ?? input.title,
       updatedAt: now,
@@ -104,22 +127,35 @@ export function buildLiveAnalysisImport({
 
     switch (preference.id) {
       case "live_intraday_comparison":
-        add(preference, { ...common, kind: "summary", title: "Resumo do período" });
+        add(preference, {
+          ...common,
+          granularity: "hour",
+          kind: "day_total",
+          title: "Hoje até agora",
+        });
+        return;
+      case "live_target_progress":
+        add(preference, {
+          ...common,
+          baseline: operationalBaseline,
+          kind: "target_progress",
+          title: "Hoje x média-base",
+        });
         return;
       case "live_month_previous_comparison":
         add(preference, {
           ...common,
           baseline: "previous_month",
-          kind: "cumulative",
-          title: "Acumulado x período do mês anterior",
+          kind: "cumulative_metric",
+          title: "Acumulado x mês anterior",
         });
         return;
       case "live_month_year_comparison":
         add(preference, {
           ...common,
           baseline: "last_year",
-          kind: "cumulative",
-          title: "Acumulado x período do ano anterior",
+          kind: "cumulative_metric",
+          title: "Acumulado x ano anterior",
         });
         return;
       case "live_chart_hour":
@@ -133,19 +169,33 @@ export function buildLiveAnalysisImport({
       case "live_chart_minute":
         add(preference, {
           ...common,
-          granularity: "hour",
+          granularity: "minute",
           kind: "timeline",
           title: "Fluxo intradiário",
         });
         return;
       case "live_chart_day":
-      case "live_chart_week":
-      case "live_chart_month":
         add(preference, {
           ...common,
           granularity: "day",
           kind: "timeline",
           title: "Fluxo por período",
+        });
+        return;
+      case "live_chart_week":
+        add(preference, {
+          ...common,
+          granularity: "week",
+          kind: "timeline",
+          title: "Semana a semana",
+        });
+        return;
+      case "live_chart_month":
+        add(preference, {
+          ...common,
+          granularity: "month",
+          kind: "timeline",
+          title: "Mês a mês",
         });
         return;
       case "live_moving_average_trend":
@@ -162,7 +212,7 @@ export function buildLiveAnalysisImport({
             operational.cumulativeScenarioIds,
             scenarios,
           ),
-          kind: "totals_table",
+          kind: "scenario_cumulative",
           title: "Acumulado por cenário",
         });
         return;
@@ -175,6 +225,22 @@ export function buildLiveAnalysisImport({
           ),
           kind: "totals_table",
           title: "Tabela acumulada por cenário",
+        });
+        return;
+      case "live_current_year_monthly":
+        add(preference, {
+          ...common,
+          granularity: "month",
+          kind: "year_monthly",
+          title: "Comparativo mensal por ano",
+        });
+        return;
+      case "live_current_year_accumulated":
+        add(preference, {
+          ...common,
+          granularity: "month",
+          kind: "year_accumulated",
+          title: "Comparativo acumulado por ano",
         });
         return;
       case "live_month_hour_heatmap":
@@ -211,6 +277,7 @@ export function buildLiveAnalysisImport({
             operational.occupancySelectionMode === "custom"
               ? "custom"
               : "all",
+          scopeMode: "scenario",
           startHour: operational.occupancyStartHour,
           title: "Ocupação hora a hora",
         });
@@ -252,9 +319,10 @@ export function buildLiveAnalysisImport({
       case "live_operational_month_comparison":
         add(preference, {
           ...common,
+          baseline: operationalBaseline,
           granularity: "day",
-          kind: "timeline",
-          title: "Dias do período",
+          kind: "daily_comparison",
+          title: "Dias x meses",
         });
         return;
       case "live_operational_month_cumulative":
@@ -268,10 +336,31 @@ export function buildLiveAnalysisImport({
       case "live_today_scenario_comparison":
         add(preference, {
           granularity: "hour",
-          kind: "comparison",
+          kind: "scope_totals",
           scenarioIds: [],
           selectionMode: "all",
-          title: "Comparativo de cenários",
+          scopeMode: "scenario",
+          title: "Hoje por cenário",
+        });
+        return;
+      case "live_today_location_comparison":
+        add(preference, {
+          granularity: "hour",
+          kind: "scope_totals",
+          scenarioIds: [],
+          selectionMode: "all",
+          scopeMode: "location",
+          title: "Hoje por local",
+        });
+        return;
+      case "live_today_sub_location_comparison":
+        add(preference, {
+          granularity: "hour",
+          kind: "scope_totals",
+          scenarioIds: [],
+          selectionMode: "all",
+          scopeMode: "sub_location",
+          title: "Hoje por sublocal",
         });
         return;
       case "live_scenario_period_comparison":
@@ -280,6 +369,7 @@ export function buildLiveAnalysisImport({
           kind: "comparison",
           scenarioIds: [],
           selectionMode: "all",
+          scopeMode: "scenario",
           title: "Comparativo de cenários",
         });
         return;
@@ -289,6 +379,7 @@ export function buildLiveAnalysisImport({
           kind: "totals_table",
           scenarioIds: [],
           selectionMode: "all",
+          scopeMode: "scenario",
           title: "Totais por cenário",
         });
         return;
@@ -309,6 +400,7 @@ export function buildLiveAnalysisImport({
         customWidget,
         snapshot,
         scenarios,
+        availableScopeOptions,
       )
     ) {
       unsupportedCount += 1;
@@ -331,10 +423,11 @@ function addCustomWidget(
       baseline?: PeriodAnalysisBaseline;
       entryScenarioIds?: string[];
       exitScenarioIds?: string[];
-      granularity?: "hour" | "day";
+      granularity?: ScenarioAnalyticsGranularity;
       kind: PeriodAnalysisWidgetKind;
       scenarioIds?: string[];
       selectionMode?: "all" | "custom";
+      scopeMode?: PeriodAnalysisScopeMode;
       startHour?: number;
       title: string;
     },
@@ -343,23 +436,23 @@ function addCustomWidget(
   widget: RealtimeCustomWidget,
   snapshot: WidgetViewSnapshot,
   scenarios: Scenario[],
+  scopeOptions: PeriodAnalysisScopeOption[],
 ) {
   if (widget.kind === "scope") {
-    if (widget.scopeMode !== "scenario") return false;
-    const scenario = resolveScenario(
-      scenarios,
+    const scope = resolveScope(
+      scopeOptions,
+      widget.scopeMode,
       widget.scopeId,
       widget.scopeName,
     );
-    if (!scenario) return false;
+    if (!scope) return false;
     add(preference, {
       granularity:
-        widget.granularity === "hour" || widget.granularity === "minute"
-          ? "hour"
-          : "day",
+        widget.granularity,
       kind: "timeline",
-      scenarioIds: [scenario.id],
+      scenarioIds: [scope.id],
       selectionMode: "custom",
+      scopeMode: scope.mode,
       title: widget.title,
     });
     return true;
@@ -373,8 +466,7 @@ function addCustomWidget(
       ),
     );
     add(preference, {
-      granularity:
-        settings.granularity === "hour" ? "hour" : "day",
+      granularity: settings.granularity,
       kind: "comparison",
       ...selectionFromSettings(
         settings.selectionMode,
@@ -387,7 +479,7 @@ function addCustomWidget(
   }
 
   const kindByType = {
-    cumulative: "cumulative",
+    cumulative: "scenario_cumulative",
     heatmap: "heatmap",
     peak_days: "peak_days",
     ranking: "ranking",
@@ -417,7 +509,11 @@ function selectionFromSettings(
   scenarios: Scenario[],
 ) {
   if (selectionMode === "all") {
-    return { scenarioIds: [], selectionMode };
+    return {
+      scenarioIds: [],
+      selectionMode,
+      scopeMode: "scenario" as const,
+    };
   }
 
   const availableIds = new Set(scenarios.map((scenario) => scenario.id));
@@ -426,36 +522,47 @@ function selectionFromSettings(
       availableIds.has(scenarioId),
     ),
     selectionMode,
+    scopeMode: "scenario" as const,
   };
 }
 
-function resolveSourceScenarioSelection(
+function resolveSourceScopeSelection(
   snapshot: WidgetViewSnapshot,
   scenarios: Scenario[],
+  scopeOptions: PeriodAnalysisScopeOption[],
 ) {
   const sourceScope = snapshot.sourceScope;
+  const availableScopes = completeScopeOptions(scopeOptions, scenarios);
   const byId = sourceScope
-    ? scenarios.find((scenario) => scenario.id === sourceScope.id)
+    ? availableScopes.find((scope) => scope.id === sourceScope.id)
     : undefined;
   if (byId) {
     return {
-      resolution: "scenario_id" as const,
+      resolution:
+        byId.mode === "scenario"
+          ? ("scenario_id" as const)
+          : ("scope_id" as const),
       selection: {
         scenarioIds: [byId.id],
         selectionMode: "custom" as const,
+        scopeMode: byId.mode,
       },
     };
   }
 
   const byName = sourceScope
-    ? uniqueScenarioByName(scenarios, sourceScope.name)
+    ? uniqueScopeByName(availableScopes, sourceScope.name)
     : undefined;
   if (byName) {
     return {
-      resolution: "scenario_name" as const,
+      resolution:
+        byName.mode === "scenario"
+          ? ("scenario_name" as const)
+          : ("scope_name" as const),
       selection: {
         scenarioIds: [byName.id],
         selectionMode: "custom" as const,
+        scopeMode: byName.mode,
       },
     };
   }
@@ -465,26 +572,55 @@ function resolveSourceScenarioSelection(
     selection: {
       scenarioIds: [],
       selectionMode: "all" as const,
+      scopeMode: "scenario" as const,
     },
   };
 }
 
-function resolveScenario(
+function completeScopeOptions(
+  scopeOptions: PeriodAnalysisScopeOption[],
   scenarios: Scenario[],
+) {
+  const scenarioIds = new Set(
+    scopeOptions
+      .filter((scope) => scope.mode === "scenario")
+      .map((scope) => scope.id),
+  );
+  return [
+    ...scopeOptions,
+    ...scenarios
+      .filter((scenario) => !scenarioIds.has(scenario.id))
+      .map<PeriodAnalysisScopeOption>((scenario) => ({
+        cameraIds: [],
+        description: scenario.description ?? "",
+        id: scenario.id,
+        mode: "scenario",
+        name: scenario.name,
+      })),
+  ];
+}
+
+function resolveScope(
+  scopeOptions: PeriodAnalysisScopeOption[],
+  mode: PeriodAnalysisScopeMode,
   scenarioId: string,
   scenarioName: string,
 ) {
+  const scopes = scopeOptions.filter((scope) => scope.mode === mode);
   return (
-    scenarios.find((scenario) => scenario.id === scenarioId) ??
-    uniqueScenarioByName(scenarios, scenarioName)
+    scopes.find((scope) => scope.id === scenarioId) ??
+    uniqueScopeByName(scopes, scenarioName)
   );
 }
 
-function uniqueScenarioByName(scenarios: Scenario[], name: string) {
+function uniqueScopeByName(
+  scopes: PeriodAnalysisScopeOption[],
+  name: string,
+) {
   const normalizedName = normalizeScenarioName(name);
   if (!normalizedName) return undefined;
-  const matches = scenarios.filter(
-    (scenario) => normalizeScenarioName(scenario.name) === normalizedName,
+  const matches = scopes.filter(
+    (scope) => normalizeScenarioName(scope.name) === normalizedName,
   );
   return matches.length === 1 ? matches[0] : undefined;
 }

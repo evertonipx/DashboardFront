@@ -11,7 +11,12 @@ import {
 } from "@/lib/hourly-occupancy-series";
 
 export type ScenarioSelectionMode = "all" | "custom";
-export type ScenarioAnalyticsGranularity = "hour" | "day";
+export type ScenarioAnalyticsGranularity =
+  | "minute"
+  | "hour"
+  | "day"
+  | "week"
+  | "month";
 
 export type ScenarioAnalyticsPoint = {
   bucket: string;
@@ -580,14 +585,33 @@ function startOfBucket(
   date: Date,
   granularity: ScenarioAnalyticsGranularity,
 ) {
-  return granularity === "hour"
-    ? new Date(
-        date.getFullYear(),
-        date.getMonth(),
-        date.getDate(),
-        date.getHours(),
-      )
-    : new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  if (granularity === "minute") {
+    return new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+      date.getHours(),
+      date.getMinutes(),
+    );
+  }
+  if (granularity === "hour") {
+    return new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+      date.getHours(),
+    );
+  }
+  if (granularity === "week") {
+    const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const daysSinceMonday = (start.getDay() + 6) % 7;
+    start.setDate(start.getDate() - daysSinceMonday);
+    return start;
+  }
+  if (granularity === "month") {
+    return new Date(date.getFullYear(), date.getMonth(), 1);
+  }
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
 function addBucket(
@@ -595,7 +619,10 @@ function addBucket(
   granularity: ScenarioAnalyticsGranularity,
 ) {
   const next = new Date(date);
-  if (granularity === "hour") next.setHours(next.getHours() + 1);
+  if (granularity === "minute") next.setMinutes(next.getMinutes() + 1);
+  else if (granularity === "hour") next.setHours(next.getHours() + 1);
+  else if (granularity === "week") next.setDate(next.getDate() + 7);
+  else if (granularity === "month") next.setMonth(next.getMonth() + 1);
   else next.setDate(next.getDate() + 1);
   return next;
 }
@@ -604,6 +631,15 @@ function formatBucketLabel(
   date: Date,
   granularity: ScenarioAnalyticsGranularity,
 ) {
+  if (granularity === "minute") {
+    return new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      hour: "2-digit",
+      hour12: false,
+      minute: "2-digit",
+      month: "2-digit",
+    }).format(date);
+  }
   if (granularity === "hour") {
     return new Intl.DateTimeFormat("pt-BR", {
       day: "2-digit",
@@ -611,6 +647,20 @@ function formatBucketLabel(
       hour12: false,
       month: "2-digit",
     }).format(date);
+  }
+  if (granularity === "week") {
+    return `Sem. ${new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+    }).format(date)}`;
+  }
+  if (granularity === "month") {
+    return new Intl.DateTimeFormat("pt-BR", {
+      month: "short",
+      year: "2-digit",
+    })
+      .format(date)
+      .replace(".", "");
   }
 
   return new Intl.DateTimeFormat("pt-BR", {

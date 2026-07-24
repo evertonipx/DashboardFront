@@ -25,10 +25,13 @@ type ScenarioPickerProps = {
   label?: string;
   loading?: boolean;
   mode: ScenarioSelectionMode;
+  nounPlural?: string;
+  nounSingular?: string;
   onModeChange: (mode: ScenarioSelectionMode) => void;
   onSelectedIdsChange: (ids: string[]) => void;
   scenarios: Scenario[];
   selectedIds: string[];
+  summaryForItem?: (scenario: Scenario) => string;
 };
 
 export function ScenarioPicker({
@@ -37,10 +40,13 @@ export function ScenarioPicker({
   label = "Cenários",
   loading = false,
   mode,
+  nounPlural = "cenários",
+  nounSingular = "cenário",
   onModeChange,
   onSelectedIdsChange,
   scenarios,
   selectedIds,
+  summaryForItem,
 }: ScenarioPickerProps) {
   const [open, setOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
@@ -66,7 +72,7 @@ export function ScenarioPicker({
   }, [scenarios, search]);
   const selectedSummary =
     mode === "all"
-      ? `Todos os cenários (${formatNumber(scenarios.length)})`
+    ? `Todos os ${nounPlural} (${formatNumber(scenarios.length)})`
       : selectedScenarios.length
         ? `${formatNumber(selectedScenarios.length)} selecionado(s)`
         : "Nenhum selecionado";
@@ -171,7 +177,7 @@ export function ScenarioPicker({
               ) : null}
               {!selectedScenarios.length ? (
                 <span className="text-xs text-muted-foreground">
-                  Abra a lista para escolher os cenários.
+                  Abra a lista para escolher {nounPlural}.
                 </span>
               ) : null}
             </div>
@@ -205,7 +211,7 @@ export function ScenarioPicker({
           <DialogHeader className="min-w-0 pr-8">
             <DialogTitle className="break-words">Selecionar {label}</DialogTitle>
             <DialogDescription>
-              {formatNumber(selectedScenarios.length)} de {formatNumber(scenarios.length)} cenário(s) selecionado(s)
+              {formatNumber(selectedScenarios.length)} de {formatNumber(scenarios.length)} {nounPlural} selecionado(s)
             </DialogDescription>
           </DialogHeader>
 
@@ -215,7 +221,7 @@ export function ScenarioPicker({
               <Input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Filtrar por palavras: entrada, saída..."
+                placeholder={`Filtrar ${nounPlural} por palavras...`}
                 className="pl-9"
               />
             </div>
@@ -269,7 +275,9 @@ export function ScenarioPicker({
                         {scenario.name}
                       </span>
                       <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                        {formatNumber(scenario.lines?.length ?? 0)} linhas
+                        {summaryForItem
+                          ? summaryForItem(scenario)
+                          : `${formatNumber(scenario.lines?.length ?? 0)} linhas`}
                       </span>
                     </button>
                   );
@@ -277,7 +285,7 @@ export function ScenarioPicker({
               </div>
             ) : (
               <div className="px-3 py-4 text-sm text-muted-foreground">
-                Nenhum cenário encontrado.
+                Nenhum {nounSingular} encontrado.
               </div>
             )}
           </div>
