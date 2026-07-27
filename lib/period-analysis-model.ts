@@ -267,10 +267,22 @@ export function periodAnalysisBaselineRange(
   baseline: PeriodAnalysisBaseline,
 ): PeriodAnalysisRange {
   if (baseline === "previous_period") {
-    const duration = period.to.getTime() - period.from.getTime();
+    const durationInCalendarDays = Math.round(
+      (Date.UTC(
+        period.to.getFullYear(),
+        period.to.getMonth(),
+        period.to.getDate(),
+      ) -
+        Date.UTC(
+          period.from.getFullYear(),
+          period.from.getMonth(),
+          period.from.getDate(),
+        )) /
+        (24 * 60 * 60 * 1_000),
+    );
     return {
-      from: new Date(period.from.getTime() - duration),
-      to: new Date(period.to.getTime() - duration),
+      from: addDays(period.from, -durationInCalendarDays),
+      to: addDays(period.to, -durationInCalendarDays),
     };
   }
 
@@ -2630,7 +2642,7 @@ function trendTone(direction: number): PeriodAnalysisInsight["tone"] {
 function listDayStarts(from: Date, to: Date) {
   const days: Date[] = [];
   let cursor = new Date(from.getFullYear(), from.getMonth(), from.getDate());
-  while (cursor < to && days.length < 10_000) {
+  while (cursor < to) {
     days.push(new Date(cursor));
     cursor = addDays(cursor, 1);
   }
@@ -2659,8 +2671,16 @@ function shiftMonthsClamped(date: Date, amount: number) {
 function parseDateInput(value: string) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return null;
-  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  return Number.isNaN(date.getTime()) ? null : date;
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const date = new Date(year, month, day);
+  return !Number.isNaN(date.getTime()) &&
+    date.getFullYear() === year &&
+    date.getMonth() === month &&
+    date.getDate() === day
+    ? date
+    : null;
 }
 
 function addDays(date: Date, amount: number) {

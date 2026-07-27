@@ -3,7 +3,11 @@ import type {
   AggregateGranularity,
   Scenario,
 } from "@/lib/types";
-import { parseAggregateBucket } from "@/lib/aggregate-time";
+import {
+  endOfAggregateBucket,
+  parseAggregateBucket,
+  startOfAggregateBucket,
+} from "@/lib/aggregate-time";
 import {
   buildHourlyOccupancySeries,
   normalizeOccupancyStartHour,
@@ -267,24 +271,8 @@ export function buildScenarioHourlyOccupancy({
     sourceGranularity,
     to,
   });
-  const entriesByHour = Array.from({ length: 24 }, (_, hour) => {
-    const bucket = new Date(
-      dayStart.getFullYear(),
-      dayStart.getMonth(),
-      dayStart.getDate(),
-      hour,
-    );
-    return entryTotals.get(bucketKey(bucket, "hour")) ?? 0;
-  });
-  const exitsByHour = Array.from({ length: 24 }, (_, hour) => {
-    const bucket = new Date(
-      dayStart.getFullYear(),
-      dayStart.getMonth(),
-      dayStart.getDate(),
-      hour,
-    );
-    return exitTotals.get(bucketKey(bucket, "hour")) ?? 0;
-  });
+  const entriesByHour = totalsByLocalHour(entryTotals, dayStart, dayEnd);
+  const exitsByHour = totalsByLocalHour(exitTotals, dayStart, dayEnd);
 
   return buildHourlyOccupancySeries({
     day: dayStart,
@@ -293,6 +281,20 @@ export function buildScenarioHourlyOccupancy({
     startHour: normalizedStartHour,
     through,
   });
+}
+
+function totalsByLocalHour(
+  totals: Map<number, number>,
+  dayStart: Date,
+  dayEnd: Date,
+) {
+  const values = Array.from({ length: 24 }, () => 0);
+  totals.forEach((total, timestamp) => {
+    const bucket = new Date(timestamp);
+    if (bucket < dayStart || bucket >= dayEnd) return;
+    values[bucket.getHours()] += total;
+  });
+  return values;
 }
 
 export function sharedScenarioLineIds(
@@ -566,12 +568,10 @@ function listBucketStarts(
 ) {
   const buckets: Date[] = [];
   let cursor = startOfBucket(from, granularity);
-  let guard = 0;
 
-  while (cursor < to && guard < 20_000) {
+  while (cursor < to) {
     buckets.push(new Date(cursor));
     cursor = addBucket(cursor, granularity);
-    guard += 1;
   }
 
   return buckets;
@@ -585,46 +585,14 @@ function startOfBucket(
   date: Date,
   granularity: ScenarioAnalyticsGranularity,
 ) {
-  if (granularity === "minute") {
-    return new Date(
-      date.getFullYear(),
-      date.getMonth(),
-      date.getDate(),
-      date.getHours(),
-      date.getMinutes(),
-    );
-  }
-  if (granularity === "hour") {
-    return new Date(
-      date.getFullYear(),
-      date.getMonth(),
-      date.getDate(),
-      date.getHours(),
-    );
-  }
-  if (granularity === "week") {
-    const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-    const daysSinceMonday = (start.getDay() + 6) % 7;
-    start.setDate(start.getDate() - daysSinceMonday);
-    return start;
-  }
-  if (granularity === "month") {
-    return new Date(date.getFullYear(), date.getMonth(), 1);
-  }
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  return startOfAggregateBucket(date, granularity);
 }
 
 function addBucket(
   date: Date,
   granularity: ScenarioAnalyticsGranularity,
 ) {
-  const next = new Date(date);
-  if (granularity === "minute") next.setMinutes(next.getMinutes() + 1);
-  else if (granularity === "hour") next.setHours(next.getHours() + 1);
-  else if (granularity === "week") next.setDate(next.getDate() + 7);
-  else if (granularity === "month") next.setMonth(next.getMonth() + 1);
-  else next.setDate(next.getDate() + 1);
-  return next;
+  return endOfAggregateBucket(date, granularity);
 }
 
 function formatBucketLabel(

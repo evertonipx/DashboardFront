@@ -1,8 +1,14 @@
-import type { AggregateGranularity } from "@/lib/types";
+import type {
+  AggregateEventRow,
+  AggregateGranularity,
+} from "@/lib/types";
 
-const CALENDAR_BUCKET_PATTERN = /^(\d{4})-(\d{2})-(\d{2})/;
+const CALENDAR_BUCKET_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})(?:(?:T| )00:00:00(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
 const LOCAL_DATE_TIME_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/;
+const ZONED_DATE_TIME_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export function aggregateQueryIso(
   date: Date,
@@ -64,7 +70,10 @@ export function parseAggregateBucket(
   const localDateTime = parseLocalDateTime(value);
   if (localDateTime) return localDateTime;
 
-  // Zone-aware RFC3339 values remain absolute instants.
+  // Only explicit RFC3339 values remain absolute instants. Rejecting other
+  // strings prevents JavaScript from silently normalizing invalid wall times.
+  if (!ZONED_DATE_TIME_PATTERN.test(value)) return null;
+
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
 }
@@ -87,6 +96,215 @@ export function isCalendarGranularity(granularity: AggregateGranularity) {
     granularity === "semester" ||
     granularity === "year"
   );
+}
+
+export function requireAggregateGranularity(
+  actual: AggregateGranularity | null | undefined,
+  requested: AggregateGranularity,
+) {
+  if (actual !== requested) {
+    throw new Error(
+      `A API retornou granularidade ${actual ?? "ausente"} para uma consulta ${requested}.`,
+    );
+  }
+
+  return requested;
+}
+
+export function requireAggregateRows(
+  data: AggregateEventRow[] | null | undefined,
+  granularity: AggregateGranularity,
+  expectedMetricType?: string,
+) {
+  if (!Array.isArray(data)) {
+    throw new Error("A API retornou uma resposta agregada sem o campo data.");
+  }
+
+  const identities = new Set<string>();
+  data.forEach((row, index) => {
+    const valid =
+      row &&
+      typeof row === "object" &&
+      typeof row.bucket === "string" &&
+      isAggregateBucketAligned(row.bucket, granularity) &&
+      typeof row.camera_id === "string" &&
+      row.camera_id.trim().length > 0 &&
+      row.camera_id === row.camera_id.trim() &&
+      (row.line_count_id === undefined ||
+        (typeof row.line_count_id === "string" &&
+          row.line_count_id.trim().length > 0 &&
+          row.line_count_id === row.line_count_id.trim())) &&
+      typeof row.metric_type === "string" &&
+      row.metric_type.trim().length > 0 &&
+      row.metric_type === row.metric_type.trim() &&
+      (expectedMetricType === undefined ||
+        row.metric_type === expectedMetricType) &&
+      (row.object_class === undefined ||
+        (typeof row.object_class === "string" &&
+          row.object_class.trim().length > 0 &&
+          row.object_class === row.object_class.trim())) &&
+      typeof row.total === "number" &&
+      Number.isSafeInteger(row.total) &&
+      row.total >= 0;
+
+    if (!valid) {
+      throw new Error(
+        `A API retornou uma linha agregada inválida na posição ${index}.`,
+      );
+    }
+
+    const bucket = parseAggregateBucket(row.bucket, granularity)!;
+    const bucketIdentity = isCalendarGranularity(granularity)
+      ? Date.UTC(
+          bucket.getFullYear(),
+          bucket.getMonth(),
+          bucket.getDate(),
+        )
+      : bucket.getTime();
+    const identity = JSON.stringify([
+      bucketIdentity,
+      row.camera_id,
+      row.line_count_id ?? "",
+      row.metric_type,
+      row.object_class ?? "",
+    ]);
+    if (identities.has(identity)) {
+      throw new Error(
+        `A API retornou uma identidade agregada duplicada na posição ${index}.`,
+      );
+    }
+    identities.add(identity);
+  });
+
+  return data;
+}
+
+export function isAggregateBucketAligned(
+  value: string | Date,
+  granularity: AggregateGranularity,
+) {
+  const bucket = parseAggregateBucket(value, granularity);
+  if (
+    !bucket ||
+    (typeof value === "string" && hasNonZeroFractionalSecond(value))
+  ) {
+    return false;
+  }
+  return (
+    startOfAggregateBucket(bucket, granularity).getTime() === bucket.getTime()
+  );
+}
+
+export function startOfAggregateBucket(
+  date: Date,
+  granularity: AggregateGranularity,
+) {
+  if (granularity === "minute") {
+    return floorLocalInstant(date, 60_000);
+  }
+  if (granularity === "hour") {
+    return floorLocalInstant(date, 60 * 60_000);
+  }
+  if (granularity === "day") {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  }
+  if (granularity === "week") {
+    const start = new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+    );
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+    return start;
+  }
+  if (granularity === "month") {
+    return new Date(date.getFullYear(), date.getMonth(), 1);
+  }
+  if (granularity === "semester") {
+    return new Date(date.getFullYear(), date.getMonth() < 6 ? 0 : 6, 1);
+  }
+  return new Date(date.getFullYear(), 0, 1);
+}
+
+export function endOfAggregateBucket(
+  date: Date,
+  granularity: AggregateGranularity,
+) {
+  const start = startOfAggregateBucket(date, granularity);
+  if (granularity === "minute") {
+    return new Date(start.getTime() + 60_000);
+  }
+  if (granularity === "hour") {
+    // Find the next real civil-hour boundary. This handles both repeated
+    // fallback hours and partial 30-minute hours such as Lord Howe's 02:30.
+    for (let minute = 1; minute <= 3 * 60; minute += 1) {
+      const candidate = new Date(start.getTime() + minute * 60_000);
+      if (
+        startOfAggregateBucket(candidate, "hour").getTime() !==
+        start.getTime()
+      ) {
+        return candidate;
+      }
+    }
+    return new Date(start.getTime() + 60 * 60_000);
+  }
+
+  const end = new Date(start);
+  if (granularity === "day") end.setDate(end.getDate() + 1);
+  else if (granularity === "week") end.setDate(end.getDate() + 7);
+  else if (granularity === "month") end.setMonth(end.getMonth() + 1);
+  else if (granularity === "semester") end.setMonth(end.getMonth() + 6);
+  else end.setFullYear(end.getFullYear() + 1);
+  return end;
+}
+
+function floorLocalInstant(date: Date, durationMs: number) {
+  const offsetMs = date.getTimezoneOffset() * 60_000;
+  const localTime = date.getTime() - offsetMs;
+  const candidate = new Date(
+    Math.floor(localTime / durationMs) * durationMs + offsetMs,
+  );
+  if (
+    candidate.getTimezoneOffset() === date.getTimezoneOffset() &&
+    sameLocalBucket(candidate, date, durationMs)
+  ) {
+    return candidate;
+  }
+
+  const minuteMs = 60_000;
+  let cursor = new Date(Math.floor(date.getTime() / minuteMs) * minuteMs);
+  let earliest: Date | null = null;
+  for (let index = 0; index <= 6 * 60; index += 1) {
+    const belongsToBucket =
+      cursor.getTimezoneOffset() === date.getTimezoneOffset() &&
+      sameLocalBucket(cursor, date, durationMs);
+    if (belongsToBucket) {
+      earliest = new Date(cursor);
+    } else if (earliest) {
+      break;
+    }
+    cursor = new Date(cursor.getTime() - minuteMs);
+  }
+
+  return earliest ?? candidate;
+}
+
+function sameLocalBucket(left: Date, right: Date, durationMs: number) {
+  if (
+    left.getFullYear() !== right.getFullYear() ||
+    left.getMonth() !== right.getMonth() ||
+    left.getDate() !== right.getDate() ||
+    left.getHours() !== right.getHours()
+  ) {
+    return false;
+  }
+
+  return durationMs > 60_000 || left.getMinutes() === right.getMinutes();
+}
+
+function hasNonZeroFractionalSecond(value: string) {
+  const fraction = /\.(\d+)/.exec(value)?.[1];
+  return Boolean(fraction && /[1-9]/.test(fraction));
 }
 
 function parseLocalDateTime(value: string) {

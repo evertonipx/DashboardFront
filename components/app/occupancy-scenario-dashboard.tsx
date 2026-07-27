@@ -49,23 +49,33 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import {
   aggregateQueryIso,
-  parseAggregateBucket,
+  endOfAggregateBucket,
+  startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
   filterScopedApiRows,
   getScopedStorageKey,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
+import {
+  aggregateOccupancyRowsByBucket,
+  occupancyAggregateBucketKey,
+  requireOccupancyAggregateRows,
+} from "@/lib/occupancy-aggregate-validation";
+import { summarizeOccupancyMetrics } from "@/lib/occupancy-metrics";
+import {
+  requireOccupancyAlertRows,
+  requireOccupancyHistoryResponse,
+  requireOccupancyScenarioRows,
+} from "@/lib/occupancy-validation";
 import { canManageOccupancy, canManageScenarios } from "@/lib/permissions";
 import type {
   AggregateGranularity,
-  OccupancyAlertListResponse,
   OccupancyAlertRow,
   OccupancyScenario,
   OccupancyScenarioAggregateResponse,
   OccupancyScenarioBucketRow,
   OccupancyScenarioHistoryResponse,
-  OccupancyScenarioListResponse,
 } from "@/lib/types";
 import { cn, formatDateTime, formatNumber, formatTime } from "@/lib/utils";
 
@@ -95,16 +105,16 @@ type OccupancyChartState = {
 type OccupancyPoint = {
   bucket: string;
   label: string;
-  average: number;
-  current?: number;
-  minimum: number;
-  peak: number;
+  average: number | null;
+  current: number | null;
+  minimum: number | null;
+  peak: number | null;
 };
 
 type PeriodMetric = {
-  average: number;
-  minimum: number;
-  peak: number;
+  average: number | null;
+  minimum: number | null;
+  peak: number | null;
 };
 
 type OccupancyMarkerKind = "average" | "current" | "limit";
@@ -157,7 +167,10 @@ export function OccupancyScenarioDashboard() {
   const [loadingScenarios, setLoadingScenarios] = React.useState(true);
   const [loadingData, setLoadingData] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
+  const [metadataError, setMetadataError] = React.useState("");
+  const [dataLoadError, setDataLoadError] = React.useState("");
   const [hasLoadedData, setHasLoadedData] = React.useState(false);
+  const [loadedDataScopeKey, setLoadedDataScopeKey] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
   const [clock, setClock] = React.useState(() => new Date());
   const [metricVisibility, setMetricVisibility] =
@@ -168,6 +181,9 @@ export function OccupancyScenarioDashboard() {
   const requestRef = React.useRef<AbortController | null>(null);
   const runningRef = React.useRef(false);
   const hasLoadedDataRef = React.useRef(false);
+  const activeDataScopeKeyRef = React.useRef("");
+  const loadedDataScopeKeyRef = React.useRef("");
+  const metadataRequestSequenceRef = React.useRef(0);
 
   const visibleScenarios = React.useMemo(
     () => (canManage ? scenarios : scenarios.filter((scenario) => scenario.active)),
@@ -179,21 +195,32 @@ export function OccupancyScenarioDashboard() {
       null,
     [selectedId, visibleScenarios],
   );
+  const activeDataScopeKey = occupancyDataScopeKey(companyScopeId, selectedId);
+  const hasLoadedSelectedScenario =
+    Boolean(selectedScenario) &&
+    hasLoadedData &&
+    loadedDataScopeKey === activeDataScopeKey;
+  const certifiedChartData = hasLoadedSelectedScenario ? chartData : {};
+  const certifiedHistory = hasLoadedSelectedScenario ? history : null;
+  const certifiedAlerts = hasLoadedSelectedScenario ? alerts : [];
   const chartDefinitions = React.useMemo(
     () => buildOccupancyChartDefinitions(clock),
     [clock],
   );
 
   const loadScenarios = React.useCallback(async (selectId?: string) => {
+    const requestSequence = ++metadataRequestSequenceRef.current;
     setLoadingScenarios(true);
+    setMetadataError("");
     try {
-      const response =
-        await apiFetch<OccupancyScenarioListResponse>("/occupancy/scenarios");
+      const response = await apiFetch<unknown>("/occupancy/scenarios");
       const nextScenarios = filterScopedApiRows(
-        normalizeScenarioList(response),
+        requireOccupancyScenarioRows(response),
         companyScopeId,
       );
 
+      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      setMetadataError("");
       setScenarios(nextScenarios);
       setSelectedId((current) => {
         const selectable = canManage
@@ -212,13 +239,22 @@ export function OccupancyScenarioDashboard() {
         );
       });
     } catch (error) {
-      toast.error(
+      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      const message =
         error instanceof Error
           ? error.message
-          : "Não foi possível carregar os cenários de ocupação.",
-      );
+          : "Não foi possível carregar os cenários de ocupação.";
+      setScenarios([]);
+      setSelectedId("");
+      setChartData({});
+      setHistory(null);
+      setAlerts([]);
+      setMetadataError(message);
+      toast.error(message);
     } finally {
-      setLoadingScenarios(false);
+      if (requestSequence === metadataRequestSequenceRef.current) {
+        setLoadingScenarios(false);
+      }
     }
   }, [canManage, companyScopeId]);
 
@@ -227,9 +263,15 @@ export function OccupancyScenarioDashboard() {
       scenario: OccupancyScenario,
       { force = false, silent = false }: LoadOptions = {},
     ) => {
-      if (!companyScopeId) {
-        setChartData({});
-        setLoadingData(false);
+      const requestedScopeKey = occupancyDataScopeKey(
+        companyScopeId,
+        scenario.id,
+      );
+      if (
+        !companyScopeId ||
+        scenario.company_id !== companyScopeId ||
+        activeDataScopeKeyRef.current !== requestedScopeKey
+      ) {
         return;
       }
 
@@ -242,23 +284,41 @@ export function OccupancyScenarioDashboard() {
       requestRef.current = controller;
       runningRef.current = true;
 
-      const silentLoad = silent || hasLoadedDataRef.current;
+      const sameScenarioLoaded =
+        hasLoadedDataRef.current &&
+        loadedDataScopeKeyRef.current === requestedScopeKey;
+      const silentLoad = sameScenarioLoaded && (silent || hasLoadedDataRef.current);
       if (silentLoad) setRefreshing(true);
       else setLoadingData(true);
 
       const now = new Date();
       const definitions = buildOccupancyChartDefinitions(now);
+      const isCurrentRequest = () =>
+        !controller.signal.aborted &&
+        requestRef.current === controller &&
+        activeDataScopeKeyRef.current === requestedScopeKey;
 
       try {
         const [historyResult, alertResult, chartEntries] = await Promise.all([
-          apiFetch<OccupancyScenarioHistoryResponse>(
+          apiFetch<unknown>(
             occupancyScenarioHistoryPath(scenario.id, now),
             { signal: controller.signal },
-          ).catch(() => null),
-          apiFetch<OccupancyAlertListResponse>(
+          ).then((response) =>
+            requireOccupancyHistoryResponse(response, scenario.id, {
+              expectedAreas: scenario.areas,
+              requestedAt: now,
+            }),
+          ),
+          apiFetch<unknown>(
             `/occupancy/scenarios/${scenario.id}/alerts?limit=12`,
             { signal: controller.signal },
-          ).catch(() => []),
+          ).then((response) =>
+            requireOccupancyAlertRows(
+              response,
+              scenario.id,
+              scenario.object_class,
+            ),
+          ),
           Promise.all(
             definitions.map(async (definition) => {
               try {
@@ -267,9 +327,14 @@ export function OccupancyScenarioDashboard() {
                     occupancyScenarioAggregatePath(scenario.id, definition),
                     { signal: controller.signal },
                   );
+                const rows = requireOccupancyAggregateRows(
+                  response,
+                  definition.granularity,
+                  scenario.id,
+                );
                 const state: OccupancyChartState = buildOccupancyChartState(
                   definition,
-                  response.data ?? [],
+                  rows,
                 );
 
                 return [definition.id, state] as const;
@@ -300,24 +365,29 @@ export function OccupancyScenarioDashboard() {
           ]),
         ) as Record<string, OccupancyChartState>;
 
+        if (!isCurrentRequest()) return;
         setChartData(nextChartData);
         setHistory(historyResult);
-        setAlerts(normalizeAlertList(alertResult));
+        setAlerts(alertResult);
+        setDataLoadError("");
         setClock(now);
         setLastUpdated(new Date());
         setHasLoadedData(true);
         hasLoadedDataRef.current = true;
+        loadedDataScopeKeyRef.current = requestedScopeKey;
+        setLoadedDataScopeKey(requestedScopeKey);
 
         if (chartEntries.some(([, state]) => state.error) && !silentLoad) {
           toast.error("Alguns períodos de ocupação não puderam ser carregados.");
         }
       } catch (error) {
-        if (!isAbortError(error)) {
-          toast.error(
+        if (!isAbortError(error) && isCurrentRequest()) {
+          const message =
             error instanceof Error
               ? error.message
-              : "Não foi possível carregar a ocupação.",
-          );
+              : "Não foi possível carregar a ocupação.";
+          setDataLoadError(message);
+          toast.error(message);
         }
       } finally {
         if (requestRef.current === controller) {
@@ -336,6 +406,26 @@ export function OccupancyScenarioDashboard() {
   }, [loadScenarios]);
 
   React.useEffect(() => {
+    activeDataScopeKeyRef.current = activeDataScopeKey;
+    requestRef.current?.abort();
+
+    if (loadedDataScopeKeyRef.current !== activeDataScopeKey) {
+      loadedDataScopeKeyRef.current = "";
+      hasLoadedDataRef.current = false;
+      setLoadedDataScopeKey("");
+      setHasLoadedData(false);
+      setChartData({});
+      setHistory(null);
+      setAlerts([]);
+      setDataLoadError("");
+      setLastUpdated(null);
+    }
+  }, [activeDataScopeKey]);
+
+  React.useEffect(() => {
+    requestRef.current?.abort();
+    setMetadataError("");
+    setDataLoadError("");
     setScenarios([]);
     setSelectedId("");
     setChartData({});
@@ -344,6 +434,8 @@ export function OccupancyScenarioDashboard() {
     setMetricVisibility(readOccupancyMetricVisibility(companyScopeId));
     setHasLoadedData(false);
     hasLoadedDataRef.current = false;
+    setLoadedDataScopeKey("");
+    loadedDataScopeKeyRef.current = "";
   }, [companyScopeId]);
 
   React.useEffect(() => {
@@ -352,6 +444,7 @@ export function OccupancyScenarioDashboard() {
 
   React.useEffect(() => {
     if (!selectedScenario) {
+      setDataLoadError("");
       setChartData({});
       setHistory(null);
       setAlerts([]);
@@ -399,29 +492,40 @@ export function OccupancyScenarioDashboard() {
   }, [loadScenarioData, selectedScenario]);
 
   const initialLoading =
-    (loadingScenarios || loadingData) && !hasLoadedData;
-  const currentTotal = history?.total ?? 0;
-  const activeAreas = history?.areas?.filter((area) => area.value > 0).length ?? 0;
+    Boolean(selectedScenario) && !hasLoadedSelectedScenario
+      ? true
+      : (loadingScenarios || loadingData) && !hasLoadedSelectedScenario;
+  const currentTotal = certifiedHistory?.total ?? null;
+  const activeAreas =
+    certifiedHistory?.areas?.filter((area) => area.value > 0).length ?? null;
   const todayMetric = buildPeriodMetric(
-    chartData.occupancy_chart_hour?.points ?? [],
+    certifiedChartData.occupancy_chart_hour?.points ?? [],
   );
-  const thresholdStatus = selectedScenario
+  const occupancyCertificationError =
+    metadataError ||
+    dataLoadError ||
+    Object.values(certifiedChartData).find((state) => state.error)?.error;
+  const thresholdStatus = selectedScenario && currentTotal !== null
     ? occupancyThresholdStatus(currentTotal, selectedScenario)
     : null;
 
   const metricCards = [
     {
       id: "occupancy_current_total",
-      label: "Ocupação agora",
+      label: "Último snapshot",
       defaultSize: "compact" as const,
       node: (
         <MetricCard
           icon={UsersRound}
-          label="Ocupação agora"
+          label="Último snapshot"
           value={currentTotal}
           loading={initialLoading}
           tone={thresholdStatus?.tone ?? "primary"}
-          description={selectedScenario?.name ?? "Cenário obrigatório"}
+          description={
+            certifiedHistory?.as_of
+              ? `fonte em ${formatDateTime(certifiedHistory.as_of)}`
+              : selectedScenario?.name ?? "Cenário obrigatório"
+          }
         />
       ),
     },
@@ -490,9 +594,9 @@ export function OccupancyScenarioDashboard() {
         <MetricCard
           icon={Bell}
           label="Alertas"
-          value={alerts.length}
+          value={certifiedAlerts.length}
           loading={initialLoading}
-          tone={alerts.length ? "warning" : "slate"}
+          tone={certifiedAlerts.length ? "warning" : "slate"}
           description={thresholdStatus?.label ?? "limites do cenário"}
         />
       ),
@@ -526,7 +630,7 @@ export function OccupancyScenarioDashboard() {
         loading={initialLoading}
         metricVisibility={metricVisibility}
         scenario={selectedScenario}
-        state={chartData[definition.id]}
+        state={certifiedChartData[definition.id]}
       />
     ) : (
       <EmptyOccupancyCard title={definition.label} />
@@ -543,7 +647,7 @@ export function OccupancyScenarioDashboard() {
           standardHeightClassName: "row-span-3 sm:row-span-2",
           node: (
             <OccupancyScenarioDetailCard
-              history={history}
+              history={certifiedHistory}
               scenario={selectedScenario}
             />
           ),
@@ -553,7 +657,12 @@ export function OccupancyScenarioDashboard() {
           label: "Histórico de alertas",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
-          node: <OccupancyAlertsCard alerts={alerts} loading={initialLoading} />,
+            node: (
+              <OccupancyAlertsCard
+                alerts={certifiedAlerts}
+                loading={initialLoading}
+              />
+            ),
         },
       ]
     : [];
@@ -567,6 +676,11 @@ export function OccupancyScenarioDashboard() {
       )}
     >
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
+      {occupancyCertificationError && !initialLoading ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
+          Dados de ocupação não certificados: {occupancyCertificationError}
+        </div>
+      ) : null}
 
       {monitorMode ? (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
@@ -702,7 +816,7 @@ export function OccupancyScenarioDashboard() {
       </div>
       )}
 
-      {visibleScenarios.length ? (
+      {visibleScenarios.length && !occupancyCertificationError ? (
         <CardLayout
           menuKey="occupancy"
           monitorMode={monitorMode}
@@ -738,7 +852,7 @@ function MetricCard({
     | "indigo"
     | "slate"
     | "warning";
-  value: number;
+  value: number | null;
 }) {
   const toneClass = {
     average:
@@ -832,10 +946,10 @@ function OccupancyChartCard({
     (scenario.max_total !== null && scenario.max_total !== undefined);
   const hasData = points.some(
     (point) =>
-      (metricVisibility.average && point.average !== 0) ||
-      (metricVisibility.minimum && point.minimum !== 0) ||
-      (metricVisibility.peak && point.peak !== 0) ||
-      point.current !== undefined,
+      (metricVisibility.average && point.average !== null) ||
+      (metricVisibility.minimum && point.minimum !== null) ||
+      (metricVisibility.peak && point.peak !== null) ||
+      point.current !== null,
   ) || hasReferenceLimit;
 
   return (
@@ -1089,7 +1203,7 @@ function EmptyChartState({ text }: { text: string }) {
 
 function buildOccupancyChartDefinitions(now: Date): OccupancyChartDefinition[] {
   const minuteEnd = addMinutes(startOfMinute(now), 1);
-  const hourEnd = addHours(startOfHour(now), 1);
+  const hourEnd = endOfAggregateBucket(startOfHour(now), "hour");
   const todayStart = startOfDay(now);
   const currentWeekStart = startOfWeek(now);
   const currentMonthStart = startOfMonth(now);
@@ -1173,67 +1287,26 @@ function buildOccupancyPoints(
   const totals = aggregateOccupancyRowsByBucket(rows, definition.granularity);
 
   return listBucketStarts(definition).map((bucketStart) => {
-    const key = bucketKeyForGranularity(bucketStart, definition.granularity);
+    const key = occupancyAggregateBucketKey(
+      bucketStart,
+      definition.granularity,
+    );
     const total = totals.get(key);
+    if (!total) {
+      throw new Error(
+        `A API não retornou o bucket de ocupação ${bucketStart.toISOString()}; ausência não é ocupação zero.`,
+      );
+    }
 
     return {
       bucket: bucketStart.toISOString(),
       label: bucketLabel(bucketStart, definition.granularity),
-      average: total?.average ?? 0,
-      minimum: total?.minimum ?? 0,
-      peak: total?.peak ?? 0,
+      average: total.average,
+      current: null,
+      minimum: total.minimum,
+      peak: total.peak,
     };
   });
-}
-
-function aggregateOccupancyRowsByBucket(
-  rows: OccupancyScenarioBucketRow[],
-  granularity: OccupancyChartDefinition["granularity"],
-) {
-  const totals = new Map<
-    number,
-    { average: number; minimum: number; peak: number; scenarioTotal: boolean }
-  >();
-
-  rows.forEach((row) => {
-    const date = parseAggregateBucket(row.bucket, granularity);
-    if (!date) return;
-
-    const key = bucketKeyForGranularity(date, granularity);
-    const existing = totals.get(key);
-    const hasScenarioTotal =
-      row.scenario_total_avg !== undefined ||
-      row.scenario_total_min !== undefined ||
-      row.scenario_total_max !== undefined;
-    const next = {
-      average: safeNumber(row.scenario_total_avg ?? row.area_avg),
-      minimum: safeNumber(row.scenario_total_min ?? row.area_min),
-      peak: safeNumber(row.scenario_total_max ?? row.area_max),
-      scenarioTotal: hasScenarioTotal,
-    };
-
-    if (!existing) {
-      totals.set(key, next);
-      return;
-    }
-
-    if (existing.scenarioTotal || hasScenarioTotal) {
-      totals.set(key, {
-        ...next,
-        scenarioTotal: true,
-      });
-      return;
-    }
-
-    totals.set(key, {
-      average: existing.average + next.average,
-      minimum: existing.minimum + next.minimum,
-      peak: existing.peak + next.peak,
-      scenarioTotal: false,
-    });
-  });
-
-  return totals;
 }
 
 function buildEmptyOccupancyPoints(
@@ -1242,9 +1315,10 @@ function buildEmptyOccupancyPoints(
   return listBucketStarts(definition).map((bucketStart) => ({
     bucket: bucketStart.toISOString(),
     label: bucketLabel(bucketStart, definition.granularity),
-    average: 0,
-    minimum: 0,
-    peak: 0,
+    average: null,
+    current: null,
+    minimum: null,
+    peak: null,
   }));
 }
 
@@ -1265,25 +1339,11 @@ function attachCurrentToLatestPoint(
 }
 
 function buildPeriodMetric(points: OccupancyPoint[]): PeriodMetric {
-  const populated = points.filter(
-    (point) => point.average !== 0 || point.minimum !== 0 || point.peak !== 0,
-  );
-
-  if (!populated.length) {
-    return {
-      average: 0,
-      minimum: 0,
-      peak: 0,
-    };
-  }
-
+  const metric = summarizeOccupancyMetrics(points);
   return {
-    average: roundValue(
-      populated.reduce((sum, point) => sum + point.average, 0) /
-        populated.length,
-    ),
-    minimum: Math.min(...populated.map((point) => point.minimum)),
-    peak: Math.max(...populated.map((point) => point.peak)),
+    average: metric.average,
+    minimum: metric.minimum,
+    peak: metric.peak,
   };
 }
 
@@ -1347,9 +1407,13 @@ function buildOccupancyChartOption(
         ]
       : []),
   ];
-  const rangeBaseValues = points.map((point) => Math.max(0, point.minimum));
+  const rangeBaseValues = points.map((point) =>
+    point.minimum === null ? null : Math.max(0, point.minimum),
+  );
   const rangeSpanValues = points.map((point) =>
-    Math.max(0, point.peak - Math.max(0, point.minimum)),
+    point.minimum === null || point.peak === null
+      ? null
+      : Math.max(0, point.peak - Math.max(0, point.minimum)),
   );
 
   return {
@@ -1574,7 +1638,7 @@ function formatOccupancyChartTooltip(
 
   const rows = [
     `<strong>${escapeHtml(point.label)}</strong>`,
-    point.current === undefined
+    point.current === null
       ? undefined
       : `Atual: ${formatOccupancyValue(point.current)}`,
     metricVisibility.average
@@ -1645,21 +1709,6 @@ function listBucketStarts(definition: OccupancyChartDefinition) {
   return starts;
 }
 
-function normalizeScenarioList(response: OccupancyScenarioListResponse) {
-  const scenarios = Array.isArray(response) ? response : response.data ?? [];
-  return scenarios.map((scenario) => ({
-    ...scenario,
-    active: scenario.active ?? true,
-    areas: scenario.areas ?? [],
-    object_class: scenario.object_class || "person",
-  }));
-}
-
-function normalizeAlertList(response: OccupancyAlertListResponse | null) {
-  if (!response) return [];
-  return Array.isArray(response) ? response : response.data ?? [];
-}
-
 function occupancyThresholdStatus(
   current: number,
   scenario: OccupancyScenario,
@@ -1690,6 +1739,14 @@ function occupancyThresholdStatus(
 
 function thresholdLabel(value: number | null | undefined) {
   return value === null || value === undefined ? "Sem limite" : formatOccupancyValue(value);
+}
+
+function occupancyDataScopeKey(
+  companyScopeId?: string | null,
+  scenarioId?: string | null,
+) {
+  if (!companyScopeId || !scenarioId) return "";
+  return JSON.stringify([companyScopeId, scenarioId]);
 }
 
 function readOccupancyMetricVisibility(
@@ -1778,31 +1835,10 @@ function addGranularity(
   granularity: OccupancyChartDefinition["granularity"],
 ) {
   if (granularity === "minute") return addMinutes(date, 1);
-  if (granularity === "hour") return addHours(date, 1);
+  if (granularity === "hour") return endOfAggregateBucket(date, "hour");
   if (granularity === "day") return addDays(date, 1);
   if (granularity === "week") return addDays(date, 7);
   return addMonths(date, 1);
-}
-
-function bucketKeyForGranularity(
-  date: Date,
-  granularity: OccupancyChartDefinition["granularity"],
-) {
-  if (granularity === "minute") return startOfMinute(date).getTime();
-  if (granularity === "hour") return startOfHour(date).getTime();
-  if (granularity === "day") {
-    return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
-  }
-  if (granularity === "week") {
-    const weekStart = startOfWeek(date);
-    return Date.UTC(
-      weekStart.getFullYear(),
-      weekStart.getMonth(),
-      weekStart.getDate(),
-    );
-  }
-
-  return Date.UTC(date.getFullYear(), date.getMonth(), 1);
 }
 
 function bucketLabel(
@@ -1827,18 +1863,11 @@ function bucketLabel(
   }).format(date);
 }
 
-function safeNumber(value: number | null | undefined) {
-  return Number.isFinite(value) ? Number(value) : 0;
-}
-
-function roundValue(value: number) {
-  return Math.round(value * 10) / 10;
-}
-
 function formatOccupancyValue(value: number | null | undefined) {
+  if (value === null || value === undefined) return "—";
   return new Intl.NumberFormat("pt-BR", {
     maximumFractionDigits: 1,
-  }).format(value ?? 0);
+  }).format(value);
 }
 
 function weekOfMonthLabel(date: Date) {
@@ -1870,9 +1899,7 @@ function startOfMinute(date: Date) {
 }
 
 function startOfHour(date: Date) {
-  const next = new Date(date);
-  next.setMinutes(0, 0, 0);
-  return next;
+  return startOfAggregateBucket(date, "hour");
 }
 
 function startOfDay(date: Date) {
@@ -1895,10 +1922,6 @@ function startOfMonth(date: Date) {
 
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * MINUTE_MS);
-}
-
-function addHours(date: Date, hours: number) {
-  return new Date(date.getTime() + hours * HOUR_MS);
 }
 
 function addDays(date: Date, days: number) {

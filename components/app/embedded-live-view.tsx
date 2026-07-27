@@ -15,8 +15,15 @@ import { apiFetch } from "@/lib/api";
 import {
   aggregateBucketInRange,
   aggregateQueryIso,
-  parseAggregateBucket,
+  endOfAggregateBucket,
+  requireAggregateGranularity,
+  requireAggregateRows,
+  startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  reconcileAggregateRows,
+  rollupAggregateRows,
+} from "@/lib/aggregate-reconciliation";
 import { hasMasterAccess } from "@/lib/access";
 import {
   buildWorkerBackedLocationOptions,
@@ -34,19 +41,24 @@ import {
   filterScopedApiRows,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
+import {
+  requireCameraRows,
+  requireInfrastructureRelations,
+  requireLocationRows,
+  requireSubLocationRows,
+  requireWorkerRows,
+} from "@/lib/metadata-validation";
+import { requireScenarioRows } from "@/lib/scenario-validation";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
   AggregateGranularity,
-  Camera,
   Location,
   Scenario,
-  SubLocation,
   Worker,
 } from "@/lib/types";
 import { formatNumber, formatTime } from "@/lib/utils";
 import {
-  normalizeWorkerRows,
   partitionWorkersByCompanyScope,
   sortWorkersByActivity,
 } from "@/lib/worker-scope";
@@ -97,14 +109,6 @@ type EmbeddedWidgetState = {
   scenarioSeries?: ScenarioComparisonSeries[];
 };
 
-type AggregateIdentityTotal = {
-  cameraId: string;
-  lineCountId: string;
-  metricType: string;
-  objectClass: string;
-  total: number;
-};
-
 type AggregateDefinition = {
   granularity: AggregateGranularity;
   from: Date;
@@ -119,7 +123,6 @@ type ScopeComparisonOption = {
 
 const DEFAULT_METRIC_TYPE = "count";
 const REFRESH_SECONDS = 5;
-const RECENT_DAY_RECONCILIATION_COUNT = 3;
 
 const chartLabels: Record<ViewChart, string> = {
   "scenario-hour": "Cenários por período",
@@ -174,17 +177,27 @@ export function EmbeddedLiveView() {
     ],
   );
   const multiWidgetMode = Boolean(widgetsParam);
+  const viewIdentityKey = React.useMemo(
+    () => JSON.stringify([companyScopeId ?? "", widgetConfigs]),
+    [companyScopeId, widgetConfigs],
+  );
   const [widgetStates, setWidgetStates] = React.useState<EmbeddedWidgetState[]>(
     [],
   );
+  const [loadedViewIdentityKey, setLoadedViewIdentityKey] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
+  const requestSequenceRef = React.useRef(0);
+  const requestRunningRef = React.useRef(false);
 
   const load = React.useCallback(async () => {
+    const requestSequence = ++requestSequenceRef.current;
+    requestRunningRef.current = true;
     if (hasMasterAccess(user) && !companyScopeId) {
       setError("Empresa não definida para esta visão.");
       setLoading(false);
+      requestRunningRef.current = false;
       return;
     }
 
@@ -193,6 +206,8 @@ export function EmbeddedLiveView() {
 
     try {
       const now = new Date();
+      const liveHourDefinition = buildAggregateDefinition(now, "hour");
+      const liveMinuteDefinition = buildAggregateDefinition(now, "minute");
       const [
         scenarioRows,
         cameraRows,
@@ -202,19 +217,25 @@ export function EmbeddedLiveView() {
         minuteRows,
       ] =
         await Promise.all([
-          apiFetch<Scenario[]>("/scenarios"),
-          apiFetch<Camera[]>("/cameras").catch(() => []),
-          apiFetch<Location[]>("/locations").catch(() => []),
-          fetchEmbeddedWorkers(companyScopeId).catch(() => []),
-          fetchAggregateRows(buildAggregateDefinition(now, "hour")),
-          fetchAggregateRows(buildAggregateDefinition(now, "minute")),
+          apiFetch<unknown>("/scenarios"),
+          apiFetch<unknown>("/cameras"),
+          apiFetch<unknown>("/locations"),
+          fetchEmbeddedWorkers(companyScopeId),
+          fetchAggregateRows(liveHourDefinition),
+          fetchAggregateRows(liveMinuteDefinition),
         ]);
       const scopedScenarios = filterScopedApiRows(
-        scenarioRows,
+        requireScenarioRows(scenarioRows),
         companyScopeId,
       ).filter((scenario) => scenario.active !== false);
-      const scopedCameras = filterScopedApiRows(cameraRows, companyScopeId);
-      const scopedLocations = filterScopedApiRows(locationRows, companyScopeId);
+      const scopedCameras = filterScopedApiRows(
+        requireCameraRows(cameraRows),
+        companyScopeId,
+      );
+      const scopedLocations = filterScopedApiRows(
+        requireLocationRows(locationRows),
+        companyScopeId,
+      );
       const liveHourRows = hydrateCurrentHourRows(hourRows, minuteRows, now);
       const needsLocation = widgetConfigs.some(
         (widget) => widget.chart === "today-location",
@@ -231,16 +252,24 @@ export function EmbeddedLiveView() {
             workers: workerRows,
           })
         : [];
+      const scopedSubLocations = needsSubLocation
+        ? filterScopedApiRows(
+            await fetchSubLocations(scopedLocations),
+            companyScopeId,
+          )
+        : undefined;
+      requireInfrastructureRelations({
+        cameras: scopedCameras,
+        locations: scopedLocations,
+        subLocations: scopedSubLocations,
+      });
       const subLocationOptions = needsSubLocation
         ? buildSubLocationCameraOptions({
             cameras: scopedCameras,
             groups: readCameraGroups(companyScopeId),
             locations: scopedLocations,
             manager: false,
-            subLocations: filterScopedApiRows(
-              await fetchSubLocations(scopedLocations),
-              companyScopeId,
-            ),
+            subLocations: scopedSubLocations ?? [],
           })
         : [];
       const scenarioRowsByConfigId = new Map(
@@ -249,10 +278,16 @@ export function EmbeddedLiveView() {
             .filter((config) => config.chart === "scenario-hour")
             .map(async (config) => [
               config.id,
-              await fetchScenarioComparisonRows(config, now),
+              await fetchScenarioComparisonRows(
+                config,
+                now,
+                liveHourRows,
+                liveHourDefinition,
+              ),
             ] as const),
         ),
       );
+      if (requestSequence !== requestSequenceRef.current) return;
 
       setWidgetStates(
         widgetConfigs.map((config) =>
@@ -267,17 +302,32 @@ export function EmbeddedLiveView() {
           }),
         ),
       );
+      setLoadedViewIdentityKey(viewIdentityKey);
       setLastUpdated(now);
     } catch (loadError) {
+      if (requestSequence !== requestSequenceRef.current) return;
       setError(
         loadError instanceof Error
           ? loadError.message
           : "Não foi possível carregar a visão.",
       );
     } finally {
-      setLoading(false);
+      if (requestSequence === requestSequenceRef.current) {
+        setLoading(false);
+        requestRunningRef.current = false;
+      }
     }
-  }, [companyScopeId, user, widgetConfigs]);
+  }, [companyScopeId, user, viewIdentityKey, widgetConfigs]);
+
+  React.useEffect(() => {
+    requestSequenceRef.current += 1;
+    requestRunningRef.current = false;
+    setWidgetStates([]);
+    setLoadedViewIdentityKey("");
+    setLastUpdated(null);
+    setError("");
+    setLoading(true);
+  }, [viewIdentityKey]);
 
   React.useEffect(() => {
     load();
@@ -285,7 +335,10 @@ export function EmbeddedLiveView() {
 
   React.useEffect(() => {
     const interval = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
+      if (
+        document.visibilityState === "visible" &&
+        !requestRunningRef.current
+      ) {
         void load();
       }
     }, REFRESH_SECONDS * 1000);
@@ -293,8 +346,10 @@ export function EmbeddedLiveView() {
     return () => window.clearInterval(interval);
   }, [load]);
 
-  const visibleStates = widgetStates.length
-    ? widgetStates
+  const currentWidgetStates =
+    loadedViewIdentityKey === viewIdentityKey ? widgetStates : [];
+  const visibleStates = currentWidgetStates.length
+    ? currentWidgetStates
     : widgetConfigs.map((config) => ({ config, error: "", points: [] }));
   const firstState = visibleStates[0];
 
@@ -329,7 +384,7 @@ export function EmbeddedLiveView() {
       ) : null}
 
       <div className="min-h-0 flex-1 p-3 pt-1">
-        {loading && !widgetStates.length ? (
+        {loading && !currentWidgetStates.length ? (
           <Skeleton className="h-full w-full" />
         ) : error ? (
           <EmbeddedState text={error} />
@@ -596,7 +651,7 @@ function buildAggregateDefinition(
     };
   }
 
-  const end = addHours(startOfHour(now), 1);
+  const end = endOfAggregateBucket(startOfHour(now), "hour");
   return {
     granularity,
     from: startOfDay(now),
@@ -616,193 +671,145 @@ async function fetchAggregateRows(
   const response = await apiFetch<AggregateEventsResponse>(
     `/analytics/aggregate?${params.toString()}`,
   );
+  requireAggregateGranularity(response.granularity, definition.granularity);
 
-  return response.data ?? [];
+  return requireAggregateRows(
+    response.data,
+    definition.granularity,
+    DEFAULT_METRIC_TYPE,
+  );
 }
 
 async function fetchScenarioComparisonRows(
   config: EmbeddedWidgetConfig,
   now: Date,
+  liveHourRows: AggregateEventRow[],
+  liveHourDefinition: AggregateDefinition,
 ) {
   const definition = buildScenarioComparisonDefinition(config, now);
-  let rows = await fetchAggregateRows(definition);
+  const currentHourEnd = endOfAggregateBucket(startOfHour(now), "hour");
+  const hourlyDefinition = {
+    from: startOfHour(definition.from),
+    granularity: "hour" as const,
+    to: new Date(
+      Math.min(
+        alignEndToGranularity(definition.to, "hour").getTime(),
+        currentHourEnd.getTime(),
+      ),
+    ),
+  };
+  if (hourlyDefinition.from >= hourlyDefinition.to) return [];
 
-  if (definition.granularity === "hour") {
-    const currentHour = currentOpenBucket("hour", now);
-    if (
-      rangesOverlap(
-        definition.from,
-        definition.to,
-        currentHour.from,
-        currentHour.to,
-      )
-    ) {
-      const minuteRows = await fetchAggregateRows(
-        {
-          granularity: "minute",
-          from: currentHour.from,
-          to: addMinutes(startOfMinute(now), 1),
-        },
-      );
-      rows = replaceOpenBucketRowsFromSource(
-        rows,
-        "hour",
-        currentHour.from,
-        minuteRows,
-        "minute",
-        currentHour.from,
-        currentHour.to,
-      );
-    }
+  const liveSourceCoversRange =
+    liveHourDefinition.from <= hourlyDefinition.from &&
+    liveHourDefinition.to >= hourlyDefinition.to;
+  let hourlyRows = liveSourceCoversRange
+    ? []
+    : await fetchAggregateRows(hourlyDefinition);
+  const overlapFrom = new Date(
+    Math.max(
+      hourlyDefinition.from.getTime(),
+      liveHourDefinition.from.getTime(),
+    ),
+  );
+  const overlapTo = new Date(
+    Math.min(
+      hourlyDefinition.to.getTime(),
+      liveHourDefinition.to.getTime(),
+    ),
+  );
 
-    return rows;
+  if (overlapFrom < overlapTo) {
+    hourlyRows = reconcileAggregateRows(
+      hourlyRows,
+      "hour",
+      liveHourRows,
+      "hour",
+      overlapFrom,
+      overlapTo,
+    );
   }
 
-  const recentDayStart = addDays(
-    startOfDay(now),
-    1 - RECENT_DAY_RECONCILIATION_COUNT,
-  );
-  const recentDayEnd = addHours(startOfHour(now), 1);
-  if (
-    !rangesOverlap(
-      definition.from,
-      definition.to,
-      recentDayStart,
-      recentDayEnd,
-    )
-  ) {
-    return rows;
-  }
-
-  const affectedBucketStarts = uniqueDateStarts(
-    recentDayStarts(now)
-      .map((dayStart) =>
-        alignToGranularity(dayStart, definition.granularity),
-      )
-      .filter((bucketStart) => {
-        const bucketEnd = addGranularity(
-          bucketStart,
-          definition.granularity,
-        );
-        return rangesOverlap(
-          definition.from,
-          definition.to,
-          bucketStart,
-          bucketEnd,
-        );
-      }),
-  );
-  if (!affectedBucketStarts.length) return rows;
-
-  const dailySourceFrom = affectedBucketStarts[0];
-  const dailySourceTo = affectedBucketStarts.reduce(
-    (latest, bucketStart) => {
-      const bucketEnd = addGranularity(
-        bucketStart,
-        definition.granularity,
-      );
-      return bucketEnd > latest ? bucketEnd : latest;
-    },
-    addGranularity(affectedBucketStarts[0], definition.granularity),
-  );
-  let dailyRows =
-    definition.granularity === "day"
-      ? rows
-      : await fetchAggregateRows(
-          {
-            granularity: "day",
-            from: dailySourceFrom,
-            to: dailySourceTo,
-          },
-        );
-  const hourlyFrom = new Date(
-    Math.max(dailySourceFrom.getTime(), recentDayStart.getTime()),
-  );
-  const hourlyTo = new Date(
-    Math.min(dailySourceTo.getTime(), recentDayEnd.getTime()),
-  );
-  let recentHourRows = await fetchAggregateRows({
-    granularity: "hour",
-    from: hourlyFrom,
-    to: hourlyTo,
-  });
-  const currentHour = currentOpenBucket("hour", now);
-  if (
-    rangesOverlap(hourlyFrom, hourlyTo, currentHour.from, currentHour.to)
-  ) {
-    const minuteRows = await fetchAggregateRows(
-      {
+  const boundaryRanges = embeddedPartialHourRanges(definition, now);
+  const boundaryEntries = await Promise.all(
+    boundaryRanges.map(async (range) => ({
+      range,
+      rows: await fetchAggregateRows({
+        from: range.from,
         granularity: "minute",
-        from: currentHour.from,
-        to: addMinutes(startOfMinute(now), 1),
-      },
-    );
-    recentHourRows = replaceOpenBucketRowsFromSource(
-      recentHourRows,
+        to: range.to,
+      }),
+    })),
+  );
+  boundaryEntries.forEach(({ range, rows }) => {
+    hourlyRows = reconcileAggregateRows(
+      hourlyRows,
       "hour",
-      currentHour.from,
-      minuteRows,
+      rows,
       "minute",
-      currentHour.from,
-      currentHour.to,
+      range.from,
+      range.to,
     );
+  });
+
+  return rollupAggregateRows(
+    hourlyRows,
+    "hour",
+    definition.granularity,
+    definition.from,
+    definition.to,
+  );
+}
+
+function embeddedPartialHourRanges(
+  definition: AggregateDefinition,
+  now: Date,
+) {
+  const ranges = new Map<
+    number,
+    { from: Date; to: Date }
+  >();
+  const firstHourStart = startOfHour(definition.from);
+  const firstHourEnd = endOfAggregateBucket(firstHourStart, "hour");
+  if (firstHourStart < definition.from) {
+    ranges.set(firstHourStart.getTime(), {
+      from: definition.from,
+      to: new Date(
+        Math.min(firstHourEnd.getTime(), definition.to.getTime()),
+      ),
+    });
   }
 
-  recentDayStarts(now).forEach((dayStart) => {
-    const dayEnd = addDays(dayStart, 1);
-    if (!rangesOverlap(dailySourceFrom, dailySourceTo, dayStart, dayEnd)) return;
-    dailyRows = replaceOpenBucketRowsFromSource(
-      dailyRows,
-      "day",
-      dayStart,
-      recentHourRows,
-      "hour",
-      dayStart,
-      dayEnd,
+  const lastHourStart = startOfHour(definition.to);
+  const currentHourStart = startOfHour(now);
+  const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
+  const currentOpenHourAlreadyCanonical =
+    lastHourStart.getTime() === currentHourStart.getTime() &&
+    definition.from <= lastHourStart &&
+    definition.to <= currentMinuteEnd;
+  if (
+    lastHourStart < definition.to &&
+    !currentOpenHourAlreadyCanonical
+  ) {
+    const existing = ranges.get(lastHourStart.getTime());
+    const from = new Date(
+      Math.max(lastHourStart.getTime(), definition.from.getTime()),
     );
-  });
+    ranges.set(lastHourStart.getTime(), {
+      from: existing
+        ? new Date(Math.min(existing.from.getTime(), from.getTime()))
+        : from,
+      to: definition.to,
+    });
+  }
 
-  if (definition.granularity === "day") return dailyRows;
-
-  affectedBucketStarts.forEach((bucketStart) => {
-    const bucketEnd = addGranularity(bucketStart, definition.granularity);
-    rows = replaceOpenBucketRowsFromSource(
-      rows,
-      definition.granularity,
-      bucketStart,
-      dailyRows,
-      "day",
-      bucketStart,
-      bucketEnd,
-    );
-  });
-
-  return rows;
-}
-
-function recentDayStarts(now: Date) {
-  const firstDay = addDays(
-    startOfDay(now),
-    1 - RECENT_DAY_RECONCILIATION_COUNT,
-  );
-  return Array.from(
-    { length: RECENT_DAY_RECONCILIATION_COUNT },
-    (_, index) => addDays(firstDay, index),
-  );
-}
-
-function uniqueDateStarts(dates: Date[]) {
-  return Array.from(
-    new Map(dates.map((date) => [date.getTime(), date] as const)).values(),
-  ).sort((left, right) => left.getTime() - right.getTime());
+  return Array.from(ranges.values()).filter((range) => range.from < range.to);
 }
 
 async function fetchEmbeddedWorkers(
   companyId?: string | null,
 ): Promise<Worker[]> {
-  const rows = await apiFetch<unknown>("/workers").then((response) =>
-    normalizeWorkerRows(response),
-  );
+  const rows = await apiFetch<unknown>("/workers").then(requireWorkerRows);
   const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
   return sortWorkersByActivity(scopedRows);
 }
@@ -810,13 +817,13 @@ async function fetchEmbeddedWorkers(
 async function fetchSubLocations(locations: Location[]) {
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<SubLocation[]>(`/locations/${location.id}/sub-locations`).catch(
-        () => [],
+      apiFetch<unknown>(`/locations/${location.id}/sub-locations`).then(
+        requireSubLocationRows,
       ),
     ),
   );
 
-  return rows.flat();
+  return requireSubLocationRows(rows.flat());
 }
 
 function hydrateCurrentHourRows(
@@ -825,107 +832,16 @@ function hydrateCurrentHourRows(
   now: Date,
 ) {
   const currentHourStart = startOfHour(now);
-  const nextHourStart = addHours(currentHourStart, 1);
-  const currentHourTime = currentHourStart.getTime();
-  const stableRows = hourRows.filter((row) => {
-    const bucket = parseAggregateBucket(row.bucket, "hour");
-    return !bucket || bucket.getTime() !== currentHourTime;
-  });
-  const currentRows = aggregateRowsIntoBucket(
+  const nextHourStart = endOfAggregateBucket(currentHourStart, "hour");
+
+  return reconcileAggregateRows(
+    hourRows,
+    "hour",
     minuteRows,
     "minute",
     currentHourStart,
     nextHourStart,
   );
-
-  return [...stableRows, ...currentRows];
-}
-
-function replaceOpenBucketRowsFromSource(
-  rows: AggregateEventRow[],
-  targetGranularity: AggregateGranularity,
-  bucketStart: Date,
-  sourceRows: AggregateEventRow[],
-  sourceGranularity: AggregateGranularity,
-  sourceFrom: Date,
-  sourceTo: Date,
-) {
-  const targetKey = bucketKeyForGranularity(bucketStart, targetGranularity);
-  const replacementRows = aggregateRowsIntoBucket(
-    sourceRows,
-    sourceGranularity,
-    sourceFrom,
-    sourceTo,
-  ).map((row) => ({
-    ...row,
-    bucket: bucketStart.toISOString(),
-  }));
-
-  return [
-    ...rows.filter((row) => {
-      const rowDate = parseAggregateBucket(row.bucket, targetGranularity);
-      if (!rowDate) return true;
-      return bucketKeyForGranularity(rowDate, targetGranularity) !== targetKey;
-    }),
-    ...replacementRows,
-  ];
-}
-
-function aggregateRowsIntoBucket(
-  rows: AggregateEventRow[],
-  sourceGranularity: AggregateGranularity,
-  from: Date,
-  to: Date,
-) {
-  const totals = new Map<string, AggregateIdentityTotal>();
-
-  rows.forEach((row) => {
-    if (!aggregateBucketInRange(row.bucket, sourceGranularity, from, to)) {
-      return;
-    }
-
-    const identity = rowIdentity(row);
-    const key = rowIdentityKey(identity);
-    const current = totals.get(key) ?? { ...identity, total: 0 };
-    current.total += row.total ?? 0;
-    totals.set(key, current);
-  });
-
-  return Array.from(totals.values()).map((identity) =>
-    createAggregateRow(from, identity),
-  );
-}
-
-function rowIdentity(row: AggregateEventRow) {
-  return {
-    cameraId: row.camera_id ?? "",
-    lineCountId: row.line_count_id ?? "",
-    metricType: row.metric_type ?? DEFAULT_METRIC_TYPE,
-    objectClass: row.object_class ?? "",
-  };
-}
-
-function rowIdentityKey(identity: Omit<AggregateIdentityTotal, "total">) {
-  return [
-    identity.cameraId,
-    identity.lineCountId,
-    identity.metricType,
-    identity.objectClass,
-  ].join("|");
-}
-
-function createAggregateRow(
-  bucket: Date,
-  identity: AggregateIdentityTotal,
-): AggregateEventRow {
-  return {
-    bucket: bucket.toISOString(),
-    camera_id: identity.cameraId,
-    line_count_id: identity.lineCountId || undefined,
-    metric_type: identity.metricType || DEFAULT_METRIC_TYPE,
-    object_class: identity.objectClass || undefined,
-    total: identity.total,
-  };
 }
 
 function buildScenarioTodayComparisonPoints(
@@ -982,8 +898,8 @@ function buildScenarioComparisonDefinition(
 
   return {
     granularity: config.granularity,
-    from: alignToGranularity(range.from, config.granularity),
-    to: alignEndToGranularity(range.to, config.granularity),
+    from: range.from,
+    to: range.to,
   };
 }
 
@@ -999,19 +915,29 @@ function scenarioComparisonRange(config: EmbeddedWidgetConfig, now: Date) {
     return { from: addDays(todayStart, -1), to: todayStart };
   }
 
+  const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
   if (config.period === "last_24h") {
-    return { from: addHours(now, -24), to: now };
+    return {
+      from: addHours(currentMinuteEnd, -24),
+      to: currentMinuteEnd,
+    };
   }
 
   if (config.period === "last_7d") {
-    return { from: startOfDay(addDays(now, -6)), to: now };
+    return {
+      from: startOfDay(addDays(now, -6)),
+      to: currentMinuteEnd,
+    };
   }
 
   if (config.period === "last_30d") {
-    return { from: startOfDay(addDays(now, -29)), to: now };
+    return {
+      from: startOfDay(addDays(now, -29)),
+      to: currentMinuteEnd,
+    };
   }
 
-  return { from: startOfDay(now), to: now };
+  return { from: startOfDay(now), to: currentMinuteEnd };
 }
 
 function selectScenarioComparisonScenarios(
@@ -1054,13 +980,11 @@ function listBucketStarts(definition: AggregateDefinition) {
   const starts: Date[] = [];
   let cursor = alignToGranularity(definition.from, definition.granularity);
   const end = alignEndToGranularity(definition.to, definition.granularity);
-  let guard = 0;
 
-  while (cursor < end && guard < 1000) {
+  while (cursor < end) {
     const bucketStart = new Date(cursor);
     starts.push(bucketStart);
     cursor = addGranularity(bucketStart, definition.granularity);
-    guard += 1;
   }
 
   return starts;
@@ -1083,15 +1007,13 @@ function alignEndToGranularity(date: Date, granularity: AggregateGranularity) {
 
 function addGranularity(date: Date, granularity: AggregateGranularity) {
   if (granularity === "minute") return addMinutes(date, 1);
-  if (granularity === "hour") return addHours(date, 1);
+  if (granularity === "hour") {
+    return endOfAggregateBucket(date, "hour");
+  }
   if (granularity === "day") return addDays(date, 1);
   if (granularity === "week") return addDays(date, 7);
   if (granularity === "month") return addMonths(date, 1);
   return addDays(date, 1);
-}
-
-function bucketKeyForGranularity(date: Date, granularity: AggregateGranularity) {
-  return alignToGranularity(date, granularity).getTime();
 }
 
 function bucketLabel(date: Date, granularity: AggregateGranularity) {
@@ -1117,18 +1039,6 @@ function bucketLabel(date: Date, granularity: AggregateGranularity) {
     month: "short",
     year: "2-digit",
   }).format(date);
-}
-
-function currentOpenBucket(granularity: AggregateGranularity, now: Date) {
-  const from = alignToGranularity(now, granularity);
-  return {
-    from,
-    to: addGranularity(from, granularity),
-  };
-}
-
-function rangesOverlap(leftFrom: Date, leftTo: Date, rightFrom: Date, rightTo: Date) {
-  return leftFrom < rightTo && rightFrom < leftTo;
 }
 
 function parseIsoDate(value?: string) {
@@ -1482,9 +1392,7 @@ function startOfMinute(date: Date) {
 }
 
 function startOfHour(date: Date) {
-  const next = new Date(date);
-  next.setMinutes(0, 0, 0);
-  return next;
+  return startOfAggregateBucket(date, "hour");
 }
 
 function startOfDay(date: Date) {

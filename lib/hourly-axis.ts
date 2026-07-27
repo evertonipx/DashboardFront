@@ -25,7 +25,11 @@ export function buildFixedHourlyAxisValues(
   points.forEach((point) => {
     const bucket = new Date(point.bucket);
     if (Number.isNaN(bucket.getTime())) return;
-    totals.set(bucket.getHours(), finiteTotal(point.total));
+    const hour = bucket.getHours();
+    totals.set(
+      hour,
+      (totals.get(hour) ?? 0) + finiteTotal(point.total),
+    );
   });
 
   const normalizedThrough = Math.max(-1, Math.min(23, throughHour));

@@ -44,7 +44,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import {
   aggregateQueryIso,
-  parseAggregateBucket,
+  endOfAggregateBucket,
+  startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
   CAMERA_GROUPS_UPDATED_EVENT,
@@ -65,20 +66,37 @@ import {
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
-import { normalizeOccupancyRows } from "@/lib/occupancy-areas";
+import {
+  requireCameraRows,
+  requireInfrastructureRelations,
+  requireLocationRows,
+  requireSubLocationRows,
+} from "@/lib/metadata-validation";
+import {
+  aggregateOccupancyRowsByBucket,
+  occupancyAggregateBucketKey,
+  requireOccupancyAggregateRows,
+} from "@/lib/occupancy-aggregate-validation";
+import {
+  emptyOccupancyMetric,
+  summarizeOccupancyMetrics,
+} from "@/lib/occupancy-metrics";
+import {
+  requireOccupancyHistoryResponse,
+  requireOccupancyScenarioRows,
+  requireOccupancySnapshotRows,
+  type CertifiedOccupancyRow,
+} from "@/lib/occupancy-validation";
 import type {
   AggregateGranularity,
   Camera,
   Location,
-  OccupancyRow,
   OccupancyScenario,
   OccupancyScenarioAggregateResponse,
   OccupancyScenarioBucketRow,
-  OccupancyScenarioListResponse,
-  OccupancySnapshotsResponse,
   SubLocation,
 } from "@/lib/types";
-import { cn, formatTime } from "@/lib/utils";
+import { cn, formatDateTime, formatTime } from "@/lib/utils";
 
 type OccupancyReportScopeMode = "scenario" | "location" | "sub_location";
 
@@ -110,10 +128,10 @@ type OccupancyReportDefinition = {
 type OccupancyReportPoint = {
   bucket: string;
   label: string;
-  average: number;
-  current: number;
-  minimum: number;
-  peak: number;
+  average: number | null;
+  current: number | null;
+  minimum: number | null;
+  peak: number | null;
 };
 
 type OccupancyReportState = {
@@ -122,10 +140,15 @@ type OccupancyReportState = {
 };
 
 type OccupancyReportMetric = {
-  average: number;
-  current: number;
-  minimum: number;
-  peak: number;
+  average: number | null;
+  current: number | null;
+  minimum: number | null;
+  peak: number | null;
+};
+
+type CertifiedCurrentSnapshot = {
+  asOf: string;
+  total: number;
 };
 
 type OccupancyMetricVisibility = {
@@ -150,6 +173,7 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 const BUCKET_CONCURRENCY = 8;
+const REPORT_REFRESH_MS = 60_000;
 const DEFAULT_OBJECT_CLASS = "person";
 const OCCUPANCY_METRIC_VISIBILITY_KEY =
   "ipxdata.occupancy.metric-visibility.v1";
@@ -188,8 +212,14 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
   const [loadingScopes, setLoadingScopes] = React.useState(true);
   const [loadingCharts, setLoadingCharts] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
+  const [metadataError, setMetadataError] = React.useState("");
+  const [chartLoadError, setChartLoadError] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
+  const [currentSnapshot, setCurrentSnapshot] =
+    React.useState<CertifiedCurrentSnapshot | null>(null);
   const [clock, setClock] = React.useState(() => new Date());
+  const metadataRequestSequenceRef = React.useRef(0);
+  const chartRequestSequenceRef = React.useRef(0);
 
   const definitions = React.useMemo(
     () => buildOccupancyReportDefinitions(clock),
@@ -243,28 +273,47 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
     () => buildPeriodMetric(chartData.occupancy_report_hour?.points ?? []),
     [chartData],
   );
+  const occupancyCertificationError =
+    metadataError ||
+    chartLoadError ||
+    Object.values(chartData).find((state) => state.error)?.error;
 
   const loadScopes = React.useCallback(async () => {
+    const requestSequence = ++metadataRequestSequenceRef.current;
     setLoadingScopes(true);
+    setMetadataError("");
     try {
       const [scenarioResponse, cameraRows, locationRows] = await Promise.all([
-        apiFetch<OccupancyScenarioListResponse>("/occupancy/scenarios"),
-        apiFetch<Camera[]>("/cameras").catch(() => []),
-        apiFetch<Location[]>("/locations").catch(() => []),
+        apiFetch<unknown>("/occupancy/scenarios"),
+        apiFetch<unknown>("/cameras"),
+        apiFetch<unknown>("/locations"),
       ]);
-      const scopedCameras = filterScopedApiRows(cameraRows, companyScopeId);
-      const scopedLocations = filterScopedApiRows(locationRows, companyScopeId);
+      const scopedCameras = filterScopedApiRows(
+        requireCameraRows(cameraRows),
+        companyScopeId,
+      );
+      const scopedLocations = filterScopedApiRows(
+        requireLocationRows(locationRows),
+        companyScopeId,
+      );
       const subLocationRows = await fetchSubLocations(
         scopedLocations,
         companyScopeId,
       );
       const nextScenarios = filterScopedApiRows(
-        normalizeScenarioList(scenarioResponse),
+        requireOccupancyScenarioRows(scenarioResponse),
         companyScopeId,
       );
+      requireInfrastructureRelations({
+        cameras: scopedCameras,
+        locations: scopedLocations,
+        subLocations: subLocationRows,
+      });
       const visibleScenarios = manager
         ? nextScenarios
         : nextScenarios.filter((scenario) => scenario.active);
+      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      setMetadataError("");
       setScenarios(visibleScenarios);
       setCameras(scopedCameras);
       setLocations(scopedLocations);
@@ -297,18 +346,30 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
           : options[0]?.id ?? "";
       });
     } catch (error) {
-      toast.error(
+      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      const message =
         error instanceof Error
           ? error.message
-          : "Não foi possível carregar as visões de ocupação.",
-      );
+          : "Não foi possível carregar as visões de ocupação.";
+      setScenarios([]);
+      setCameras([]);
+      setLocations([]);
+      setSubLocations([]);
+      setSelectedId("");
+      setChartData({});
+      setCurrentSnapshot(null);
+      setMetadataError(message);
+      toast.error(message);
     } finally {
-      setLoadingScopes(false);
+      if (requestSequence === metadataRequestSequenceRef.current) {
+        setLoadingScopes(false);
+      }
     }
   }, [cameraGroups, companyScopeId, manager, scopeMode]);
 
   const loadCharts = React.useCallback(
     async (scope: OccupancyReportScope, silent = false) => {
+      const requestSequence = ++chartRequestSequenceRef.current;
       if (silent) setRefreshing(true);
       else setLoadingCharts(true);
 
@@ -321,8 +382,9 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
         : [];
 
       try {
-        const entries = await Promise.all(
-          [...currentDefinitions, ...previousDefinitions].map(async (definition) => {
+        const [entries, certifiedCurrentSnapshot] = await Promise.all([
+          Promise.all(
+            [...currentDefinitions, ...previousDefinitions].map(async (definition) => {
             try {
               const state = await loadOccupancyReportState(definition, scope);
               return [definition.id, state] as const;
@@ -338,21 +400,57 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
                 },
               ] as const;
             }
-          }),
-        );
+            }),
+          ),
+          scope.scenario
+            ? apiFetch<unknown>(
+                occupancyScenarioHistoryPath(scope.scenario.id, now),
+              ).then((response) => {
+                const history = requireOccupancyHistoryResponse(
+                  response,
+                  scope.scenario!.id,
+                  {
+                    expectedAreas: scope.scenario!.areas,
+                    requestedAt: now,
+                  },
+                );
+                return {
+                  asOf: history.as_of!,
+                  total: history.total,
+                };
+              })
+            : Promise.resolve(null),
+        ]);
 
-        setChartData(Object.fromEntries(entries));
+        if (requestSequence !== chartRequestSequenceRef.current) return;
+        const nextChartData = Object.fromEntries(entries) as Record<
+          string,
+          OccupancyReportState
+        >;
+        maskOpenBucketComparisons(
+          nextChartData,
+          currentDefinitions,
+          now,
+        );
+        setChartData(nextChartData);
+        setCurrentSnapshot(certifiedCurrentSnapshot);
+        setChartLoadError("");
         setClock(now);
         setLastUpdated(new Date());
       } catch (error) {
-        toast.error(
+        if (requestSequence !== chartRequestSequenceRef.current) return;
+        const message =
           error instanceof Error
             ? error.message
-            : "Não foi possível carregar os relatórios de ocupação.",
-        );
+            : "Não foi possível carregar os relatórios de ocupação.";
+        setChartLoadError(message);
+        setCurrentSnapshot(null);
+        toast.error(message);
       } finally {
-        setLoadingCharts(false);
-        setRefreshing(false);
+        if (requestSequence === chartRequestSequenceRef.current) {
+          setLoadingCharts(false);
+          setRefreshing(false);
+        }
       }
     },
     [intradayComparison, showPreviousPeriod],
@@ -363,11 +461,21 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
   }, [loadScopes]);
 
   React.useEffect(() => {
+    chartRequestSequenceRef.current += 1;
     const settings = loadLiveDashboardSettings(companyScopeId);
+    setMetadataError("");
+    setChartLoadError("");
+    setScenarios([]);
+    setCameras([]);
+    setLocations([]);
+    setSubLocations([]);
+    setSelectedId("");
     setShowPreviousPeriod(settings.showPreviousPeriod);
     setIntradayComparison(settings.intradayComparison);
     setMetricVisibility(readOccupancyMetricVisibility(companyScopeId));
     setChartData({});
+    setCurrentSnapshot(null);
+    setLastUpdated(null);
   }, [companyScopeId]);
 
   React.useEffect(() => {
@@ -402,11 +510,43 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
 
   React.useEffect(() => {
     if (!selectedScope) {
+      chartRequestSequenceRef.current += 1;
+      setChartLoadError("");
       setChartData({});
+      setCurrentSnapshot(null);
       return;
     }
 
     loadCharts(selectedScope);
+  }, [loadCharts, selectedScope]);
+
+  React.useEffect(() => {
+    if (!selectedScope) return;
+
+    let disposed = false;
+    let timeout: number | undefined;
+    const scheduleNextRefresh = () => {
+      timeout = window.setTimeout(async () => {
+        if (disposed) return;
+        if (document.visibilityState === "visible") {
+          await loadCharts(selectedScope, true);
+        }
+        scheduleNextRefresh();
+      }, REPORT_REFRESH_MS);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        loadCharts(selectedScope, true);
+      }
+    };
+
+    scheduleNextRefresh();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      disposed = true;
+      if (timeout) window.clearTimeout(timeout);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [loadCharts, selectedScope]);
 
   React.useEffect(() => {
@@ -432,9 +572,14 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
   const metricCards = [
     {
       icon: UsersRound,
-      label: "Atual",
-      value: todayMetric.current,
-      description: selectedScope?.name ?? "visão selecionada",
+      label: selectedScope?.scenario ? "Último snapshot" : "Atual",
+      value: selectedScope?.scenario
+        ? currentSnapshot?.total ?? null
+        : todayMetric.current,
+      description:
+        selectedScope?.scenario && currentSnapshot
+          ? `fonte em ${formatDateTime(currentSnapshot.asOf)}`
+          : selectedScope?.name ?? "visão selecionada",
       tone: "primary" as const,
     },
     ...(metricVisibility.average
@@ -481,6 +626,11 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
       )}
     >
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
+      {occupancyCertificationError ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
+          Dados de ocupação não certificados: {occupancyCertificationError}
+        </div>
+      ) : null}
 
       {monitorMode ? (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
@@ -617,7 +767,7 @@ export function OccupancyReportsDashboard({ manager = false }: { manager?: boole
       </div>
       )}
 
-      {scopeOptions.length ? (
+      {scopeOptions.length && !occupancyCertificationError ? (
         <>
           <div
             className={cn(
@@ -675,7 +825,7 @@ function MetricCard({
   label: string;
   loading: boolean;
   tone: "average" | "maximum" | "minimum" | "primary";
-  value: number;
+  value: number | null;
 }) {
   const toneClass = {
     average:
@@ -777,9 +927,21 @@ function OccupancyReportChartCard({
         scope?.scenario?.max_total !== undefined),
   );
   const hasData =
-    points.some((point) => point.average || point.current || point.peak) ||
+    points.some(
+      (point) =>
+        point.average !== null ||
+        point.current !== null ||
+        point.minimum !== null ||
+        point.peak !== null,
+    ) ||
     (showPreviousPeriod &&
-      previousPoints.some((point) => point.average || point.current || point.peak)) ||
+      previousPoints.some(
+        (point) =>
+          point.average !== null ||
+          point.current !== null ||
+          point.minimum !== null ||
+          point.peak !== null,
+      )) ||
     hasReferenceLimit;
 
   return (
@@ -940,7 +1102,7 @@ function ComparisonModeSelect({
 
 function buildOccupancyReportDefinitions(now: Date): OccupancyReportDefinition[] {
   const minuteEnd = addMinutes(startOfMinute(now), 1);
-  const hourEnd = addHours(startOfHour(now), 1);
+  const hourEnd = endOfAggregateBucket(startOfHour(now), "hour");
   const todayStart = startOfDay(now);
   const currentWeekStart = startOfWeek(now);
   const currentMonthStart = startOfMonth(now);
@@ -1015,9 +1177,14 @@ async function loadOccupancyReportState(
     const response = await apiFetch<OccupancyScenarioAggregateResponse>(
       occupancyScenarioAggregatePath(scope.scenario.id, definition),
     );
+    const rows = requireOccupancyAggregateRows(
+      response,
+      definition.granularity,
+      scope.scenario.id,
+    );
 
     return {
-      points: buildScenarioPoints(definition, response.data ?? []),
+      points: buildScenarioPoints(definition, rows),
     };
   }
 
@@ -1027,12 +1194,15 @@ async function loadOccupancyReportState(
     BUCKET_CONCURRENCY,
     async (bucketStart) => {
       const bucketEnd = addGranularity(bucketStart, definition.granularity);
-      const response = await apiFetch<OccupancySnapshotsResponse>(
+      const response = await apiFetch<unknown>(
         occupancyPath(bucketStart, bucketEnd > definition.to ? definition.to : bucketEnd),
       );
-      const rows = normalizeOccupancyRows(response).filter(
-        (row) => row.camera_id && scope.cameraIds.includes(row.camera_id),
-      );
+      const rows = requireOccupancySnapshotRows(response, {
+        expectedCameraIds: scope.cameraIds,
+        expectedObjectClass: DEFAULT_OBJECT_CLASS,
+        from: bucketStart,
+        to: bucketEnd > definition.to ? definition.to : bucketEnd,
+      });
       const metric = buildRowsMetric(rows);
 
       return {
@@ -1050,51 +1220,24 @@ function buildScenarioPoints(
   definition: OccupancyReportDefinition,
   rows: OccupancyScenarioBucketRow[],
 ) {
-  const totals = new Map<number, OccupancyReportMetric>();
-  const hasScenarioTotalByBucket = new Set<number>();
-
-  rows.forEach((row) => {
-    const date = parseAggregateBucket(row.bucket, definition.granularity);
-    if (!date) return;
-
-    const key = bucketKeyForGranularity(date, definition.granularity);
-    const existing = totals.get(key);
-    const hasScenarioTotal =
-      row.scenario_total_avg !== undefined ||
-      row.scenario_total_min !== undefined ||
-      row.scenario_total_max !== undefined;
-    const metric = {
-      average: safeNumber(row.scenario_total_avg ?? row.area_avg),
-      current: safeNumber(row.scenario_total_avg ?? row.area_avg),
-      minimum: safeNumber(row.scenario_total_min ?? row.area_min),
-      peak: safeNumber(row.scenario_total_max ?? row.area_max),
-    };
-
-    if (hasScenarioTotal) {
-      hasScenarioTotalByBucket.add(key);
-      totals.set(key, metric);
-      return;
-    }
-
-    if (!existing) {
-      totals.set(key, metric);
-      return;
-    }
-
-    if (hasScenarioTotalByBucket.has(key)) return;
-
-    totals.set(key, {
-      average: existing.average + metric.average,
-      current: existing.current + metric.current,
-      minimum: existing.minimum + metric.minimum,
-      peak: existing.peak + metric.peak,
-    });
-  });
+  const totals = aggregateOccupancyRowsByBucket(
+    rows,
+    definition.granularity,
+  );
 
   return listBucketStarts(definition).map((bucketStart) => {
-    const metric =
-      totals.get(bucketKeyForGranularity(bucketStart, definition.granularity)) ??
-      emptyMetric();
+    const total = totals.get(
+      occupancyAggregateBucketKey(bucketStart, definition.granularity),
+    );
+    if (!total) {
+      throw new Error(
+        `A API não retornou o bucket de ocupação ${bucketStart.toISOString()}; ausência não é ocupação zero.`,
+      );
+    }
+    const metric: OccupancyReportMetric = {
+      ...total,
+      current: null,
+    };
 
     return {
       bucket: bucketStart.toISOString(),
@@ -1104,31 +1247,24 @@ function buildScenarioPoints(
   });
 }
 
-function buildRowsMetric(rows: OccupancyRow[]): OccupancyReportMetric {
-  if (!rows.length) return emptyMetric();
+function buildRowsMetric(rows: CertifiedOccupancyRow[]): OccupancyReportMetric {
+  if (rows.length !== 1 || rows[0].area !== undefined) {
+    throw new Error(
+      "A API não retornou um total temporal certificado da câmera para este escopo; uma área isolada e mínimos ou máximos de múltiplas áreas/câmeras não podem representar o total.",
+    );
+  }
+  const row = rows[0];
 
   return {
-    average: roundValue(rows.reduce((sum, row) => sum + safeNumber(row.avg), 0)),
-    current: roundValue(
-      rows.reduce((sum, row) => sum + safeNumber(row.current_value), 0),
-    ),
-    minimum: roundValue(rows.reduce((sum, row) => sum + safeNumber(row.min), 0)),
-    peak: roundValue(rows.reduce((sum, row) => sum + safeNumber(row.peak), 0)),
+    average: roundValue(row.avg),
+    current: roundValue(row.current_value),
+    minimum: roundValue(row.min),
+    peak: roundValue(row.peak),
   };
 }
 
 function buildPeriodMetric(points: OccupancyReportPoint[]): OccupancyReportMetric {
-  const populated = points.filter((point) => point.average || point.current || point.peak);
-  if (!populated.length) return emptyMetric();
-
-  return {
-    average: roundValue(
-      populated.reduce((sum, point) => sum + point.average, 0) / populated.length,
-    ),
-    current: populated.at(-1)?.current ?? 0,
-    minimum: Math.min(...populated.map((point) => point.minimum)),
-    peak: Math.max(...populated.map((point) => point.peak)),
-  };
+  return summarizeOccupancyMetrics(points);
 }
 
 function buildOccupancyReportChartOption(
@@ -1145,23 +1281,37 @@ function buildOccupancyReportChartOption(
   const showPrevious = previousPoints.length > 0;
   const dense =
     definition.granularity === "minute" || definition.granularity === "hour";
-  const rangeBaseValues = points.map((point) => Math.max(0, point.minimum));
+  const rangeBaseValues = points.map((point) =>
+    point.minimum === null ? null : Math.max(0, point.minimum),
+  );
   const rangeSpanValues = points.map((point) =>
-    Math.max(0, point.peak - Math.max(0, point.minimum)),
+    point.minimum === null || point.peak === null
+      ? null
+      : Math.max(0, point.peak - Math.max(0, point.minimum)),
   );
-  const previousBaseValues = points.map((_, index) =>
-    Math.max(0, previousPoints[index]?.minimum ?? 0),
-  );
+  const previousBaseValues = points.map((_, index) => {
+    const minimum = previousPoints[index]?.minimum;
+    return minimum === null || minimum === undefined
+      ? null
+      : Math.max(0, minimum);
+  });
   const previousSpanValues = points.map((_, index) => {
     const previous = previousPoints[index];
-    if (!previous) return 0;
+    if (
+      !previous ||
+      previous.minimum === null ||
+      previous.peak === null
+    ) {
+      return null;
+    }
 
     return Math.max(0, previous.peak - Math.max(0, previous.minimum));
   });
-  const markerDefinitions: OccupancyReportMarkerDefinition[] = [
-    {
+  const markerDefinitions: OccupancyReportMarkerDefinition[] = [];
+  if (points.some((point) => point.current !== null)) {
+    markerDefinitions.push({
       color: palette.current,
-      data: points.map((point) => point.current ?? null),
+      data: points.map((point) => point.current),
       effect: true,
       fill: palette.current,
       name: "Atual",
@@ -1169,8 +1319,8 @@ function buildOccupancyReportChartOption(
       size: denseMarkerSize(definition, "current"),
       symbol: "circle",
       z: 7,
-    },
-  ];
+    });
+  }
 
   if (metricVisibility.average) {
     markerDefinitions.push({
@@ -1489,7 +1639,9 @@ function formatOccupancyReportTooltip(
   const previous = previousPoints[dataIndex];
   const rows = [
     `<strong>${escapeHtml(point.label)}</strong>`,
-    `Atual: ${formatOccupancyValue(point.current)}`,
+    point.current === null
+      ? undefined
+      : `Atual: ${formatOccupancyValue(point.current)}`,
     metricVisibility.average
       ? `Média: ${formatOccupancyValue(point.average)}`
       : undefined,
@@ -1500,7 +1652,10 @@ function formatOccupancyReportTooltip(
       ? `Máximo: ${formatOccupancyValue(point.peak)}`
       : undefined,
     previous ? "<br/><strong>Período anterior</strong>" : undefined,
-    previous && metricVisibility.average
+    previous &&
+    metricVisibility.average &&
+    point.average !== null &&
+    previous.average !== null
       ? `Média anterior: ${formatOccupancyValue(previous.average)} ${metricDeltaLabel(
           point.average,
           previous.average,
@@ -1569,13 +1724,16 @@ async function fetchSubLocations(
 ) {
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<SubLocation[]>(`/locations/${location.id}/sub-locations`).catch(
-        () => [],
+      apiFetch<unknown>(`/locations/${location.id}/sub-locations`).then(
+        requireSubLocationRows,
       ),
     ),
   );
 
-  return filterScopedApiRows(rows.flat(), companyScopeId);
+  return filterScopedApiRows(
+    requireSubLocationRows(rows.flat()),
+    companyScopeId,
+  );
 }
 
 function buildAvailableScopeModes({
@@ -1731,24 +1889,58 @@ function comparisonDescription(
   definition: OccupancyReportDefinition,
   intradayComparison: IntradayComparisonMode,
 ) {
+  let description: string;
   if (definition.granularity === "minute" || definition.granularity === "hour") {
-    return intradayComparison === "last_week"
+    description = intradayComparison === "last_week"
       ? "Comparando com a semana passada."
       : "Comparando com ontem.";
+  } else if (definition.granularity === "day") {
+    description = "Comparando com os mesmos dias da semana passada.";
+  } else if (definition.granularity === "week") {
+    description = "Comparando cada semana com a mesma semana do mês anterior.";
+  } else if (definition.granularity === "month") {
+    description = "Comparando cada mês com o mesmo mês do ano anterior.";
+  } else if (definition.granularity === "semester") {
+    description =
+      "Comparando cada semestre com o mesmo semestre do ano anterior.";
+  } else {
+    description = "Comparando cada ano com o ano anterior.";
   }
-  if (definition.granularity === "day") {
-    return "Comparando com os mesmos dias da semana passada.";
-  }
-  if (definition.granularity === "week") {
-    return "Comparando cada semana com a mesma semana do mês anterior.";
-  }
-  if (definition.granularity === "month") {
-    return "Comparando cada mês com o mesmo mês do ano anterior.";
-  }
-  if (definition.granularity === "semester") {
-    return "Comparando cada semestre com o mesmo semestre do ano anterior.";
-  }
-  return "Comparando cada ano com o ano anterior.";
+
+  return `${description} O bucket em andamento só entra no comparativo depois de fechado.`;
+}
+
+function maskOpenBucketComparisons(
+  data: Record<string, OccupancyReportState>,
+  currentDefinitions: OccupancyReportDefinition[],
+  now: Date,
+) {
+  currentDefinitions.forEach((definition) => {
+    const openIndex = listBucketStarts(definition).findIndex((bucketStart) => {
+      const bucketEnd = addGranularity(
+        bucketStart,
+        definition.granularity,
+      );
+      return bucketStart <= now && now < bucketEnd;
+    });
+    if (openIndex < 0) return;
+
+    const previousKey = previousId(definition.id);
+    const previous = data[previousKey];
+    if (!previous?.points[openIndex]) return;
+
+    data[previousKey] = {
+      ...previous,
+      points: previous.points.map((point, index) =>
+        index === openIndex
+          ? {
+              ...point,
+              ...emptyOccupancyMetric(),
+            }
+          : point,
+      ),
+    };
+  });
 }
 
 function equivalentWeekInPreviousMonth(bucketStart: Date) {
@@ -1778,6 +1970,11 @@ function occupancyScenarioAggregatePath(
   });
 
   return `/occupancy/scenarios/${scenarioId}/aggregate?${params.toString()}`;
+}
+
+function occupancyScenarioHistoryPath(scenarioId: string, at: Date) {
+  const params = new URLSearchParams({ at: at.toISOString() });
+  return `/occupancy/scenarios/${scenarioId}/history?${params.toString()}`;
 }
 
 function occupancyPath(from: Date, to: Date) {
@@ -1814,31 +2011,8 @@ function buildEmptyPoints(definition: OccupancyReportDefinition) {
   return listBucketStarts(definition).map((bucketStart) => ({
     bucket: bucketStart.toISOString(),
     label: bucketLabel(bucketStart, definition.granularity),
-    ...emptyMetric(),
+    ...emptyOccupancyMetric(),
   }));
-}
-
-function normalizeScenarioList(response: OccupancyScenarioListResponse) {
-  const scenarios = Array.isArray(response) ? response : response.data ?? [];
-  return scenarios.map((scenario) => ({
-    ...scenario,
-    active: scenario.active ?? true,
-    areas: scenario.areas ?? [],
-    object_class: scenario.object_class || DEFAULT_OBJECT_CLASS,
-  }));
-}
-
-function emptyMetric(): OccupancyReportMetric {
-  return {
-    average: 0,
-    current: 0,
-    minimum: 0,
-    peak: 0,
-  };
-}
-
-function safeNumber(value: number | null | undefined) {
-  return Number.isFinite(value) ? Number(value) : 0;
 }
 
 function roundValue(value: number) {
@@ -1846,9 +2020,10 @@ function roundValue(value: number) {
 }
 
 function formatOccupancyValue(value: number | null | undefined) {
+  if (value === null || value === undefined) return "—";
   return new Intl.NumberFormat("pt-BR", {
     maximumFractionDigits: 1,
-  }).format(value ?? 0);
+  }).format(value);
 }
 
 function alignToGranularity(
@@ -1878,36 +2053,12 @@ function addGranularity(
   granularity: OccupancyReportDefinition["granularity"],
 ) {
   if (granularity === "minute") return addMinutes(date, 1);
-  if (granularity === "hour") return addHours(date, 1);
+  if (granularity === "hour") return endOfAggregateBucket(date, "hour");
   if (granularity === "day") return addDays(date, 1);
   if (granularity === "week") return addDays(date, 7);
   if (granularity === "semester") return addMonths(date, 6);
   if (granularity === "year") return addYears(date, 1);
   return addMonths(date, 1);
-}
-
-function bucketKeyForGranularity(
-  date: Date,
-  granularity: OccupancyReportDefinition["granularity"],
-) {
-  if (granularity === "minute") return startOfMinute(date).getTime();
-  if (granularity === "hour") return startOfHour(date).getTime();
-  if (granularity === "day") {
-    return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
-  }
-  if (granularity === "week") {
-    const weekStart = startOfWeek(date);
-    return Date.UTC(
-      weekStart.getFullYear(),
-      weekStart.getMonth(),
-      weekStart.getDate(),
-    );
-  }
-  if (granularity === "semester") {
-    return Date.UTC(date.getFullYear(), date.getMonth() < 6 ? 0 : 6, 1);
-  }
-  if (granularity === "year") return Date.UTC(date.getFullYear(), 0, 1);
-  return Date.UTC(date.getFullYear(), date.getMonth(), 1);
 }
 
 function bucketLabel(
@@ -1965,9 +2116,7 @@ function startOfMinute(date: Date) {
 }
 
 function startOfHour(date: Date) {
-  const next = new Date(date);
-  next.setMinutes(0, 0, 0);
-  return next;
+  return startOfAggregateBucket(date, "hour");
 }
 
 function startOfDay(date: Date) {
@@ -1998,10 +2147,6 @@ function startOfYear(date: Date) {
 
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * MINUTE_MS);
-}
-
-function addHours(date: Date, hours: number) {
-  return new Date(date.getTime() + hours * HOUR_MS);
 }
 
 function addDays(date: Date, days: number) {

@@ -56,6 +56,7 @@ import {
   fetchScenarioComparisonRows,
   loadScenarioComparisonSettings,
   saveScenarioComparisonSettings,
+  type ScenarioComparisonHourlySource,
   type ScenarioComparisonSettings,
 } from "@/components/app/scenario-comparison-card";
 import { Badge } from "@/components/ui/badge";
@@ -98,8 +99,16 @@ import { apiFetch } from "@/lib/api";
 import {
   aggregateBucketInRange,
   aggregateQueryIso,
+  endOfAggregateBucket,
   parseAggregateBucket,
+  requireAggregateGranularity,
+  requireAggregateRows,
+  startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  reconcileAggregateRows,
+  rollupAggregateRowsMany,
+} from "@/lib/aggregate-reconciliation";
 import {
   CAMERA_GROUPS_UPDATED_EVENT,
   type CameraGroup,
@@ -115,6 +124,13 @@ import {
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
+import {
+  requireCameraRows,
+  requireInfrastructureRelations,
+  requireLocationRows,
+  requireSubLocationRows,
+  requireWorkerRows,
+} from "@/lib/metadata-validation";
 import {
   loadLiveOperationalSettings,
   saveLiveOperationalSettings,
@@ -186,6 +202,7 @@ import {
   type ScenarioPeakDayPoint,
 } from "@/lib/scenario-analytics";
 import { inferOccupancyScenarios } from "@/lib/scenario-direction";
+import { requireScenarioRows } from "@/lib/scenario-validation";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -199,7 +216,6 @@ import type {
 import { cn, formatNumber, formatTime } from "@/lib/utils";
 import {
   collapseWorkerIdentityChains,
-  normalizeWorkerRows,
   partitionWorkersByCompanyScope,
   sortWorkersByActivity,
 } from "@/lib/worker-scope";
@@ -235,14 +251,6 @@ type RealtimeChartState = {
 type ChartPoint = {
   bucket: string;
   label: string;
-  total: number;
-};
-
-type AggregateIdentityTotal = {
-  cameraId: string;
-  lineCountId: string;
-  metricType: string;
-  objectClass: string;
   total: number;
 };
 
@@ -321,7 +329,6 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 const MAX_REALTIME_BUCKETS = 2_000;
-const RECENT_DAY_RECONCILIATION_COUNT = 3;
 const DEFAULT_METRIC_TYPE = "count";
 const CURRENT_MONTH_DAYS_ID = "live_current_month_days";
 const OPERATIONAL_COMPARISON_HOURS_ID = "live_operational_comparison_hours";
@@ -330,6 +337,24 @@ const OPERATIONAL_LAST_YEAR_MONTH_ID = "live_operational_last_year_month";
 const OPERATIONAL_TREND_DAYS_ID = "live_operational_trend_days";
 const OPERATIONAL_MONTH_HOURS_ID = "live_operational_month_hours";
 const OCCUPANCY_HOURS_ID = "live_hourly_occupancy_data";
+const CANONICAL_HOUR_DERIVED_TARGETS: ReadonlyArray<{
+  granularity: "hour" | "day" | "week" | "month";
+  id: string;
+}> = [
+  { id: "live_chart_hour", granularity: "hour" },
+  { id: OCCUPANCY_HOURS_ID, granularity: "hour" },
+  { id: OPERATIONAL_COMPARISON_HOURS_ID, granularity: "hour" },
+  { id: OPERATIONAL_PREVIOUS_MONTH_ID, granularity: "hour" },
+  { id: OPERATIONAL_LAST_YEAR_MONTH_ID, granularity: "hour" },
+  { id: "live_chart_day", granularity: "day" },
+  { id: CURRENT_MONTH_DAYS_ID, granularity: "day" },
+  { id: OPERATIONAL_TREND_DAYS_ID, granularity: "day" },
+  { id: "live_chart_week", granularity: "week" },
+  { id: "live_chart_month", granularity: "month" },
+];
+const CANONICAL_HOUR_DERIVED_IDS = new Set(
+  CANONICAL_HOUR_DERIVED_TARGETS.map((target) => target.id),
+);
 const OCCUPANCY_START_HOURS = Array.from({ length: 24 }, (_, hour) => hour);
 const HOUR_AXIS_LABELS = Array.from(
   { length: 24 },
@@ -422,6 +447,8 @@ export function RealtimeDashboard({
   >({});
   const [loadingScenarios, setLoadingScenarios] = React.useState(true);
   const [loadingCharts, setLoadingCharts] = React.useState(false);
+  const [metadataError, setMetadataError] = React.useState("");
+  const [chartLoadError, setChartLoadError] = React.useState("");
   const [hasLoadedCharts, setHasLoadedCharts] = React.useState(false);
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
   const [clock, setClock] = React.useState(() => new Date());
@@ -454,6 +481,7 @@ export function RealtimeDashboard({
   const requestRef = React.useRef<AbortController | null>(null);
   const runningRef = React.useRef(false);
   const hasLoadedChartsRef = React.useRef(false);
+  const metadataRequestSequenceRef = React.useRef(0);
 
   const chartDefinitions = React.useMemo(
     () => buildRealtimeChartDefinitions(clock),
@@ -569,35 +597,85 @@ export function RealtimeDashboard({
   const operationalMonthHourState = chartData[OPERATIONAL_MONTH_HOURS_ID];
   const operationalMonthHourRows =
     operationalMonthHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const liveComparisonHourlySource =
+    React.useMemo<ScenarioComparisonHourlySource | undefined>(() => {
+      if (
+        operationalMonthHourState?.granularity !== "hour" ||
+        operationalMonthHourState.error
+      ) {
+        return undefined;
+      }
+
+      const definition = buildOperationalMonthHoursDefinition(clock);
+      return {
+        from: definition.from,
+        rows: operationalMonthHourRows,
+        to: definition.to,
+      };
+    }, [
+      clock,
+      operationalMonthHourRows,
+      operationalMonthHourState?.error,
+      operationalMonthHourState?.granularity,
+    ]);
   const baselineMonthDayRows =
     operationalSettings.monthComparison === "last_year"
       ? lastYearMonthDayRows
       : previousMonthDayRows;
   const baselineMonthDayGranularity =
     operationalSettings.monthComparison === "last_year"
-      ? lastYearMonthDayState?.granularity ?? "day"
-      : previousMonthDayState?.granularity ?? "day";
+      ? lastYearMonthDayState?.granularity ?? "hour"
+      : previousMonthDayState?.granularity ?? "hour";
+  const liveDataCertificationError =
+    metadataError ||
+    chartLoadError ||
+    Object.values(chartData).find((state) => state.error)?.error;
+  const liveComparisonDisabledReason = liveDataCertificationError
+    ? `Comparativo não certificado: ${liveDataCertificationError}`
+    : !liveComparisonHourlySource
+      ? loadingCharts
+        ? "Comparativo aguardando a fonte horária canônica."
+        : "Comparativo indisponível sem a fonte horária canônica certificada."
+      : undefined;
 
   const loadScenarios = React.useCallback(async () => {
+    const requestSequence = ++metadataRequestSequenceRef.current;
     setLoadingScenarios(true);
+    setMetadataError("");
     try {
       const [data, cameraRows, locationRows, workerRows] = await Promise.all([
-        apiFetch<Scenario[]>("/scenarios"),
-        apiFetch<Camera[]>("/cameras").catch(() => []),
-        apiFetch<Location[]>("/locations").catch(() => []),
-        fetchRealtimeWorkers(companyScopeId).catch(() => []),
+        apiFetch<unknown>("/scenarios"),
+        apiFetch<unknown>("/cameras"),
+        apiFetch<unknown>("/locations"),
+        fetchRealtimeWorkers(companyScopeId),
       ]);
-      const scopedScenarios = filterScopedApiRows(data, companyScopeId);
-      const scopedCameras = filterScopedApiRows(cameraRows, companyScopeId);
-      const scopedLocations = filterScopedApiRows(locationRows, companyScopeId);
+      const scopedScenarios = filterScopedApiRows(
+        requireScenarioRows(data),
+        companyScopeId,
+      );
+      const scopedCameras = filterScopedApiRows(
+        requireCameraRows(cameraRows),
+        companyScopeId,
+      );
+      const scopedLocations = filterScopedApiRows(
+        requireLocationRows(locationRows),
+        companyScopeId,
+      );
       const subLocationRows = await fetchSubLocations(
         scopedLocations,
         companyScopeId,
       );
+      requireInfrastructureRelations({
+        cameras: scopedCameras,
+        locations: scopedLocations,
+        subLocations: subLocationRows,
+      });
       const visible = manager
         ? scopedScenarios
         : scopedScenarios.filter((scenario) => scenario.active);
 
+      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      setMetadataError("");
       setScenarios(visible);
       setCameras(scopedCameras);
       setLocations(scopedLocations);
@@ -637,13 +715,24 @@ export function RealtimeDashboard({
         return options[0]?.id ?? "";
       });
     } catch (error) {
-      toast.error(
+      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      const message =
         error instanceof Error
           ? error.message
-          : "Não foi possível carregar as visões de contagem.",
-      );
+          : "Não foi possível carregar as visões de contagem.";
+      setScenarios([]);
+      setCameras([]);
+      setLocations([]);
+      setSubLocations([]);
+      setWorkers([]);
+      setSelectedId("");
+      setChartData({});
+      setMetadataError(message);
+      toast.error(message);
     } finally {
-      setLoadingScenarios(false);
+      if (requestSequence === metadataRequestSequenceRef.current) {
+        setLoadingScenarios(false);
+      }
     }
   }, [
     cameraGroups,
@@ -675,7 +764,6 @@ export function RealtimeDashboard({
 
       const now = new Date();
       const definitions = buildRealtimeChartDefinitions(now);
-      const visibleDefinitionIds = new Set(definitions.map((definition) => definition.id));
       const supportDefinitions = [
         buildCurrentMonthDaysDefinition(now),
         buildOperationalComparisonHoursDefinition(
@@ -691,17 +779,36 @@ export function RealtimeDashboard({
           operationalSettings.occupancyStartHour,
         ),
       ];
+      const allDefinitions = [...definitions, ...supportDefinitions];
       try {
         const entries = await Promise.all(
-          [...definitions, ...supportDefinitions].map(async (definition) => {
+          allDefinitions.map(async (definition) => {
+            if (CANONICAL_HOUR_DERIVED_IDS.has(definition.id)) {
+              return [
+                definition.id,
+                {
+                  rows: [],
+                  granularity: definition.granularity,
+                } satisfies RealtimeChartState,
+              ] as const;
+            }
+
             try {
               const response = await apiFetch<AggregateEventsResponse>(
                 aggregatePath(definition),
                 { signal: controller.signal },
               );
+              const responseGranularity = requireAggregateGranularity(
+                response.granularity,
+                definition.granularity,
+              );
               const state: RealtimeChartState = {
-                rows: response.data ?? [],
-                granularity: response.granularity ?? definition.granularity,
+                rows: requireAggregateRows(
+                  response.data,
+                  responseGranularity,
+                  DEFAULT_METRIC_TYPE,
+                ),
+                granularity: responseGranularity,
               };
 
               return [definition.id, state] as const;
@@ -721,28 +828,33 @@ export function RealtimeDashboard({
           }),
         );
 
-        const nextData = hydrateRealtimeOpenBuckets(Object.fromEntries(entries), now);
+        const nextData = hydrateRealtimeOpenBuckets(
+          Object.fromEntries(entries),
+          allDefinitions,
+          now,
+        );
         const refreshedAt = new Date();
 
         setChartData(nextData);
+        setChartLoadError("");
         setClock(now);
         setLastUpdated(refreshedAt);
         setHasLoadedCharts(true);
         hasLoadedChartsRef.current = true;
 
-        if (
-          entries.some(([id, state]) => visibleDefinitionIds.has(id) && state.error) &&
-          !silentLoad
-        ) {
-          toast.error("Alguns dados ao vivo não puderam ser carregados.");
+        if (entries.some(([, state]) => state.error) && !silentLoad) {
+          toast.error(
+            "Alguns dados não puderam ser reconciliados; os valores afetados não estão certificados.",
+          );
         }
       } catch (error) {
         if (!isAbortError(error)) {
-          toast.error(
+          const message =
             error instanceof Error
               ? error.message
-              : "Não foi possível carregar os dados ao vivo.",
-          );
+              : "Não foi possível carregar os dados ao vivo.";
+          setChartLoadError(message);
+          toast.error(message);
         }
       } finally {
         if (requestRef.current === controller) {
@@ -806,6 +918,9 @@ export function RealtimeDashboard({
   }, [companyScopeId, preferenceScope]);
 
   React.useEffect(() => {
+    requestRef.current?.abort();
+    setMetadataError("");
+    setChartLoadError("");
     setScenarios([]);
     setCameras([]);
     setLocations([]);
@@ -952,7 +1067,7 @@ export function RealtimeDashboard({
         selectedScope,
         previousMonthStart,
         comparableMonthEnd(previousMonthStart, completedMonthDayCount),
-        previousMonthDayState?.granularity ?? "day",
+        previousMonthDayState?.granularity ?? "hour",
       )
     : 0;
   const lastYearMonthComparableTotal = selectedScope
@@ -961,7 +1076,7 @@ export function RealtimeDashboard({
         selectedScope,
         lastYearMonthStart,
         comparableMonthEnd(lastYearMonthStart, completedMonthDayCount),
-        lastYearMonthDayState?.granularity ?? "day",
+        lastYearMonthDayState?.granularity ?? "hour",
       )
     : 0;
   const previousMonthDelta = percentageDelta(
@@ -1142,7 +1257,7 @@ export function RealtimeDashboard({
         rows: operationalMonthHourRows,
         scenarios: heatmapScenarios,
         sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
-        to: addHours(startOfHour(clock), 1),
+        to: endOfAggregateBucket(startOfHour(clock), "hour"),
       }).map((point) => {
         const bucket = new Date(point.bucket);
         return {
@@ -1681,6 +1796,11 @@ export function RealtimeDashboard({
       defaultSize: "compact" as const,
       node: (
         <MetricCard
+          error={
+            chartData.live_chart_minute?.error ||
+            hourState?.error ||
+            comparisonHourState?.error
+          }
           icon={Clock3}
           label="Hoje até agora"
           value={todayTotal}
@@ -1708,6 +1828,7 @@ export function RealtimeDashboard({
       defaultSize: "compact" as const,
       node: (
         <MetricCard
+          error={hourState?.error || operationalMonthHourState?.error}
           icon={Target}
           label="Hoje x média-base"
           value={
@@ -1735,6 +1856,10 @@ export function RealtimeDashboard({
       defaultSize: "compact" as const,
       node: (
         <MetricCard
+          error={
+            operationalMonthHourState?.error ||
+            previousMonthDayState?.error
+          }
           icon={Activity}
           label="Acumulado x mês anterior"
           value={currentMonthRealtimeTotal}
@@ -1753,6 +1878,10 @@ export function RealtimeDashboard({
       defaultSize: "compact" as const,
       node: (
         <MetricCard
+          error={
+            operationalMonthHourState?.error ||
+            lastYearMonthDayState?.error
+          }
           icon={TrendingUp}
           label="Acumulado x ano anterior"
           value={currentMonthRealtimeTotal}
@@ -1814,6 +1943,7 @@ export function RealtimeDashboard({
       className: "sm:col-span-2 xl:col-span-2",
       node: (
         <OperationalTrendCard
+          error={operationalMonthHourState?.error}
           loading={initialLoading}
           month={clock}
           points={operationalTrendPoints}
@@ -2223,6 +2353,8 @@ export function RealtimeDashboard({
             }
             autoRefresh
             companyId={companyScopeId}
+            disabledReason={liveComparisonDisabledReason}
+            hourlySource={liveComparisonHourlySource}
             monitorMode={monitorMode}
             preferenceScopeId={selectedScope?.id}
             scenarios={scenarios}
@@ -2769,7 +2901,7 @@ export function RealtimeDashboard({
           rows: operationalMonthHourRows,
           scenarios: selectedScenarios,
           sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
-          to: addHours(startOfHour(clock), 1),
+          to: endOfAggregateBucket(startOfHour(clock), "hour"),
         }).map((point) => {
           const bucket = new Date(point.bucket);
           return {
@@ -2903,17 +3035,21 @@ export function RealtimeDashboard({
 
   async function buildConfiguredLiveReportPayload() {
     const chartByCardId = new Map(configuredLiveChartEntries);
+    const visibleComparisonWidgets = customWidgets.filter(
+      (widget) =>
+        widget.kind === "scenario_comparison" &&
+        visibleLiveCardIds.includes(`live_custom_${widget.id}`),
+    );
+
+    if (visibleComparisonWidgets.length && liveComparisonDisabledReason) {
+      throw new Error(liveComparisonDisabledReason);
+    }
 
     await Promise.all(
-      customWidgets
-        .filter(
-          (widget) =>
-            widget.kind === "scenario_comparison" &&
-            visibleLiveCardIds.includes(`live_custom_${widget.id}`),
-        )
+      visibleComparisonWidgets
         .map(async (widget) => {
+          const cardId = `live_custom_${widget.id}`;
           try {
-            const cardId = `live_custom_${widget.id}`;
             const storageKey = realtimeScenarioComparisonStorageKey(widget.id);
             const settings = loadScenarioComparisonSettings(
               storageKey,
@@ -2924,27 +3060,33 @@ export function RealtimeDashboard({
               settings,
               new Date(),
             );
-            const rows = await fetchScenarioComparisonRows(definition);
-            const reportChart = buildScenarioComparisonReportChart({
-                definition,
-                rows,
-                scenarios,
-                settings,
-                title: widget.title,
-                widgetColor: liveColorByCardId.get(cardId),
-              });
-            chartByCardId.set(
-              cardId,
-              {
-                ...reportChart,
-                option: applyChartTypePreference(
-                  reportChart.option,
-                  liveChartTypeByCardId.get(cardId),
-                ),
-              },
+            const rows = await fetchScenarioComparisonRows(
+              definition,
+              liveComparisonHourlySource,
             );
-          } catch {
-            // Preserva os demais widgets caso um comparativo isolado falhe.
+            const reportChart = buildScenarioComparisonReportChart({
+              definition,
+              rows,
+              scenarios,
+              settings,
+              title: widget.title,
+              widgetColor: liveColorByCardId.get(cardId),
+            });
+            chartByCardId.set(cardId, {
+              ...reportChart,
+              option: applyChartTypePreference(
+                reportChart.option,
+                liveChartTypeByCardId.get(cardId),
+              ),
+            });
+          } catch (error) {
+            const detail =
+              error instanceof Error
+                ? error.message
+                : "falha desconhecida na consulta";
+            throw new Error(
+              `Não foi possível certificar o comparativo "${widget.title}": ${detail}`,
+            );
           }
         }),
     );
@@ -2976,6 +3118,13 @@ export function RealtimeDashboard({
       )}
     >
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
+      {liveDataCertificationError && !initialLoading ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
+          Dados não certificados: {liveDataCertificationError} Os widgets e as
+          exportações foram bloqueados para não apresentar um total
+          potencialmente incorreto.
+        </div>
+      ) : null}
 
       {monitorMode ? (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
@@ -3071,7 +3220,11 @@ export function RealtimeDashboard({
                 </Badge>
               ) : null}
               <ReportExportActions
-                disabled={initialLoading || !selectedScope}
+                disabled={
+                  initialLoading ||
+                  !selectedScope ||
+                  Boolean(liveDataCertificationError)
+                }
                 getPayload={buildConfiguredLiveReportPayload}
                 payload={liveReportPayload}
               />
@@ -3173,7 +3326,8 @@ export function RealtimeDashboard({
       </div>
       )}
 
-      {scopeOptions.length ? (
+      {scopeOptions.length &&
+      (!liveDataCertificationError || initialLoading) ? (
         <CardLayout
           menuKey="live"
           monitorMode={monitorMode}
@@ -3427,6 +3581,7 @@ export function RealtimeDashboard({
 function MetricCard({
   comparison,
   description,
+  error,
   icon: Icon,
   label,
   loading,
@@ -3435,6 +3590,7 @@ function MetricCard({
 }: {
   comparison?: string;
   description: string;
+  error?: string;
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   loading: boolean;
@@ -3458,6 +3614,10 @@ function MetricCard({
           </div>
           {loading ? (
             <Skeleton className="mt-3 h-8 w-24" />
+          ) : error ? (
+            <div className="mt-2 text-sm font-semibold text-destructive">
+              Não certificado
+            </div>
           ) : (
             <div className="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
               <div className="text-3xl font-semibold leading-none tabular-nums">
@@ -3762,7 +3922,7 @@ function CustomScenarioWidgetCard({
         rows: monthHourRows,
         scenarios: selectedScenarios,
         sourceGranularity: monthHourGranularity,
-        to: addHours(startOfHour(clock), 1),
+        to: endOfAggregateBucket(startOfHour(clock), "hour"),
       }).map((point) => {
         const bucket = new Date(point.bucket);
         return {
@@ -4688,11 +4848,13 @@ function OperationalMonthCumulativeCard({
 }
 
 function OperationalTrendCard({
+  error,
   loading,
   month,
   points,
   scopeName,
 }: {
+  error?: string;
   loading: boolean;
   month: Date;
   points: OperationalTrendPoint[];
@@ -4739,6 +4901,11 @@ function OperationalTrendCard({
       <CardContent className="min-w-0">
         {loading ? (
           <Skeleton className="h-[300px] w-full" />
+        ) : error ? (
+          <EmptyChartState
+            className="h-[200px]"
+            text="Não foi possível certificar a base horária da tendência."
+          />
         ) : hasData ? (
           <EChart option={option} className="h-[300px]" />
         ) : (
@@ -5237,7 +5404,7 @@ function EmptyChartState({
 
 function buildRealtimeChartDefinitions(now: Date): RealtimeChartDefinition[] {
   const minuteEnd = addMinutes(startOfMinute(now), 1);
-  const hourEnd = addHours(startOfHour(now), 1);
+  const hourEnd = endOfAggregateBucket(startOfHour(now), "hour");
   const todayStart = startOfDay(now);
   const currentWeekStart = startOfWeek(now);
   const currentMonthStart = startOfMonth(now);
@@ -5330,8 +5497,8 @@ function buildOperationalBaselineMonthDefinition(
         ? OPERATIONAL_LAST_YEAR_MONTH_ID
         : OPERATIONAL_PREVIOUS_MONTH_ID,
     label: monthComparisonLabel(mode),
-    description: "Base diária auxiliar do comparativo mensal operacional.",
-    granularity: "day",
+    description: "Base horária canônica do comparativo mensal operacional.",
+    granularity: "hour",
     from,
     to: addMonths(from, 1),
   };
@@ -5354,18 +5521,16 @@ function buildOperationalMonthHoursDefinition(
   now: Date,
 ): RealtimeChartDefinition {
   const currentMonthStart = startOfMonth(now);
-  const recentDayStart = addDays(
-    startOfDay(now),
-    1 - RECENT_DAY_RECONCILIATION_COUNT,
-  );
+  const historyStart = addMonths(currentMonthStart, -12);
 
   return {
     id: OPERATIONAL_MONTH_HOURS_ID,
-    label: "Mapa de calor dia x hora",
-    description: "Distribuição horária do fluxo no mês em andamento.",
+    label: "Histórico horário operacional",
+    description:
+      "Base horária canônica do mês atual e dos 12 meses anteriores.",
     granularity: "hour",
-    from: recentDayStart < currentMonthStart ? recentDayStart : currentMonthStart,
-    to: addHours(startOfHour(now), 1),
+    from: historyStart,
+    to: endOfAggregateBucket(startOfHour(now), "hour"),
   };
 }
 
@@ -5464,6 +5629,7 @@ function aggregatePath(definition: RealtimeChartDefinition) {
 
 function hydrateRealtimeOpenBuckets(
   data: Record<string, RealtimeChartState>,
+  definitions: RealtimeChartDefinition[],
   now: Date,
 ) {
   const next = Object.fromEntries(
@@ -5472,294 +5638,70 @@ function hydrateRealtimeOpenBuckets(
       { ...state, rows: [...state.rows] },
     ]),
   ) as Record<string, RealtimeChartState>;
-
-  const currentHourStart = startOfHour(now);
-  const todayStart = startOfDay(now);
-  const currentWeekStart = startOfWeek(now);
-  const currentMonthStart = startOfMonth(now);
-
-  replaceBucketRowsFromSource(
-    next,
-    "live_chart_hour",
-    "hour",
-    currentHourStart,
-    addHours(currentHourStart, 1),
-    next.live_chart_minute?.rows ?? [],
-    "minute",
+  const definitionById = new Map(
+    definitions.map((definition) => [definition.id, definition] as const),
   );
-  replaceBucketRowsFromSource(
-    next,
-    OCCUPANCY_HOURS_ID,
-    "hour",
-    currentHourStart,
-    addHours(currentHourStart, 1),
-    next.live_chart_minute?.rows ?? [],
-    "minute",
-  );
-  replaceBucketRowsFromSource(
-    next,
+  const minuteState = next.live_chart_minute;
+  const canonicalDefinition = definitionById.get(
     OPERATIONAL_MONTH_HOURS_ID,
-    "hour",
-    currentHourStart,
-    addHours(currentHourStart, 1),
-    next.live_chart_minute?.rows ?? [],
-    "minute",
   );
-  replaceBucketRowsFromSource(
-    next,
-    "live_chart_day",
-    "day",
-    todayStart,
-    addDays(todayStart, 1),
-    next.live_chart_hour?.rows ?? [],
-    "hour",
-  );
-  replaceBucketRowsFromSource(
-    next,
-    CURRENT_MONTH_DAYS_ID,
-    "day",
-    todayStart,
-    addDays(todayStart, 1),
-    next.live_chart_hour?.rows ?? [],
-    "hour",
-  );
-  replaceBucketRowsFromSource(
-    next,
-    OPERATIONAL_TREND_DAYS_ID,
-    "day",
-    todayStart,
-    addDays(todayStart, 1),
-    next.live_chart_hour?.rows ?? [],
-    "hour",
-  );
+  const canonicalState = next[OPERATIONAL_MONTH_HOURS_ID];
 
-  const recentDayStart = addDays(
-    todayStart,
-    1 - RECENT_DAY_RECONCILIATION_COUNT,
-  );
-  const tomorrowStart = addDays(todayStart, 1);
-  const monthHourRows = next[OPERATIONAL_MONTH_HOURS_ID]?.rows ?? [];
-  replaceDailyBucketsFromHourlySource(
-    next,
-    "live_chart_day",
-    recentDayStart,
-    tomorrowStart,
-    monthHourRows,
-  );
-  replaceDailyBucketsFromHourlySource(
-    next,
-    OPERATIONAL_TREND_DAYS_ID,
-    recentDayStart,
-    tomorrowStart,
-    monthHourRows,
-  );
-  replaceDailyBucketsFromHourlySource(
-    next,
-    CURRENT_MONTH_DAYS_ID,
-    recentDayStart < currentMonthStart ? currentMonthStart : recentDayStart,
-    tomorrowStart,
-    monthHourRows,
-  );
-
-  if (recentDayStart < currentMonthStart) {
-    replaceDailyBucketsFromHourlySource(
-      next,
-      OPERATIONAL_PREVIOUS_MONTH_ID,
-      recentDayStart,
-      currentMonthStart,
-      monthHourRows,
+  if (
+    canonicalDefinition &&
+    canonicalState &&
+    !canonicalState.error &&
+    canonicalState.granularity === "hour" &&
+    minuteState &&
+    !minuteState.error &&
+    minuteState.granularity === "minute"
+  ) {
+    const currentHourStart = startOfHour(now);
+    canonicalState.rows = reconcileAggregateRows(
+      canonicalState.rows,
+      "hour",
+      minuteState.rows,
+      "minute",
+      currentHourStart,
+      endOfAggregateBucket(currentHourStart, "hour"),
     );
   }
 
-  replaceBucketRowsFromSource(
-    next,
-    "live_chart_week",
-    "week",
-    currentWeekStart,
-    addDays(currentWeekStart, 7),
-    next.live_chart_day?.rows ?? [],
-    "day",
+  if (
+    !canonicalDefinition ||
+    !canonicalState ||
+    canonicalState.error ||
+    canonicalState.granularity !== "hour"
+  ) {
+    return next;
+  }
+
+  const rolledRows = rollupAggregateRowsMany(
+    canonicalState.rows,
+    "hour",
+    ["hour", "day", "week", "month"],
+    canonicalDefinition.from,
+    canonicalDefinition.to,
   );
-  replaceBucketRowsFromSource(
-    next,
-    "live_chart_month",
-    "month",
-    currentMonthStart,
-    addMonths(currentMonthStart, 1),
-    next[CURRENT_MONTH_DAYS_ID]?.rows ?? [],
-    "day",
-  );
-  const previousMonthStart = addMonths(currentMonthStart, -1);
-  replaceBucketRowsFromSource(
-    next,
-    "live_chart_month",
-    "month",
-    previousMonthStart,
-    currentMonthStart,
-    next[OPERATIONAL_PREVIOUS_MONTH_ID]?.rows ?? [],
-    "day",
-  );
+
+  CANONICAL_HOUR_DERIVED_TARGETS.forEach(({ granularity, id }) => {
+    const target = next[id];
+    const definition = definitionById.get(id);
+    if (!target || !definition) return;
+
+    target.rows = (rolledRows.get(granularity) ?? []).filter((row) =>
+      aggregateBucketInRange(
+        row.bucket,
+        granularity,
+        definition.from,
+        definition.to,
+      ),
+    );
+    target.granularity = granularity;
+    delete target.error;
+  });
 
   return next;
-}
-
-function replaceDailyBucketsFromHourlySource(
-  data: Record<string, RealtimeChartState>,
-  targetId: string,
-  from: Date,
-  to: Date,
-  sourceRows: AggregateEventRow[],
-) {
-  let cursor = startOfDay(from);
-
-  while (cursor < to) {
-    const nextDay = addDays(cursor, 1);
-    replaceBucketRowsFromSource(
-      data,
-      targetId,
-      "day",
-      cursor,
-      nextDay,
-      sourceRows,
-      "hour",
-    );
-    cursor = nextDay;
-  }
-}
-
-function replaceBucketRowsFromSource(
-  data: Record<string, RealtimeChartState>,
-  targetId: string,
-  targetGranularity: AggregateGranularity,
-  from: Date,
-  to: Date,
-  sourceRows: AggregateEventRow[],
-  sourceGranularity: AggregateGranularity,
-) {
-  const target = data[targetId];
-  if (!target) return;
-
-  const fromKey = bucketKeyForGranularity(from, targetGranularity);
-  const existingTotals = aggregateRowsByIdentity(
-    target.rows,
-    targetGranularity,
-    from,
-    to,
-  );
-  const sourceTotals = aggregateRowsByIdentity(
-    sourceRows,
-    sourceGranularity,
-    from,
-    to,
-  );
-  const mergedTotals = mergeIdentityTotals(existingTotals, sourceTotals);
-  if (!mergedTotals.size) return;
-
-  const replacementRows = Array.from(mergedTotals.values()).map((identity) =>
-    createAggregateRow(from, identity),
-  );
-
-  target.rows = [
-    ...target.rows.filter((row) => {
-      const date = parseAggregateBucket(row.bucket, targetGranularity);
-      return (
-        !date ||
-        bucketKeyForGranularity(date, targetGranularity) !== fromKey
-      );
-    }),
-    ...replacementRows,
-  ];
-}
-
-function aggregateRowsByIdentity(
-  rows: AggregateEventRow[],
-  granularity: AggregateGranularity,
-  from: Date,
-  to: Date,
-) {
-  const totals = new Map<string, AggregateIdentityTotal>();
-  const fromTime = from.getTime();
-  const toTime = to.getTime();
-  const fromKey = bucketKeyForGranularity(from, granularity);
-  const toKey = bucketKeyForGranularity(to, granularity);
-
-  rows.forEach((row) => {
-    const identity = rowIdentity(row);
-    if (!identity.cameraId && !identity.lineCountId) return;
-
-    const bucket = parseAggregateBucket(row.bucket, granularity);
-    if (!bucket) return;
-
-    const inRange =
-      granularity === "minute" || granularity === "hour"
-        ? bucket.getTime() >= fromTime && bucket.getTime() < toTime
-        : bucketKeyForGranularity(bucket, granularity) >= fromKey &&
-          bucketKeyForGranularity(bucket, granularity) < toKey;
-    if (!inRange) return;
-
-    const key = rowIdentityKey(identity);
-    const current = totals.get(key);
-    totals.set(key, {
-      ...identity,
-      total: (current?.total ?? 0) + (row.total ?? 0),
-    });
-  });
-
-  return totals;
-}
-
-function mergeIdentityTotals(
-  existingTotals: Map<string, AggregateIdentityTotal>,
-  sourceTotals: Map<string, AggregateIdentityTotal>,
-) {
-  const merged = new Map<string, AggregateIdentityTotal>();
-  const keys = new Set([...existingTotals.keys(), ...sourceTotals.keys()]);
-
-  keys.forEach((key) => {
-    const existing = existingTotals.get(key);
-    const source = sourceTotals.get(key);
-    const identity = source ?? existing;
-    if (!identity) return;
-
-    merged.set(key, {
-      ...identity,
-      total: Math.max(existing?.total ?? 0, source?.total ?? 0),
-    });
-  });
-
-  return merged;
-}
-
-function rowIdentity(row: AggregateEventRow): Omit<AggregateIdentityTotal, "total"> {
-  return {
-    cameraId: row.camera_id ?? "",
-    lineCountId: row.line_count_id ?? "",
-    metricType: row.metric_type ?? DEFAULT_METRIC_TYPE,
-    objectClass: row.object_class ?? "",
-  };
-}
-
-function rowIdentityKey(identity: Omit<AggregateIdentityTotal, "total">) {
-  return [
-    identity.cameraId,
-    identity.lineCountId,
-    identity.metricType,
-    identity.objectClass,
-  ].join("|");
-}
-
-function createAggregateRow(
-  bucket: Date,
-  identity: AggregateIdentityTotal,
-): AggregateEventRow {
-  return {
-    bucket: bucket.toISOString(),
-    camera_id: identity.cameraId,
-    line_count_id: identity.lineCountId || undefined,
-    metric_type: identity.metricType || DEFAULT_METRIC_TYPE,
-    object_class: identity.objectClass || undefined,
-    total: identity.total,
-  };
 }
 
 async function fetchSubLocations(
@@ -5768,19 +5710,20 @@ async function fetchSubLocations(
 ) {
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<SubLocation[]>(`/locations/${location.id}/sub-locations`).catch(
-        () => [],
+      apiFetch<unknown>(`/locations/${location.id}/sub-locations`).then(
+        requireSubLocationRows,
       ),
     ),
   );
 
-  return filterScopedApiRows(rows.flat(), companyScopeId);
+  return filterScopedApiRows(
+    requireSubLocationRows(rows.flat()),
+    companyScopeId,
+  );
 }
 
 async function fetchRealtimeWorkers(companyId?: string | null) {
-  const rows = await apiFetch<unknown>("/workers").then((response) =>
-    normalizeWorkerRows(response),
-  );
+  const rows = await apiFetch<unknown>("/workers").then(requireWorkerRows);
   const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
   return sortWorkersByActivity(collapseWorkerIdentityChains(scopedRows));
 }
@@ -7764,7 +7707,9 @@ function alignEndToGranularity(date: Date, granularity: AggregateGranularity) {
 
 function addGranularity(date: Date, granularity: AggregateGranularity) {
   if (granularity === "minute") return addMinutes(date, 1);
-  if (granularity === "hour") return addHours(date, 1);
+  if (granularity === "hour") {
+    return endOfAggregateBucket(date, "hour");
+  }
   if (granularity === "day") return addDays(date, 1);
   if (granularity === "week") return addDays(date, 7);
   if (granularity === "month") return addMonths(date, 1);
@@ -7935,9 +7880,7 @@ function startOfMinute(date: Date) {
 }
 
 function startOfHour(date: Date) {
-  const next = new Date(date);
-  next.setMinutes(0, 0, 0);
-  return next;
+  return startOfAggregateBucket(date, "hour");
 }
 
 function startOfDay(date: Date) {

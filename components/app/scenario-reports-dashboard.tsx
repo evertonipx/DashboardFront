@@ -5,6 +5,7 @@ import {
   BarChart3,
   Clock3,
   Plus,
+  RefreshCw,
   Settings2,
   Trash2,
 } from "lucide-react";
@@ -38,6 +39,7 @@ import {
   fetchScenarioComparisonRows,
   loadScenarioComparisonSettings,
   saveScenarioComparisonSettings,
+  type ScenarioComparisonHourlySource,
   type ScenarioComparisonSettings,
 } from "@/components/app/scenario-comparison-card";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
@@ -73,8 +75,17 @@ import { hasVisualAdminAccess } from "@/lib/access";
 import { apiFetch } from "@/lib/api";
 import {
   aggregateQueryIso,
+  endOfAggregateBucket,
   parseAggregateBucket,
+  requireAggregateGranularity,
+  requireAggregateRows,
+  startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  reconcileAggregateRows,
+  rollupAggregateRows,
+  rollupAggregateRowsMany,
+} from "@/lib/aggregate-reconciliation";
 import {
   CAMERA_GROUPS_UPDATED_EVENT,
   type CameraGroup,
@@ -91,7 +102,6 @@ import {
 import {
   buildCountingIntelligenceModel,
   buildCountingIntelligenceReportAssets,
-  COUNTING_HISTORY_START_YEAR,
 } from "@/lib/counting-intelligence";
 import {
   loadCountingReportViewSettings,
@@ -112,6 +122,12 @@ import {
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
 import {
+  requireCameraRows,
+  requireInfrastructureRelations,
+  requireLocationRows,
+  requireSubLocationRows,
+} from "@/lib/metadata-validation";
+import {
   deleteReportCustomWidget,
   loadReportCustomWidgets,
   REPORT_CUSTOM_WIDGETS_UPDATED_EVENT,
@@ -122,6 +138,7 @@ import {
   type ReportCustomWidgetScopeMode,
   type ReportScopeCustomWidget,
 } from "@/lib/report-custom-widgets";
+import { requireScenarioRows } from "@/lib/scenario-validation";
 import type { ReportMetric, ReportPayload, ReportTable } from "@/lib/report-export";
 import type {
   AggregateEventRow,
@@ -151,19 +168,18 @@ type ScenarioChartState = {
   rows: AggregateEventRow[];
   granularity: AggregateGranularity;
   error?: string;
+  comparisonBaseError?: string | null;
+};
+
+type ReportComparisonRollup = {
+  boundaryDefinition?: ScenarioAggregateDefinition;
+  definition: ScenarioAggregateDefinition;
+  to: Date;
 };
 
 type ChartPoint = {
   bucket: string;
   label: string;
-  total: number;
-};
-
-type AggregateIdentityTotal = {
-  cameraId: string;
-  lineCountId: string;
-  metricType: string;
-  objectClass: string;
   total: number;
 };
 
@@ -194,14 +210,15 @@ type ReportCustomWidgetForm = {
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
-const RECENT_DAY_RECONCILIATION_COUNT = 3;
 const DEFAULT_METRIC_TYPE = "count";
 const PREVIOUS_SUFFIX = "__previous";
 const CURRENT_HOUR_MINUTES_ID = "report_current_hour_minutes";
-const CURRENT_DAY_HOURS_ID = "report_current_day_hours";
 const CURRENT_MONTH_DAYS_ID = "report_current_month_days";
 const COUNTING_HOUR_HISTORY_ID = "report_counting_hour_history";
 const COUNTING_MONTH_HISTORY_ID = "report_counting_month_history";
+const COMPARISON_BOUNDARY_MINUTES_PREFIX =
+  "report_comparison_boundary_minutes_";
+const REPORT_OPEN_REFRESH_MS = 5_000;
 const REPORT_CUSTOM_WIDGET_GRANULARITY_OPTIONS: {
   label: string;
   value: ReportCustomWidgetGranularity;
@@ -233,6 +250,7 @@ export function ScenarioReportsDashboard({
   const [chartData, setChartData] = React.useState<
     Record<string, ScenarioChartState>
   >({});
+  const chartDataRef = React.useRef<Record<string, ScenarioChartState>>({});
   const [showPreviousPeriod, setShowPreviousPeriod] = React.useState(
     () => loadLiveDashboardSettings(companyScopeId).showPreviousPeriod,
   );
@@ -242,6 +260,8 @@ export function ScenarioReportsDashboard({
     );
   const [loadingScenarios, setLoadingScenarios] = React.useState(true);
   const [loadingCharts, setLoadingCharts] = React.useState(false);
+  const [metadataError, setMetadataError] = React.useState("");
+  const [chartLoadError, setChartLoadError] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
   const [clock, setClock] = React.useState(() => new Date());
   const [countingPeriod, setCountingPeriod] =
@@ -259,6 +279,11 @@ export function ScenarioReportsDashboard({
     React.useState(false);
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
   const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
+  const metadataRequestSequenceRef = React.useRef(0);
+  const chartRequestSequenceRef = React.useRef(0);
+  const openRefreshRequestSequenceRef = React.useRef(0);
+  const openRefreshRunningRef = React.useRef(false);
+  const canonicalBaselineReadyRef = React.useRef(false);
   const [customWidgetForm, setCustomWidgetForm] =
     React.useState<ReportCustomWidgetForm>({
       comparisonSettings: createDefaultScenarioComparisonSettings(),
@@ -349,6 +374,7 @@ export function ScenarioReportsDashboard({
   const reportPeriodOverride = React.useMemo(
     () => ({
       ...effectivePeriodDates,
+      to: reportCoverageEnd(effectivePeriodDates, clock),
       label: `${formatCountingReportPeriod(appliedCountingPeriod)} · ${
         countingViewSettings.includeOpenPeriod
           ? "inclui mês em andamento"
@@ -357,6 +383,7 @@ export function ScenarioReportsDashboard({
     }),
     [
       appliedCountingPeriod,
+      clock,
       countingViewSettings.includeOpenPeriod,
       effectivePeriodDates,
     ],
@@ -374,24 +401,40 @@ export function ScenarioReportsDashboard({
   );
 
   const loadScenarios = React.useCallback(async () => {
+    const requestSequence = ++metadataRequestSequenceRef.current;
     setLoadingScenarios(true);
+    setMetadataError("");
     try {
-      const [data, cameraRows, locationRows] = await Promise.all([
-        apiFetch<Scenario[]>("/scenarios"),
-        apiFetch<Camera[]>("/cameras").catch(() => []),
-        apiFetch<Location[]>("/locations").catch(() => []),
+      const [scenarioRows, cameraRows, locationRows] = await Promise.all([
+        apiFetch<unknown>("/scenarios"),
+        apiFetch<unknown>("/cameras"),
+        apiFetch<unknown>("/locations"),
       ]);
+      const data = requireScenarioRows(scenarioRows);
       const scopedScenarios = filterScopedApiRows(data, companyScopeId);
-      const scopedCameras = filterScopedApiRows(cameraRows, companyScopeId);
-      const scopedLocations = filterScopedApiRows(locationRows, companyScopeId);
+      const scopedCameras = filterScopedApiRows(
+        requireCameraRows(cameraRows),
+        companyScopeId,
+      );
+      const scopedLocations = filterScopedApiRows(
+        requireLocationRows(locationRows),
+        companyScopeId,
+      );
       const subLocationRows = await fetchSubLocations(
         scopedLocations,
         companyScopeId,
       );
+      requireInfrastructureRelations({
+        cameras: scopedCameras,
+        locations: scopedLocations,
+        subLocations: subLocationRows,
+      });
       const visible = manager
         ? scopedScenarios
         : scopedScenarios.filter((scenario) => scenario.active);
 
+      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      setMetadataError("");
       setScenarios(visible);
       setCameras(scopedCameras);
       setLocations(scopedLocations);
@@ -424,21 +467,37 @@ export function ScenarioReportsDashboard({
           : options[0]?.id ?? "";
       });
     } catch (error) {
-      toast.error(
+      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      const message =
         error instanceof Error
           ? error.message
-          : "Não foi possível carregar as visões de relatório.",
-      );
+          : "Não foi possível carregar as visões de relatório.";
+      setScenarios([]);
+      setCameras([]);
+      setLocations([]);
+      setSubLocations([]);
+      setSelectedId("");
+      chartDataRef.current = {};
+      setChartData({});
+      setMetadataError(message);
+      toast.error(message);
     } finally {
-      setLoadingScenarios(false);
+      if (requestSequence === metadataRequestSequenceRef.current) {
+        setLoadingScenarios(false);
+      }
     }
   }, [cameraGroups, companyScopeId, manager, scopeMode]);
 
   const loadCharts = React.useCallback(
     async (_scope: ReportScopeOption, silent = false) => {
+      const requestSequence = ++chartRequestSequenceRef.current;
+      openRefreshRequestSequenceRef.current += 1;
+      openRefreshRunningRef.current = false;
+      canonicalBaselineReadyRef.current = false;
       if (!silent) setLoadingCharts(true);
 
       const now = new Date();
+      const coverageTo = reportCoverageEnd(effectivePeriodDates, now);
       const definitions = buildScenarioAggregateDefinitions(
         now,
         effectivePeriodDates,
@@ -458,16 +517,18 @@ export function ScenarioReportsDashboard({
             buildComparisonDefinition(definition, intradayComparison),
           )
         : [];
+      const comparisonRollups = buildComparisonRollups(
+        visibleDefinitions,
+        previousDefinitions,
+        coverageTo,
+        intradayComparison,
+      );
       const supportDefinitions = [
-        buildCountingHourHistoryDefinition(effectivePeriodDates),
-        buildCountingMonthHistoryDefinition(now),
+        buildCountingHourHistoryDefinition(effectivePeriodDates, now),
+        ...uniqueComparisonBoundaryDefinitions(comparisonRollups),
       ];
       if (now >= effectivePeriodDates.from && now < effectivePeriodDates.to) {
-        supportDefinitions.push(
-          buildCurrentHourMinutesDefinition(now),
-          buildCurrentDayHoursDefinition(now),
-          buildCurrentMonthDaysDefinition(now),
-        );
+        supportDefinitions.push(buildCurrentHourMinutesDefinition(now));
       }
 
       try {
@@ -479,15 +540,32 @@ export function ScenarioReportsDashboard({
                 { rows: [], granularity: definition.granularity },
               ] as const;
             }
+            if (
+              definition.id.startsWith("report_chart_") &&
+              definition.granularity !== "minute"
+            ) {
+              return [
+                definition.id,
+                { rows: [], granularity: definition.granularity },
+              ] as const;
+            }
             try {
               const response = await apiFetch<AggregateEventsResponse>(
                 aggregatePath(definition),
               );
+              const responseGranularity = requireAggregateGranularity(
+                response.granularity,
+                definition.granularity,
+              );
               return [
                 definition.id,
                 {
-                  rows: response.data ?? [],
-                  granularity: response.granularity ?? definition.granularity,
+                  rows: requireAggregateRows(
+                    response.data,
+                    responseGranularity,
+                    DEFAULT_METRIC_TYPE,
+                  ),
+                  granularity: responseGranularity,
                 },
               ] as const;
             } catch (error) {
@@ -505,24 +583,81 @@ export function ScenarioReportsDashboard({
             }
           }),
         );
+        if (requestSequence !== chartRequestSequenceRef.current) return;
 
-        setChartData(
-          hydrateScenarioOpenBuckets(
-            Object.fromEntries(entries),
-            now,
-            effectivePeriodDates,
+        const loadedData = Object.fromEntries(entries) as Record<
+          string,
+          ScenarioChartState
+        >;
+        const canonicalHourState = loadedData[COUNTING_HOUR_HISTORY_ID];
+        const canonicalDefinitions = visibleDefinitions.map((definition) => ({
+          definition,
+          to: new Date(
+            Math.min(definition.to.getTime(), coverageTo.getTime()),
           ),
+        }));
+        canonicalDefinitions
+          .filter(({ definition }) => definition.granularity !== "minute")
+          .forEach(({ definition, to }) => {
+            if (!canonicalHourState || canonicalHourState.error) {
+              loadedData[definition.id] = {
+                error:
+                  canonicalHourState?.error ??
+                  "A base horária canônica não foi carregada.",
+                granularity: definition.granularity,
+                rows: [],
+              };
+              return;
+            }
+
+            loadedData[definition.id] = {
+              granularity: definition.granularity,
+              rows: rollupAggregateRows(
+                canonicalHourState.rows,
+                canonicalHourState.granularity,
+                definition.granularity,
+                definition.from,
+                to,
+              ),
+            };
+          });
+
+        if (
+          Object.values(loadedData).some((state) => state.error) &&
+          !silent
+        ) {
+          toast.error(
+            "Alguns dados não puderam ser reconciliados; os valores afetados não estão certificados.",
+          );
+        }
+        const nextData = hydrateScenarioOpenBuckets(
+          loadedData,
+          now,
+          effectivePeriodDates,
+          visibleDefinitions,
+          comparisonRollups,
         );
+        chartDataRef.current = nextData;
+        setChartData(nextData);
+        setChartLoadError("");
         setClock(now);
         setLastUpdated(new Date());
+        canonicalBaselineReadyRef.current = Boolean(
+          canonicalHourState && !canonicalHourState.error,
+        );
       } catch (error) {
-        toast.error(
+        if (requestSequence !== chartRequestSequenceRef.current) return;
+        canonicalBaselineReadyRef.current = false;
+        const message =
           error instanceof Error
             ? error.message
-            : "Não foi possível carregar os relatórios.",
-        );
+            : "Não foi possível carregar os relatórios.";
+        setChartLoadError(message);
+        toast.error(message);
       } finally {
-        setLoadingCharts(false);
+        if (requestSequence === chartRequestSequenceRef.current) {
+          setLoadingCharts(false);
+        }
       }
     },
     [
@@ -533,12 +668,200 @@ export function ScenarioReportsDashboard({
     ],
   );
 
+  const refreshOpenReportData = React.useCallback(async () => {
+    const now = new Date();
+    if (
+      openRefreshRunningRef.current ||
+      loadingCharts ||
+      metadataError ||
+      !canonicalBaselineReadyRef.current ||
+      now < effectivePeriodDates.from ||
+      now >= effectivePeriodDates.to
+    ) {
+      return;
+    }
+
+    openRefreshRunningRef.current = true;
+    const requestSequence = ++openRefreshRequestSequenceRef.current;
+    const definitions = buildScenarioAggregateDefinitions(
+      now,
+      effectivePeriodDates,
+    );
+    const requiredChartIds = new Set(
+      customWidgets.flatMap((widget) =>
+        widget.kind === "scope"
+          ? [reportChartIdForGranularity(widget.granularity)]
+          : [],
+      ),
+    );
+    const visibleDefinitions = definitions.filter((definition) =>
+      requiredChartIds.has(definition.id),
+    );
+    const previousDefinitions = showPreviousPeriod
+      ? visibleDefinitions.map((definition) =>
+          buildComparisonDefinition(definition, intradayComparison),
+        )
+      : [];
+    const comparisonRollups = buildComparisonRollups(
+      visibleDefinitions,
+      previousDefinitions,
+      reportCoverageEnd(effectivePeriodDates, now),
+      intradayComparison,
+    );
+    const boundaryDefinitions =
+      uniqueComparisonBoundaryDefinitions(comparisonRollups);
+    const boundaryDefinitionsToFetch = boundaryDefinitions.filter((definition) => {
+      const existing = chartDataRef.current[definition.id];
+      return !existing || Boolean(existing.error);
+    });
+    const openHourDefinition: ScenarioAggregateDefinition = {
+      id: COUNTING_HOUR_HISTORY_ID,
+      label: "Atualização horária aberta",
+      description: "Horas do dia em andamento.",
+      granularity: "hour",
+      from: startOfDay(now),
+      to: endOfAggregateBucket(startOfHour(now), "hour"),
+    };
+    const currentMinuteDefinition = buildCurrentHourMinutesDefinition(now);
+
+    async function fetchState(
+      definition: ScenarioAggregateDefinition,
+    ): Promise<ScenarioChartState> {
+      try {
+        const response = await apiFetch<AggregateEventsResponse>(
+          aggregatePath(definition),
+        );
+        const granularity = requireAggregateGranularity(
+          response.granularity,
+          definition.granularity,
+        );
+        return {
+          granularity,
+          rows: requireAggregateRows(
+            response.data,
+            granularity,
+            DEFAULT_METRIC_TYPE,
+          ),
+        };
+      } catch (error) {
+        return {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Não foi possível atualizar o período aberto.",
+          granularity: definition.granularity,
+          rows: [],
+        };
+      }
+    }
+
+    try {
+      const [openHourState, currentMinuteState, boundaryEntries] =
+        await Promise.all([
+        fetchState(openHourDefinition),
+        fetchState(currentMinuteDefinition),
+        Promise.all(
+          boundaryDefinitionsToFetch.map(async (definition) => [
+            definition.id,
+            await fetchState(definition),
+          ] as const),
+        ),
+      ]);
+      if (
+        requestSequence !== openRefreshRequestSequenceRef.current ||
+        !canonicalBaselineReadyRef.current
+      ) {
+        return;
+      }
+
+      const next = cloneChartData(chartDataRef.current);
+      const canonical = next[COUNTING_HOUR_HISTORY_ID];
+      if (!canonical) return;
+
+      const activeBoundaryIds = new Set(
+        boundaryDefinitions.map((definition) => definition.id),
+      );
+      const retainCompletedMinuteBoundaries = comparisonRollups.some(
+        ({ definition }) => definition.granularity === "minute",
+      );
+      Object.keys(next).forEach((id) => {
+        if (
+          id.startsWith(COMPARISON_BOUNDARY_MINUTES_PREFIX) &&
+          !activeBoundaryIds.has(id) &&
+          (!retainCompletedMinuteBoundaries || next[id]?.error)
+        ) {
+          delete next[id];
+        }
+      });
+      boundaryEntries.forEach(([id, state]) => {
+        next[id] = state;
+      });
+
+      next[CURRENT_HOUR_MINUTES_ID] = currentMinuteState;
+      if (openHourState.error) {
+        next[COUNTING_HOUR_HISTORY_ID] = {
+          ...canonical,
+          error: openHourState.error,
+        };
+      } else {
+        next[COUNTING_HOUR_HISTORY_ID] = {
+          ...canonical,
+          error: undefined,
+          rows: reconcileAggregateRows(
+            canonical.rows,
+            canonical.granularity,
+            openHourState.rows,
+            openHourState.granularity,
+            openHourDefinition.from,
+            openHourDefinition.to,
+          ),
+        };
+      }
+
+      const hydrated = hydrateScenarioOpenBuckets(
+        next,
+        now,
+        effectivePeriodDates,
+        visibleDefinitions,
+        comparisonRollups,
+      );
+      chartDataRef.current = hydrated;
+      setChartData(hydrated);
+      setClock(now);
+      setLastUpdated(new Date());
+    } finally {
+      if (requestSequence === openRefreshRequestSequenceRef.current) {
+        openRefreshRunningRef.current = false;
+      }
+    }
+  }, [
+    customWidgets,
+    effectivePeriodDates,
+    intradayComparison,
+    loadingCharts,
+    metadataError,
+    showPreviousPeriod,
+  ]);
+
   React.useEffect(() => {
     loadScenarios();
   }, [loadScenarios]);
 
   React.useEffect(() => {
+    chartRequestSequenceRef.current += 1;
+    openRefreshRequestSequenceRef.current += 1;
+    openRefreshRunningRef.current = false;
+    canonicalBaselineReadyRef.current = false;
+    setMetadataError("");
+    setChartLoadError("");
+    setScenarios([]);
+    setCameras([]);
+    setLocations([]);
+    setSubLocations([]);
+    setSelectedId("");
+    chartDataRef.current = {};
     setChartData({});
+    setLastUpdated(null);
   }, [companyScopeId]);
 
   React.useEffect(() => {
@@ -646,12 +969,31 @@ export function ScenarioReportsDashboard({
 
   React.useEffect(() => {
     if (!selectedScope) {
+      chartRequestSequenceRef.current += 1;
+      openRefreshRequestSequenceRef.current += 1;
+      openRefreshRunningRef.current = false;
+      canonicalBaselineReadyRef.current = false;
+      setChartLoadError("");
+      chartDataRef.current = {};
       setChartData({});
       return;
     }
 
     loadCharts(selectedScope);
   }, [loadCharts, selectedScope]);
+
+  React.useEffect(() => {
+    if (!selectedScope) return;
+
+    void refreshOpenReportData();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void refreshOpenReportData();
+      }
+    }, REPORT_OPEN_REFRESH_MS);
+
+    return () => window.clearInterval(interval);
+  }, [refreshOpenReportData, selectedScope]);
 
   function updateShowPreviousPeriod(value: boolean) {
     setShowPreviousPeriod(value);
@@ -692,9 +1034,14 @@ export function ScenarioReportsDashboard({
     );
   }
 
+  const reportHourHistoryState = chartData[COUNTING_HOUR_HISTORY_ID];
+  const reportCertificationError =
+    metadataError ||
+    chartLoadError ||
+    Object.values(chartData).find((state) => state.error)?.error;
   const countingIntelligenceModel = React.useMemo(
     () =>
-      selectedScope
+      selectedScope && !reportCertificationError
         ? buildCountingIntelligenceModel({
             hourlyRows: chartData[COUNTING_HOUR_HISTORY_ID]?.rows ?? [],
             includeOpenPeriod: countingViewSettings.includeOpenPeriod,
@@ -717,6 +1064,7 @@ export function ScenarioReportsDashboard({
       clock,
       countingViewSettings,
       effectivePeriodDates,
+      reportCertificationError,
       scenarios,
       selectedScope,
     ],
@@ -737,6 +1085,36 @@ export function ScenarioReportsDashboard({
         scenarios,
       })
     : [];
+  const reportComparisonHourlySource =
+    React.useMemo<ScenarioComparisonHourlySource | undefined>(() => {
+      if (
+        reportCertificationError ||
+        reportHourHistoryState?.granularity !== "hour" ||
+        reportHourHistoryState.error
+      ) {
+        return undefined;
+      }
+
+      const canonicalDefinition =
+        buildCountingHourHistoryDefinition(effectivePeriodDates, clock);
+      return {
+        from: canonicalDefinition.from,
+        rows: reportHourHistoryState.rows,
+        to: canonicalDefinition.to,
+      };
+    }, [
+      clock,
+      effectivePeriodDates,
+      reportCertificationError,
+      reportHourHistoryState,
+    ]);
+  const reportComparisonDisabledReason =
+    loadingCharts || loadingScenarios
+      ? "A base horária canônica do relatório está sendo carregada."
+      : reportCertificationError ||
+        (!reportComparisonHourlySource
+          ? "A base horária canônica do relatório não está disponível."
+          : undefined);
 
   function getScopeOptionsForMode(mode: ReportCustomWidgetScopeMode) {
     return buildReportScopeOptions({
@@ -929,6 +1307,8 @@ export function ScenarioReportsDashboard({
             <ScenarioComparisonCard
               companyId={companyScopeId}
               description="Compare todos os cenários ou apenas os escolhidos para análise de relatório."
+              disabledReason={reportComparisonDisabledReason}
+              hourlySource={reportComparisonHourlySource}
               monitorMode={monitorMode}
               periodOverride={reportPeriodOverride}
               preferenceScopeId={selectedScope?.id}
@@ -967,6 +1347,8 @@ export function ScenarioReportsDashboard({
               </Button>
             }
             companyId={companyScopeId}
+            disabledReason={reportComparisonDisabledReason}
+            hourlySource={reportComparisonHourlySource}
             monitorMode={monitorMode}
             periodOverride={reportPeriodOverride}
             preferenceScopeId={selectedScope?.id}
@@ -1021,6 +1403,11 @@ export function ScenarioReportsDashboard({
           definition={definition}
           loading={loadingCharts}
           previousRows={previousState?.rows ?? []}
+          error={
+            reportCertificationError ||
+            state?.error ||
+            (showPreviousPeriod ? previousState?.error : undefined)
+          }
           intradayComparison={intradayComparison}
           rows={state?.rows ?? []}
           scope={scope}
@@ -1261,38 +1648,37 @@ export function ScenarioReportsDashboard({
       visibleReportCardIds.includes("report_scenario_period_comparison") &&
       scenarios.length
     ) {
-      try {
-        const settings = loadScenarioComparisonSettings(
-          "reports",
-          companyScopeId,
-          preferenceScope,
-        );
-        const definition = buildScenarioComparisonDefinition(
-          settings,
-          new Date(),
-          reportPeriodOverride,
-        );
-        const rows = await fetchScenarioComparisonRows(definition);
-        const reportChart = buildScenarioComparisonReportChart({
-            definition,
-            rows,
-            scenarios,
-            settings,
-            periodLabelOverride: reportPeriodOverride.label,
-            widgetColor: reportColorByCardId.get(
-              "report_scenario_period_comparison",
-            ),
-          });
-        chartByCardId.set(
+      const settings = loadScenarioComparisonSettings(
+        "reports",
+        companyScopeId,
+        preferenceScope,
+      );
+      const definition = buildScenarioComparisonDefinition(
+        settings,
+        new Date(),
+        reportPeriodOverride,
+      );
+      const rows = await fetchScenarioComparisonRows(
+        definition,
+        reportComparisonHourlySource,
+      );
+      const reportChart = buildScenarioComparisonReportChart({
+        definition,
+        rows,
+        scenarios,
+        settings,
+        periodLabelOverride: reportPeriodOverride.label,
+        widgetColor: reportColorByCardId.get(
           "report_scenario_period_comparison",
-          applyReportChartType(
-            "report_scenario_period_comparison",
-            reportChart,
-          ),
-        );
-      } catch {
-        // Mantem a exportação dos demais widgets mesmo se este gráfico falhar.
-      }
+        ),
+      });
+      chartByCardId.set(
+        "report_scenario_period_comparison",
+        applyReportChartType(
+          "report_scenario_period_comparison",
+          reportChart,
+        ),
+      );
     }
 
     await Promise.all(
@@ -1303,38 +1689,35 @@ export function ScenarioReportsDashboard({
             visibleReportCardIds.includes(`report_custom_${widget.id}`),
         )
         .map(async (widget) => {
-          try {
-            const storageKey = reportScenarioComparisonStorageKey(widget.id);
-            const settings = loadScenarioComparisonSettings(
-              storageKey,
-              companyScopeId,
-              preferenceScope,
-            );
-            const definition = buildScenarioComparisonDefinition(
-              settings,
-              new Date(),
-              reportPeriodOverride,
-            );
-            const rows = await fetchScenarioComparisonRows(definition);
-            const cardId = `report_custom_${widget.id}`;
-            const reportChart = buildScenarioComparisonReportChart({
-                definition,
-                rows,
-                scenarios,
-                settings,
-                periodLabelOverride: reportPeriodOverride.label,
-                title: widget.title,
-                widgetColor: reportColorByCardId.get(
-                  cardId,
-                ),
-              });
-            chartByCardId.set(
-              cardId,
-              applyReportChartType(cardId, reportChart),
-            );
-          } catch {
-            // Mantem os demais widgets na exportação se um comparativo falhar.
-          }
+          const storageKey = reportScenarioComparisonStorageKey(widget.id);
+          const settings = loadScenarioComparisonSettings(
+            storageKey,
+            companyScopeId,
+            preferenceScope,
+          );
+          const definition = buildScenarioComparisonDefinition(
+            settings,
+            new Date(),
+            reportPeriodOverride,
+          );
+          const rows = await fetchScenarioComparisonRows(
+            definition,
+            reportComparisonHourlySource,
+          );
+          const cardId = `report_custom_${widget.id}`;
+          const reportChart = buildScenarioComparisonReportChart({
+            definition,
+            rows,
+            scenarios,
+            settings,
+            periodLabelOverride: reportPeriodOverride.label,
+            title: widget.title,
+            widgetColor: reportColorByCardId.get(cardId),
+          });
+          chartByCardId.set(
+            cardId,
+            applyReportChartType(cardId, reportChart),
+          );
         }),
     );
 
@@ -1376,6 +1759,12 @@ export function ScenarioReportsDashboard({
       )}
     >
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
+      {reportCertificationError ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
+          Dados não certificados: {reportCertificationError} Os valores
+          afetados e as exportações não devem ser considerados conclusivos.
+        </div>
+      ) : null}
 
       {monitorMode ? (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
@@ -1504,6 +1893,24 @@ export function ScenarioReportsDashboard({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    disabled={loadingCharts || !selectedScope}
+                    onClick={() => {
+                      if (selectedScope) void loadCharts(selectedScope);
+                    }}
+                    aria-label="Atualizar dados do relatório"
+                    title="Atualizar dados do relatório"
+                  >
+                    <RefreshCw
+                      className={cn(
+                        "h-4 w-4",
+                        loadingCharts && "animate-spin",
+                      )}
+                    />
+                  </Button>
                   {canEditVisual ? (
                     <>
                       <ReorderModeButton
@@ -1529,7 +1936,8 @@ export function ScenarioReportsDashboard({
                       countingPeriodPending ||
                       loadingCharts ||
                       loadingScenarios ||
-                      !selectedScope
+                      !selectedScope ||
+                      Boolean(reportComparisonDisabledReason)
                     }
                   />
                   <MonitorModeButton
@@ -1751,6 +2159,7 @@ export function ScenarioReportsDashboard({
 function ScenarioAggregateChartCard({
   action,
   definition,
+  error,
   intradayComparison,
   loading,
   rows,
@@ -1761,6 +2170,7 @@ function ScenarioAggregateChartCard({
 }: {
   action?: React.ReactNode;
   definition: ScenarioAggregateDefinition;
+  error?: string;
   intradayComparison: IntradayComparisonMode;
   loading: boolean;
   rows: AggregateEventRow[];
@@ -1825,8 +2235,8 @@ function ScenarioAggregateChartCard({
       <CardContent>
         {loading ? (
           <Skeleton className="h-[300px] w-full" />
-        ) : state?.error ? (
-          <EmptyChartState text={state.error} />
+        ) : error || state?.error ? (
+          <EmptyChartState text={error || state?.error || "Dados não certificados."} />
         ) : hasData ? (
           <div className="h-[300px] w-full">
             <EChart option={option} />
@@ -1956,6 +2366,7 @@ function buildScenarioAggregateDefinitions(
   period?: { from: Date; to: Date },
 ): ScenarioAggregateDefinition[] {
   if (period) {
+    const coverageTo = reportCoverageEnd(period, now);
     const templates: Array<{
       granularity: ReportCustomWidgetGranularity;
       id: string;
@@ -1978,7 +2389,7 @@ function buildScenarioAggregateDefinitions(
       const granularity = fitReportGranularityToRange(
         template.granularity,
         period.from,
-        period.to,
+        coverageTo,
       );
       const adjusted = granularity !== template.granularity;
 
@@ -1994,13 +2405,13 @@ function buildScenarioAggregateDefinitions(
             ).toLowerCase()}.`,
         granularity,
         from: alignToGranularity(period.from, granularity),
-        to: alignEndToGranularity(period.to, granularity),
+        to: alignEndToGranularity(coverageTo, granularity),
       };
     });
   }
 
   const minuteEnd = addMinutes(startOfMinute(now), 1);
-  const hourEnd = addHours(startOfHour(now), 1);
+  const hourEnd = endOfAggregateBucket(startOfHour(now), "hour");
   const todayStart = startOfDay(now);
   const currentWeekStart = startOfWeek(now);
   const currentMonthStart = startOfMonth(now);
@@ -2141,75 +2552,28 @@ function buildCurrentHourMinutesDefinition(
   };
 }
 
-function buildCurrentDayHoursDefinition(
-  now: Date,
-): ScenarioAggregateDefinition {
-  const todayStart = startOfDay(now);
-
-  return {
-    id: CURRENT_DAY_HOURS_ID,
-    label: "Horas dos dias recentes",
-    description: "Base auxiliar para reconciliar os dias recentes.",
-    granularity: "hour",
-    from: addDays(todayStart, 1 - RECENT_DAY_RECONCILIATION_COUNT),
-    to: addHours(startOfHour(now), 1),
-  };
-}
-
-function buildCurrentMonthDaysDefinition(now: Date): ScenarioAggregateDefinition {
-  const todayStart = startOfDay(now);
-  const recentDayStart = addDays(
-    todayStart,
-    1 - RECENT_DAY_RECONCILIATION_COUNT,
-  );
-  const supportStart = new Date(
-    Math.min(
-      startOfMonth(recentDayStart).getTime(),
-      startOfWeek(now).getTime(),
-      startOfMonth(now).getTime(),
-    ),
-  );
-
-  return {
-    id: CURRENT_MONTH_DAYS_ID,
-    label: "Dias dos períodos recentes",
-    description: "Base auxiliar para completar períodos em andamento.",
-    granularity: "day",
-    from: supportStart,
-    to: addDays(todayStart, 1),
-  };
-}
-
 function buildCountingHourHistoryDefinition(period: {
   from: Date;
   to: Date;
-}): ScenarioAggregateDefinition {
+}, now: Date): ScenarioAggregateDefinition {
   return {
     id: COUNTING_HOUR_HISTORY_ID,
     label: "Histórico horário de contagem",
-    description: "Base horária do fluxo direcional no período selecionado.",
+    description:
+      "Base horária do período selecionado e do comparativo anual.",
     granularity: "hour",
-    from: period.from,
-    to: period.to,
+    from: startOfYear(addYears(period.from, -1)),
+    to: alignEndToGranularity(reportCoverageEnd(period, now), "hour"),
   };
 }
 
-function buildCountingMonthHistoryDefinition(
+function reportCoverageEnd(
+  period: { from: Date; to: Date },
   now: Date,
-): ScenarioAggregateDefinition {
-  const currentYearStart = startOfYear(now);
-
-  return {
-    id: COUNTING_MONTH_HISTORY_ID,
-    label: "Histórico mensal de contagem",
-    description: "Base auxiliar para a análise executiva ano x meses.",
-    granularity: "month",
-    from: addYears(
-      currentYearStart,
-      COUNTING_HISTORY_START_YEAR - currentYearStart.getFullYear(),
-    ),
-    to: addMonths(startOfMonth(now), 1),
-  };
+) {
+  return now >= period.from && now < period.to
+    ? addMinutes(startOfMinute(now), 1)
+    : period.to;
 }
 
 function buildReportCustomWidgetDefinition(
@@ -2309,6 +2673,128 @@ function buildComparisonDefinition(
   };
 }
 
+function comparisonRangeEnd(
+  definition: ScenarioAggregateDefinition,
+  periodTo: Date,
+  intradayComparison: IntradayComparisonMode,
+) {
+  const currentTo = new Date(
+    Math.min(definition.to.getTime(), periodTo.getTime()),
+  );
+  if (
+    definition.granularity === "minute" ||
+    definition.granularity === "hour"
+  ) {
+    return addDays(
+      currentTo,
+      intradayComparison === "last_week" ? -7 : -1,
+    );
+  }
+  if (definition.granularity === "day") {
+    return addDays(currentTo, -7);
+  }
+  if (definition.granularity === "week") {
+    const currentBucketStart = startOfWeek(
+      new Date(currentTo.getTime() - 1),
+    );
+    const comparisonStart =
+      equivalentWeekInPreviousMonth(currentBucketStart);
+    const calendarDays = Math.round(
+      (Date.UTC(
+        currentTo.getFullYear(),
+        currentTo.getMonth(),
+        currentTo.getDate(),
+      ) -
+        Date.UTC(
+          currentBucketStart.getFullYear(),
+          currentBucketStart.getMonth(),
+          currentBucketStart.getDate(),
+        )) /
+        DAY_MS,
+    );
+    const comparisonTo = addDays(comparisonStart, calendarDays);
+    comparisonTo.setHours(
+      currentTo.getHours(),
+      currentTo.getMinutes(),
+      currentTo.getSeconds(),
+      currentTo.getMilliseconds(),
+    );
+    return comparisonTo;
+  }
+
+  return addYears(currentTo, -1);
+}
+
+function buildComparisonRollups(
+  currentDefinitions: ScenarioAggregateDefinition[],
+  previousDefinitions: ScenarioAggregateDefinition[],
+  coverageTo: Date,
+  intradayComparison: IntradayComparisonMode,
+): ReportComparisonRollup[] {
+  return previousDefinitions.map((definition, index) => {
+    const currentDefinition = currentDefinitions[index];
+    const to = new Date(
+      Math.min(
+        definition.to.getTime(),
+        comparisonRangeEnd(
+          currentDefinition,
+          coverageTo,
+          intradayComparison,
+        ).getTime(),
+      ),
+    );
+
+    return {
+      boundaryDefinition: buildComparisonBoundaryMinutesDefinition(
+        definition,
+        to,
+      ),
+      definition,
+      to,
+    };
+  });
+}
+
+function buildComparisonBoundaryMinutesDefinition(
+  definition: ScenarioAggregateDefinition,
+  to: Date,
+): ScenarioAggregateDefinition | undefined {
+  if (to <= definition.from) return undefined;
+
+  const alignedHour = startOfHour(to);
+  const boundaryStart =
+    alignedHour.getTime() === to.getTime()
+      ? definition.granularity === "minute"
+        ? startOfHour(new Date(to.getTime() - 1))
+        : undefined
+      : alignedHour;
+  if (!boundaryStart) return undefined;
+
+  return {
+    id: `${COMPARISON_BOUNDARY_MINUTES_PREFIX}${boundaryStart.getTime()}`,
+    label: "Minutos da fronteira comparativa",
+    description:
+      "Base fechada para aplicar ao comparativo o mesmo minuto decorrido.",
+    granularity: "minute",
+    from: boundaryStart,
+    to: endOfAggregateBucket(boundaryStart, "hour"),
+  };
+}
+
+function uniqueComparisonBoundaryDefinitions(
+  rollups: ReportComparisonRollup[],
+) {
+  return Array.from(
+    new Map(
+      rollups.flatMap(({ boundaryDefinition }) =>
+        boundaryDefinition
+          ? [[boundaryDefinition.id, boundaryDefinition] as const]
+          : [],
+      ),
+    ).values(),
+  );
+}
+
 function previousId(id: string) {
   return `${id}${PREVIOUS_SUFFIX}`;
 }
@@ -2328,167 +2814,319 @@ function hydrateScenarioOpenBuckets(
   data: Record<string, ScenarioChartState>,
   now: Date,
   period: { from: Date; to: Date },
+  currentDefinitions: ScenarioAggregateDefinition[] = [],
+  comparisonRollups: ReportComparisonRollup[] = [],
 ) {
   const next = cloneChartData(data);
-  if (now < period.from || now >= period.to) return next;
+  const includesNow = now >= period.from && now < period.to;
 
   const currentHourStart = startOfHour(now);
-  const todayStart = startOfDay(now);
-  const recentDayStart = addDays(
-    todayStart,
-    1 - RECENT_DAY_RECONCILIATION_COUNT,
-  );
-  const recentDayStarts = Array.from(
-    { length: RECENT_DAY_RECONCILIATION_COUNT },
-    (_, index) => addDays(recentDayStart, index),
-  );
-  const currentMinuteRows = next[CURRENT_HOUR_MINUTES_ID]?.rows ?? [];
+  const currentMinuteState = next[CURRENT_HOUR_MINUTES_ID];
+  const currentMinuteRows = currentMinuteState?.rows ?? [];
+  const currentMinuteGranularity =
+    currentMinuteState?.granularity ?? "minute";
+  const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
 
-  function replaceVisibleBucket(
-    granularity: AggregateGranularity,
-    bucketStart: Date,
-    bucketEnd: Date,
-    sourceRows: AggregateEventRow[],
-    sourceGranularity: AggregateGranularity,
-  ) {
-    if (bucketEnd <= period.from || bucketStart >= period.to) return;
-
+  if (includesNow && currentMinuteState && !currentMinuteState.error) {
+    replaceBucketRowsFromSource(
+      next,
+      COUNTING_HOUR_HISTORY_ID,
+      "hour",
+      currentHourStart,
+      endOfAggregateBucket(currentHourStart, "hour"),
+      currentMinuteRows,
+      currentMinuteGranularity,
+    );
     Object.entries(next).forEach(([chartId, state]) => {
       if (
         !chartId.startsWith("report_chart_") ||
-        chartId.endsWith(PREVIOUS_SUFFIX) ||
-        state.granularity !== granularity
+        chartId.endsWith(PREVIOUS_SUFFIX)
       ) {
         return;
       }
 
-      replaceBucketRowsFromSource(
-        next,
-        chartId,
-        granularity,
-        bucketStart,
-        bucketEnd,
-        sourceRows,
-        sourceGranularity,
-      );
+      if (state.granularity === "hour") {
+        next[chartId] = {
+          ...state,
+          rows: reconcileAggregateRows(
+            state.rows,
+            "hour",
+            currentMinuteRows,
+            currentMinuteGranularity,
+            currentHourStart,
+            endOfAggregateBucket(currentHourStart, "hour"),
+          ),
+        };
+      } else if (state.granularity === "minute") {
+        next[chartId] = {
+          ...state,
+          rows: reconcileAggregateRows(
+            state.rows,
+            "minute",
+            currentMinuteRows,
+            currentMinuteGranularity,
+            currentHourStart,
+            currentMinuteEnd,
+          ),
+        };
+      }
     });
   }
 
-  replaceBucketRowsFromSource(
+  const periodHourState = next[COUNTING_HOUR_HISTORY_ID];
+  if (!periodHourState || periodHourState.error) return next;
+
+  const periodHourRows = periodHourState?.rows ?? [];
+  const periodSourceGranularity = periodHourState?.granularity ?? "hour";
+  const canonicalDefinition = buildCountingHourHistoryDefinition(period, now);
+  const comparisonFrom = canonicalDefinition.from;
+  const comparisonTo = canonicalDefinition.to;
+
+  Object.entries(next).forEach(([chartId, state]) => {
+    if (
+      chartId.startsWith("report_chart_") &&
+      !chartId.endsWith(PREVIOUS_SUFFIX) &&
+      state.granularity === "hour"
+    ) {
+      next[chartId] = {
+        ...state,
+        rows: reconcileAggregateRows(
+          state.rows,
+          "hour",
+          periodHourRows,
+          periodSourceGranularity,
+          period.from,
+          comparisonTo,
+        ),
+      };
+    }
+  });
+
+  const rollups = rollupAggregateRowsMany(
+    periodHourRows,
+    periodSourceGranularity,
+    ["day", "week", "month", "semester", "year"],
+    comparisonFrom,
+    comparisonTo,
+  );
+
+  const dailyState = next[CURRENT_MONTH_DAYS_ID] ?? {
+    granularity: "day" as const,
+    rows: [],
+  };
+  next[CURRENT_MONTH_DAYS_ID] = {
+    ...dailyState,
+    rows: reconcileAggregateRows(
+      dailyState.rows,
+      "day",
+      rollups.get("day") ?? [],
+      "day",
+      period.from,
+      period.to,
+    ),
+  };
+
+  const monthHistory = next[COUNTING_MONTH_HISTORY_ID] ?? {
+    granularity: "month" as const,
+    rows: [],
+  };
+  next[COUNTING_MONTH_HISTORY_ID] = {
+    ...monthHistory,
+    rows: reconcileAggregateRows(
+      monthHistory.rows,
+      "month",
+      rollups.get("month") ?? [],
+      "month",
+      startOfMonth(comparisonFrom),
+      alignEndToGranularity(comparisonTo, "month"),
+    ),
+  };
+
+  Object.entries(next).forEach(([chartId, state]) => {
+    if (
+      !chartId.startsWith("report_chart_") ||
+      chartId.endsWith(PREVIOUS_SUFFIX) ||
+      state.granularity === "minute" ||
+      state.granularity === "hour"
+    ) {
+      return;
+    }
+
+    const sourceRows = rollups.get(state.granularity) ?? [];
+    next[chartId] = {
+      ...state,
+      rows: reconcileAggregateRows(
+        state.rows,
+        state.granularity,
+        sourceRows,
+        state.granularity,
+        alignToGranularity(period.from, state.granularity),
+        alignEndToGranularity(period.to, state.granularity),
+      ),
+    };
+  });
+
+  reconcileCurrentReportDefinitions(
     next,
-    CURRENT_DAY_HOURS_ID,
-    "hour",
-    currentHourStart,
-    addHours(currentHourStart, 1),
-    currentMinuteRows,
-    "minute",
+    periodHourState,
+    currentDefinitions,
+    reportCoverageEnd(period, now),
   );
-  replaceBucketRowsFromSource(
-    next,
-    COUNTING_HOUR_HISTORY_ID,
-    "hour",
-    currentHourStart,
-    addHours(currentHourStart, 1),
-    currentMinuteRows,
-    "minute",
-  );
-  replaceVisibleBucket(
-    "hour",
-    currentHourStart,
-    addHours(currentHourStart, 1),
-    currentMinuteRows,
-    "minute",
-  );
-
-  const recentHourRows = next[CURRENT_DAY_HOURS_ID]?.rows ?? [];
-  recentDayStarts.forEach((dayStart) => {
-    const dayEnd = addDays(dayStart, 1);
-    replaceBucketRowsFromSource(
-      next,
-      CURRENT_MONTH_DAYS_ID,
-      "day",
-      dayStart,
-      dayEnd,
-      recentHourRows,
-      "hour",
-    );
-    replaceVisibleBucket(
-      "day",
-      dayStart,
-      dayEnd,
-      recentHourRows,
-      "hour",
-    );
-  });
-
-  const recentDayRows = next[CURRENT_MONTH_DAYS_ID]?.rows ?? [];
-  const affectedWeekStarts = uniqueDateStarts(
-    recentDayStarts.map((date) => startOfWeek(date)),
-  );
-  affectedWeekStarts.forEach((weekStart) => {
-    replaceVisibleBucket(
-      "week",
-      weekStart,
-      addDays(weekStart, 7),
-      recentDayRows,
-      "day",
-    );
-  });
-
-  const affectedMonthStarts = uniqueDateStarts(
-    recentDayStarts.map((date) => startOfMonth(date)),
-  );
-  affectedMonthStarts.forEach((monthStart) => {
-    const monthEnd = addMonths(monthStart, 1);
-    replaceBucketRowsFromSource(
-      next,
-      COUNTING_MONTH_HISTORY_ID,
-      "month",
-      monthStart,
-      monthEnd,
-      recentDayRows,
-      "day",
-    );
-    replaceVisibleBucket(
-      "month",
-      monthStart,
-      monthEnd,
-      recentDayRows,
-      "day",
-    );
-  });
-
-  const monthRows = next[COUNTING_MONTH_HISTORY_ID]?.rows ?? [];
-  uniqueDateStarts(
-    affectedMonthStarts.map((date) => startOfSemester(date)),
-  ).forEach((semesterStart) => {
-    replaceVisibleBucket(
-      "semester",
-      semesterStart,
-      addMonths(semesterStart, 6),
-      monthRows,
-      "month",
-    );
-  });
-  uniqueDateStarts(
-    affectedMonthStarts.map((date) => startOfYear(date)),
-  ).forEach((yearStart) => {
-    replaceVisibleBucket(
-      "year",
-      yearStart,
-      addYears(yearStart, 1),
-      monthRows,
-      "month",
-    );
-  });
+  reconcileComparisonRollups(next, periodHourState, comparisonRollups);
 
   return next;
 }
 
-function uniqueDateStarts(dates: Date[]) {
-  return Array.from(
-    new Map(dates.map((date) => [date.getTime(), date] as const)).values(),
-  );
+function reconcileCurrentReportDefinitions(
+  data: Record<string, ScenarioChartState>,
+  canonicalHourState: ScenarioChartState,
+  definitions: ScenarioAggregateDefinition[],
+  coverageTo: Date,
+) {
+  definitions.forEach((definition) => {
+    const target = data[definition.id];
+    if (!target) return;
+
+    if (definition.granularity === "minute") {
+      if (target.granularity !== "minute") {
+        data[definition.id] = {
+          ...target,
+          error:
+            "A granularidade minuto a minuto exige uma nova carga certificada.",
+          granularity: "minute",
+          rows: [],
+        };
+      }
+      return;
+    }
+
+    const to = new Date(
+      Math.min(definition.to.getTime(), coverageTo.getTime()),
+    );
+    data[definition.id] = {
+      ...target,
+      error: undefined,
+      granularity: definition.granularity,
+      rows: rollupAggregateRows(
+        canonicalHourState.rows,
+        canonicalHourState.granularity,
+        definition.granularity,
+        definition.from,
+        to,
+      ),
+    };
+  });
+}
+
+function reconcileComparisonRollups(
+  data: Record<string, ScenarioChartState>,
+  canonicalHourState: ScenarioChartState,
+  rollups: ReportComparisonRollup[],
+) {
+  rollups.forEach(({ boundaryDefinition, definition, to }) => {
+    const target = data[definition.id];
+    if (!target) return;
+
+    if (to <= definition.from) {
+      data[definition.id] = {
+        ...target,
+        comparisonBaseError: undefined,
+        error: undefined,
+        granularity: definition.granularity,
+        rows: [],
+      };
+      return;
+    }
+
+    const boundaryState = boundaryDefinition
+      ? data[boundaryDefinition.id]
+      : undefined;
+    if (boundaryDefinition && (!boundaryState || boundaryState.error)) {
+      data[definition.id] = {
+        ...target,
+        comparisonBaseError:
+          target.comparisonBaseError ?? target.error ?? null,
+        error:
+          boundaryState?.error ??
+          "A base minuto a minuto da fronteira comparativa não foi carregada.",
+        granularity: definition.granularity,
+        rows: target.rows,
+      };
+      return;
+    }
+
+    if (definition.granularity === "minute") {
+      if (target.error && target.comparisonBaseError === undefined) return;
+
+      let rows = target.rows;
+      Object.entries(data).forEach(([id, state]) => {
+        if (
+          !id.startsWith(COMPARISON_BOUNDARY_MINUTES_PREFIX) ||
+          state.error
+        ) {
+          return;
+        }
+
+        const boundaryTimestamp = Number(
+          id.slice(COMPARISON_BOUNDARY_MINUTES_PREFIX.length),
+        );
+        if (!Number.isFinite(boundaryTimestamp)) return;
+        const boundaryFrom = new Date(boundaryTimestamp);
+        const boundaryTo = endOfAggregateBucket(boundaryFrom, "hour");
+        const from = new Date(
+          Math.max(boundaryFrom.getTime(), definition.from.getTime()),
+        );
+        const rangeTo = new Date(
+          Math.min(boundaryTo.getTime(), to.getTime()),
+        );
+        if (from >= rangeTo) return;
+
+        rows = reconcileAggregateRows(
+          rows,
+          "minute",
+          state.rows,
+          state.granularity,
+          from,
+          rangeTo,
+        );
+      });
+
+      data[definition.id] = {
+        ...target,
+        comparisonBaseError: undefined,
+        error: target.comparisonBaseError ?? undefined,
+        granularity: definition.granularity,
+        rows,
+      };
+      return;
+    }
+
+    let sourceRows = canonicalHourState.rows;
+    if (boundaryDefinition && boundaryState) {
+      sourceRows = reconcileAggregateRows(
+        sourceRows,
+        canonicalHourState.granularity,
+        boundaryState.rows,
+        boundaryState.granularity,
+        boundaryDefinition.from,
+        to,
+      );
+    }
+
+    data[definition.id] = {
+      ...target,
+      comparisonBaseError: undefined,
+      error: undefined,
+      granularity: definition.granularity,
+      rows: rollupAggregateRows(
+        sourceRows,
+        canonicalHourState.granularity,
+        definition.granularity,
+        definition.from,
+        to,
+      ),
+    };
+  });
 }
 
 function cloneChartData(data: Record<string, ScenarioChartState>) {
@@ -2512,127 +3150,16 @@ function replaceBucketRowsFromSource(
   const state = data[chartId];
   if (!state) return;
 
-  const existingTotals = aggregateRowsByIdentity(
-    state.rows,
-    targetGranularity,
-    bucketStart,
-    bucketEnd,
-  );
-  const sourceTotals = aggregateRowsByIdentity(
-    sourceRows,
-    sourceGranularity,
-    bucketStart,
-    bucketEnd,
-  );
-  const mergedTotals = mergeIdentityTotals(existingTotals, sourceTotals);
-  if (!mergedTotals.size) return;
-
-  const bucketKey = bucketKeyForGranularity(bucketStart, targetGranularity);
   data[chartId] = {
     ...state,
-    rows: [
-      ...state.rows.filter((row) => {
-        const rowDate = parseAggregateBucket(row.bucket, targetGranularity);
-        if (!rowDate) return true;
-        return bucketKeyForGranularity(rowDate, targetGranularity) !== bucketKey;
-      }),
-      ...Array.from(mergedTotals.values(), (identity) =>
-        createAggregateRow(bucketStart, identity),
-      ),
-    ],
-  };
-}
-
-function aggregateRowsByIdentity(
-  rows: AggregateEventRow[],
-  granularity: AggregateGranularity,
-  from: Date,
-  to: Date,
-) {
-  const totals = new Map<string, AggregateIdentityTotal>();
-  const fromTime = from.getTime();
-  const toTime = to.getTime();
-  const fromKey = bucketKeyForGranularity(from, granularity);
-  const toKey = bucketKeyForGranularity(to, granularity);
-
-  rows.forEach((row) => {
-    const identity = rowIdentity(row);
-    if (!identity.cameraId && !identity.lineCountId) return;
-
-    const rowDate = parseAggregateBucket(row.bucket, granularity);
-    if (!rowDate) return;
-
-    const inRange =
-      granularity === "minute" || granularity === "hour"
-        ? rowDate.getTime() >= fromTime && rowDate.getTime() < toTime
-        : bucketKeyForGranularity(rowDate, granularity) >= fromKey &&
-          bucketKeyForGranularity(rowDate, granularity) < toKey;
-    if (!inRange) return;
-
-    const key = rowIdentityKey(identity);
-    const current = totals.get(key);
-    totals.set(key, {
-      ...identity,
-      total: (current?.total ?? 0) + (row.total ?? 0),
-    });
-  });
-
-  return totals;
-}
-
-function mergeIdentityTotals(
-  existingTotals: Map<string, AggregateIdentityTotal>,
-  sourceTotals: Map<string, AggregateIdentityTotal>,
-) {
-  const merged = new Map<string, AggregateIdentityTotal>();
-  const keys = new Set([...existingTotals.keys(), ...sourceTotals.keys()]);
-
-  keys.forEach((key) => {
-    const existing = existingTotals.get(key);
-    const source = sourceTotals.get(key);
-    const identity = source ?? existing;
-    if (!identity) return;
-
-    merged.set(key, {
-      ...identity,
-      total: Math.max(existing?.total ?? 0, source?.total ?? 0),
-    });
-  });
-
-  return merged;
-}
-
-function rowIdentity(
-  row: AggregateEventRow,
-): Omit<AggregateIdentityTotal, "total"> {
-  return {
-    cameraId: row.camera_id ?? "",
-    lineCountId: row.line_count_id ?? "",
-    metricType: row.metric_type ?? DEFAULT_METRIC_TYPE,
-    objectClass: row.object_class ?? "",
-  };
-}
-
-function rowIdentityKey(identity: Omit<AggregateIdentityTotal, "total">) {
-  return [
-    identity.cameraId,
-    identity.lineCountId,
-    identity.metricType,
-    identity.objectClass,
-  ].join("|");
-}
-
-function createAggregateRow(
-  bucket: Date,
-  identity: AggregateIdentityTotal,
-): AggregateEventRow {
-  return {
-    bucket: bucket.toISOString(),
-    camera_id: identity.cameraId,
-    line_count_id: identity.lineCountId || undefined,
-    metric_type: identity.metricType || DEFAULT_METRIC_TYPE,
-    object_class: identity.objectClass || undefined,
-    total: identity.total,
+    rows: reconcileAggregateRows(
+      state.rows,
+      targetGranularity,
+      sourceRows,
+      sourceGranularity,
+      bucketStart,
+      bucketEnd,
+    ),
   };
 }
 
@@ -2642,13 +3169,16 @@ async function fetchSubLocations(
 ) {
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<SubLocation[]>(`/locations/${location.id}/sub-locations`).catch(
-        () => [],
+      apiFetch<unknown>(`/locations/${location.id}/sub-locations`).then(
+        requireSubLocationRows,
       ),
     ),
   );
 
-  return filterScopedApiRows(rows.flat(), companyScopeId);
+  return filterScopedApiRows(
+    requireSubLocationRows(rows.flat()),
+    companyScopeId,
+  );
 }
 
 function buildReportScopeOptions({
@@ -3277,7 +3807,7 @@ function alignEndToGranularity(date: Date, granularity: AggregateGranularity) {
 
 function addGranularity(date: Date, granularity: AggregateGranularity) {
   if (granularity === "minute") return addMinutes(date, 1);
-  if (granularity === "hour") return addHours(date, 1);
+  if (granularity === "hour") return endOfAggregateBucket(date, "hour");
   if (granularity === "day") return addDays(date, 1);
   if (granularity === "week") return addDays(date, 7);
   if (granularity === "month") return addMonths(date, 1);
@@ -3340,9 +3870,7 @@ function startOfMinute(date: Date) {
 }
 
 function startOfHour(date: Date) {
-  const next = new Date(date);
-  next.setMinutes(0, 0, 0);
-  return next;
+  return startOfAggregateBucket(date, "hour");
 }
 
 function startOfDay(date: Date) {
@@ -3373,10 +3901,6 @@ function startOfYear(date: Date) {
 
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * MINUTE_MS);
-}
-
-function addHours(date: Date, hours: number) {
-  return new Date(date.getTime() + hours * HOUR_MS);
 }
 
 function addDays(date: Date, days: number) {

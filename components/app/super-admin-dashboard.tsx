@@ -71,17 +71,21 @@ import {
   setStoredMasterCompanyScope,
 } from "@/lib/master-company-scope";
 import {
+  requireCameraRows,
+  requireInfrastructureRelations,
+  requireLocationRows,
+  requireSubLocationRows,
+  requireWorkerRows,
+} from "@/lib/metadata-validation";
+import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
+import {
   OPERATIONAL_PERMISSIONS,
   type OperationalPermissionDefinition,
 } from "@/lib/permissions";
+import { requireScenarioRows } from "@/lib/scenario-validation";
 import type {
-  Camera,
   Location,
-  OccupancyScenario,
-  OccupancyScenarioListResponse,
   Permission,
-  Scenario,
-  SubLocation,
   UserPermission,
   Worker,
 } from "@/lib/types";
@@ -89,7 +93,6 @@ import { cn, formatDateTime, formatNumber } from "@/lib/utils";
 import { getWorkerDisplayInfo } from "@/lib/worker-display";
 import {
   collapseWorkerIdentityChains,
-  normalizeWorkerRows,
   partitionWorkersByCompanyScope,
   resolveWorkerCompanyId,
   sortWorkersByActivity,
@@ -193,15 +196,6 @@ type CompanyOperationalStats = {
   occupancyScenarios: number;
 };
 
-const emptyCompanyOperationalStats: CompanyOperationalStats = {
-  algorithms: 0,
-  cameras: 0,
-  locations: 0,
-  subLocations: 0,
-  countingScenarios: 0,
-  occupancyScenarios: 0,
-};
-
 const emptyCompanyForm: CompanyFormState = {
   name: "",
   trade_name: "",
@@ -279,9 +273,9 @@ export function SuperAdminDashboard() {
   const [companyQuery, setCompanyQuery] = React.useState("");
   const [userQuery, setUserQuery] = React.useState("");
   const [masterUserQuery, setMasterUserQuery] = React.useState("");
-  const [companyStats, setCompanyStats] = React.useState<CompanyOperationalStats>(
-    emptyCompanyOperationalStats,
-  );
+  const [companyStats, setCompanyStats] =
+    React.useState<CompanyOperationalStats | null>(null);
+  const [companyDetailsError, setCompanyDetailsError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [loadingDetails, setLoadingDetails] = React.useState(false);
   const [companyDialog, setCompanyDialog] = React.useState(false);
@@ -444,18 +438,21 @@ export function SuperAdminDashboard() {
       setCompanyModules([]);
       setWorkers([]);
       setWorkerScopeWarning("");
-      setCompanyStats(emptyCompanyOperationalStats);
+      setCompanyStats(null);
+      setCompanyDetailsError("");
       return;
     }
 
     setLoadingDetails(true);
+    setCompanyStats(null);
+    setCompanyDetailsError("");
     setWorkerScopeWarning("");
     try {
       const [userRows, moduleRows] = await Promise.all([
         apiFetch<ManagedUser[]>(`/companies/${selectedCompanyId}/users`),
         apiFetch<CompanyModule[]>(
           `/companies/${selectedCompanyId}/modules`,
-        ).catch(() => []),
+        ),
       ]);
       const companyScopeIds = uniqueScopeIds(selectedCompanyId);
       const scopedUserRows = userRows.filter((user) => {
@@ -470,9 +467,9 @@ export function SuperAdminDashboard() {
         occupancyScenarioRows,
       ] = await Promise.all([
         fetchScopedWorkers(),
-        fetchScopedRows<Location>("/locations"),
-        fetchScopedRows<Camera>("/cameras"),
-        fetchScopedRows<Scenario>("/scenarios"),
+        fetchValidatedRows("/locations", requireLocationRows),
+        fetchValidatedRows("/cameras", requireCameraRows),
+        fetchValidatedRows("/scenarios", requireScenarioRows),
         fetchScopedOccupancyScenarios(),
       ]);
       const workerScopePartition = partitionWorkersByCompanyScope(
@@ -496,6 +493,11 @@ export function SuperAdminDashboard() {
         companyScopeIds,
       );
       const scopedCameras = filterRowsByCompanyScopes(cameraRows, companyScopeIds);
+      requireInfrastructureRelations({
+        cameras: scopedCameras,
+        locations: scopedLocations,
+        subLocations: subLocationRows,
+      });
       const collapsedWorkerRows = collapseWorkerIdentityChains(
         workerScopePartition.scopedRows,
       );
@@ -530,11 +532,16 @@ export function SuperAdminDashboard() {
         ),
       );
     } catch (error) {
-      toast.error(
+      const message =
         error instanceof Error
           ? error.message
-          : "Não foi possível carregar dados da empresa.",
-      );
+          : "Não foi possível carregar dados da empresa.";
+      setUsers([]);
+      setCompanyModules([]);
+      setWorkers([]);
+      setCompanyStats(null);
+      setCompanyDetailsError(message);
+      toast.error(message);
     } finally {
       setLoadingDetails(false);
     }
@@ -793,7 +800,8 @@ export function SuperAdminDashboard() {
         setCompanyModules([]);
         setWorkers([]);
         setWorkerScopeWarning("");
-        setCompanyStats(emptyCompanyOperationalStats);
+        setCompanyStats(null);
+        setCompanyDetailsError("");
       }
 
       await loadCompanies();
@@ -1379,12 +1387,17 @@ export function SuperAdminDashboard() {
 
           <CompanyManagementFlow
             company={selectedCompany}
+            error={companyDetailsError}
             loading={loadingDetails}
-            stats={{
-              ...companyStats,
-              users: users.length,
-              workers: workers.length,
-            }}
+            stats={
+              companyStats
+                ? {
+                    ...companyStats,
+                    users: users.length,
+                    workers: workers.length,
+                  }
+                : null
+            }
             onOpenRoute={openCompanyRoute}
             onOpenTab={openCompanySection}
           />
@@ -2278,23 +2291,30 @@ function CompanySummary({
 
 function CompanyManagementFlow({
   company,
+  error,
   loading,
   stats,
   onOpenRoute,
   onOpenTab,
 }: {
   company: Company | null;
+  error: string;
   loading: boolean;
-  stats: CompanyOperationalStats & {
-    users: number;
-    workers: number;
-  };
+  stats:
+    | (CompanyOperationalStats & {
+        users: number;
+        workers: number;
+      })
+    | null;
   onOpenRoute: (path: string) => void;
   onOpenTab: (tab: CompanyTab) => void;
 }) {
-  const disabled = !company || loading;
-  const scenarioTotal = stats.countingScenarios + stats.occupancyScenarios;
-  const steps = [
+  const disabled = !company || loading || !stats;
+  const scenarioTotal = stats
+    ? stats.countingScenarios + stats.occupancyScenarios
+    : 0;
+  const steps = stats
+    ? [
     {
       index: "01",
       label: "Usuários",
@@ -2353,7 +2373,8 @@ function CompanyManagementFlow({
       icon: ListChecks,
       onClick: () => onOpenRoute("/manager/scenarios"),
     },
-  ];
+  ]
+    : [];
 
   return (
     <Card>
@@ -2364,6 +2385,11 @@ function CompanyManagementFlow({
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {error ? (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm font-medium text-destructive">
+            Totais operacionais não certificados: {error}
+          </div>
+        ) : (
         <div className="grid gap-2 md:grid-cols-2">
           {steps.map((step) => {
             const Icon = step.icon;
@@ -2403,6 +2429,7 @@ function CompanyManagementFlow({
             );
           })}
         </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -2534,32 +2561,34 @@ async function fetchCompanySubLocations(
 ) {
   const rows = await Promise.all(
     locations.map((location) => {
-      return apiFetch<SubLocation[]>(
+      return apiFetch<unknown>(
         `/locations/${location.id}/sub-locations`,
-      ).catch(() => []);
+      ).then(requireSubLocationRows);
     }),
   );
 
-  return filterRowsByCompanyScopes(rows.flat(), companyScopeIds);
+  return filterRowsByCompanyScopes(
+    requireSubLocationRows(rows.flat()),
+    companyScopeIds,
+  );
 }
 
-async function fetchScopedRows<T extends { id?: string | null }>(
+async function fetchValidatedRows<T>(
   path: string,
+  validate: (value: unknown) => T[],
 ) {
-  return apiFetch<T[]>(path).then(uniqueRowsById).catch(() => []);
+  return apiFetch<unknown>(path).then(validate);
 }
 
 async function fetchScopedWorkers() {
   return apiFetch<unknown>("/workers")
-    .then(normalizeWorkerRows)
-    .then(uniqueRowsById);
+    .then(requireWorkerRows);
 }
 
 async function fetchScopedOccupancyScenarios() {
-  return apiFetch<OccupancyScenarioListResponse>("/occupancy/scenarios")
-    .then(normalizeOccupancyScenarioList)
-    .then(uniqueRowsById)
-    .catch(() => []);
+  return apiFetch<unknown>("/occupancy/scenarios").then(
+    requireOccupancyScenarioRows,
+  );
 }
 
 function filterRowsByCompanyScopes<T>(
@@ -2624,12 +2653,6 @@ function enabledOperationalModuleCount(
   });
 
   return enabledFamilies.size;
-}
-
-function normalizeOccupancyScenarioList(
-  response: OccupancyScenarioListResponse,
-): OccupancyScenario[] {
-  return Array.isArray(response) ? response : response.data ?? [];
 }
 
 function workerIsOnline(worker: Worker) {
