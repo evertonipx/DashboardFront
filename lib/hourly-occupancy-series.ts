@@ -1,3 +1,5 @@
+import { endOfAggregateBucket } from "@/lib/aggregate-time";
+
 export type HourlyOccupancySeriesPoint = {
   bucket: string;
   entries: number;
@@ -32,8 +34,7 @@ export function buildHourlyOccupancySeries({
     dayStart.getDate(),
     normalizedStartHour,
   );
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
+  const dayEnd = endOfAggregateBucket(dayStart, "day");
   const effectiveEnd = new Date(
     Math.min(
       dayEnd.getTime(),

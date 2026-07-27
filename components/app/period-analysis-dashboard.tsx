@@ -71,9 +71,14 @@ import {
   aggregateQueryIso,
   endOfAggregateBucket,
   requireAggregateGranularity,
-  requireAggregateRows,
+  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  clearHourlyAggregateCache,
+  fetchHourlyAggregateRanges,
+  type HourlyAggregateCache,
+} from "@/lib/aggregate-hour-query";
 import {
   reconcileAggregateRows,
   rollupAggregateRows,
@@ -97,6 +102,7 @@ import {
   isSingleDayAnalysisPeriod,
   periodAnalysisBaselineDataRange,
   periodAnalysisBaselineLabel,
+  periodAnalysisBaselineRange,
   periodAnalysisEffectiveGranularity,
   periodAnalysisOperationalRange,
   resolvePeriodAnalysisRange,
@@ -437,6 +443,9 @@ export function PeriodAnalysisDashboard({
     React.useState<PeriodAnalysisWidgetInput>(() => emptyWidgetForm());
   const requestRef = React.useRef<AbortController | null>(null);
   const hasLoadedDataRef = React.useRef(false);
+  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
+    new Map(),
+  );
   const period = React.useMemo(
     () =>
       resolvePeriodAnalysisRange(appliedSettings.from, appliedSettings.to) ??
@@ -531,6 +540,7 @@ export function PeriodAnalysisDashboard({
   React.useEffect(() => {
     const settings = loadPeriodAnalysisSettings(companyScopeId, user?.id);
     hasLoadedDataRef.current = false;
+    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
     setMetadataError("");
     setDataLoadError("");
     setScenarios([]);
@@ -649,24 +659,42 @@ export function PeriodAnalysisDashboard({
       to: operationalPeriod.to,
     };
     const referenceDate = new Date(period.to.getTime() - 1);
+    const periodCoverageTo =
+      now >= period.from && now < period.to
+        ? addMinutes(startOfMinute(now), 1)
+        : period.to;
     const monthRange = {
       from: new Date(referenceDate.getFullYear(), 0, 1),
-      to: new Date(referenceDate.getFullYear() + 1, 0, 1),
+      to: periodCoverageTo,
     };
     const baselineRanges = requirements.baseline.map((baseline) => [
       baseline,
       periodAnalysisBaselineDataRange(period, baseline),
     ] as const);
+    const baselineComparableRanges = new Map(
+      requirements.baseline.map((baseline) => [
+        baseline,
+        periodAnalysisBaselineRange(
+          {
+            from: operationalPeriod.from,
+            to: periodCoverageTo,
+          },
+          baseline,
+        ),
+      ]),
+    );
     const requiredHourRanges = [
       ...(requirements.contextHour ? [dayRange] : []),
       ...(requirements.month ? [monthRange] : []),
       ...baselineRanges.map(([, range]) => range),
+      ...baselineComparableRanges.values(),
     ];
-    const canonicalHourRange = unionAnalysisRanges(requiredHourRanges);
-    const canonicalHourPromise = canonicalHourRange
-      ? fetchAnalysisDataset(
-          "hour",
-          canonicalHourRange,
+    const canonicalHourPromise = requiredHourRanges.length
+      ? fetchAnalysisHourlyDatasets(
+          requiredHourRanges,
+          hourlyAggregateCacheRef.current,
+          `analysis:${companyScopeId ?? "jwt-company"}`,
+          now,
           controller.signal,
         )
       : Promise.resolve(emptyDataset("hour"));
@@ -700,15 +728,11 @@ export function PeriodAnalysisDashboard({
       now,
     );
     const reconciliationMinutePromise = currentMinuteRange
-      ? requirements.minute &&
-        minuteRangeWithinLimit &&
-        rangeContains(period, currentMinuteRange)
-        ? minutePromise
-        : fetchAnalysisDataset(
-            "minute",
-            currentMinuteRange,
-            controller.signal,
-          )
+      ? fetchAnalysisDataset(
+          "minute",
+          currentMinuteRange,
+          controller.signal,
+        )
       : Promise.resolve(emptyDataset("minute"));
 
     Promise.all([
@@ -719,14 +743,40 @@ export function PeriodAnalysisDashboard({
       monthPromise,
       reconciliationMinutePromise,
       Promise.all(
-        baselineRanges.map(async ([baseline, baselineRange]) => [
-          baseline,
-          baselineRange,
-          sliceAnalysisHourlyDataset(
+        baselineRanges.map(async ([baseline, baselineRange]) => {
+          const comparableRange =
+            baselineComparableRanges.get(baseline) ?? baselineRange;
+          const boundaryMinutePromise = Promise.all(
+            analysisPartialHourRanges(comparableRange).map(
+              async (range) => ({
+                dataset: await fetchAnalysisDataset(
+                  "minute",
+                  range,
+                  controller.signal,
+                ),
+                range,
+              }),
+            ),
+          );
+          const dataset = sliceAnalysisHourlyDataset(
             await canonicalHourPromise,
             baselineRange,
-          ),
-        ] as const),
+          );
+          const comparableDataset = sliceAnalysisHourlyDataset(
+            await canonicalHourPromise,
+            comparableRange,
+          );
+          return [
+            baseline,
+            baselineRange,
+            dataset,
+            comparableRange,
+            reconcileAnalysisHourlyBoundaries(
+              comparableDataset,
+              await boundaryMinutePromise,
+            ),
+          ] as const;
+        }),
       ),
     ])
       .then(
@@ -739,73 +789,96 @@ export function PeriodAnalysisDashboard({
           reconciliationMinute,
           rawBaselineEntries,
         ]) => {
-        if (controller.signal.aborted) return;
-        const contextHour = reconcileAnalysisHourlyDataset(
-          rawContextHour,
-          reconciliationMinute,
-          dayRange,
-          currentMinuteRange,
-        );
-        const reconciledHour = requirements.hour
-          ? contextHour
-          : hour;
-        const month = requirements.month
-          ? rollupAnalysisDataset(
-              reconcileAnalysisHourlyDataset(
-                rawMonthHours,
+          if (controller.signal.aborted) return;
+          const contextHour = reconcileAnalysisHourlyDataset(
+            rawContextHour,
+            reconciliationMinute,
+            dayRange,
+            currentMinuteRange,
+          );
+          const reconciledHour = requirements.hour
+            ? contextHour
+            : hour;
+          const reconciledMinute = requirements.minute
+            ? reconcileAnalysisMinuteDataset(
+                minute,
                 reconciliationMinute,
-                monthRange,
                 currentMinuteRange,
-              ),
-              "month",
-              monthRange,
-            )
-          : emptyDataset("month");
-        const baselineEntries = rawBaselineEntries.map(
-          ([baseline, baselineRange, dataset]) =>
-            [
-              baseline,
-              rollupAnalysisDataset(
+              )
+            : minute;
+          const month = requirements.month
+            ? rollupAnalysisDataset(
+                reconcileAnalysisHourlyDataset(
+                  rawMonthHours,
+                  reconciliationMinute,
+                  monthRange,
+                  currentMinuteRange,
+                ),
+                "month",
+                monthRange,
+              )
+            : emptyDataset("month");
+          const baselineEntries = rawBaselineEntries.map(
+            ([baseline, baselineRange, dataset]) =>
+              [
+                baseline,
                 reconcileAnalysisHourlyDataset(
                   dataset,
                   reconciliationMinute,
                   baselineRange,
                   currentMinuteRange,
                 ),
-                "day",
-                baselineRange,
-              ),
-            ] as const,
-        );
-        const reconciledDay = requirements.contextHour
-          ? contextHour.error
-            ? { ...day, error: contextHour.error }
-            : mergeExactHoursIntoDays(day, contextHour, dayRange)
-          : singleDayAnalysis && requirements.hour
-            ? mergeExactHoursIntoDays(day, reconciledHour, period)
-            : day;
-        setData({
-          baseline: Object.fromEntries(baselineEntries),
-          contextHour,
-          day: reconciledDay,
-          hour: reconciledHour,
-          minute,
-          month,
-        });
-        setDataLoadError("");
-        hasLoadedDataRef.current = true;
-        setLastUpdated(new Date());
-        if (
-          announceErrors &&
-          (reconciledDay.error ||
-            hour.error ||
-            contextHour.error ||
-            minute.error ||
-            month.error ||
-            baselineEntries.some(([, dataset]) => dataset.error))
-        ) {
-          toast.error("Alguns dados da análise não puderam ser carregados.");
-        }
+              ] as const,
+          );
+          const baselineComparableEntries = rawBaselineEntries.map(
+            ([baseline, , , comparableRange, dataset]) =>
+              [
+                baseline,
+                reconcileAnalysisHourlyDataset(
+                  dataset,
+                  reconciliationMinute,
+                  comparableRange,
+                  currentMinuteRange,
+                ),
+              ] as const,
+          );
+          const reconciledDay = requirements.contextHour
+            ? contextHour.error
+              ? { ...day, error: contextHour.error }
+              : mergeExactHoursIntoDays(day, contextHour, dayRange)
+            : singleDayAnalysis && requirements.hour
+              ? mergeExactHoursIntoDays(day, reconciledHour, period)
+              : day;
+          setData({
+            baseline: Object.fromEntries(baselineEntries),
+            baselineComparable: Object.fromEntries(
+              baselineComparableEntries,
+            ),
+            contextHour,
+            day: reconciledDay,
+            hour: reconciledHour,
+            minute: reconciledMinute,
+            month,
+          });
+          setDataLoadError("");
+          hasLoadedDataRef.current = true;
+          setLastUpdated(new Date());
+          if (
+            announceErrors &&
+            (reconciledDay.error ||
+              hour.error ||
+              contextHour.error ||
+              reconciledMinute.error ||
+              month.error ||
+              baselineEntries.some(([, dataset]) => dataset.error) ||
+              baselineComparableEntries.some(
+                ([, dataset]) => dataset.error,
+              ))
+          ) {
+            toast.error(
+              "Alguns dados da análise não puderam ser carregados.",
+            );
+          }
         },
       )
       .catch((error) => {
@@ -863,6 +936,7 @@ export function PeriodAnalysisDashboard({
       data.minute,
       data.month,
       ...Object.values(data.baseline),
+      ...Object.values(data.baselineComparable ?? {}),
     ].find((dataset) => dataset?.error)?.error;
   const modelByWidgetId = React.useMemo(
     () =>
@@ -2214,9 +2288,11 @@ async function fetchAnalysisDataset(
 
     return {
       granularity: responseGranularity,
-      rows: requireAggregateRows(
+      rows: requireAggregateRowsInRange(
         response.data,
         responseGranularity,
+        range.from,
+        range.to,
         DEFAULT_METRIC_TYPE,
       ),
     };
@@ -2228,6 +2304,37 @@ async function fetchAnalysisDataset(
           ? error.message
           : "Não foi possível carregar os dados.",
       granularity,
+      rows: [],
+    };
+  }
+}
+
+async function fetchAnalysisHourlyDatasets(
+  ranges: PeriodAnalysisRange[],
+  cache: HourlyAggregateCache,
+  cacheScope: string,
+  now: Date,
+  signal?: AbortSignal,
+): Promise<PeriodAnalysisDataset> {
+  try {
+    return {
+      granularity: "hour",
+      rows: await fetchHourlyAggregateRanges({
+        cache,
+        cacheScope,
+        now,
+        ranges,
+        signal,
+      }),
+    };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return {
+      error:
+        error instanceof Error
+          ? error.message
+          : "Não foi possível carregar a base horária da análise.",
+      granularity: "hour",
       rows: [],
     };
   }
@@ -2272,19 +2379,6 @@ function rollupAnalysisDataset(
       targetGranularity,
       range.from,
       range.to,
-    ),
-  };
-}
-
-function unionAnalysisRanges(ranges: PeriodAnalysisRange[]) {
-  if (!ranges.length) return null;
-
-  return {
-    from: new Date(
-      Math.min(...ranges.map((range) => range.from.getTime())),
-    ),
-    to: new Date(
-      Math.max(...ranges.map((range) => range.to.getTime())),
     ),
   };
 }
@@ -2396,6 +2490,153 @@ function reconcileAnalysisHourlyDataset(
   }
 }
 
+function reconcileAnalysisMinuteDataset(
+  minute: PeriodAnalysisDataset,
+  authoritativeMinute: PeriodAnalysisDataset,
+  currentMinuteRange: PeriodAnalysisRange | null,
+): PeriodAnalysisDataset {
+  if (!currentMinuteRange || minute.error) return minute;
+  if (authoritativeMinute.error) {
+    return {
+      error: authoritativeMinute.error,
+      granularity: "minute",
+      rows: [],
+    };
+  }
+  if (
+    minute.granularity !== "minute" ||
+    authoritativeMinute.granularity !== "minute"
+  ) {
+    return {
+      error:
+        "As granularidades usadas na reconciliação dos minutos são inválidas.",
+      granularity: "minute",
+      rows: [],
+    };
+  }
+
+  try {
+    return {
+      granularity: "minute",
+      rows: reconcileAggregateRows(
+        minute.rows,
+        minute.granularity,
+        authoritativeMinute.rows,
+        authoritativeMinute.granularity,
+        currentMinuteRange.from,
+        currentMinuteRange.to,
+      ),
+    };
+  } catch (error) {
+    return {
+      error:
+        error instanceof Error
+          ? error.message
+          : "Não foi possível reconciliar os minutos ainda abertos.",
+      granularity: "minute",
+      rows: [],
+    };
+  }
+}
+
+function analysisPartialHourRanges(
+  range: PeriodAnalysisRange,
+): PeriodAnalysisRange[] {
+  const ranges = new Map<string, PeriodAnalysisRange>();
+  const fromHour = startOfHour(range.from);
+  if (fromHour.getTime() !== range.from.getTime()) {
+    const to = new Date(
+      Math.min(
+        range.to.getTime(),
+        endOfAggregateBucket(fromHour, "hour").getTime(),
+      ),
+    );
+    if (range.from < to) {
+      ranges.set(`${range.from.toISOString()}|${to.toISOString()}`, {
+        from: range.from,
+        to,
+      });
+    }
+  }
+
+  if (startOfHour(range.to).getTime() !== range.to.getTime()) {
+    const lastIncluded = new Date(range.to.getTime() - 1);
+    const toHour = startOfHour(lastIncluded);
+    const from = new Date(
+      Math.max(range.from.getTime(), toHour.getTime()),
+    );
+    if (from < range.to) {
+      ranges.set(`${from.toISOString()}|${range.to.toISOString()}`, {
+        from,
+        to: range.to,
+      });
+    }
+  }
+
+  return Array.from(ranges.values());
+}
+
+function reconcileAnalysisHourlyBoundaries(
+  hourly: PeriodAnalysisDataset,
+  boundaries: Array<{
+    dataset: PeriodAnalysisDataset;
+    range: PeriodAnalysisRange;
+  }>,
+): PeriodAnalysisDataset {
+  if (hourly.error || !boundaries.length) return hourly;
+  if (hourly.granularity !== "hour") {
+    return {
+      error:
+        "A granularidade usada na reconciliação da base horária é inválida.",
+      granularity: "hour",
+      rows: [],
+    };
+  }
+
+  try {
+    let rows = hourly.rows;
+    for (const { dataset, range } of boundaries) {
+      if (dataset.error) {
+        return {
+          error: dataset.error,
+          granularity: "hour",
+          rows: [],
+        };
+      }
+      if (dataset.granularity !== "minute") {
+        return {
+          error:
+            "A granularidade usada na borda comparável é inválida.",
+          granularity: "hour",
+          rows: [],
+        };
+      }
+      rows = reconcileAggregateRows(
+        rows,
+        "hour",
+        dataset.rows,
+        "minute",
+        range.from,
+        range.to,
+      );
+    }
+    return {
+      granularity: "hour",
+      partialBoundariesReconciled: true,
+      rows,
+    };
+  } catch (error) {
+    return {
+      error:
+        error instanceof Error
+          ? error.message
+          : "Não foi possível reconciliar a borda horária da base.",
+      granularity: "hour",
+      rows: [],
+    };
+  }
+}
+
 function analysisCurrentMinuteRange(
   ranges: PeriodAnalysisRange[],
   now: Date,
@@ -2410,13 +2651,6 @@ function analysisCurrentMinuteRange(
   return ranges.some((range) => range.from < to && range.to > from)
     ? { from, to }
     : null;
-}
-
-function rangeContains(
-  outer: PeriodAnalysisRange,
-  inner: PeriodAnalysisRange,
-) {
-  return outer.from <= inner.from && outer.to >= inner.to;
 }
 
 function estimatedMinuteBucketCount(range: PeriodAnalysisRange) {
@@ -2457,9 +2691,21 @@ function addMinutes(date: Date, amount: number) {
 }
 
 function addDays(date: Date, amount: number) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + amount);
-  return next;
+  const civilBoundary = new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+  );
+  const isDayBoundary = civilBoundary.getTime() === date.getTime();
+  return new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate() + amount,
+    isDayBoundary ? 0 : date.getHours(),
+    isDayBoundary ? 0 : date.getMinutes(),
+    isDayBoundary ? 0 : date.getSeconds(),
+    isDayBoundary ? 0 : date.getMilliseconds(),
+  );
 }
 
 function parseDateInputValue(value: string) {

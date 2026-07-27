@@ -102,9 +102,14 @@ import {
   endOfAggregateBucket,
   parseAggregateBucket,
   requireAggregateGranularity,
-  requireAggregateRows,
+  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  clearHourlyAggregateCache,
+  fetchHourlyAggregateRanges,
+  type HourlyAggregateCache,
+} from "@/lib/aggregate-hour-query";
 import {
   reconcileAggregateRows,
   rollupAggregateRowsMany,
@@ -336,6 +341,8 @@ const OPERATIONAL_PREVIOUS_MONTH_ID = "live_operational_previous_month";
 const OPERATIONAL_LAST_YEAR_MONTH_ID = "live_operational_last_year_month";
 const OPERATIONAL_TREND_DAYS_ID = "live_operational_trend_days";
 const OPERATIONAL_MONTH_HOURS_ID = "live_operational_month_hours";
+const OPERATIONAL_CURRENT_HOUR_MINUTES_ID =
+  "live_operational_current_hour_minutes";
 const OCCUPANCY_HOURS_ID = "live_hourly_occupancy_data";
 const CANONICAL_HOUR_DERIVED_TARGETS: ReadonlyArray<{
   granularity: "hour" | "day" | "week" | "month";
@@ -482,6 +489,9 @@ export function RealtimeDashboard({
   const runningRef = React.useRef(false);
   const hasLoadedChartsRef = React.useRef(false);
   const metadataRequestSequenceRef = React.useRef(0);
+  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
+    new Map(),
+  );
 
   const chartDefinitions = React.useMemo(
     () => buildRealtimeChartDefinitions(clock),
@@ -774,6 +784,7 @@ export function RealtimeDashboard({
         buildOperationalBaselineMonthDefinition(now, "last_year"),
         buildOperationalTrendDaysDefinition(now),
         buildOperationalMonthHoursDefinition(now),
+        buildOperationalCurrentHourMinutesDefinition(now),
         buildHourlyOccupancyDataDefinition(
           now,
           operationalSettings.occupancyStartHour,
@@ -794,6 +805,20 @@ export function RealtimeDashboard({
             }
 
             try {
+              if (definition.id === OPERATIONAL_MONTH_HOURS_ID) {
+                const state: RealtimeChartState = {
+                  granularity: "hour",
+                  rows: await fetchHourlyAggregateRanges({
+                    cache: hourlyAggregateCacheRef.current,
+                    cacheScope: `live:${companyScopeId}`,
+                    now,
+                    ranges: [definition],
+                    signal: controller.signal,
+                  }),
+                };
+                return [definition.id, state] as const;
+              }
+
               const response = await apiFetch<AggregateEventsResponse>(
                 aggregatePath(definition),
                 { signal: controller.signal },
@@ -803,9 +828,11 @@ export function RealtimeDashboard({
                 definition.granularity,
               );
               const state: RealtimeChartState = {
-                rows: requireAggregateRows(
+                rows: requireAggregateRowsInRange(
                   response.data,
                   responseGranularity,
+                  definition.from,
+                  definition.to,
                   DEFAULT_METRIC_TYPE,
                 ),
                 granularity: responseGranularity,
@@ -919,6 +946,7 @@ export function RealtimeDashboard({
 
   React.useEffect(() => {
     requestRef.current?.abort();
+    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
     setMetadataError("");
     setChartLoadError("");
     setScenarios([]);
@@ -5534,6 +5562,20 @@ function buildOperationalMonthHoursDefinition(
   };
 }
 
+function buildOperationalCurrentHourMinutesDefinition(
+  now: Date,
+): RealtimeChartDefinition {
+  return {
+    id: OPERATIONAL_CURRENT_HOUR_MINUTES_ID,
+    label: "Minutos da hora atual",
+    description:
+      "Base canônica para reconciliar a hora civil ainda aberta.",
+    granularity: "minute",
+    from: startOfHour(now),
+    to: addMinutes(startOfMinute(now), 1),
+  };
+}
+
 function buildHourlyOccupancyDataDefinition(
   now: Date,
   startHour: number,
@@ -5641,11 +5683,31 @@ function hydrateRealtimeOpenBuckets(
   const definitionById = new Map(
     definitions.map((definition) => [definition.id, definition] as const),
   );
-  const minuteState = next.live_chart_minute;
+  const minuteState = next[OPERATIONAL_CURRENT_HOUR_MINUTES_ID];
+  const visibleMinuteState = next.live_chart_minute;
   const canonicalDefinition = definitionById.get(
     OPERATIONAL_MONTH_HOURS_ID,
   );
   const canonicalState = next[OPERATIONAL_MONTH_HOURS_ID];
+
+  if (
+    minuteState &&
+    !minuteState.error &&
+    minuteState.granularity === "minute" &&
+    visibleMinuteState &&
+    !visibleMinuteState.error &&
+    visibleMinuteState.granularity === "minute"
+  ) {
+    const currentHourStart = startOfHour(now);
+    visibleMinuteState.rows = reconcileAggregateRows(
+      visibleMinuteState.rows,
+      "minute",
+      minuteState.rows,
+      "minute",
+      currentHourStart,
+      addMinutes(startOfMinute(now), 1),
+    );
+  }
 
   if (
     canonicalDefinition &&

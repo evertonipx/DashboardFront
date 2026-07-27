@@ -179,6 +179,41 @@ export function requireAggregateRows(
   return data;
 }
 
+export function requireAggregateRowsInRange(
+  data: AggregateEventRow[] | null | undefined,
+  granularity: AggregateGranularity,
+  from: Date,
+  to: Date,
+  expectedMetricType?: string,
+) {
+  if (
+    !(from instanceof Date) ||
+    Number.isNaN(from.getTime()) ||
+    !(to instanceof Date) ||
+    Number.isNaN(to.getTime()) ||
+    from >= to
+  ) {
+    throw new RangeError(
+      "O intervalo da resposta agregada deve ter início anterior ao fim.",
+    );
+  }
+
+  const rows = requireAggregateRows(
+    data,
+    granularity,
+    expectedMetricType,
+  );
+  rows.forEach((row, index) => {
+    if (!aggregateBucketInRange(row.bucket, granularity, from, to)) {
+      throw new Error(
+        `A API retornou um bucket fora do intervalo consultado na posição ${index}.`,
+      );
+    }
+  });
+
+  return rows;
+}
+
 export function isAggregateBucketAligned(
   value: string | Date,
   granularity: AggregateGranularity,
@@ -209,13 +244,16 @@ export function startOfAggregateBucket(
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());
   }
   if (granularity === "week") {
-    const start = new Date(
+    const day = new Date(
       date.getFullYear(),
       date.getMonth(),
       date.getDate(),
     );
-    start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
-    return start;
+    return new Date(
+      day.getFullYear(),
+      day.getMonth(),
+      day.getDate() - ((day.getDay() + 6) % 7),
+    );
   }
   if (granularity === "month") {
     return new Date(date.getFullYear(), date.getMonth(), 1);
@@ -249,13 +287,27 @@ export function endOfAggregateBucket(
     return new Date(start.getTime() + 60 * 60_000);
   }
 
-  const end = new Date(start);
-  if (granularity === "day") end.setDate(end.getDate() + 1);
-  else if (granularity === "week") end.setDate(end.getDate() + 7);
-  else if (granularity === "month") end.setMonth(end.getMonth() + 1);
-  else if (granularity === "semester") end.setMonth(end.getMonth() + 6);
-  else end.setFullYear(end.getFullYear() + 1);
-  return end;
+  if (granularity === "day") {
+    return new Date(
+      start.getFullYear(),
+      start.getMonth(),
+      start.getDate() + 1,
+    );
+  }
+  if (granularity === "week") {
+    return new Date(
+      start.getFullYear(),
+      start.getMonth(),
+      start.getDate() + 7,
+    );
+  }
+  if (granularity === "month") {
+    return new Date(start.getFullYear(), start.getMonth() + 1, 1);
+  }
+  if (granularity === "semester") {
+    return new Date(start.getFullYear(), start.getMonth() + 6, 1);
+  }
+  return new Date(start.getFullYear() + 1, 0, 1);
 }
 
 function floorLocalInstant(date: Date, durationMs: number) {

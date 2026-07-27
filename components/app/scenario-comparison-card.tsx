@@ -35,9 +35,14 @@ import {
   aggregateQueryIso,
   endOfAggregateBucket,
   requireAggregateGranularity,
-  requireAggregateRows,
+  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  clearHourlyAggregateCache,
+  fetchHourlyAggregateRanges,
+  type HourlyAggregateCache,
+} from "@/lib/aggregate-hour-query";
 import { reconcileAggregateRows } from "@/lib/aggregate-reconciliation";
 import {
   DAY_OF_MONTH_AXIS_LABELS,
@@ -199,6 +204,9 @@ export function ScenarioComparisonCard({
   const [settingsReady, setSettingsReady] = React.useState(false);
   const requestSequenceRef = React.useRef(0);
   const requestRunningRef = React.useRef(false);
+  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
+    new Map(),
+  );
   const [definition, setDefinition] = React.useState<ScenarioComparisonDefinition>(() =>
     buildScenarioComparisonDefinition(
       createDefaultScenarioComparisonSettings(),
@@ -302,6 +310,11 @@ export function ScenarioComparisonCard({
         const nextRows = await fetchScenarioComparisonRows(
           nextDefinition,
           hourlySource,
+          {
+            cache: hourlyAggregateCacheRef.current,
+            cacheScope: `scenario-comparison:${companyId}`,
+            now,
+          },
         );
         if (requestSequence !== requestSequenceRef.current) return;
 
@@ -333,6 +346,7 @@ export function ScenarioComparisonCard({
   );
 
   React.useEffect(() => {
+    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
     setSettingsReady(false);
     setSettings(
       loadSettings(storageKey, companyId, {
@@ -641,6 +655,7 @@ function ChartState({ text }: { text: string }) {
 export async function fetchScenarioComparisonRows(
   definition: ScenarioComparisonDefinition,
   hourlySource?: ScenarioComparisonHourlySource,
+  options: ScenarioComparisonFetchOptions = {},
 ) {
   const ranges = definition.baselineFrom && definition.baselineTo
     ? [
@@ -664,7 +679,7 @@ export async function fetchScenarioComparisonRows(
       ];
   const result = await Promise.all(
     ranges.map((range) =>
-      fetchScenarioComparisonRangeRows(range, hourlySource),
+      fetchScenarioComparisonRangeRows(range, hourlySource, options),
     ),
   );
 
@@ -677,11 +692,19 @@ type AggregateRangeDefinition = {
   to: Date;
 };
 
+type ScenarioComparisonFetchOptions = {
+  cache?: HourlyAggregateCache;
+  cacheScope?: string;
+  now?: Date;
+  signal?: AbortSignal;
+};
+
 async function fetchScenarioComparisonRangeRows(
   definition: AggregateRangeDefinition,
   hourlySource?: ScenarioComparisonHourlySource,
+  options: ScenarioComparisonFetchOptions = {},
 ) {
-  const now = new Date();
+  const now = options.now ?? new Date();
   const hourlyDefinition = {
     granularity: "hour" as const,
     from: startOfHour(definition.from),
@@ -722,7 +745,7 @@ async function fetchScenarioComparisonRangeRows(
           hourlyDefinition.to,
         ),
       )
-    : await fetchAggregateRows(hourlyDefinition);
+    : await fetchAggregateRows(hourlyDefinition, options);
   const currentHour = currentOpenBucket("hour", now);
   const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
   const requiredCurrentFrom = new Date(
@@ -760,6 +783,7 @@ async function fetchScenarioComparisonRangeRows(
         from: currentHour.from,
         to: currentMinuteEnd,
       },
+      options,
     );
     currentOpenMinuteRows = minuteRows;
     hourlyRows = replaceOpenBucketRowsFromSource(
@@ -809,11 +833,14 @@ async function fetchScenarioComparisonRangeRows(
       initialBoundaryStart.getTime() === currentHour.from.getTime() &&
       currentOpenMinuteRows
         ? currentOpenMinuteRows
-        : await fetchAggregateRows({
-            granularity: "minute",
-            from: definition.from,
-            to: initialBoundaryTo,
-          });
+        : await fetchAggregateRows(
+            {
+              granularity: "minute",
+              from: definition.from,
+              to: initialBoundaryTo,
+            },
+            options,
+          );
     hourlyRows = reconcileAggregateRows(
       hourlyRows,
       "hour",
@@ -831,14 +858,17 @@ async function fetchScenarioComparisonRangeRows(
     !(hasPartialInitialBoundary && rangeEndsInInitialHour);
   const currentCutoffAlreadyReconciled =
     historicalBoundaryStart.getTime() === currentHour.from.getTime() &&
-    definition.to >= startOfMinute(now) &&
+    definition.to >= currentMinuteEnd &&
     (reconciledCurrentCutoff || canonicalCoversCurrentRange);
   if (hasPartialHistoricalBoundary && !currentCutoffAlreadyReconciled) {
-    const historicalMinuteRows = await fetchAggregateRows({
-      granularity: "minute",
-      from: historicalBoundaryStart,
-      to: definition.to,
-    });
+    const historicalMinuteRows = await fetchAggregateRows(
+      {
+        granularity: "minute",
+        from: historicalBoundaryStart,
+        to: definition.to,
+      },
+      options,
+    );
     hourlyRows = reconcileAggregateRows(
       hourlyRows,
       "hour",
@@ -854,7 +884,19 @@ async function fetchScenarioComparisonRangeRows(
 
 async function fetchAggregateRows(
   definition: AggregateRangeDefinition,
+  options: ScenarioComparisonFetchOptions = {},
 ) {
+  if (definition.granularity === "hour") {
+    return fetchHourlyAggregateRanges({
+      cache: options.cache,
+      cacheScope:
+        options.cacheScope ?? "scenario-comparison:uncached-request",
+      now: options.now,
+      ranges: [definition],
+      signal: options.signal,
+    });
+  }
+
   const params = new URLSearchParams({
     granularity: definition.granularity,
     from: aggregateQueryIso(definition.from, definition.granularity),
@@ -863,12 +905,15 @@ async function fetchAggregateRows(
   });
   const response = await apiFetch<AggregateEventsResponse>(
     `/analytics/aggregate?${params.toString()}`,
+    { signal: options.signal },
   );
   requireAggregateGranularity(response.granularity, definition.granularity);
 
-  return requireAggregateRows(
+  return requireAggregateRowsInRange(
     response.data,
     definition.granularity,
+    definition.from,
+    definition.to,
     DEFAULT_METRIC_TYPE,
   );
 }

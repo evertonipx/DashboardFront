@@ -17,9 +17,14 @@ import {
   aggregateQueryIso,
   endOfAggregateBucket,
   requireAggregateGranularity,
-  requireAggregateRows,
+  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  clearHourlyAggregateCache,
+  fetchHourlyAggregateRanges,
+  type HourlyAggregateCache,
+} from "@/lib/aggregate-hour-query";
 import {
   reconcileAggregateRows,
   rollupAggregateRows,
@@ -190,6 +195,9 @@ export function EmbeddedLiveView() {
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
   const requestSequenceRef = React.useRef(0);
   const requestRunningRef = React.useRef(false);
+  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
+    new Map(),
+  );
 
   const load = React.useCallback(async () => {
     const requestSequence = ++requestSequenceRef.current;
@@ -221,7 +229,12 @@ export function EmbeddedLiveView() {
           apiFetch<unknown>("/cameras"),
           apiFetch<unknown>("/locations"),
           fetchEmbeddedWorkers(companyScopeId),
-          fetchAggregateRows(liveHourDefinition),
+          fetchHourlyAggregateRanges({
+            cache: hourlyAggregateCacheRef.current,
+            cacheScope: `embedded:${companyScopeId ?? "jwt-company"}`,
+            now,
+            ranges: [liveHourDefinition],
+          }),
           fetchAggregateRows(liveMinuteDefinition),
         ]);
       const scopedScenarios = filterScopedApiRows(
@@ -283,6 +296,8 @@ export function EmbeddedLiveView() {
                 now,
                 liveHourRows,
                 liveHourDefinition,
+                hourlyAggregateCacheRef.current,
+                `embedded:${companyScopeId ?? "jwt-company"}`,
               ),
             ] as const),
         ),
@@ -322,6 +337,7 @@ export function EmbeddedLiveView() {
   React.useEffect(() => {
     requestSequenceRef.current += 1;
     requestRunningRef.current = false;
+    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
     setWidgetStates([]);
     setLoadedViewIdentityKey("");
     setLastUpdated(null);
@@ -646,7 +662,7 @@ function buildAggregateDefinition(
     const end = addMinutes(startOfMinute(now), 1);
     return {
       granularity,
-      from: addMinutes(end, -60),
+      from: startOfHour(now),
       to: end,
     };
   }
@@ -673,9 +689,11 @@ async function fetchAggregateRows(
   );
   requireAggregateGranularity(response.granularity, definition.granularity);
 
-  return requireAggregateRows(
+  return requireAggregateRowsInRange(
     response.data,
     definition.granularity,
+    definition.from,
+    definition.to,
     DEFAULT_METRIC_TYPE,
   );
 }
@@ -685,6 +703,8 @@ async function fetchScenarioComparisonRows(
   now: Date,
   liveHourRows: AggregateEventRow[],
   liveHourDefinition: AggregateDefinition,
+  hourlyAggregateCache: HourlyAggregateCache,
+  cacheScope: string,
 ) {
   const definition = buildScenarioComparisonDefinition(config, now);
   const currentHourEnd = endOfAggregateBucket(startOfHour(now), "hour");
@@ -705,7 +725,12 @@ async function fetchScenarioComparisonRows(
     liveHourDefinition.to >= hourlyDefinition.to;
   let hourlyRows = liveSourceCoversRange
     ? []
-    : await fetchAggregateRows(hourlyDefinition);
+    : await fetchHourlyAggregateRanges({
+        cache: hourlyAggregateCache,
+        cacheScope,
+        now,
+        ranges: [hourlyDefinition],
+      });
   const overlapFrom = new Date(
     Math.max(
       hourlyDefinition.from.getTime(),
@@ -786,7 +811,7 @@ function embeddedPartialHourRanges(
   const currentOpenHourAlreadyCanonical =
     lastHourStart.getTime() === currentHourStart.getTime() &&
     definition.from <= lastHourStart &&
-    definition.to <= currentMinuteEnd;
+    definition.to >= currentMinuteEnd;
   if (
     lastHourStart < definition.to &&
     !currentOpenHourAlreadyCanonical

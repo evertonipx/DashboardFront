@@ -627,7 +627,9 @@ function YearOverYearMatrixCard({
                   average={row.average}
                   baselineOnly={row.baselineOnly}
                   current={row.year === comparison.latestYear}
-                  key={row.year}
+                  key={`${row.year}:${
+                    row.baselineOnly ? "baseline" : "selected"
+                  }`}
                   label={String(row.year)}
                   values={row.months}
                 />

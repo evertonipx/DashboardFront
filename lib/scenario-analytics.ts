@@ -78,6 +78,7 @@ export function scenarioSelectionSummary(
 export function buildCombinedScenarioPoints({
   from,
   granularity,
+  includeOverlappingSourceBuckets = false,
   rows,
   scenarios,
   sourceGranularity,
@@ -85,6 +86,7 @@ export function buildCombinedScenarioPoints({
 }: {
   from: Date;
   granularity: ScenarioAnalyticsGranularity;
+  includeOverlappingSourceBuckets?: boolean;
   rows: AggregateEventRow[];
   scenarios: Scenario[];
   sourceGranularity: AggregateGranularity;
@@ -97,6 +99,7 @@ export function buildCombinedScenarioPoints({
     sourceGranularity,
     from,
     to,
+    includeOverlappingSourceBuckets,
   );
 
   return listBucketStarts(from, to, granularity).map((bucket) => ({
@@ -248,8 +251,7 @@ export function buildScenarioHourlyOccupancy({
     day.getDate(),
     normalizedStartHour,
   );
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
+  const dayEnd = endOfAggregateBucket(dayStart, "day");
   const to = new Date(
     Math.min(dayEnd.getTime(), Math.max(from.getTime(), through.getTime())),
   );
@@ -349,6 +351,7 @@ function aggregateSelectedRowsByBucket(
   sourceGranularity: AggregateGranularity,
   from: Date,
   to: Date,
+  includeOverlappingSourceBuckets: boolean,
 ) {
   const multipliers = buildCombinedMultiplierMap(scenarios);
   const totals = new Map<number, number>();
@@ -362,7 +365,15 @@ function aggregateSelectedRowsByBucket(
     const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
     if (!bucket) return;
     const bucketTime = bucket.getTime();
-    if (bucketTime < fromTime || bucketTime >= toTime) return;
+    if (includeOverlappingSourceBuckets) {
+      const bucketEnd = endOfAggregateBucket(
+        bucket,
+        sourceGranularity,
+      ).getTime();
+      if (bucketTime >= toTime || bucketEnd <= fromTime) return;
+    } else if (bucketTime < fromTime || bucketTime >= toTime) {
+      return;
+    }
 
     const key = bucketKey(bucket, granularity);
     totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0) * multiplier);

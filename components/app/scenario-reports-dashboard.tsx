@@ -78,9 +78,14 @@ import {
   endOfAggregateBucket,
   parseAggregateBucket,
   requireAggregateGranularity,
-  requireAggregateRows,
+  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  clearHourlyAggregateCache,
+  fetchHourlyAggregateRanges,
+  type HourlyAggregateCache,
+} from "@/lib/aggregate-hour-query";
 import {
   reconcileAggregateRows,
   rollupAggregateRows,
@@ -281,9 +286,15 @@ export function ScenarioReportsDashboard({
   const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
   const metadataRequestSequenceRef = React.useRef(0);
   const chartRequestSequenceRef = React.useRef(0);
+  const chartRequestControllerRef = React.useRef<AbortController | null>(
+    null,
+  );
   const openRefreshRequestSequenceRef = React.useRef(0);
   const openRefreshRunningRef = React.useRef(false);
   const canonicalBaselineReadyRef = React.useRef(false);
+  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
+    new Map(),
+  );
   const [customWidgetForm, setCustomWidgetForm] =
     React.useState<ReportCustomWidgetForm>({
       comparisonSettings: createDefaultScenarioComparisonSettings(),
@@ -491,6 +502,9 @@ export function ScenarioReportsDashboard({
   const loadCharts = React.useCallback(
     async (_scope: ReportScopeOption, silent = false) => {
       const requestSequence = ++chartRequestSequenceRef.current;
+      chartRequestControllerRef.current?.abort();
+      const controller = new AbortController();
+      chartRequestControllerRef.current = controller;
       openRefreshRequestSequenceRef.current += 1;
       openRefreshRunningRef.current = false;
       canonicalBaselineReadyRef.current = false;
@@ -550,8 +564,25 @@ export function ScenarioReportsDashboard({
               ] as const;
             }
             try {
+              if (definition.id === COUNTING_HOUR_HISTORY_ID) {
+                return [
+                  definition.id,
+                  {
+                    granularity: "hour",
+                    rows: await fetchHourlyAggregateRanges({
+                      cache: hourlyAggregateCacheRef.current,
+                      cacheScope: `reports:${companyScopeId ?? "jwt-company"}`,
+                      now,
+                      ranges: [definition],
+                      signal: controller.signal,
+                    }),
+                  },
+                ] as const;
+              }
+
               const response = await apiFetch<AggregateEventsResponse>(
                 aggregatePath(definition),
+                { signal: controller.signal },
               );
               const responseGranularity = requireAggregateGranularity(
                 response.granularity,
@@ -560,15 +591,18 @@ export function ScenarioReportsDashboard({
               return [
                 definition.id,
                 {
-                  rows: requireAggregateRows(
+                  rows: requireAggregateRowsInRange(
                     response.data,
                     responseGranularity,
+                    definition.from,
+                    definition.to,
                     DEFAULT_METRIC_TYPE,
                   ),
                   granularity: responseGranularity,
                 },
               ] as const;
             } catch (error) {
+              if (controller.signal.aborted) throw error;
               return [
                 definition.id,
                 {
@@ -646,6 +680,7 @@ export function ScenarioReportsDashboard({
           canonicalHourState && !canonicalHourState.error,
         );
       } catch (error) {
+        if (controller.signal.aborted) return;
         if (requestSequence !== chartRequestSequenceRef.current) return;
         canonicalBaselineReadyRef.current = false;
         const message =
@@ -655,12 +690,16 @@ export function ScenarioReportsDashboard({
         setChartLoadError(message);
         toast.error(message);
       } finally {
+        if (chartRequestControllerRef.current === controller) {
+          chartRequestControllerRef.current = null;
+        }
         if (requestSequence === chartRequestSequenceRef.current) {
           setLoadingCharts(false);
         }
       }
     },
     [
+      companyScopeId,
       customWidgets,
       effectivePeriodDates,
       intradayComparison,
@@ -728,6 +767,18 @@ export function ScenarioReportsDashboard({
       definition: ScenarioAggregateDefinition,
     ): Promise<ScenarioChartState> {
       try {
+        if (definition.granularity === "hour") {
+          return {
+            granularity: "hour",
+            rows: await fetchHourlyAggregateRanges({
+              cache: hourlyAggregateCacheRef.current,
+              cacheScope: `reports:${companyScopeId ?? "jwt-company"}`,
+              now,
+              ranges: [definition],
+            }),
+          };
+        }
+
         const response = await apiFetch<AggregateEventsResponse>(
           aggregatePath(definition),
         );
@@ -737,9 +788,11 @@ export function ScenarioReportsDashboard({
         );
         return {
           granularity,
-          rows: requireAggregateRows(
+          rows: requireAggregateRowsInRange(
             response.data,
             granularity,
+            definition.from,
+            definition.to,
             DEFAULT_METRIC_TYPE,
           ),
         };
@@ -835,6 +888,7 @@ export function ScenarioReportsDashboard({
       }
     }
   }, [
+    companyScopeId,
     customWidgets,
     effectivePeriodDates,
     intradayComparison,
@@ -849,9 +903,12 @@ export function ScenarioReportsDashboard({
 
   React.useEffect(() => {
     chartRequestSequenceRef.current += 1;
+    chartRequestControllerRef.current?.abort();
+    chartRequestControllerRef.current = null;
     openRefreshRequestSequenceRef.current += 1;
     openRefreshRunningRef.current = false;
     canonicalBaselineReadyRef.current = false;
+    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
     setMetadataError("");
     setChartLoadError("");
     setScenarios([]);
@@ -970,6 +1027,8 @@ export function ScenarioReportsDashboard({
   React.useEffect(() => {
     if (!selectedScope) {
       chartRequestSequenceRef.current += 1;
+      chartRequestControllerRef.current?.abort();
+      chartRequestControllerRef.current = null;
       openRefreshRequestSequenceRef.current += 1;
       openRefreshRunningRef.current = false;
       canonicalBaselineReadyRef.current = false;
@@ -980,6 +1039,9 @@ export function ScenarioReportsDashboard({
     }
 
     loadCharts(selectedScope);
+    return () => {
+      chartRequestControllerRef.current?.abort();
+    };
   }, [loadCharts, selectedScope]);
 
   React.useEffect(() => {

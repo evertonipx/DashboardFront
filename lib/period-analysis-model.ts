@@ -62,11 +62,15 @@ export type PeriodAnalysisRange = {
 export type PeriodAnalysisDataset = {
   error?: string;
   granularity: AggregateGranularity;
+  partialBoundariesReconciled?: boolean;
   rows: AggregateEventRow[];
 };
 
 export type PeriodAnalysisData = {
   baseline: Partial<Record<PeriodAnalysisBaseline, PeriodAnalysisDataset>>;
+  baselineComparable?: Partial<
+    Record<PeriodAnalysisBaseline, PeriodAnalysisDataset>
+  >;
   contextHour: PeriodAnalysisDataset;
   day: PeriodAnalysisDataset;
   hour: PeriodAnalysisDataset;
@@ -267,6 +271,10 @@ export function periodAnalysisBaselineRange(
   baseline: PeriodAnalysisBaseline,
 ): PeriodAnalysisRange {
   if (baseline === "previous_period") {
+    const fromIsDayBoundary =
+      civilDayBoundary(period.from).getTime() === period.from.getTime();
+    const toIsDayBoundary =
+      civilDayBoundary(period.to).getTime() === period.to.getTime();
     const durationInCalendarDays = Math.round(
       (Date.UTC(
         period.to.getFullYear(),
@@ -280,16 +288,23 @@ export function periodAnalysisBaselineRange(
         )) /
         (24 * 60 * 60 * 1_000),
     );
+    const to = new Date(period.from);
     return {
-      from: addDays(period.from, -durationInCalendarDays),
-      to: addDays(period.to, -durationInCalendarDays),
+      from:
+        fromIsDayBoundary && toIsDayBoundary
+          ? addDays(period.from, -durationInCalendarDays)
+          : new Date(
+              period.from.getTime() -
+                (period.to.getTime() - period.from.getTime()),
+            ),
+      to,
     };
   }
 
   const amount = baseline === "last_year" ? -12 : -1;
   return {
     from: shiftMonthsClamped(period.from, amount),
-    to: shiftMonthsClamped(period.to, amount),
+    to: shiftExclusiveEndClamped(period.to, amount),
   };
 }
 
@@ -423,7 +438,8 @@ function buildTargetProgressModel(
       ? currentTotal / currentPoints.length
       : 0;
   const baselineDataset =
-    data.baseline[widget.baseline] ?? emptyDataset("day");
+    data.baseline[widget.baseline] ??
+    emptyDataset("day");
   const baselinePeriod = periodAnalysisBaselineDataRange(
     period,
     widget.baseline,
@@ -495,7 +511,9 @@ function buildCumulativeMetricModel(
     widget.baseline,
   );
   const baselineDataset =
-    data.baseline[widget.baseline] ?? emptyDataset("day");
+    data.baselineComparable?.[widget.baseline] ??
+    data.baseline[widget.baseline] ??
+    emptyDataset("day");
   const currentPoints = combinedPoints(
     data.day,
     scenarios,
@@ -567,7 +585,9 @@ function buildDailyComparisonModel(
     widget.baseline,
   );
   const baselineDataset =
-    data.baseline[widget.baseline] ?? emptyDataset("day");
+    data.baselineComparable?.[widget.baseline] ??
+    data.baseline[widget.baseline] ??
+    emptyDataset("day");
   const current = combinedPoints(
     data.day,
     scenarios,
@@ -666,28 +686,22 @@ function buildCurrentYearModel(
   let accumulated = 0;
   const points = monthLabels.map<CurrentYearMonthPoint>((label, month) => {
     let value: number | null = null;
-    if (month < currentMonth) {
+    if (month <= currentMonth) {
       const from = new Date(year, month, 1);
+      const to =
+        month < currentMonth
+          ? new Date(year, month + 1, 1)
+          : new Date(
+              Math.min(
+                periodRangeThroughNow(period).to.getTime(),
+                new Date(year, month + 1, 1).getTime(),
+              ),
+            );
       value = sumSelectedScenarioRows({
         from,
         rows: data.month.rows,
         scenarios,
         sourceGranularity: data.month.granularity,
-        to: new Date(year, month + 1, 1),
-      });
-    } else if (month === currentMonth) {
-      const from = new Date(year, month, 1);
-      const to = new Date(
-        Math.min(
-          periodRangeThroughNow(period).to.getTime(),
-          new Date(year, month + 1, 1).getTime(),
-        ),
-      );
-      value = sumSelectedScenarioRows({
-        from,
-        rows: data.day.rows,
-        scenarios,
-        sourceGranularity: data.day.granularity,
         to,
       });
     }
@@ -709,7 +723,7 @@ function buildCurrentYearModel(
       ? `Soma progressiva dos meses de ${year} até a data consultada.`
       : `Valores mensais de ${year} até a data consultada e média mensal tracejada.`,
     emptyText: "Sem dados mensais para o ano da data consultada.",
-    error: data.month.error ?? data.day.error,
+    error: data.month.error,
     hasData: recorded.some((point) => (point.value ?? 0) !== 0),
     height: 340,
     insights: latest
@@ -1667,7 +1681,10 @@ function buildCumulativeModel(
     effectivePeriod,
     "day",
   );
-  const baselineDataset = data.baseline[widget.baseline] ?? emptyDataset("day");
+  const baselineDataset =
+    data.baselineComparable?.[widget.baseline] ??
+    data.baseline[widget.baseline] ??
+    emptyDataset("day");
   const baseline = combinedPoints(
     baselineDataset,
     scenarios,
@@ -2448,6 +2465,8 @@ function combinedPoints(
   return buildCombinedScenarioPoints({
     from: period.from,
     granularity,
+    includeOverlappingSourceBuckets:
+      dataset.partialBoundariesReconciled === true,
     rows: dataset.rows,
     scenarios,
     sourceGranularity: dataset.granularity,
@@ -2547,6 +2566,7 @@ function periodAnalysisDatasets(data: PeriodAnalysisData) {
     data.minute,
     data.month,
     ...Object.values(data.baseline),
+    ...Object.values(data.baselineComparable ?? {}),
   ].filter((dataset): dataset is PeriodAnalysisDataset => Boolean(dataset));
 }
 
@@ -2568,6 +2588,16 @@ function mapPeriodAnalysisDataRows(
         dataset ? mapDataset(dataset) : dataset,
       ]),
     ),
+    baselineComparable: data.baselineComparable
+      ? Object.fromEntries(
+          Object.entries(data.baselineComparable).map(
+            ([baseline, dataset]) => [
+              baseline,
+              dataset ? mapDataset(dataset) : dataset,
+            ],
+          ),
+        )
+      : undefined,
     contextHour: mapDataset(data.contextHour),
     day: mapDataset(data.day),
     hour: mapDataset(data.hour),
@@ -2657,15 +2687,26 @@ function shiftMonthsClamped(date: Date, amount: number) {
     first.getMonth() + 1,
     0,
   ).getDate();
+  const isDayBoundary =
+    civilDayBoundary(date).getTime() === date.getTime();
   return new Date(
     first.getFullYear(),
     first.getMonth(),
     Math.min(date.getDate(), lastDay),
-    date.getHours(),
-    date.getMinutes(),
-    date.getSeconds(),
-    date.getMilliseconds(),
+    isDayBoundary ? 0 : date.getHours(),
+    isDayBoundary ? 0 : date.getMinutes(),
+    isDayBoundary ? 0 : date.getSeconds(),
+    isDayBoundary ? 0 : date.getMilliseconds(),
   );
+}
+
+function shiftExclusiveEndClamped(date: Date, amount: number) {
+  if (civilDayBoundary(date).getTime() !== date.getTime()) {
+    return shiftMonthsClamped(date, amount);
+  }
+
+  const lastIncludedDay = addDays(date, -1);
+  return addDays(shiftMonthsClamped(lastIncludedDay, amount), 1);
 }
 
 function parseDateInput(value: string) {
@@ -2684,9 +2725,21 @@ function parseDateInput(value: string) {
 }
 
 function addDays(date: Date, amount: number) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + amount);
-  return next;
+  const isDayBoundary =
+    civilDayBoundary(date).getTime() === date.getTime();
+  return new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate() + amount,
+    isDayBoundary ? 0 : date.getHours(),
+    isDayBoundary ? 0 : date.getMinutes(),
+    isDayBoundary ? 0 : date.getSeconds(),
+    isDayBoundary ? 0 : date.getMilliseconds(),
+  );
+}
+
+function civilDayBoundary(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
 function formatDate(date: Date) {
