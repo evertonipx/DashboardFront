@@ -51,6 +51,11 @@ import {
   holidayCategoryIndexes,
 } from "@/lib/chart-calendar-axis";
 import { pastelBarColor } from "@/lib/chart-palette";
+import { requireCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
+import {
+  requireScenarioComparisonScope,
+  type ScenarioComparisonSourceScope,
+} from "@/lib/scenario-comparison-scope";
 import {
   buildFixedHourlyAxisValues,
   HOUR_OF_DAY_LABELS,
@@ -71,6 +76,7 @@ type ScenarioComparisonCardProps = {
   action?: React.ReactNode;
   autoRefresh?: boolean;
   companyId?: string | null;
+  companyTimeZone: string;
   description?: string;
   disabledReason?: string;
   hourlySource?: ScenarioComparisonHourlySource;
@@ -82,7 +88,7 @@ type ScenarioComparisonCardProps = {
   title?: string;
 };
 
-export type ScenarioComparisonHourlySource = {
+export type ScenarioComparisonHourlySource = ScenarioComparisonSourceScope & {
   from: Date;
   rows: AggregateEventRow[];
   to: Date;
@@ -180,6 +186,7 @@ export function ScenarioComparisonCard({
   action,
   autoRefresh = false,
   companyId,
+  companyTimeZone,
   description = "Compare os cenários escolhidos no mesmo gráfico.",
   disabledReason,
   hourlySource,
@@ -204,9 +211,26 @@ export function ScenarioComparisonCard({
   const [settingsReady, setSettingsReady] = React.useState(false);
   const requestSequenceRef = React.useRef(0);
   const requestRunningRef = React.useRef(false);
+  const requestRef = React.useRef<AbortController | null>(null);
   const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
     new Map(),
   );
+  const scopeCertificationError = React.useMemo(() => {
+    try {
+      requireScenarioComparisonScope({
+        companyScopeId: companyId,
+        companyTimeZone,
+        hourlySource,
+        scenarios,
+      });
+      return "";
+    } catch (scopeError) {
+      return scopeError instanceof Error
+        ? scopeError.message
+        : "Escopo da comparação não certificado.";
+    }
+  }, [companyId, companyTimeZone, hourlySource, scenarios]);
+  const effectiveDisabledReason = disabledReason || scopeCertificationError;
   const [definition, setDefinition] = React.useState<ScenarioComparisonDefinition>(() =>
     buildScenarioComparisonDefinition(
       createDefaultScenarioComparisonSettings(),
@@ -249,10 +273,13 @@ export function ScenarioComparisonCard({
   const load = React.useCallback(
     async (silent = false) => {
       const requestSequence = ++requestSequenceRef.current;
+      requestRef.current?.abort();
+      requestRef.current = null;
       requestRunningRef.current = true;
-      if (disabledReason) {
+      if (effectiveDisabledReason) {
         setRows([]);
-        setError(disabledReason);
+        setError(effectiveDisabledReason);
+        setLastUpdated(null);
         setLoading(false);
         setDefinition(
           buildScenarioComparisonDefinition(settings, new Date(), periodOverride),
@@ -264,6 +291,22 @@ export function ScenarioComparisonCard({
       if (!companyId) {
         setRows([]);
         setError("Empresa não definida para esta comparação.");
+        setLastUpdated(null);
+        setLoading(false);
+        requestRunningRef.current = false;
+        return;
+      }
+
+      try {
+        requireCountingRuntimeTimeZone(companyTimeZone);
+      } catch (loadError) {
+        setRows([]);
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Fuso da empresa não disponível.",
+        );
+        setLastUpdated(null);
         setLoading(false);
         requestRunningRef.current = false;
         return;
@@ -272,6 +315,7 @@ export function ScenarioComparisonCard({
       if (!scenarios.length) {
         setRows([]);
         setError("");
+        setLastUpdated(null);
         setLoading(false);
         setDefinition(
           buildScenarioComparisonDefinition(settings, new Date(), periodOverride),
@@ -283,6 +327,7 @@ export function ScenarioComparisonCard({
       if (settings.selectionMode === "custom" && !settings.selectedScenarioIds.length) {
         setRows([]);
         setError("");
+        setLastUpdated(null);
         setLoading(false);
         setDefinition(
           buildScenarioComparisonDefinition(settings, new Date(), periodOverride),
@@ -293,6 +338,8 @@ export function ScenarioComparisonCard({
 
       if (!silent) setLoading(true);
       setError("");
+      const controller = new AbortController();
+      requestRef.current = controller;
 
       try {
         const now = new Date();
@@ -304,16 +351,19 @@ export function ScenarioComparisonCard({
         if (nextDefinition.to <= nextDefinition.from) {
           setDefinition(nextDefinition);
           setRows([]);
-          setLastUpdated(now);
+          setLastUpdated(null);
           return;
         }
         const nextRows = await fetchScenarioComparisonRows(
           nextDefinition,
           hourlySource,
+          companyTimeZone,
+          companyId,
           {
             cache: hourlyAggregateCacheRef.current,
             cacheScope: `scenario-comparison:${companyId}`,
             now,
+            signal: controller.signal,
           },
         );
         if (requestSequence !== requestSequenceRef.current) return;
@@ -323,6 +373,11 @@ export function ScenarioComparisonCard({
         setLastUpdated(now);
       } catch (loadError) {
         if (requestSequence !== requestSequenceRef.current) return;
+        if (loadError instanceof Error && loadError.name === "AbortError") {
+          return;
+        }
+        setRows([]);
+        setLastUpdated(null);
         setError(
           loadError instanceof Error
             ? loadError.message
@@ -332,21 +387,30 @@ export function ScenarioComparisonCard({
         if (requestSequence === requestSequenceRef.current) {
           setLoading(false);
           requestRunningRef.current = false;
+          if (requestRef.current === controller) requestRef.current = null;
         }
       }
     },
     [
       companyId,
-      disabledReason,
+      companyTimeZone,
+      effectiveDisabledReason,
       hourlySource,
       periodOverride,
-      scenarios.length,
+      scenarios,
       settings,
     ],
   );
 
   React.useEffect(() => {
+    requestSequenceRef.current += 1;
+    requestRef.current?.abort();
+    requestRef.current = null;
+    requestRunningRef.current = false;
     clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+    setRows([]);
+    setError("");
+    setLastUpdated(null);
     setSettingsReady(false);
     setSettings(
       loadSettings(storageKey, companyId, {
@@ -355,7 +419,17 @@ export function ScenarioComparisonCard({
       }),
     );
     setSettingsReady(true);
-  }, [companyId, preferenceScopeId, storageKey, user?.id]);
+  }, [companyId, companyTimeZone, preferenceScopeId, storageKey, user?.id]);
+
+  React.useEffect(
+    () => () => {
+      requestSequenceRef.current += 1;
+      requestRef.current?.abort();
+      requestRef.current = null;
+      requestRunningRef.current = false;
+    },
+    [],
+  );
 
   React.useEffect(() => {
     setSettings((current) => ({
@@ -464,17 +538,20 @@ export function ScenarioComparisonCard({
         ) : null}
 
         <div
+          aria-label="Gráfico comparativo; role horizontalmente quando necessário"
           className={cn(
-            "w-full overflow-x-auto",
+            "enterprise-horizontal-scroll w-full overflow-x-auto",
             monitorMode
               ? "h-[clamp(320px,42vh,620px)]"
               : "h-[360px]",
           )}
+          role="region"
+          tabIndex={0}
         >
           {loading && !rows.length ? (
             <Skeleton className="h-full w-full" />
-          ) : error ? (
-            <ChartState text={error} />
+          ) : effectiveDisabledReason || error ? (
+            <ChartState text={effectiveDisabledReason || error} />
           ) : settings.selectionMode === "custom" &&
             !settings.selectedScenarioIds.length ? (
             <ChartState text="Selecione ao menos um cenário para comparar." />
@@ -516,7 +593,9 @@ export function ScenarioComparisonConfigurator({
             onChange({ view: value as ScenarioComparisonView })
           }
         >
-          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Visualização">
+            <SelectValue />
+          </SelectTrigger>
           <SelectContent>
             {viewOptions.map((optionItem) => (
               <SelectItem key={optionItem.value} value={optionItem.value}>
@@ -534,7 +613,9 @@ export function ScenarioComparisonConfigurator({
             onChange({ accumulated: value === "accumulated" })
           }
         >
-          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Leitura">
+            <SelectValue />
+          </SelectTrigger>
           <SelectContent>
             <SelectItem value="interval">Valor por intervalo</SelectItem>
             <SelectItem value="accumulated">Acumulado no período</SelectItem>
@@ -550,7 +631,9 @@ export function ScenarioComparisonConfigurator({
             onChange({ granularity: value as ScenarioCompareGranularity })
           }
         >
-          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Granularidade">
+            <SelectValue />
+          </SelectTrigger>
           <SelectContent>
             {granularityOptions.map((optionItem) => (
               <SelectItem key={optionItem.value} value={optionItem.value}>
@@ -578,7 +661,9 @@ export function ScenarioComparisonConfigurator({
               onChange({ period: value as ScenarioComparePeriod })
             }
           >
-            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label="Período">
+              <SelectValue />
+            </SelectTrigger>
             <SelectContent>
               {periodOptions.map((optionItem) => (
                 <SelectItem key={optionItem.value} value={optionItem.value}>
@@ -605,6 +690,7 @@ export function ScenarioComparisonConfigurator({
         <div className="grid gap-3 sm:col-span-2 sm:grid-cols-2">
           <Field label="De">
             <Input
+              aria-label="De"
               type="datetime-local"
               value={settings.customFrom}
               onChange={(event) => onChange({ customFrom: event.target.value })}
@@ -612,6 +698,7 @@ export function ScenarioComparisonConfigurator({
           </Field>
           <Field label="Até">
             <Input
+              aria-label="Até"
               type="datetime-local"
               value={settings.customTo}
               onChange={(event) => onChange({ customTo: event.target.value })}
@@ -654,9 +741,17 @@ function ChartState({ text }: { text: string }) {
 
 export async function fetchScenarioComparisonRows(
   definition: ScenarioComparisonDefinition,
-  hourlySource?: ScenarioComparisonHourlySource,
+  hourlySource: ScenarioComparisonHourlySource | undefined,
+  companyTimeZone: string,
+  companyScopeId: string,
   options: ScenarioComparisonFetchOptions = {},
 ) {
+  const certifiedScope = requireScenarioComparisonScope({
+    companyScopeId,
+    companyTimeZone,
+    hourlySource,
+  });
+  requireCountingRuntimeTimeZone(certifiedScope.companyTimeZone);
   const ranges = definition.baselineFrom && definition.baselineTo
     ? [
         {
@@ -679,7 +774,12 @@ export async function fetchScenarioComparisonRows(
       ];
   const result = await Promise.all(
     ranges.map((range) =>
-      fetchScenarioComparisonRangeRows(range, hourlySource, options),
+      fetchScenarioComparisonRangeRows(
+        range,
+        certifiedScope.companyScopeId,
+        hourlySource,
+        options,
+      ),
     ),
   );
 
@@ -701,6 +801,7 @@ type ScenarioComparisonFetchOptions = {
 
 async function fetchScenarioComparisonRangeRows(
   definition: AggregateRangeDefinition,
+  companyScopeId: string,
   hourlySource?: ScenarioComparisonHourlySource,
   options: ScenarioComparisonFetchOptions = {},
 ) {
@@ -745,7 +846,7 @@ async function fetchScenarioComparisonRangeRows(
           hourlyDefinition.to,
         ),
       )
-    : await fetchAggregateRows(hourlyDefinition, options);
+    : await fetchAggregateRows(hourlyDefinition, companyScopeId, options);
   const currentHour = currentOpenBucket("hour", now);
   const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
   const requiredCurrentFrom = new Date(
@@ -783,6 +884,7 @@ async function fetchScenarioComparisonRangeRows(
         from: currentHour.from,
         to: currentMinuteEnd,
       },
+      companyScopeId,
       options,
     );
     currentOpenMinuteRows = minuteRows;
@@ -839,6 +941,7 @@ async function fetchScenarioComparisonRangeRows(
               from: definition.from,
               to: initialBoundaryTo,
             },
+            companyScopeId,
             options,
           );
     hourlyRows = reconcileAggregateRows(
@@ -867,6 +970,7 @@ async function fetchScenarioComparisonRangeRows(
         from: historicalBoundaryStart,
         to: definition.to,
       },
+      companyScopeId,
       options,
     );
     hourlyRows = reconcileAggregateRows(
@@ -884,6 +988,7 @@ async function fetchScenarioComparisonRangeRows(
 
 async function fetchAggregateRows(
   definition: AggregateRangeDefinition,
+  companyScopeId: string,
   options: ScenarioComparisonFetchOptions = {},
 ) {
   if (definition.granularity === "hour") {
@@ -891,6 +996,7 @@ async function fetchAggregateRows(
       cache: options.cache,
       cacheScope:
         options.cacheScope ?? "scenario-comparison:uncached-request",
+      companyScopeId,
       now: options.now,
       ranges: [definition],
       signal: options.signal,
@@ -905,7 +1011,9 @@ async function fetchAggregateRows(
   });
   const response = await apiFetch<AggregateEventsResponse>(
     `/analytics/aggregate?${params.toString()}`,
-    { signal: options.signal },
+    options.signal
+      ? { companyScopeId, signal: options.signal }
+      : { companyScopeId },
   );
   requireAggregateGranularity(response.granularity, definition.granularity);
 

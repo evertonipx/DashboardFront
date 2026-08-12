@@ -15,6 +15,12 @@ export type WidgetViewScope = {
   name: string;
 };
 
+export type WidgetViewPresetNamespace =
+  | CardMenuKey
+  | "occupancy-analysis"
+  | "occupancy-live"
+  | "occupancy-reports";
+
 export type WidgetViewSnapshot = {
   cardIds: string[];
   capturedAt: string;
@@ -50,6 +56,7 @@ type CaptureWidgetViewSnapshotInput = {
 
 type ApplyWidgetViewPresetInput = {
   companyId?: string | null;
+  presetNamespace?: WidgetViewPresetNamespace;
   targetScope?: WidgetViewScope | null;
   userId?: string | null;
 };
@@ -71,7 +78,12 @@ const menuStorageMatchers: Record<CardMenuKey, RegExp[]> = {
     /^ipxdata\.live-operational-settings\.v1$/,
     /^ipxdata\.live-custom-.+\.scenario-comparison\.v1$/,
   ],
-  occupancy: [],
+  occupancy: [
+    /^ipxdata\.occupancy-custom-widgets\.v1$/,
+    /^ipxdata\.occupancy-dashboard-settings\.v1$/,
+    /^ipxdata\.occupancy-widget-settings\.v1$/,
+    /^ipxdata\.occupancy\.metric-visibility\.v1$/,
+  ],
   reports: [
     /^ipxdata\.report-custom-widgets\.v1$/,
     /^ipxdata\.live-dashboard-settings\.v1$/,
@@ -85,13 +97,22 @@ export function loadWidgetViewPresets(
   menuKey: CardMenuKey,
   companyId?: string | null,
   userId?: string | null,
+  presetNamespace: WidgetViewPresetNamespace = menuKey,
 ) {
   if (typeof window === "undefined") return [];
 
   try {
-    const stored = window.localStorage.getItem(
-      presetsStorageKey(menuKey, companyId, userId),
-    );
+    const namespace = resolvePresetNamespace(menuKey, presetNamespace);
+    const storageKey = presetsStorageKey(namespace, companyId, userId);
+    const stored =
+      window.localStorage.getItem(storageKey) ??
+      migrateLegacyOccupancyPresets({
+        companyId,
+        menuKey,
+        namespace,
+        storageKey,
+        userId,
+      });
     if (!stored) return [];
     const parsed = JSON.parse(stored) as unknown;
     if (!Array.isArray(parsed)) return [];
@@ -110,6 +131,7 @@ export function saveWidgetViewPresets(
   presets: WidgetViewPreset[],
   companyId?: string | null,
   userId?: string | null,
+  presetNamespace: WidgetViewPresetNamespace = menuKey,
 ) {
   const normalized = enforceSingleDefault(
     presets
@@ -119,12 +141,16 @@ export function saveWidgetViewPresets(
   if (typeof window === "undefined") return normalized;
 
   window.localStorage.setItem(
-    presetsStorageKey(menuKey, companyId, userId),
+    presetsStorageKey(
+      resolvePresetNamespace(menuKey, presetNamespace),
+      companyId,
+      userId,
+    ),
     JSON.stringify(normalized),
   );
   window.dispatchEvent(
     new CustomEvent(WIDGET_VIEW_PRESETS_UPDATED_EVENT, {
-      detail: { companyId, menuKey, userId },
+      detail: { companyId, menuKey, presetNamespace, userId },
     }),
   );
   return normalized;
@@ -135,6 +161,7 @@ export function upsertWidgetViewPreset({
   id,
   menuKey,
   name,
+  presetNamespace,
   snapshot,
   userId,
 }: {
@@ -142,10 +169,16 @@ export function upsertWidgetViewPreset({
   id?: string;
   menuKey: CardMenuKey;
   name: string;
+  presetNamespace?: WidgetViewPresetNamespace;
   snapshot: WidgetViewSnapshot;
   userId?: string | null;
 }) {
-  const presets = loadWidgetViewPresets(menuKey, companyId, userId);
+  const presets = loadWidgetViewPresets(
+    menuKey,
+    companyId,
+    userId,
+    presetNamespace,
+  );
   const current = id ? presets.find((preset) => preset.id === id) : undefined;
   const now = new Date().toISOString();
   const preset: WidgetViewPreset = {
@@ -160,7 +193,13 @@ export function upsertWidgetViewPreset({
     ? presets.map((stored) => (stored.id === current.id ? preset : stored))
     : [...presets, preset];
 
-  return saveWidgetViewPresets(menuKey, next, companyId, userId);
+  return saveWidgetViewPresets(
+    menuKey,
+    next,
+    companyId,
+    userId,
+    presetNamespace,
+  );
 }
 
 export function deleteWidgetViewPreset(
@@ -168,14 +207,21 @@ export function deleteWidgetViewPreset(
   presetId: string,
   companyId?: string | null,
   userId?: string | null,
+  presetNamespace: WidgetViewPresetNamespace = menuKey,
 ) {
   return saveWidgetViewPresets(
     menuKey,
-    loadWidgetViewPresets(menuKey, companyId, userId).filter(
+    loadWidgetViewPresets(
+      menuKey,
+      companyId,
+      userId,
+      presetNamespace,
+    ).filter(
       (preset) => preset.id !== presetId,
     ),
     companyId,
     userId,
+    presetNamespace,
   );
 }
 
@@ -184,15 +230,22 @@ export function setDefaultWidgetViewPreset(
   presetId: string,
   companyId?: string | null,
   userId?: string | null,
+  presetNamespace: WidgetViewPresetNamespace = menuKey,
 ) {
   return saveWidgetViewPresets(
     menuKey,
-    loadWidgetViewPresets(menuKey, companyId, userId).map((preset) => ({
+    loadWidgetViewPresets(
+      menuKey,
+      companyId,
+      userId,
+      presetNamespace,
+    ).map((preset) => ({
       ...preset,
       isDefault: preset.id === presetId,
     })),
     companyId,
     userId,
+    presetNamespace,
   );
 }
 
@@ -227,7 +280,12 @@ export function captureWidgetViewSnapshot({
 
 export function applyWidgetViewPreset(
   preset: WidgetViewPreset,
-  { companyId, targetScope = null, userId }: ApplyWidgetViewPresetInput,
+  {
+    companyId,
+    presetNamespace = preset.snapshot.menuKey,
+    targetScope = null,
+    userId,
+  }: ApplyWidgetViewPresetInput,
 ) {
   if (typeof window === "undefined") return false;
   const { snapshot } = preset;
@@ -254,7 +312,7 @@ export function applyWidgetViewPreset(
   );
   window.localStorage.setItem(
     appliedPresetStorageKey(
-      snapshot.menuKey,
+      resolvePresetNamespace(snapshot.menuKey, presetNamespace),
       companyId,
       userId,
       targetViewId,
@@ -268,12 +326,14 @@ export function applyDefaultWidgetViewPresetIfEmpty({
   cardIds,
   companyId,
   menuKey,
+  presetNamespace = menuKey,
   targetScope,
   userId,
 }: {
   cardIds: string[];
   companyId?: string | null;
   menuKey: CardMenuKey;
+  presetNamespace?: WidgetViewPresetNamespace;
   targetScope: WidgetViewScope;
   userId?: string | null;
 }) {
@@ -283,14 +343,18 @@ export function applyDefaultWidgetViewPresetIfEmpty({
       companyId,
       userId,
       targetScope.id,
+      presetNamespace,
     )
   ) {
     return false;
   }
 
-  const preset = loadWidgetViewPresets(menuKey, companyId, userId).find(
-    (candidate) => candidate.isDefault,
-  );
+  const preset = loadWidgetViewPresets(
+    menuKey,
+    companyId,
+    userId,
+    presetNamespace,
+  ).find((candidate) => candidate.isDefault);
   if (!preset) return false;
 
   return applyWidgetViewPreset(
@@ -303,7 +367,7 @@ export function applyDefaultWidgetViewPresetIfEmpty({
           : cardIds,
       },
     },
-    { companyId, targetScope, userId },
+    { companyId, presetNamespace, targetScope, userId },
   );
 }
 
@@ -355,12 +419,18 @@ function hasScopedWidgetViewState(
   companyId?: string | null,
   userId?: string | null,
   viewId?: string | null,
+  presetNamespace: WidgetViewPresetNamespace = menuKey,
 ) {
   if (typeof window === "undefined") return true;
 
   if (
     window.localStorage.getItem(
-      appliedPresetStorageKey(menuKey, companyId, userId, viewId),
+      appliedPresetStorageKey(
+        resolvePresetNamespace(menuKey, presetNamespace),
+        companyId,
+        userId,
+        viewId,
+      ),
     )
   ) {
     return true;
@@ -420,8 +490,32 @@ function remapValue(
     );
   }
   if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (key === "capacities") {
+      const sourceEntry = entries.find(
+        ([entryKey]) => entryKey === sourceScope.id,
+      );
+      const retainedEntries: Array<[string, unknown]> = entries
+        .filter(([entryKey]) => entryKey !== sourceScope.id)
+        .map(([entryKey, entryValue]) => [
+          entryKey,
+          remapValue(entryValue, sourceScope, targetScope, entryKey),
+        ]);
+      if (sourceEntry) {
+        retainedEntries.push([
+          targetScope.id,
+          remapValue(
+            sourceEntry[1],
+            sourceScope,
+            targetScope,
+            targetScope.id,
+          ),
+        ]);
+      }
+      return Object.fromEntries(retainedEntries);
+    }
     return Object.fromEntries(
-      Object.entries(value).map(([entryKey, entryValue]) => [
+      entries.map(([entryKey, entryValue]) => [
         entryKey,
         remapValue(entryValue, sourceScope, targetScope, entryKey),
       ]),
@@ -462,26 +556,85 @@ function scopedBaseKey(key: string, suffix: string) {
   return key.endsWith(suffix) ? key.slice(0, -suffix.length) : "";
 }
 
-function presetsStorageKey(
+function resolvePresetNamespace(
   menuKey: CardMenuKey,
+  presetNamespace: WidgetViewPresetNamespace,
+): WidgetViewPresetNamespace {
+  if (menuKey !== "occupancy") return menuKey;
+  return presetNamespace === "occupancy-analysis" ||
+    presetNamespace === "occupancy-live" ||
+    presetNamespace === "occupancy-reports"
+    ? presetNamespace
+    : menuKey;
+}
+
+function migrateLegacyOccupancyPresets({
+  companyId,
+  menuKey,
+  namespace,
+  storageKey,
+  userId,
+}: {
+  companyId?: string | null;
+  menuKey: CardMenuKey;
+  namespace: WidgetViewPresetNamespace;
+  storageKey: string;
+  userId?: string | null;
+}) {
+  if (menuKey !== "occupancy" || namespace === "occupancy") return null;
+
+  const legacyStored = window.localStorage.getItem(
+    presetsStorageKey("occupancy", companyId, userId),
+  );
+  if (!legacyStored) return null;
+
+  const parsed = JSON.parse(legacyStored) as unknown;
+  if (!Array.isArray(parsed)) return null;
+  const migrated = enforceSingleDefault(
+    parsed
+      .map((value) => normalizePreset(value, "occupancy"))
+      .filter((preset): preset is WidgetViewPreset => Boolean(preset))
+      .filter((preset) => occupancyPresetBelongsToNamespace(preset, namespace)),
+  );
+  const serialized = JSON.stringify(migrated);
+  window.localStorage.setItem(storageKey, serialized);
+  return serialized;
+}
+
+function occupancyPresetBelongsToNamespace(
+  preset: WidgetViewPreset,
+  namespace: WidgetViewPresetNamespace,
+) {
+  const scopeId = preset.snapshot.sourceScope?.id ?? "";
+  if (namespace === "occupancy-analysis") return scopeId.startsWith("analysis:");
+  if (namespace === "occupancy-reports") return scopeId.startsWith("reports:");
+  return (
+    namespace === "occupancy-live" &&
+    !scopeId.startsWith("analysis:") &&
+    !scopeId.startsWith("reports:")
+  );
+}
+
+function presetsStorageKey(
+  presetNamespace: WidgetViewPresetNamespace,
   companyId?: string | null,
   userId?: string | null,
 ) {
   return getUserViewScopedStorageKey(
-    `${PRESETS_STORAGE_KEY}.${menuKey}`,
+    `${PRESETS_STORAGE_KEY}.${presetNamespace}`,
     companyId,
     userId,
   );
 }
 
 function appliedPresetStorageKey(
-  menuKey: CardMenuKey,
+  presetNamespace: WidgetViewPresetNamespace,
   companyId?: string | null,
   userId?: string | null,
   viewId?: string | null,
 ) {
   return getUserViewScopedStorageKey(
-    `${APPLIED_PRESET_STORAGE_KEY}.${menuKey}`,
+    `${APPLIED_PRESET_STORAGE_KEY}.${presetNamespace}`,
     companyId,
     userId,
     viewId,

@@ -54,6 +54,10 @@ import {
   requireWorkerRows,
 } from "@/lib/metadata-validation";
 import { requireScenarioRows } from "@/lib/scenario-validation";
+import {
+  RESOURCE_METADATA_REFRESH_INTERVAL_MS,
+  shouldAutoRefreshResources,
+} from "@/lib/resource-auto-refresh";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -129,6 +133,20 @@ type ScopeComparisonOption = {
 const DEFAULT_METRIC_TYPE = "count";
 const REFRESH_SECONDS = 5;
 
+type EmbeddedLoadOptions = {
+  force?: boolean;
+  silent?: boolean;
+};
+
+type EmbeddedApiRequest = <T>(path: string) => Promise<T>;
+
+type EmbeddedMetadataSnapshot = {
+  identityKey: string;
+  locationOptions: ScopeComparisonOption[];
+  scenarios: Scenario[];
+  subLocationOptions: ScopeComparisonOption[];
+};
+
 const chartLabels: Record<ViewChart, string> = {
   "scenario-hour": "Cenários por período",
   "today-location": "Hoje por local",
@@ -193,98 +211,63 @@ export function EmbeddedLiveView() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
-  const requestSequenceRef = React.useRef(0);
-  const requestRunningRef = React.useRef(false);
+  const viewIdentityKeyRef = React.useRef(viewIdentityKey);
+  const metadataSnapshotRef = React.useRef<EmbeddedMetadataSnapshot | null>(null);
+  const metadataLoadedAtRef = React.useRef(0);
+  const metadataRequestSequenceRef = React.useRef(0);
+  const metadataRequestControllerRef = React.useRef<AbortController | null>(null);
+  const metadataRequestRunningRef = React.useRef(false);
+  const dataRequestSequenceRef = React.useRef(0);
+  const dataRequestControllerRef = React.useRef<AbortController | null>(null);
+  const dataRequestRunningRef = React.useRef(false);
   const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
     new Map(),
   );
 
-  const load = React.useCallback(async () => {
-    const requestSequence = ++requestSequenceRef.current;
-    requestRunningRef.current = true;
-    if (hasMasterAccess(user) && !companyScopeId) {
-      setError("Empresa não definida para esta visão.");
-      setLoading(false);
-      requestRunningRef.current = false;
+  const loadData = React.useCallback(async (
+    metadataSnapshot: EmbeddedMetadataSnapshot | null =
+      metadataSnapshotRef.current,
+    { force = false, silent = false }: EmbeddedLoadOptions = {},
+  ) => {
+    if (!metadataSnapshot || metadataSnapshot.identityKey !== viewIdentityKey) {
       return;
     }
+    if (dataRequestRunningRef.current) {
+      if (!force) return;
+      dataRequestControllerRef.current?.abort();
+    }
 
-    setError("");
-    setLoading(true);
+    const requestedIdentityKey = viewIdentityKey;
+    const requestSequence = ++dataRequestSequenceRef.current;
+    const controller = new AbortController();
+    dataRequestControllerRef.current = controller;
+    dataRequestRunningRef.current = true;
+    if (!silent) {
+      setError("");
+      setLoading(true);
+    }
 
     try {
+      const request: EmbeddedApiRequest = <T,>(path: string) =>
+        apiFetch<T>(path, {
+          companyScopeId: companyScopeId ?? undefined,
+          signal: controller.signal,
+        });
       const now = new Date();
       const liveHourDefinition = buildAggregateDefinition(now, "hour");
       const liveMinuteDefinition = buildAggregateDefinition(now, "minute");
-      const [
-        scenarioRows,
-        cameraRows,
-        locationRows,
-        workerRows,
-        hourRows,
-        minuteRows,
-      ] =
-        await Promise.all([
-          apiFetch<unknown>("/scenarios"),
-          apiFetch<unknown>("/cameras"),
-          apiFetch<unknown>("/locations"),
-          fetchEmbeddedWorkers(companyScopeId),
-          fetchHourlyAggregateRanges({
-            cache: hourlyAggregateCacheRef.current,
-            cacheScope: `embedded:${companyScopeId ?? "jwt-company"}`,
-            now,
-            ranges: [liveHourDefinition],
-          }),
-          fetchAggregateRows(liveMinuteDefinition),
-        ]);
-      const scopedScenarios = filterScopedApiRows(
-        requireScenarioRows(scenarioRows),
-        companyScopeId,
-      ).filter((scenario) => scenario.active !== false);
-      const scopedCameras = filterScopedApiRows(
-        requireCameraRows(cameraRows),
-        companyScopeId,
-      );
-      const scopedLocations = filterScopedApiRows(
-        requireLocationRows(locationRows),
-        companyScopeId,
-      );
+      const [hourRows, minuteRows] = await Promise.all([
+        fetchHourlyAggregateRanges({
+          cache: hourlyAggregateCacheRef.current,
+          cacheScope: `embedded:${companyScopeId ?? "jwt-company"}`,
+          companyScopeId: companyScopeId ?? undefined,
+          now,
+          ranges: [liveHourDefinition],
+          signal: controller.signal,
+        }),
+        fetchAggregateRows(liveMinuteDefinition, request),
+      ]);
       const liveHourRows = hydrateCurrentHourRows(hourRows, minuteRows, now);
-      const needsLocation = widgetConfigs.some(
-        (widget) => widget.chart === "today-location",
-      );
-      const needsSubLocation = widgetConfigs.some(
-        (widget) => widget.chart === "today-sub-location",
-      );
-      const locationOptions = needsLocation
-        ? buildWorkerBackedLocationOptions({
-            assignments: readWorkerLocationAssignments(companyScopeId),
-            cameras: scopedCameras,
-            locations: scopedLocations,
-            manager: false,
-            workers: workerRows,
-          })
-        : [];
-      const scopedSubLocations = needsSubLocation
-        ? filterScopedApiRows(
-            await fetchSubLocations(scopedLocations),
-            companyScopeId,
-          )
-        : undefined;
-      requireInfrastructureRelations({
-        cameras: scopedCameras,
-        locations: scopedLocations,
-        subLocations: scopedSubLocations,
-      });
-      const subLocationOptions = needsSubLocation
-        ? buildSubLocationCameraOptions({
-            cameras: scopedCameras,
-            groups: readCameraGroups(companyScopeId),
-            locations: scopedLocations,
-            manager: false,
-            subLocations: scopedSubLocations ?? [],
-          })
-        : [];
       const scenarioRowsByConfigId = new Map(
         await Promise.all(
           widgetConfigs
@@ -298,69 +281,290 @@ export function EmbeddedLiveView() {
                 liveHourDefinition,
                 hourlyAggregateCacheRef.current,
                 `embedded:${companyScopeId ?? "jwt-company"}`,
+                companyScopeId ?? undefined,
+                request,
+                controller.signal,
               ),
             ] as const),
         ),
       );
-      if (requestSequence !== requestSequenceRef.current) return;
+      if (
+        controller.signal.aborted ||
+        requestSequence !== dataRequestSequenceRef.current ||
+        viewIdentityKeyRef.current !== requestedIdentityKey ||
+        metadataSnapshotRef.current !== metadataSnapshot
+      ) {
+        return;
+      }
 
+      setError("");
       setWidgetStates(
         widgetConfigs.map((config) =>
           buildEmbeddedWidgetState({
             config,
             liveHourRows,
-            locationOptions,
+            locationOptions: metadataSnapshot.locationOptions,
             now,
             scenarioRows: scenarioRowsByConfigId.get(config.id) ?? [],
-            scenarios: scopedScenarios,
-            subLocationOptions,
+            scenarios: metadataSnapshot.scenarios,
+            subLocationOptions: metadataSnapshot.subLocationOptions,
           }),
         ),
       );
-      setLoadedViewIdentityKey(viewIdentityKey);
+      setLoadedViewIdentityKey(requestedIdentityKey);
       setLastUpdated(now);
     } catch (loadError) {
-      if (requestSequence !== requestSequenceRef.current) return;
+      if (
+        controller.signal.aborted ||
+        requestSequence !== dataRequestSequenceRef.current ||
+        viewIdentityKeyRef.current !== requestedIdentityKey ||
+        metadataSnapshotRef.current !== metadataSnapshot ||
+        silent
+      ) {
+        return;
+      }
       setError(
         loadError instanceof Error
           ? loadError.message
           : "Não foi possível carregar a visão.",
       );
     } finally {
-      if (requestSequence === requestSequenceRef.current) {
-        setLoading(false);
-        requestRunningRef.current = false;
+      if (dataRequestControllerRef.current === controller) {
+        dataRequestControllerRef.current = null;
+        dataRequestRunningRef.current = false;
+        if (!silent) setLoading(false);
       }
     }
-  }, [companyScopeId, user, viewIdentityKey, widgetConfigs]);
+  }, [companyScopeId, viewIdentityKey, widgetConfigs]);
+
+  const loadMetadata = React.useCallback(async (
+    { force = false, silent = false }: EmbeddedLoadOptions = {},
+  ) => {
+    if (hasMasterAccess(user) && !companyScopeId) {
+      metadataRequestControllerRef.current?.abort();
+      dataRequestControllerRef.current?.abort();
+      metadataSnapshotRef.current = null;
+      setError("Empresa não definida para esta visão.");
+      setLoading(false);
+      return;
+    }
+    if (metadataRequestRunningRef.current) {
+      if (!force) return;
+      metadataRequestControllerRef.current?.abort();
+    }
+
+    const requestedIdentityKey = viewIdentityKey;
+    const requestSequence = ++metadataRequestSequenceRef.current;
+    const controller = new AbortController();
+    metadataRequestControllerRef.current = controller;
+    metadataRequestRunningRef.current = true;
+    if (!silent) {
+      setError("");
+      setLoading(true);
+    }
+
+    try {
+      const request: EmbeddedApiRequest = <T,>(path: string) =>
+        apiFetch<T>(path, {
+          companyScopeId: companyScopeId ?? undefined,
+          signal: controller.signal,
+        });
+      const needsScenarios = widgetConfigs.some(
+        (widget) =>
+          widget.chart === "today-scenario" || widget.chart === "scenario-hour",
+      );
+      const needsLocation = widgetConfigs.some(
+        (widget) => widget.chart === "today-location",
+      );
+      const needsSubLocation = widgetConfigs.some(
+        (widget) => widget.chart === "today-sub-location",
+      );
+      const needsInfrastructure = needsLocation || needsSubLocation;
+      const [scenarioRows, cameraRows, locationRows, workerRows] =
+        await Promise.all([
+          needsScenarios ? request<unknown>("/scenarios") : Promise.resolve([]),
+          needsInfrastructure ? request<unknown>("/cameras") : Promise.resolve([]),
+          needsInfrastructure ? request<unknown>("/locations") : Promise.resolve([]),
+          needsLocation
+            ? fetchEmbeddedWorkers(companyScopeId, request)
+            : Promise.resolve([]),
+        ]);
+      const scopedScenarios = filterScopedApiRows(
+        requireScenarioRows(scenarioRows, companyScopeId),
+        companyScopeId,
+      ).filter((scenario) => scenario.active !== false);
+      const scopedCameras = filterScopedApiRows(
+        requireCameraRows(cameraRows, companyScopeId),
+        companyScopeId,
+      );
+      const scopedLocations = filterScopedApiRows(
+        requireLocationRows(locationRows, companyScopeId),
+        companyScopeId,
+      );
+      const scopedSubLocations = needsSubLocation
+        ? filterScopedApiRows(
+            await fetchSubLocations(scopedLocations, companyScopeId, request),
+            companyScopeId,
+          )
+        : undefined;
+      if (needsInfrastructure) {
+        requireInfrastructureRelations({
+          cameras: scopedCameras,
+          locations: scopedLocations,
+          subLocations: scopedSubLocations,
+        });
+      }
+      const nextMetadata: EmbeddedMetadataSnapshot = {
+        identityKey: requestedIdentityKey,
+        locationOptions: needsLocation
+          ? buildWorkerBackedLocationOptions({
+              assignments: readWorkerLocationAssignments(companyScopeId),
+              cameras: scopedCameras,
+              locations: scopedLocations,
+              manager: false,
+              workers: workerRows,
+            })
+          : [],
+        scenarios: scopedScenarios,
+        subLocationOptions: needsSubLocation
+          ? buildSubLocationCameraOptions({
+              cameras: scopedCameras,
+              groups: readCameraGroups(companyScopeId),
+              locations: scopedLocations,
+              manager: false,
+              subLocations: scopedSubLocations ?? [],
+            })
+          : [],
+      };
+      if (
+        controller.signal.aborted ||
+        requestSequence !== metadataRequestSequenceRef.current ||
+        viewIdentityKeyRef.current !== requestedIdentityKey
+      ) {
+        return;
+      }
+
+      metadataSnapshotRef.current = nextMetadata;
+      metadataLoadedAtRef.current = Date.now();
+      await loadData(nextMetadata, { force: true, silent });
+    } catch (loadError) {
+      if (
+        controller.signal.aborted ||
+        requestSequence !== metadataRequestSequenceRef.current ||
+        viewIdentityKeyRef.current !== requestedIdentityKey ||
+        silent
+      ) {
+        return;
+      }
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : "Não foi possível carregar os metadados da visão.",
+      );
+      setLoading(false);
+    } finally {
+      if (metadataRequestControllerRef.current === controller) {
+        metadataRequestControllerRef.current = null;
+        metadataRequestRunningRef.current = false;
+      }
+    }
+  }, [companyScopeId, loadData, user, viewIdentityKey, widgetConfigs]);
 
   React.useEffect(() => {
-    requestSequenceRef.current += 1;
-    requestRunningRef.current = false;
+    viewIdentityKeyRef.current = viewIdentityKey;
+    metadataRequestSequenceRef.current += 1;
+    dataRequestSequenceRef.current += 1;
+    metadataRequestControllerRef.current?.abort();
+    dataRequestControllerRef.current?.abort();
+    metadataRequestControllerRef.current = null;
+    dataRequestControllerRef.current = null;
+    metadataRequestRunningRef.current = false;
+    dataRequestRunningRef.current = false;
+    metadataSnapshotRef.current = null;
+    metadataLoadedAtRef.current = 0;
     clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
     setWidgetStates([]);
     setLoadedViewIdentityKey("");
     setLastUpdated(null);
     setError("");
     setLoading(true);
-  }, [viewIdentityKey]);
+    void loadMetadata({ force: true });
+
+    return () => {
+      metadataRequestSequenceRef.current += 1;
+      dataRequestSequenceRef.current += 1;
+      metadataRequestControllerRef.current?.abort();
+      dataRequestControllerRef.current?.abort();
+      metadataRequestControllerRef.current = null;
+      dataRequestControllerRef.current = null;
+      metadataRequestRunningRef.current = false;
+      dataRequestRunningRef.current = false;
+    };
+  }, [loadMetadata, viewIdentityKey]);
 
   React.useEffect(() => {
-    load();
-  }, [load]);
-
-  React.useEffect(() => {
-    const interval = window.setInterval(() => {
+    const enabled = !hasMasterAccess(user) || Boolean(companyScopeId);
+    const refreshMetadataWhenVisible = () => {
       if (
-        document.visibilityState === "visible" &&
-        !requestRunningRef.current
+        !shouldAutoRefreshResources({
+          enabled,
+          visibilityState: document.visibilityState,
+        }) ||
+        metadataRequestRunningRef.current ||
+        Date.now() - metadataLoadedAtRef.current <
+          RESOURCE_METADATA_REFRESH_INTERVAL_MS
       ) {
-        void load();
+        return;
       }
-    }, REFRESH_SECONDS * 1000);
+      void loadMetadata({ silent: true });
+    };
+    const interval = window.setInterval(
+      refreshMetadataWhenVisible,
+      RESOURCE_METADATA_REFRESH_INTERVAL_MS,
+    );
+    window.addEventListener("focus", refreshMetadataWhenVisible);
+    document.addEventListener("visibilitychange", refreshMetadataWhenVisible);
 
-    return () => window.clearInterval(interval);
-  }, [load]);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshMetadataWhenVisible);
+      document.removeEventListener(
+        "visibilitychange",
+        refreshMetadataWhenVisible,
+      );
+    };
+  }, [companyScopeId, loadMetadata, user]);
+
+  React.useEffect(() => {
+    const enabled = !hasMasterAccess(user) || Boolean(companyScopeId);
+    const refreshDataWhenVisible = () => {
+      const metadataSnapshot = metadataSnapshotRef.current;
+      if (
+        !shouldAutoRefreshResources({
+          enabled,
+          visibilityState: document.visibilityState,
+        }) ||
+        metadataRequestRunningRef.current ||
+        dataRequestRunningRef.current ||
+        metadataSnapshot?.identityKey !== viewIdentityKeyRef.current
+      ) {
+        return;
+      }
+      void loadData(metadataSnapshot, { silent: true });
+    };
+    const interval = window.setInterval(
+      refreshDataWhenVisible,
+      REFRESH_SECONDS * 1000,
+    );
+    window.addEventListener("focus", refreshDataWhenVisible);
+    document.addEventListener("visibilitychange", refreshDataWhenVisible);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshDataWhenVisible);
+      document.removeEventListener("visibilitychange", refreshDataWhenVisible);
+    };
+  }, [companyScopeId, loadData, user]);
 
   const currentWidgetStates =
     loadedViewIdentityKey === viewIdentityKey ? widgetStates : [];
@@ -370,7 +574,7 @@ export function EmbeddedLiveView() {
   const firstState = visibleStates[0];
 
   return (
-    <main className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+    <main className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-background text-foreground">
       {monitorMode ? (
         <MonitorModeExitHint onExit={exitMonitorMode} />
       ) : (
@@ -677,6 +881,7 @@ function buildAggregateDefinition(
 
 async function fetchAggregateRows(
   definition: AggregateDefinition,
+  request: EmbeddedApiRequest,
 ) {
   const params = new URLSearchParams({
     granularity: definition.granularity,
@@ -684,7 +889,7 @@ async function fetchAggregateRows(
     to: aggregateQueryIso(definition.to, definition.granularity),
     metric_type: DEFAULT_METRIC_TYPE,
   });
-  const response = await apiFetch<AggregateEventsResponse>(
+  const response = await request<AggregateEventsResponse>(
     `/analytics/aggregate?${params.toString()}`,
   );
   requireAggregateGranularity(response.granularity, definition.granularity);
@@ -705,6 +910,9 @@ async function fetchScenarioComparisonRows(
   liveHourDefinition: AggregateDefinition,
   hourlyAggregateCache: HourlyAggregateCache,
   cacheScope: string,
+  companyScopeId: string | undefined,
+  request: EmbeddedApiRequest,
+  signal?: AbortSignal,
 ) {
   const definition = buildScenarioComparisonDefinition(config, now);
   const currentHourEnd = endOfAggregateBucket(startOfHour(now), "hour");
@@ -728,8 +936,10 @@ async function fetchScenarioComparisonRows(
     : await fetchHourlyAggregateRanges({
         cache: hourlyAggregateCache,
         cacheScope,
+        companyScopeId,
         now,
         ranges: [hourlyDefinition],
+        signal,
       });
   const overlapFrom = new Date(
     Math.max(
@@ -759,11 +969,14 @@ async function fetchScenarioComparisonRows(
   const boundaryEntries = await Promise.all(
     boundaryRanges.map(async (range) => ({
       range,
-      rows: await fetchAggregateRows({
-        from: range.from,
-        granularity: "minute",
-        to: range.to,
-      }),
+      rows: await fetchAggregateRows(
+        {
+          from: range.from,
+          granularity: "minute",
+          to: range.to,
+        },
+        request,
+      ),
     })),
   );
   boundaryEntries.forEach(({ range, rows }) => {
@@ -833,22 +1046,29 @@ function embeddedPartialHourRanges(
 
 async function fetchEmbeddedWorkers(
   companyId?: string | null,
+  request: EmbeddedApiRequest = apiFetch,
 ): Promise<Worker[]> {
-  const rows = await apiFetch<unknown>("/workers").then(requireWorkerRows);
+  const rows = await request<unknown>("/workers").then((value) =>
+    requireWorkerRows(value, companyId),
+  );
   const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
   return sortWorkersByActivity(scopedRows);
 }
 
-async function fetchSubLocations(locations: Location[]) {
+async function fetchSubLocations(
+  locations: Location[],
+  companyId?: string | null,
+  request: EmbeddedApiRequest = apiFetch,
+) {
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<unknown>(`/locations/${location.id}/sub-locations`).then(
-        requireSubLocationRows,
+      request<unknown>(`/locations/${location.id}/sub-locations`).then(
+        (value) => requireSubLocationRows(value, companyId),
       ),
     ),
   );
 
-  return requireSubLocationRows(rows.flat());
+  return requireSubLocationRows(rows.flat(), companyId);
 }
 
 function hydrateCurrentHourRows(

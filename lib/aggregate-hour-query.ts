@@ -57,6 +57,7 @@ const pendingRequestsByCache = new WeakMap<
 type FetchHourlyAggregateRangesOptions = {
   cache?: HourlyAggregateCache;
   cacheScope: string;
+  companyScopeId?: string;
   metricType?: string;
   now?: Date;
   queryConcurrency?: number;
@@ -75,6 +76,7 @@ type FetchHourlyAggregateRangesOptions = {
 export async function fetchHourlyAggregateRanges({
   cache,
   cacheScope,
+  companyScopeId,
   metricType = DEFAULT_METRIC_TYPE,
   now = new Date(),
   queryConcurrency = DEFAULT_QUERY_CONCURRENCY,
@@ -95,6 +97,7 @@ export async function fetchHourlyAggregateRanges({
       loadHourlyAggregateQuery({
         cache,
         cacheScope,
+        companyScopeId,
         query,
         metricType,
         revision: hourlyAggregateCacheRevision(query, now),
@@ -159,6 +162,7 @@ async function fetchHourlyAggregateQuery(
   query: HourlyAggregateQuery,
   metricType: string,
   signal?: AbortSignal,
+  companyScopeId?: string,
 ) {
   const params = new URLSearchParams({
     from: aggregateQueryIso(query.from, "hour"),
@@ -168,7 +172,7 @@ async function fetchHourlyAggregateQuery(
   });
   const response = await apiFetch<AggregateEventsResponse>(
     `/analytics/aggregate?${params.toString()}`,
-    { signal },
+    { companyScopeId, signal },
   );
   const granularity = requireAggregateGranularity(
     response.granularity,
@@ -186,6 +190,7 @@ async function fetchHourlyAggregateQuery(
 async function loadHourlyAggregateQuery({
   cache,
   cacheScope,
+  companyScopeId,
   metricType,
   query,
   revision,
@@ -193,6 +198,7 @@ async function loadHourlyAggregateQuery({
 }: {
   cache?: HourlyAggregateCache;
   cacheScope: string;
+  companyScopeId?: string;
   metricType: string;
   query: HourlyAggregateQuery;
   revision: string;
@@ -222,6 +228,7 @@ async function loadHourlyAggregateQuery({
     query,
     metricType,
     signal,
+    companyScopeId,
   );
   pendingRequests?.set(cacheKey, { promise, revision, signal });
 

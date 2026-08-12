@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { resolveBackendBaseUrl } from "@/lib/backend-routing";
+import { resolveOccupancySnapshotsProxyResult } from "@/lib/occupancy-snapshots-proxy";
 
 export async function GET(request: NextRequest) {
   const authorization = request.headers.get("authorization");
@@ -16,6 +17,10 @@ export async function GET(request: NextRequest) {
   const headers = new Headers({
     Authorization: authorization,
   });
+  const companyScopeId = request.headers.get("x-company-id")?.trim();
+  if (companyScopeId) {
+    headers.set("X-Company-ID", companyScopeId);
+  }
 
   let backendBaseUrl: string;
   try {
@@ -27,18 +32,35 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const response = await fetch(
+  const response = await fetchSnapshotResponse(
     `${backendBaseUrl}/api/v1/occupancy?${params}`,
-    {
+    headers,
+    request.signal,
+  );
+  const result = await resolveOccupancySnapshotsProxyResult(response);
+
+  return NextResponse.json(result.payload, { status: result.status });
+}
+
+async function fetchSnapshotResponse(
+  url: string,
+  headers: Headers,
+  sourceSignal: AbortSignal,
+) {
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(sourceSignal.reason);
+  if (sourceSignal.aborted) forwardAbort();
+  else sourceSignal.addEventListener("abort", forwardAbort, { once: true });
+  const timeout = setTimeout(() => controller.abort(), 60_000);
+
+  try {
+    return await fetch(url, {
       headers,
       cache: "no-store",
-    },
-  ).catch(() => null);
-
-  if (!response || response.status === 404 || response.status === 405) {
-    return NextResponse.json({ data: [] });
+      signal: controller.signal,
+    }).catch(() => null);
+  } finally {
+    clearTimeout(timeout);
+    sourceSignal.removeEventListener("abort", forwardAbort);
   }
-
-  const payload = await response.json().catch(() => ({ data: [] }));
-  return NextResponse.json(payload, { status: response.status });
 }

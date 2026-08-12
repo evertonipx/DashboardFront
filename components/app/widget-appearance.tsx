@@ -49,12 +49,20 @@ export function useWidgetColor(fallback = "#1267C4") {
   return React.useContext(WidgetAppearanceContext).color || fallback;
 }
 
+export function useWidgetColorOverride() {
+  return React.useContext(WidgetAppearanceContext).color;
+}
+
 export function useWidgetChartType() {
   return React.useContext(WidgetAppearanceContext).chartType;
 }
 
 export function useWidgetTitle(fallback: string) {
   return React.useContext(WidgetAppearanceContext).title || fallback;
+}
+
+export function WidgetTitleText({ fallback }: { fallback: string }) {
+  return <>{useWidgetTitle(fallback)}</>;
 }
 
 export function useWidgetZoom() {

@@ -21,6 +21,12 @@ const aggregateReconciliation = loadTypeScriptModule(
 const aggregateQueryPlan = loadTypeScriptModule(
   "lib/aggregate-query-plan.ts",
 );
+const chartPalette = loadTypeScriptModule("lib/chart-palette.ts");
+const companyTimeZone = loadTypeScriptModule("lib/company-time-zone.ts");
+const countingTimeZone = loadTypeScriptModule("lib/counting-time-zone.ts");
+const occupancyChartPalette = loadTypeScriptModule(
+  "components/app/occupancy-chart-palette.ts",
+);
 const countingIntelligence = loadTypeScriptModule(
   "lib/counting-intelligence.ts",
 );
@@ -31,8 +37,57 @@ const metadataValidation = loadTypeScriptModule(
 const occupancyAggregateValidation = loadTypeScriptModule(
   "lib/occupancy-aggregate-validation.ts",
 );
+const occupancyAnalysisWindow = loadTypeScriptModule(
+  "lib/occupancy-analysis-window.ts",
+);
+const occupancyAreaOptions = loadTypeScriptModule(
+  "lib/occupancy-area-options.ts",
+);
+const occupancyAreas = loadTypeScriptModule("lib/occupancy-areas.ts");
 const occupancyMetrics = loadTypeScriptModule(
   "lib/occupancy-metrics.ts",
+);
+const occupancyHourAxis = loadTypeScriptModule(
+  "lib/occupancy-hour-axis.ts",
+);
+const occupancyHeatmapVisual = loadTypeScriptModule(
+  "lib/occupancy-heatmap-visual.ts",
+);
+const occupancyHexLayout = loadTypeScriptModule(
+  "lib/occupancy-hex-layout.ts",
+);
+const occupancyHexPalette = loadTypeScriptModule(
+  "lib/occupancy-hex-palette.ts",
+);
+const occupancyHexEditorState = loadTypeScriptModule(
+  "lib/occupancy-hex-editor-state.ts",
+);
+const occupancyHexVisual = loadTypeScriptModule(
+  "lib/occupancy-hex-visual.ts",
+);
+const occupancyComparison = loadTypeScriptModule(
+  "lib/occupancy-comparison.ts",
+);
+const occupancyColorPalettes = loadTypeScriptModule(
+  "lib/occupancy-color-palettes.ts",
+);
+const occupancyScenarioColors = loadTypeScriptModule(
+  "lib/occupancy-scenario-color.ts",
+);
+const occupancyReportComparison = loadTypeScriptModule(
+  "lib/occupancy-report-comparison.ts",
+);
+const occupancySnapshotsProxy = loadTypeScriptModule(
+  "lib/occupancy-snapshots-proxy.ts",
+);
+const occupancyWidgetSettings = loadTypeScriptModule(
+  "lib/occupancy-widget-settings.ts",
+);
+const occupancyCustomWidgets = loadTypeScriptModule(
+  "lib/occupancy-custom-widgets.ts",
+);
+const occupancyDashboardSettings = loadTypeScriptModule(
+  "lib/occupancy-dashboard-settings.ts",
 );
 const occupancyValidation = loadTypeScriptModule(
   "lib/occupancy-validation.ts",
@@ -51,6 +106,2471 @@ const scenarioValidation = loadTypeScriptModule(
   "lib/scenario-validation.ts",
 );
 const viewPreferences = loadTypeScriptModule("lib/view-preferences.ts");
+const widgetViewPresets = loadTypeScriptModule("lib/widget-view-presets.ts");
+
+test("comparação de ocupação distingue zero certificado de ausência", () => {
+  const snapshots = [
+    { name: "Fila A", scenarioId: "a", total: 0 },
+    { name: "Fila B", scenarioId: "b", total: 3 },
+    { name: "Fila C", scenarioId: "c", total: null },
+  ];
+
+  assert.equal(occupancyComparison.classifyOccupancyTotal(0), "unoccupied");
+  assert.equal(occupancyComparison.classifyOccupancyTotal(3), "occupied");
+  assert.equal(occupancyComparison.classifyOccupancyTotal(null), "unknown");
+  assert.deepEqual(
+    occupancyComparison
+      .filterOccupancySnapshots(snapshots, "unoccupied")
+      .map((snapshot) => snapshot.scenarioId),
+    ["a"],
+  );
+  assert.deepEqual(
+    occupancyComparison
+      .filterOccupancySnapshots(snapshots, "occupied")
+      .map((snapshot) => snapshot.scenarioId),
+    ["b"],
+  );
+});
+
+test("meia rosca alterna estado e ocupação real sem apagar cenário zero", () => {
+  const snapshots = [
+    { name: "Posto livre", scenarioId: "free", total: 0 },
+    { name: "Fila ocupada", scenarioId: "busy", total: 7 },
+    { name: "Sem dados", scenarioId: "missing", total: null },
+  ];
+  const status = occupancyComparison.buildOccupancyHalfDonutEntries(
+    snapshots,
+    "status",
+  );
+  const actual = occupancyComparison.buildOccupancyHalfDonutEntries(
+    snapshots,
+    "actual",
+  );
+
+  assert.deepEqual(
+    status.map((entry) => [entry.scenarioId, entry.chartValue, entry.state, entry.total]),
+    [
+      ["free", 1, "unoccupied", 0],
+      ["busy", 1, "occupied", 7],
+    ],
+  );
+  assert.deepEqual(
+    actual.map((entry) => [entry.scenarioId, entry.chartValue, entry.total]),
+    [
+      ["free", 0, 0],
+      ["busy", 7, 7],
+    ],
+  );
+  assert.equal(actual.some((entry) => entry.scenarioId === "missing"), false);
+
+  const afterValueChange = occupancyComparison.buildOccupancyHalfDonutEntries(
+    [
+      { name: "Posto livre", scenarioId: "free", total: 12 },
+      { name: "Fila ocupada", scenarioId: "busy", total: 1 },
+    ],
+    "actual",
+  );
+  assert.deepEqual(
+    afterValueChange.map((entry) => entry.scenarioId),
+    ["free", "busy"],
+    "a ordem original dos cenários não pode variar com a ocupação",
+  );
+});
+
+test("meia rosca real mantém ângulo estritamente zero no motor ECharts", () => {
+  const echarts = require("echarts/core");
+  const { PieChart } = require("echarts/charts");
+  const { SVGRenderer } = require("echarts/renderers");
+  echarts.use([PieChart, SVGRenderer]);
+  const chart = echarts.init(null, null, {
+    height: 300,
+    renderer: "svg",
+    ssr: true,
+    width: 500,
+  });
+  try {
+    assert.equal(occupancyComparison.occupancyHalfDonutMinimumAngle("actual"), 0);
+    chart.setOption({
+      series: [
+        {
+          data: [
+            { name: "Livre", value: 0 },
+            { name: "Ocupado", value: 7 },
+          ],
+          minAngle: occupancyComparison.occupancyHalfDonutMinimumAngle("actual"),
+          stillShowZeroSum: false,
+          type: "pie",
+        },
+      ],
+    });
+    const zeroLayout = chart
+      .getModel()
+      .getSeriesByIndex(0)
+      .getData()
+      .getItemLayout(0);
+    assert.equal(zeroLayout.angle, 0);
+  } finally {
+    chart.dispose();
+  }
+});
+
+test("meia rosca vincula índice, cor, nome e percentual aos callouts", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const start = source.indexOf("function buildHalfDonutOption");
+  const end = source.indexOf("function halfDonutEntryColor", start);
+  const optionSource = source.slice(start, end);
+
+  assert.ok(start >= 0 && end > start);
+  assert.match(optionSource, /alignTo: "labelLine"/);
+  assert.match(optionSource, /labelLine:[\s\S]*?show: true/);
+  assert.match(optionSource, /indexLabel/);
+  assert.match(optionSource, /labelStyleKey/);
+  assert.match(optionSource, /color: entry\.color/);
+  assert.match(optionSource, /params\.data\?\.percentage/);
+  assert.match(optionSource, /scenarioIndexes\.get\(entry\.scenarioId\)/);
+  assert.match(optionSource, /compactLabels = entries\.length > 8/);
+  assert.match(optionSource, /\{name\|/);
+  assert.match(
+    optionSource,
+    /if \(mode === "status"\)[\s\S]*?"Ocupado" : "Desocupado"/,
+    "o estado binário deve ser nomeado sem anunciar percentual artificial",
+  );
+});
+
+test("gráficos de ocupação usam paletas explícitas e superfície correta por tema", () => {
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const reportsSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const light = occupancyChartPalette.getOccupancyChartPalette("light");
+  const dark = occupancyChartPalette.getOccupancyChartPalette("dark");
+
+  assert.equal(light.surface, "#FFFFFF");
+  assert.equal(dark.surface, "#131316");
+  assert.notEqual(light.average, light.surface);
+  assert.notEqual(dark.average, dark.surface);
+  assert.match(
+    comparisonSource,
+    /itemStyle:\s*\{[\s\S]*?borderColor: color,[\s\S]*?color: chartSurface,[\s\S]*?symbol: "circle"/,
+  );
+  assert.ok(
+    (comparisonSource.match(/themeMode="explicit"/g) ?? []).length >= 6,
+    "todos os comparativos ECharts devem preservar a paleta explícita",
+  );
+  assert.match(reportsSource, /<EChart option=\{option\} themeMode="explicit"/);
+  assert.doesNotMatch(
+    reportsSource,
+    /Dados parciais|Comparativo parcial|Dados de ocupação não certificados/,
+  );
+});
+
+test("layout hexagonal preserva células, lacunas e troca posições sem colisão", () => {
+  const normalized = occupancyHexLayout.normalizeOccupancyHexLayout({
+    cells: [
+      { column: 0, id: "a", label: "Fila A", row: 0, scenarioId: "a" },
+      { column: 0, id: "b", label: "Fila B", row: 0, scenarioId: "b" },
+      { column: 2, id: "c", label: "Reserva", row: 1, scenarioId: "a" },
+    ],
+    columns: 3,
+    preset: "custom",
+    rows: 2,
+    version: 1,
+  });
+
+  assert.ok(normalized);
+  assert.equal(normalized.cells.length, 3);
+  assert.equal(new Set(normalized.cells.map((cell) => `${cell.column}:${cell.row}`)).size, 3);
+  assert.equal(normalized.cells[2].scenarioId, null);
+  const moved = occupancyHexLayout.moveOccupancyHexCell(normalized, "a", 2, 1);
+  assert.deepEqual(
+    moved.cells.map((cell) => [cell.id, cell.column, cell.row]),
+    [
+      ["a", 2, 1],
+      ["b", 1, 0],
+      ["c", 0, 0],
+    ],
+  );
+  const resized = occupancyHexLayout.reflowOccupancyHexLayout(moved, {
+    columns: 2,
+    rows: 1,
+  });
+  assert.equal(resized.cells.length, 3);
+  assert.ok(resized.rows >= 2);
+  assert.equal(new Set(resized.cells.map((cell) => `${cell.column}:${cell.row}`)).size, 3);
+  const dense = occupancyHexLayout.createDefaultOccupancyHexLayout({
+    columns: 1,
+    scenarioIds: Array.from({ length: 100 }, (_, index) => `scenario-${index}`),
+  });
+  assert.equal(dense.cells.length, 100);
+  assert.equal(dense.columns, 2);
+  assert.equal(dense.rows, 50);
+});
+
+test("histórico do editor hexagonal mantém layout e capacidades na mesma transação", () => {
+  const initialDocument = {
+    capacities: { queue: 12, showcase: 8 },
+    layout: {
+      cells: [
+        {
+          column: 0,
+          id: "cell-queue",
+          label: "Fila",
+          row: 0,
+          scenarioId: "queue",
+        },
+      ],
+      columns: 2,
+      preset: "custom",
+      rows: 2,
+      version: 1,
+    },
+  };
+  const sameDocumentWithReorderedCapacities = {
+    capacities: { showcase: 8, queue: 12 },
+    layout: structuredClone(initialDocument.layout),
+  };
+
+  assert.equal(
+    occupancyHexEditorState.areOccupancyHexEditorDocumentsEqual(
+      initialDocument,
+      sameDocumentWithReorderedCapacities,
+    ),
+    true,
+  );
+
+  const isolatedClone =
+    occupancyHexEditorState.cloneOccupancyHexEditorDocument(initialDocument);
+  isolatedClone.layout.cells[0].label = "Clone";
+  isolatedClone.capacities.queue = 99;
+  assert.equal(initialDocument.layout.cells[0].label, "Fila");
+  assert.equal(initialDocument.capacities.queue, 12);
+
+  let state =
+    occupancyHexEditorState.createOccupancyHexEditorState(initialDocument);
+  const committedDocument = {
+    capacities: { showcase: 9, queue: 20 },
+    layout: {
+      ...structuredClone(initialDocument.layout),
+      cells: [
+        {
+          ...initialDocument.layout.cells[0],
+          column: 1,
+          label: "Fila principal",
+        },
+      ],
+    },
+  };
+  state = occupancyHexEditorState.occupancyHexEditorReducer(state, {
+    document: committedDocument,
+    type: "commit",
+  });
+  committedDocument.layout.cells[0].label = "Mutação externa";
+  committedDocument.capacities.queue = 999;
+
+  assert.equal(state.past.length, 1);
+  assert.equal(state.present.layout.cells[0].label, "Fila principal");
+  assert.equal(state.present.capacities.queue, 20);
+  assert.equal(
+    occupancyHexEditorState.isOccupancyHexEditorStateDirty(state),
+    true,
+  );
+
+  state = occupancyHexEditorState.occupancyHexEditorReducer(state, {
+    type: "undo",
+  });
+  assert.equal(state.present.layout.cells[0].column, 0);
+  assert.equal(state.present.capacities.queue, 12);
+  assert.equal(
+    occupancyHexEditorState.isOccupancyHexEditorStateDirty(state),
+    false,
+  );
+
+  state = occupancyHexEditorState.occupancyHexEditorReducer(state, {
+    type: "redo",
+  });
+  assert.equal(state.present.layout.cells[0].column, 1);
+  assert.equal(state.present.capacities.queue, 20);
+
+  const resetDocument = {
+    capacities: { queue: 20, showcase: 9 },
+    layout: structuredClone(state.present.layout),
+  };
+  state = occupancyHexEditorState.occupancyHexEditorReducer(state, {
+    document: resetDocument,
+    type: "reset",
+  });
+  assert.equal(state.past.length, 0);
+  assert.equal(state.future.length, 0);
+  assert.equal(
+    occupancyHexEditorState.isOccupancyHexEditorStateDirty(state),
+    false,
+  );
+
+  const noOpState = occupancyHexEditorState.occupancyHexEditorReducer(state, {
+    document: {
+      capacities: { showcase: 9, queue: 20 },
+      layout: structuredClone(resetDocument.layout),
+    },
+    type: "commit",
+  });
+  assert.equal(noOpState, state);
+});
+
+test("histórico do editor hexagonal limita desfazer e refazer a 50 transações", () => {
+  const initialDocument = {
+    capacities: {},
+    layout: {
+      cells: [
+        {
+          column: 0,
+          id: "cell-a",
+          label: "v0",
+          row: 0,
+          scenarioId: "a",
+        },
+      ],
+      columns: 1,
+      preset: "custom",
+      rows: 1,
+      version: 1,
+    },
+  };
+  let state =
+    occupancyHexEditorState.createOccupancyHexEditorState(initialDocument);
+
+  for (let version = 1; version <= 60; version += 1) {
+    const document =
+      occupancyHexEditorState.cloneOccupancyHexEditorDocument(state.present);
+    document.layout.cells[0].label = `v${version}`;
+    state = occupancyHexEditorState.occupancyHexEditorReducer(state, {
+      document,
+      type: "commit",
+    });
+  }
+
+  assert.equal(state.past.length, 50);
+  for (let index = 0; index < 50; index += 1) {
+    state = occupancyHexEditorState.occupancyHexEditorReducer(state, {
+      type: "undo",
+    });
+  }
+  assert.equal(state.present.layout.cells[0].label, "v10");
+  assert.equal(state.future.length, 50);
+  const withoutMoreHistory = occupancyHexEditorState.occupancyHexEditorReducer(
+    state,
+    { type: "undo" },
+  );
+  assert.equal(withoutMoreHistory, state);
+
+  for (let index = 0; index < 50; index += 1) {
+    state = occupancyHexEditorState.occupancyHexEditorReducer(state, {
+      type: "redo",
+    });
+  }
+  assert.equal(state.present.layout.cells[0].label, "v60");
+  assert.equal(state.past.length, 50);
+});
+
+test("validação do editor hexagonal relata conflitos sem alterar o documento", () => {
+  const document = {
+    capacities: {
+      decimal: 1.5,
+      huge: 1_000_001,
+      nan: Number.NaN,
+      valid: 10,
+      zero: 0,
+    },
+    layout: {
+      cells: [
+        { column: 0, id: "duplicate", label: "A", row: 0, scenarioId: "a" },
+        { column: 0, id: "duplicate", label: "B", row: 0, scenarioId: "a" },
+        {
+          column: 2,
+          id: "outside",
+          label: "Fora",
+          row: 0,
+          scenarioId: "missing",
+        },
+        { column: 1, id: "unlinked", label: "Livre", row: 1, scenarioId: null },
+      ],
+      columns: 2,
+      preset: "custom",
+      rows: 2,
+      version: 1,
+    },
+  };
+  const beforeValidation = structuredClone(document);
+  const result =
+    occupancyHexEditorState.validateOccupancyHexEditorDocument(document, {
+      availableScenarioIds: ["a"],
+    });
+
+  assert.deepEqual(document, beforeValidation);
+  assert.equal(result.valid, false);
+  assert.equal(
+    result.errors.filter((issue) => issue.code === "duplicate-cell-id").length,
+    1,
+  );
+  assert.equal(
+    result.errors.filter((issue) => issue.code === "duplicate-coordinate").length,
+    1,
+  );
+  assert.equal(
+    result.errors.filter((issue) => issue.code === "duplicate-scenario").length,
+    1,
+  );
+  assert.equal(
+    result.errors.filter((issue) => issue.code === "cell-out-of-grid").length,
+    1,
+  );
+  assert.equal(
+    result.errors.filter((issue) => issue.code === "invalid-capacity").length,
+    4,
+  );
+  assert.deepEqual(
+    result.warnings.map((issue) => issue.code).sort(),
+    ["unavailable-scenario", "unlinked-cell"],
+  );
+});
+
+test("simulador hexagonal distingue zero certificado de célula sem vínculo", () => {
+  const positions = occupancyComparison.buildOccupancyHexLayout({
+    capacities: { free: 10 },
+    columns: 3,
+    layout: {
+      cells: [
+        { column: 0, id: "free-cell", label: "Caixa livre", row: 0, scenarioId: "free" },
+        { column: 1, id: "gone-cell", label: "Cenário antigo", row: 0, scenarioId: "gone" },
+        { column: 2, id: "empty-cell", label: "Reserva", row: 0, scenarioId: null },
+      ],
+      columns: 3,
+      preset: "custom",
+      rows: 1,
+      version: 1,
+    },
+    preset: "custom",
+    scenarios: [{ id: "free", max_total: 10, name: "Posto" }],
+    snapshots: [
+      { name: "Posto", scenarioId: "free", total: 0 },
+      { name: "Cenário antigo", scenarioId: "gone", total: 99 },
+    ],
+  });
+
+  assert.equal(positions[0].state, "unoccupied");
+  assert.equal(positions[0].total, 0);
+  assert.equal(positions[0].name, "Caixa livre");
+  assert.equal(positions[1].state, "unavailable");
+  assert.equal(positions[1].total, null);
+  assert.equal(positions[2].state, "unlinked");
+  assert.equal(positions[2].total, null);
+  const withoutCapacity = occupancyComparison.buildOccupancyHexLayout({
+    capacities: {},
+    columns: 1,
+    preset: "queue",
+    scenarios: [{ id: "busy", max_total: null, name: "Fila" }],
+    snapshots: [{ name: "Fila", scenarioId: "busy", total: 7 }],
+  });
+  assert.equal(withoutCapacity[0].capacity, null);
+  assert.equal(withoutCapacity[0].utilization, null);
+});
+
+test("escala hexbin usa domínio certificado comum e raio monotônico", () => {
+  const visual = occupancyHexVisual.buildOccupancyHexVisualScale([
+    { capacity: 10, cellId: "zero", state: "unoccupied", total: 0 },
+    { capacity: null, cellId: "one", state: "occupied", total: 1 },
+    { capacity: 2, cellId: "four", state: "occupied", total: 4 },
+    { capacity: 18, cellId: "nine", state: "occupied", total: 9 },
+    { capacity: 999_999, cellId: "unknown", state: "unknown", total: null },
+    { capacity: null, cellId: "unavailable", state: "unavailable", total: null },
+    { capacity: null, cellId: "unlinked", state: "unlinked", total: null },
+  ]);
+
+  assert.equal(visual.certifiedCount, 4);
+  assert.equal(visual.certifiedMaximum, 9);
+  assert.equal(visual.domainMaximum, 10);
+  const byId = new Map(visual.entries.map((entry) => [entry.cellId, entry]));
+  assert.equal(
+    byId.get("zero").radiusRatio,
+    occupancyHexVisual.OCCUPANCY_HEX_ZERO_RADIUS_RATIO,
+  );
+  assert.equal(byId.get("zero").state, "unoccupied");
+  assert.equal(byId.get("zero").valueRatio, 0);
+  assert.equal(byId.get("four").valueRatio, 0.4);
+  assert.equal(byId.get("nine").valueRatio, 0.9);
+  assert.ok(byId.get("one").radiusRatio > byId.get("zero").radiusRatio);
+  assert.ok(byId.get("four").radiusRatio > byId.get("one").radiusRatio);
+  assert.ok(byId.get("nine").radiusRatio > byId.get("four").radiusRatio);
+  assert.ok(byId.get("nine").radiusRatio < 1);
+  assert.equal(byId.get("unknown").radiusRatio, null);
+  assert.equal(byId.get("unavailable").radiusRatio, null);
+  assert.equal(byId.get("unlinked").radiusRatio, null);
+});
+
+test("escala hexbin não inventa utilização e preserva estouro de capacidade", () => {
+  const visual = occupancyHexVisual.buildOccupancyHexVisualScale([
+    { capacity: null, cellId: "without-capacity", state: "occupied", total: 7 },
+    { capacity: 4, cellId: "over-capacity", state: "occupied", total: 7 },
+    { capacity: 10, cellId: "certified-zero", state: "unoccupied", total: 0 },
+    { capacity: 10, cellId: "missing", state: "unknown", total: null },
+  ]);
+  const byId = new Map(visual.entries.map((entry) => [entry.cellId, entry]));
+
+  assert.equal(byId.get("without-capacity").colorRatio, null);
+  assert.equal(byId.get("without-capacity").overCapacity, false);
+  assert.equal(byId.get("over-capacity").colorRatio, 1.75);
+  assert.equal(byId.get("over-capacity").overCapacity, true);
+  assert.equal(byId.get("certified-zero").colorRatio, 0);
+  assert.equal(byId.get("missing").colorRatio, null);
+});
+
+test("escala hexbin é determinística para vazio, zero, ordem e teto 1/2/5", () => {
+  assert.deepEqual(
+    [0, 1, 2, 3, 5, 6, 20, 21, 999].map((value) =>
+      occupancyHexVisual.niceOccupancyHexCeiling(value),
+    ),
+    [1, 1, 2, 5, 5, 10, 20, 50, 1_000],
+  );
+
+  const empty = occupancyHexVisual.buildOccupancyHexVisualScale([
+    { capacity: 10, cellId: "missing", state: "unknown", total: null },
+    { capacity: null, cellId: "space", state: "unlinked", total: null },
+  ]);
+  assert.equal(empty.certifiedCount, 0);
+  assert.equal(empty.certifiedMaximum, null);
+  assert.equal(empty.domainMaximum, 1);
+
+  const sources = [
+    { capacity: 20, cellId: "a", state: "occupied", total: 8 },
+    { capacity: 20, cellId: "b", state: "occupied", total: 2 },
+    { capacity: 20, cellId: "c", state: "unoccupied", total: 0 },
+  ];
+  const forward = occupancyHexVisual.buildOccupancyHexVisualScale(sources);
+  const reverse = occupancyHexVisual.buildOccupancyHexVisualScale(
+    [...sources].reverse(),
+  );
+  assert.equal(forward.domainMaximum, reverse.domainMaximum);
+  assert.deepEqual(
+    Object.fromEntries(forward.entries.map((entry) => [entry.cellId, entry.radiusRatio])),
+    Object.fromEntries(reverse.entries.map((entry) => [entry.cellId, entry.radiusRatio])),
+  );
+});
+
+test("escala hexbin rejeita estados e números inconsistentes", () => {
+  assert.throws(
+    () =>
+      occupancyHexVisual.buildOccupancyHexVisualScale([
+        { capacity: 10, cellId: "duplicate", state: "occupied", total: 1 },
+        { capacity: 10, cellId: "duplicate", state: "occupied", total: 2 },
+      ]),
+    /duplicado/,
+  );
+  assert.throws(
+    () =>
+      occupancyHexVisual.buildOccupancyHexVisualScale([
+        { capacity: 10, cellId: "false-zero", state: "unoccupied", total: 1 },
+      ]),
+    /deve ter total zero/,
+  );
+  assert.throws(
+    () =>
+      occupancyHexVisual.buildOccupancyHexVisualScale([
+        { capacity: 0, cellId: "capacity", state: "occupied", total: 1 },
+      ]),
+    /inteiro seguro positivo/,
+  );
+  assert.throws(
+    () =>
+      occupancyHexVisual.buildOccupancyHexVisualScale([
+        {
+          capacity: 10,
+          cellId: "unavailable-with-capacity",
+          state: "unavailable",
+          total: null,
+        },
+      ]),
+    /indisponível.*não pode ter total nem capacidade/,
+  );
+  assert.throws(
+    () => occupancyHexVisual.occupancyHexRadiusRatio(2, 1),
+    /não pode exceder/,
+  );
+  assert.throws(
+    () => occupancyHexVisual.niceOccupancyHexCeiling(Number.NaN),
+    /inteiro seguro não negativo/,
+  );
+});
+
+test("hexbin usa superfícies e contraste próprios nos modos light e dark", () => {
+  const light = occupancyHexPalette.getOccupancyHexPalette("light", "#1267C4");
+  const dark = occupancyHexPalette.getOccupancyHexPalette("dark", "#1267C4");
+  const maximum = {
+    capacity: 10,
+    cellId: "maximum",
+    colorRatio: 1,
+    overCapacity: false,
+    radiusRatio: 1,
+    state: "occupied",
+    total: 10,
+    valueRatio: 1,
+  };
+
+  assert.notEqual(light.surfaces.occupied.fill, dark.surfaces.occupied.fill);
+  assert.notEqual(light.labelText, dark.labelText);
+  assert.notDeepEqual(light.valueColors, dark.valueColors);
+  assert.equal(
+    occupancyHexPalette.occupancyHexDisplayRadiusRatio(maximum),
+    occupancyHexPalette.OCCUPANCY_HEX_INNER_MAX_RATIO,
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexTextColor(undefined, light),
+    light.labelText,
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexTextColor(undefined, dark),
+    dark.labelText,
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexValueColor(
+      { ...maximum, overCapacity: true },
+      dark,
+    ),
+    occupancyHexPalette.occupancyHexValueColor(maximum, dark),
+  );
+});
+
+test("hexbin separa gradiente de valor real do estado binário", () => {
+  const scale = occupancyHexVisual.buildOccupancyHexVisualScale([
+    { capacity: 2, cellId: "low", state: "occupied", total: 2 },
+    { capacity: 100, cellId: "high", state: "occupied", total: 8 },
+    { capacity: 1, cellId: "over", state: "occupied", total: 8 },
+    { capacity: 10, cellId: "zero", state: "unoccupied", total: 0 },
+  ]);
+  const byId = new Map(scale.entries.map((entry) => [entry.cellId, entry]));
+  const palette = occupancyHexPalette.getOccupancyHexPalette(
+    "light",
+    "#1267C4",
+    { occupied: "#0F766E", unoccupied: "#B91C1C" },
+  );
+  const low = byId.get("low");
+  const high = byId.get("high");
+  const over = byId.get("over");
+  const zero = byId.get("zero");
+
+  assert.ok(low.valueRatio < high.valueRatio);
+  assert.ok(low.colorRatio > high.colorRatio);
+  assert.notEqual(
+    occupancyHexPalette.occupancyHexValueColor(low, palette, "actual"),
+    occupancyHexPalette.occupancyHexValueColor(high, palette, "actual"),
+    "a capacidade inversa não pode inverter nem igualar o gradiente real",
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexValueColor(high, palette, "status"),
+    palette.occupied,
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexValueColor(low, palette, "status"),
+    palette.occupied,
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexValueColor(zero, palette, "actual"),
+    palette.valueColors[0],
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexValueColor(zero, palette, "status"),
+    palette.zero,
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexValueColor(over, palette, "actual"),
+    occupancyHexPalette.occupancyHexValueColor(high, palette, "actual"),
+    "sobrecapacidade deve manter o fill gradual e usar vermelho só no contorno",
+  );
+  assert.notEqual(
+    occupancyHexPalette.occupancyHexValueColor(over, palette, "actual"),
+    palette.overCapacity,
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexDisplayRadiusRatio(low, "status"),
+    occupancyHexPalette.OCCUPANCY_HEX_INNER_MAX_RATIO,
+  );
+  assert.equal(
+    occupancyHexPalette.occupancyHexDisplayRadiusRatio(zero, "status"),
+    occupancyHexPalette.OCCUPANCY_HEX_INNER_MAX_RATIO,
+  );
+  for (const entry of scale.entries) {
+    assert.equal(
+      occupancyHexPalette.occupancyHexTextColor(entry, palette),
+      palette.labelText,
+    );
+  }
+});
+
+test("bar race ao vivo usa snapshots, preserva zero e não transforma ausência em zero", () => {
+  const entries = occupancyComparison.buildOccupancyLiveRaceEntries([
+    { name: "Posto livre", scenarioId: "free", total: 0 },
+    { name: "Fila ocupada", scenarioId: "busy", total: 7 },
+    { name: "Sem dados", scenarioId: "missing", total: null },
+  ]);
+
+  assert.deepEqual(
+    entries.map((entry) => [entry.scenarioId, entry.value]),
+    [
+      ["free", 0],
+      ["busy", 7],
+      ["missing", null],
+    ],
+  );
+});
+
+test("máximos por cenário usam recortes civis ordenados de hoje, 12 meses e 5 anos", () => {
+  const ranges = occupancyComparison.buildOccupancyMaximumTrendRanges(
+    new Date(2026, 7, 7, 15, 37, 42, 123),
+  );
+
+  assert.deepEqual(
+    ranges.hourly.buckets.map((bucket) => bucket.getHours()),
+    Array.from({ length: 16 }, (_, hour) => hour),
+    "a série horária deve começar à meia-noite e incluir somente até a hora atual",
+  );
+  assert.equal(ranges.hourly.from.getHours(), 0);
+  assert.equal(ranges.hourly.to.getHours(), 16);
+  assert.deepEqual(
+    occupancyComparison.occupancyMaximumTrendBucketLabels(
+      ranges.monthly.buckets,
+      "month",
+    ),
+    [
+      "set/25",
+      "out/25",
+      "nov/25",
+      "dez/25",
+      "jan/26",
+      "fev/26",
+      "mar/26",
+      "abr/26",
+      "mai/26",
+      "jun/26",
+      "jul/26",
+      "ago/26",
+    ],
+    "os 12 meses devem permanecer em ordem civil, inclusive na virada do ano",
+  );
+  assert.deepEqual(
+    occupancyComparison.occupancyMaximumTrendBucketLabels(
+      ranges.annual.buckets,
+      "year",
+    ),
+    ["2022", "2023", "2024", "2025", "2026"],
+  );
+  assert.equal(ranges.monthlySource.buckets.length, 56);
+  assert.equal(
+    occupancyComparison.occupancyMaximumTrendBucketLabel(
+      ranges.monthlySource.buckets[0],
+      "month",
+    ),
+    "jan/22",
+  );
+  assert.equal(
+    occupancyComparison.occupancyMaximumTrendBucketLabel(
+      ranges.monthlySource.buckets.at(-1),
+      "month",
+    ),
+    "ago/26",
+  );
+  assert.deepEqual(
+    occupancyComparison.occupancyMaximumTrendBucketLabels(
+      ranges.hourly.buckets.slice(0, 3),
+      "hour",
+    ),
+    ["00h", "01h", "02h"],
+  );
+});
+
+test("série máxima usa exclusivamente peak e preserva zero certificado e ausência", () => {
+  const buckets = [
+    new Date(2026, 7, 7, 10),
+    new Date(2026, 7, 7, 11),
+    new Date(2026, 7, 7, 12),
+  ];
+  const metrics = new Map([
+    [
+      occupancyAggregateValidation.occupancyAggregateBucketKey(
+        buckets[0],
+        "hour",
+      ),
+      { average: 999, minimum: 1, peak: 7 },
+    ],
+    [
+      occupancyAggregateValidation.occupancyAggregateBucketKey(
+        buckets[1],
+        "hour",
+      ),
+      { average: 999, minimum: 0, peak: 0 },
+    ],
+  ]);
+
+  assert.deepEqual(
+    occupancyComparison.buildOccupancyPeakValues(buckets, metrics, "hour"),
+    [7, 0, null],
+    "peak zero é dado certificado; bucket ausente deve continuar null",
+  );
+});
+
+test("eixo máximo horário mantém 24 posições, futuro vazio e substitui a hora aberta", () => {
+  const range = occupancyComparison.buildOccupancyMaximumTrendRanges(
+    new Date(2026, 7, 7, 15, 37, 42, 123),
+  ).hourly;
+  const metrics = new Map(
+    range.buckets.map((bucket, hour) => [
+      occupancyAggregateValidation.occupancyAggregateBucketKey(
+        bucket,
+        "hour",
+      ),
+      { average: hour, minimum: 0, peak: hour },
+    ]),
+  );
+  const openBucket = range.buckets.at(-1);
+
+  assert.equal(occupancyComparison.OCCUPANCY_FIXED_HOUR_LABELS.length, 24);
+  assert.equal(occupancyComparison.OCCUPANCY_FIXED_HOUR_LABELS[0], "00h");
+  assert.equal(
+    occupancyComparison.OCCUPANCY_FIXED_HOUR_LABELS.at(-1),
+    "23h–24h",
+  );
+  assert.deepEqual(
+    occupancyComparison.buildOccupancyFixedHourlyPeakValues({
+      buckets: range.buckets,
+      metrics,
+    }),
+    [...Array.from({ length: 16 }, (_, hour) => hour), ...Array(8).fill(null)],
+    "horas futuras são apenas posições visuais e não viram zero",
+  );
+  assert.equal(
+    occupancyComparison.buildOccupancyFixedHourlyPeakValues({
+      buckets: range.buckets,
+      metrics,
+      openBucket,
+      openMetric: { average: 5, minimum: 0, peak: 5 },
+    })[15],
+    5,
+    "a leitura dedicada deve substituir o pico anterior, inclusive em correção para baixo",
+  );
+  assert.equal(
+    occupancyComparison.buildOccupancyFixedHourlyPeakValues({
+      buckets: range.buckets,
+      metrics,
+      openBucket,
+      openMetric: null,
+    })[15],
+    null,
+    "ausência autoritativa na hora aberta não pode manter o baseline obsoleto",
+  );
+  assert.equal(
+    occupancyComparison.buildOccupancyFixedHourlyPeakValues({
+      buckets: range.buckets,
+      metrics,
+      openBucket,
+      openPeak: 9,
+    })[15],
+    9,
+    "o pico recomposto por minutos e snapshot deve alimentar a hora aberta sem fabricar outras métricas",
+  );
+  assert.equal(
+    occupancyComparison.buildOccupancyFixedHourlyPeakValues({
+      buckets: range.buckets,
+      metrics,
+      openBucket,
+      openPeak: 5,
+      openPeakMode: "maximum",
+    })[15],
+    15,
+    "uma observação parcial nunca pode reduzir um pico horário já conhecido",
+  );
+});
+
+test("fallback da hora aberta solicita somente minutos já fechados", () => {
+  const range = occupancyComparison.buildOccupancyClosedMinuteRange(
+    new Date(2026, 7, 7, 15, 37, 42, 123),
+  );
+
+  assert.equal(range.from.getHours(), 15);
+  assert.equal(range.from.getMinutes(), 0);
+  assert.equal(range.to.getHours(), 15);
+  assert.equal(range.to.getMinutes(), 37);
+  assert.equal(range.buckets.length, 37);
+  assert.equal(range.buckets[0].getMinutes(), 0);
+  assert.equal(range.buckets.at(-1).getMinutes(), 36);
+});
+
+test("snapshot só participa do máximo quando pertence à mesma hora absoluta", () => {
+  const bucket = new Date("2026-08-07T15:00:00.000Z");
+  assert.equal(
+    occupancyComparison.occupancySnapshotTotalWithinHour(
+      { asOf: "2026-08-07T15:37:00.000Z", total: 7 },
+      bucket,
+    ),
+    7,
+  );
+  assert.equal(
+    occupancyComparison.occupancySnapshotTotalWithinHour(
+      { asOf: "2026-08-07T14:59:59.999Z", total: 12 },
+      bucket,
+    ),
+    undefined,
+    "um snapshot anterior não pode contaminar a nova hora",
+  );
+  assert.equal(
+    occupancyComparison.occupancySnapshotTotalWithinHour(
+      { asOf: "2026-08-07T16:00:00.000Z", total: 12 },
+      bucket,
+    ),
+    undefined,
+  );
+});
+
+test("hora aberta usa intervalo semiaberto e reinicia na virada do dia e do ano", () => {
+  const before = occupancyComparison.buildOccupancyCurrentHourRange(
+    new Date(2026, 11, 31, 23, 59, 59, 999),
+  );
+  const after = occupancyComparison.buildOccupancyCurrentHourRange(
+    new Date(2027, 0, 1, 0, 0, 0, 0),
+  );
+
+  assert.deepEqual(
+    [before.from.getFullYear(), before.from.getMonth(), before.from.getDate(), before.from.getHours()],
+    [2026, 11, 31, 23],
+  );
+  assert.deepEqual(
+    [before.to.getFullYear(), before.to.getMonth(), before.to.getDate(), before.to.getHours()],
+    [2027, 0, 1, 0],
+  );
+  assert.deepEqual(
+    [after.from.getFullYear(), after.from.getMonth(), after.from.getDate(), after.from.getHours()],
+    [2027, 0, 1, 0],
+  );
+  assert.deepEqual(
+    [after.to.getFullYear(), after.to.getMonth(), after.to.getDate(), after.to.getHours()],
+    [2027, 0, 1, 1],
+  );
+  assert.equal(before.to.getTime(), after.from.getTime());
+  assert.equal(before.buckets.length, 1);
+  assert.equal(after.buckets.length, 1);
+});
+
+test("janelas mensal e anual avançam sem carregar meses ou anos removidos", () => {
+  const december = occupancyComparison.buildOccupancyMaximumTrendRanges(
+    new Date(2026, 11, 31, 23, 59, 59, 999),
+  );
+  const january = occupancyComparison.buildOccupancyMaximumTrendRanges(
+    new Date(2027, 0, 1, 0, 0, 0, 0),
+  );
+
+  assert.deepEqual(
+    occupancyComparison.occupancyMaximumTrendBucketLabels(
+      december.monthly.buckets,
+      "month",
+    ),
+    [
+      "jan/26", "fev/26", "mar/26", "abr/26", "mai/26", "jun/26",
+      "jul/26", "ago/26", "set/26", "out/26", "nov/26", "dez/26",
+    ],
+  );
+  assert.deepEqual(
+    occupancyComparison.occupancyMaximumTrendBucketLabels(
+      january.monthly.buckets,
+      "month",
+    ),
+    [
+      "fev/26", "mar/26", "abr/26", "mai/26", "jun/26", "jul/26",
+      "ago/26", "set/26", "out/26", "nov/26", "dez/26", "jan/27",
+    ],
+  );
+  assert.deepEqual(
+    occupancyComparison.occupancyMaximumTrendBucketLabels(
+      december.annual.buckets,
+      "year",
+    ),
+    ["2022", "2023", "2024", "2025", "2026"],
+  );
+  assert.deepEqual(
+    occupancyComparison.occupancyMaximumTrendBucketLabels(
+      january.annual.buckets,
+      "year",
+    ),
+    ["2023", "2024", "2025", "2026", "2027"],
+  );
+  assert.equal(december.monthlySource.buckets.length, 60);
+  assert.equal(january.monthlySource.buckets.length, 49);
+  assert.equal(
+    occupancyComparison.occupancyMaximumTrendBucketLabel(
+      january.monthlySource.buckets.at(-1),
+      "month",
+    ),
+    "jan/27",
+  );
+});
+
+test("eixo horário de ocupação trata horas repetidas por máximo e exige cobertura total", () => {
+  const previousTimezone = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  try {
+    const first = new Date("2026-11-01T05:00:00Z");
+    const second = new Date("2026-11-01T06:00:00Z");
+    assert.equal(first.getHours(), 1);
+    assert.equal(second.getHours(), 1);
+    const firstKey = occupancyAggregateValidation.occupancyAggregateBucketKey(
+      first,
+      "hour",
+    );
+    const secondKey = occupancyAggregateValidation.occupancyAggregateBucketKey(
+      second,
+      "hour",
+    );
+    const complete = new Map([
+      [firstKey, { average: 4, minimum: 0, peak: 7 }],
+      [secondKey, { average: 5, minimum: 0, peak: 9 }],
+    ]);
+
+    assert.equal(
+      occupancyComparison.buildOccupancyFixedHourlyPeakValues({
+        buckets: [first, second],
+        metrics: complete,
+      })[1],
+      9,
+      "duas ocorrências absolutas da mesma hora civil usam máximo, nunca soma",
+    );
+    complete.delete(secondKey);
+    assert.equal(
+      occupancyComparison.buildOccupancyFixedHourlyPeakValues({
+        buckets: [first, second],
+        metrics: complete,
+      })[1],
+      null,
+      "uma ocorrência ausente torna o máximo civil desconhecido",
+    );
+  } finally {
+    if (previousTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimezone;
+  }
+});
+
+test("máximo anual usa os peaks mensais e invalida ano com mês ausente", () => {
+  const annualBuckets = [new Date(2025, 0, 1), new Date(2026, 0, 1)];
+  const monthlyBuckets = [
+    new Date(2025, 0, 1),
+    new Date(2025, 1, 1),
+    new Date(2026, 0, 1),
+    new Date(2026, 1, 1),
+  ];
+  const metrics = new Map([
+    [
+      occupancyAggregateValidation.occupancyAggregateBucketKey(
+        monthlyBuckets[0],
+        "month",
+      ),
+      { average: 999, minimum: 1, peak: 8 },
+    ],
+    [
+      occupancyAggregateValidation.occupancyAggregateBucketKey(
+        monthlyBuckets[2],
+        "month",
+      ),
+      { average: 999, minimum: 0, peak: 0 },
+    ],
+    [
+      occupancyAggregateValidation.occupancyAggregateBucketKey(
+        monthlyBuckets[3],
+        "month",
+      ),
+      { average: 999, minimum: 2, peak: 5 },
+    ],
+  ]);
+
+  assert.deepEqual(
+    occupancyComparison.buildOccupancyAnnualMaximumValues({
+      annualBuckets,
+      metrics,
+      monthlyBuckets,
+    }),
+    [null, 5],
+    "um único mês ausente não pode ser certificado como zero nem ignorado no ano",
+  );
+  assert.deepEqual(
+    occupancyComparison.buildOccupancyAnnualMaximumPoints({
+      annualBuckets,
+      liveBucket: new Date(2026, 1, 12, 10),
+      livePeak: 7,
+      metrics: new Map(),
+      monthlyBuckets,
+    }),
+    [
+      { partial: false, value: null },
+      { partial: true, value: 7 },
+    ],
+    "o ano aberto deve exibir a melhor observação disponível como parcial, nunca como zero ou como ano fechado",
+  );
+});
+
+test("catálogo de ocupação publica os três comparativos máximos por cenário", () => {
+  const cardIds = viewPreferences
+    .getCardMenuDefinition("occupancy")
+    .cards.map((card) => card.id);
+
+  assert.deepEqual(
+    cardIds.filter((id) => id.startsWith("occupancy_scenario_max_")),
+    [
+      "occupancy_scenario_max_hour",
+      "occupancy_scenario_max_month",
+      "occupancy_scenario_max_year",
+    ],
+  );
+});
+
+test("comparativos máximos substituem séries ao trocar cenário ou empresa", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const cardStart = source.indexOf(
+    "function OccupancyScenarioMaximumLineCard",
+  );
+  const nextCard = source.indexOf("function OccupancyHexLayoutCard", cardStart);
+
+  assert.ok(cardStart >= 0 && nextCard > cardStart);
+  assert.doesNotMatch(
+    source.slice(cardStart, nextCard),
+    /mergeUpdates/,
+    "o ECharts deve substituir completamente as séries para não reter cenários do escopo anterior",
+  );
+  assert.match(
+    source,
+    /const hourlyMaximumBuckets = React\.useMemo\([\s\S]*?certifiedCurrentHourMaximum\.bucket[\s\S]*?buckets=\{hourlyMaximumBuckets\}[\s\S]*?currentBucket=\{certifiedCurrentHourMaximum\.bucket\}/,
+    "a hora aberta deve ancorar o dia exibido e não pode reutilizar buckets do dia anterior",
+  );
+  assert.match(
+    source,
+    /async function refreshCurrentHourMaximum[\s\S]*?buildOccupancyCurrentHourRange\(requestedAt\)[\s\S]*?buildOccupancyClosedMinuteRange\(requestedAt\)[\s\S]*?"minute"/,
+    "a hora aberta deve usar o bucket horário quando existir e recompô-lo com minutos fechados quando a API o omitir",
+  );
+  assert.match(
+    source,
+    /minuteCoverage\.missingBuckets\.length[\s\S]*?\? new Map\(\)/,
+    "minutos com lacuna não podem ser promovidos a máximo completo da hora",
+  );
+  assert.match(
+    source,
+    /latestMinuteRange = buildOccupancyClosedMinuteRange\(completedAt\)[\s\S]*?!sameOccupancyRange\(minuteRange, latestMinuteRange\)/,
+    "uma resposta que cruza a virada do minuto deve ser refeita imediatamente",
+  );
+  assert.match(
+    source,
+    /showAllSymbol: true,[\s\S]*?showSymbol: true/,
+    "um único ponto parcial precisa continuar visível mesmo sem segmento de linha",
+  );
+  assert.match(
+    source.slice(cardStart, nextCard),
+    /granularity === "hour"[\s\S]*?OCCUPANCY_FIXED_HOUR_LABELS/,
+    "o cartão horário deve manter as 24 posições visuais fixas",
+  );
+  assert.match(
+    source.slice(source.indexOf("function buildMaximumLineSeries")),
+    /granularity === "hour"[\s\S]*?buildOccupancyFixedHourlyPeakValues\(\{[\s\S]*?buckets/,
+    "a série horária deve projetar os buckets cobráveis nas 24 posições visuais",
+  );
+  assert.match(
+    source,
+    /sameOccupancyRange\(range, latestRange\)[\s\S]*?scheduleNext\(undefined, true\)/,
+    "respostas que atravessam a virada civil devem ser descartadas e refeitas",
+  );
+  assert.match(
+    source,
+    /document\.addEventListener\("visibilitychange", handleVisibilityChange\)/,
+    "voltar à aba visível deve disparar atualização imediata",
+  );
+});
+
+test("dashboards de ocupação isolam o bucket aberto e descartam respostas de outra janela", () => {
+  const liveSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const reportSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    liveSource,
+    /requireOccupancyAggregateRows\([\s\S]*?openBucket: listBucketStarts\(definition\)\.at\(-1\)/,
+    "o Ao Vivo deve liberar parcial somente para o último bucket solicitado",
+  );
+  assert.match(
+    reportSource,
+    /requireOccupancyAggregateRows\([\s\S]*?openBucket: definition\.openBucket/,
+    "o Relatório deve propagar somente o bucket aberto calculado para a janela",
+  );
+  assert.match(
+    reportSource,
+    /function buildComparisonDefinition\([\s\S]*?openBucket: undefined/,
+    "o Relatório não pode liberar parcial nos períodos comparativos históricos",
+  );
+  assert.match(
+    liveSource,
+    /DefinitionsWindowKey[\s\S]*?buildOccupancyChartDefinitions\(new Date\(\)\)/,
+    "a janela ao vivo deve ser revalidada antes de publicar a resposta",
+  );
+  assert.match(
+    reportSource,
+    /definitionsWindowKey[\s\S]*?latestDefinitionsWindowKey[\s\S]*?windowRetry < 1[\s\S]*?execute\(windowRetry \+ 1\)/,
+    "a janela de relatório ou análise deve ser revalidada e refeita antes de publicar a resposta",
+  );
+  assert.match(
+    liveSource,
+    /if \(disposed \|\| refreshRunning\) return;/,
+    "o Ao Vivo não deve iniciar uma segunda consulta enquanto a anterior estiver ativa",
+  );
+  assert.match(
+    reportSource,
+    /disposed \|\|[\s\S]*?refreshRunning \|\|[\s\S]*?chartAbortControllerRef\.current !== null/,
+    "o relatório não deve iniciar uma segunda consulta enquanto a anterior estiver ativa",
+  );
+  for (const source of [liveSource, reportSource]) {
+    assert.match(
+      source,
+      /refreshRunning = true;[\s\S]*?await (?:loadScenarioData|loadCharts)\([\s\S]*?finally \{[\s\S]*?refreshRunning = false;[\s\S]*?scheduleNextRefresh\(\)/,
+      "cada atualização deve armar o próximo ciclo ao concluir, sem sobreposição nem starvation",
+    );
+    assert.doesNotMatch(
+      source,
+      /setInterval\(/,
+      "a atualização não deve acumular ticks durante consultas lentas",
+    );
+  }
+});
+
+test("heatmaps de ocupação mantêm célula zero e célula ausente", () => {
+  const first = new Date(2026, 6, 29, 10, 0, 0, 0);
+  const second = new Date(2026, 6, 29, 11, 0, 0, 0);
+  const firstKey = occupancyAggregateValidation.occupancyAggregateBucketKey(
+    first,
+    "hour",
+  );
+  const scenario = {
+    metrics: new Map([
+      [firstKey, { average: 0, minimum: 0, peak: 0 }],
+    ]),
+    name: "Vitrine",
+    scenarioId: "showcase",
+  };
+  const matrix = occupancyComparison.buildDaysHoursOccupancyCells({
+    buckets: [first, second],
+    metric: "average",
+    scenario,
+  });
+
+  assert.equal(matrix.cells[0].value, 0);
+  assert.equal(matrix.cells[1].value, null);
+  assert.equal(matrix.cells[0].x, 0);
+  assert.equal(matrix.cells[1].x, 0);
+  assert.equal(matrix.cells[0].y, 10);
+  assert.equal(matrix.cells[1].y, 11);
+});
+
+test("cada série heatmap de ocupação possui visualMap no motor ECharts", () => {
+  const echarts = require("echarts/core");
+  const { HeatmapChart } = require("echarts/charts");
+  const { GridComponent, VisualMapComponent } = require("echarts/components");
+  const { SVGRenderer } = require("echarts/renderers");
+  echarts.use([
+    HeatmapChart,
+    GridComponent,
+    VisualMapComponent,
+    SVGRenderer,
+  ]);
+  const chart = echarts.init(null, null, {
+    height: 360,
+    renderer: "svg",
+    ssr: true,
+    width: 640,
+  });
+
+  try {
+    const visualMap =
+      occupancyHeatmapVisual.buildOccupancyHeatmapVisualMaps("#1267C4", 10);
+    const darkVisualMap =
+      occupancyHeatmapVisual.buildOccupancyHeatmapVisualMaps(
+        "#1267C4",
+        10,
+        "dark",
+      );
+    assert.deepEqual(
+      visualMap.map((entry) => entry.seriesIndex),
+      [0, 1],
+    );
+    assert.deepEqual(
+      visualMap[1].inRange.color,
+      chartPalette.monochromeHeatmapPalette("#1267C4"),
+      "a ocupação deve usar a mesma paleta monocromática da contagem",
+    );
+    assert.deepEqual(
+      darkVisualMap[1].inRange.color,
+      chartPalette.monochromeHeatmapPalette("#1267C4", "dark"),
+      "o mapa de ocupação deve gerar sua escala diretamente para o modo escuro",
+    );
+    assert.equal(darkVisualMap[0].pieces[0].color, "#273244");
+    assert.doesNotThrow(() =>
+      chart.setOption({
+        series: [
+          { data: [[0, 0, -1]], type: "heatmap" },
+          { data: [[1, 0, 0]], type: "heatmap" },
+        ],
+        visualMap,
+        xAxis: { data: ["00h", "01h"], type: "category" },
+        yAxis: { data: ["05/08"], type: "category" },
+      }),
+    );
+    assert.match(chart.renderToSVGString(), /<svg/);
+  } finally {
+    chart.dispose();
+  }
+});
+
+test("configuração dos widgets de ocupação é normalizada por schema", () => {
+  const settings = occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+    capacities: { a: 12, b: 0, " bad ": 4 },
+    colorPaletteId: "aurora",
+    comparisonChartType: "bars",
+    comparisonMode: "actual",
+    dayCount: 30,
+    heatmapScenarioId: "scenario-a",
+    hexColorPaletteId: "ocean",
+    hexColumns: 8,
+    hexDisplayMode: "status",
+    hexLayout: {
+      cells: [
+        { column: 0, id: "cell-a", label: "Fila A", row: 0, scenarioId: "a" },
+      ],
+      columns: 4,
+      preset: "custom",
+      rows: 2,
+      version: 1,
+    },
+    hexPreset: "workstation",
+    hexStatusColors: {
+      occupied: "#0f766e",
+      preset: "productivity",
+      unoccupied: "#b91c1c",
+    },
+    metric: "peak",
+    scenarioIds: ["a", "a", "", " b "],
+    schemaVersion: 99,
+  });
+
+  assert.equal(
+    settings.schemaVersion,
+    occupancyWidgetSettings.OCCUPANCY_WIDGET_SETTINGS_SCHEMA_VERSION,
+  );
+  assert.deepEqual(settings.scenarioIds, ["a"]);
+  assert.deepEqual(settings.capacities, { a: 12 });
+  assert.equal(settings.colorPaletteId, "aurora");
+  assert.equal(settings.comparisonChartType, "bars");
+  assert.equal(settings.comparisonMode, "actual");
+  assert.equal(settings.dayCount, 30);
+  assert.equal(settings.hexColorPaletteId, "ocean");
+  assert.equal(settings.hexColumns, 8);
+  assert.equal(settings.hexDisplayMode, "status");
+  assert.equal(settings.hexLayout.cells[0].scenarioId, "a");
+  assert.equal(settings.hexLayout.preset, "custom");
+  assert.deepEqual(settings.hexStatusColors, {
+    occupied: "#0F766E",
+    preset: "productivity",
+    unoccupied: "#B91C1C",
+  });
+  assert.equal(settings.metric, "peak");
+  const migratedV1 =
+    occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+      colorPaletteId: "aurora",
+      comparisonStatusColors:
+        occupancyWidgetSettings.occupancyStatusColorsForPreset(
+          "availability",
+        ),
+      schemaVersion: 1,
+    });
+  assert.equal(
+    migratedV1.schemaVersion,
+    occupancyWidgetSettings.OCCUPANCY_WIDGET_SETTINGS_SCHEMA_VERSION,
+    "payloads v1 devem migrar para o schema atual",
+  );
+  assert.equal(migratedV1.hexColorPaletteId, "aurora");
+  assert.deepEqual(
+    migratedV1.hexStatusColors,
+    occupancyWidgetSettings.occupancyStatusColorsForPreset("availability"),
+    "o schema atual deve migrar as antigas cores compartilhadas para o hexágono",
+  );
+  assert.equal(
+    occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+      comparisonChartType: "vertical_bars",
+    }).comparisonChartType,
+    "vertical_bars",
+    "a escolha de barras verticais deve sobreviver à normalização persistida",
+  );
+});
+
+test("cores semânticas de ocupação preservam legado, presets e contraste", () => {
+  const legacy = occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+    comparisonMode: "status",
+    hexColumns: 7,
+    scenarioIds: ["a"],
+  });
+  assert.deepEqual(
+    legacy.hexStatusColors,
+    occupancyWidgetSettings.DEFAULT_OCCUPANCY_STATUS_COLORS,
+    "configurações anteriores às cores do hex devem receber o preset neutro",
+  );
+  assert.equal(legacy.hexColumns, 7);
+  assert.equal(
+    legacy.comparisonChartType,
+    "half_donut",
+    "configurações anteriores ao seletor devem preservar a meia rosca",
+  );
+  assert.equal(
+    legacy.hexDisplayMode,
+    "actual",
+    "configurações anteriores ao modo visual devem preservar o valor real",
+  );
+  assert.deepEqual(legacy.scenarioIds, ["a"]);
+  assert.equal(
+    legacy.colorPaletteId,
+    occupancyColorPalettes.DEFAULT_OCCUPANCY_COLOR_PALETTE_ID,
+    "configurações legadas devem receber a paleta enterprise",
+  );
+  assert.equal(
+    legacy.hexColorPaletteId,
+    occupancyColorPalettes.DEFAULT_OCCUPANCY_COLOR_PALETTE_ID,
+  );
+
+  const migratedSharedPalette =
+    occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+      colorPaletteId: "aurora",
+    });
+  assert.equal(
+    migratedSharedPalette.hexColorPaletteId,
+    "aurora",
+    "sem hexColorPaletteId, o hex deve herdar a antiga paleta compartilhada",
+  );
+
+  const legacySharedColors =
+    occupancyWidgetSettings.occupancyStatusColorsForPreset("availability");
+  const migratedSharedColors =
+    occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+      comparisonStatusColors: legacySharedColors,
+    });
+  assert.deepEqual(
+    migratedSharedColors.hexStatusColors,
+    legacySharedColors,
+    "sem hexStatusColors, o hex deve herdar as antigas cores compartilhadas",
+  );
+
+  assert.equal(
+    occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+      comparisonChartType: "invalid",
+    }).comparisonChartType,
+    "half_donut",
+    "tipos de comparação desconhecidos devem usar a meia rosca segura",
+  );
+
+  assert.equal(
+    occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+      hexDisplayMode: "invalid",
+    }).hexDisplayMode,
+    "actual",
+    "modos desconhecidos devem usar o modo real seguro",
+  );
+
+  for (const preset of occupancyWidgetSettings.OCCUPANCY_STATUS_COLOR_PRESETS) {
+    const colors = occupancyWidgetSettings.occupancyStatusColorsForPreset(
+      preset.id,
+    );
+    assert.equal(colors.preset, preset.id);
+    assert.equal(
+      occupancyWidgetSettings.occupancyStatusColorsAreDistinct(colors),
+      true,
+      `${preset.label} precisa distinguir os dois estados`,
+    );
+  }
+
+  assert.deepEqual(
+    occupancyWidgetSettings.normalizeOccupancyStatusColors({
+      occupied: "#112233",
+      preset: "neutral",
+      unoccupied: "#F5A623",
+    }),
+    {
+      occupied: "#112233",
+      preset: "custom",
+      unoccupied: "#F5A623",
+    },
+    "cores alteradas manualmente não podem continuar rotuladas como preset",
+  );
+  assert.deepEqual(
+    occupancyWidgetSettings.normalizeOccupancyStatusColors({
+      occupied: "#123456",
+      preset: "custom",
+      unoccupied: "#123456",
+    }),
+    occupancyWidgetSettings.DEFAULT_OCCUPANCY_STATUS_COLORS,
+    "pares indistinguíveis devem voltar ao neutro seguro",
+  );
+});
+
+test("catálogo de paletas de ocupação oferece variações persistíveis e seguras", () => {
+  assert.ok(
+    occupancyColorPalettes.OCCUPANCY_COLOR_PALETTES.length >= 10,
+    "o cliente precisa de um catálogo amplo de paletas",
+  );
+  for (const palette of occupancyColorPalettes.OCCUPANCY_COLOR_PALETTES) {
+    assert.ok(palette.colors.length >= 8, `${palette.label} precisa cobrir séries densas`);
+    assert.equal(new Set(palette.colors).size, palette.colors.length);
+    palette.colors.forEach((color) => assert.match(color, /^#[0-9A-F]{6}$/));
+  }
+  assert.equal(
+    occupancyColorPalettes.normalizeOccupancyColorPaletteId("ocean"),
+    "ocean",
+  );
+  const cyber = occupancyColorPalettes.getOccupancyColorPalette("cyber");
+  assert.equal(cyber.id, "cyber");
+  assert.equal(cyber.label, "Cyber");
+  assert.deepEqual(cyber.colors, [
+    "#00E5FF",
+    "#FF2A9D",
+    "#7C3CFF",
+    "#00D68F",
+    "#FF6B00",
+    "#3D5AFE",
+    "#E900FF",
+    "#C6FF00",
+    "#00B8D9",
+    "#FF1744",
+  ]);
+  const cyberSettings = occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+    colorPaletteId: "cyber",
+    hexColorPaletteId: "cyber",
+  });
+  assert.equal(cyberSettings.colorPaletteId, "cyber");
+  assert.equal(cyberSettings.hexColorPaletteId, "cyber");
+  assert.equal(
+    occupancyColorPalettes.normalizeOccupancyColorPaletteId("desconhecida"),
+    occupancyColorPalettes.DEFAULT_OCCUPANCY_COLOR_PALETTE_ID,
+  );
+});
+
+test("paleta dos comparativos da visão fica centralizada na barra superior", () => {
+  const dashboardSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const paletteSelectSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-palette-select.tsx"),
+    "utf8",
+  );
+  assert.equal(
+    (dashboardSource.match(/<OccupancyPaletteSelect/g) ?? []).length,
+    1,
+    "a paleta desta visão deve aparecer uma única vez na barra superior",
+  );
+  assert.match(
+    dashboardSource,
+    /aria-label="Aparência dos comparativos desta visão"[\s\S]*?<OccupancyPaletteSelect/,
+  );
+  assert.match(
+    paletteSelectSource,
+    /ariaLabel = "Paleta dos comparativos desta visão"/,
+  );
+  assert.match(
+    paletteSelectSource,
+    /aria-label=\{`\$\{ariaLabel\}: \$\{palette\.label\}`\}/,
+  );
+  assert.match(paletteSelectSource, /className="h-8 w-\[116px\]/);
+  assert.match(paletteSelectSource, /<PaletteSwatches colors=\{palette\.colors\} selected \/>/);
+  assert.doesNotMatch(paletteSelectSource, /<SelectValue/);
+  assert.match(paletteSelectSource, /selected \? 10 : 5/);
+  assert.match(
+    paletteSelectSource,
+    /style=\{\{ display: "inline-flex" \}\}/,
+    "a régua selecionada deve preservar flex mesmo sob o line-clamp do SelectTrigger",
+  );
+  assert.match(
+    paletteSelectSource,
+    /"block h-3\.5 w-1\.5 shrink-0"/,
+    "cada amostra escolhida precisa manter dimensões próprias no trigger fechado",
+  );
+  assert.match(
+    paletteSelectSource,
+    /<SelectContent[\s\S]*?option\.label[\s\S]*?option\.description/,
+    "o menu aberto deve preservar nome e descrição das paletas",
+  );
+  assert.match(
+    paletteSelectSource,
+    /title=\{`\$\{palette\.label\} — \$\{palette\.description\}`\}/,
+    "os nomes devem permanecer acessíveis sem comprimir os swatches",
+  );
+  assert.doesNotMatch(
+    dashboardSource.slice(dashboardSource.indexOf("{operationalSettingsOpen ? (")),
+    /<OccupancyPaletteSelect|<OccupancyStatusColorsDialog/,
+    "os seletores visuais não devem voltar ao painel colapsado",
+  );
+  const compactToolbarSource = dashboardSource.slice(
+    dashboardSource.indexOf('aria-label="Controles da visão de ocupação"'),
+    dashboardSource.indexOf("{operationalSettingsOpen ? ("),
+  );
+  assert.match(
+    compactToolbarSource,
+    /className="[^"]*flex min-w-0 items-center gap-2 overflow-x-auto pb-1"/,
+    "a barra superior deve permanecer compacta em uma única linha",
+  );
+  assert.doesNotMatch(
+    compactToolbarSource,
+    />Contexto<|>Estado<|Sincronização desta visão|dashboardSettings\.liveRefreshSeconds\}s|>Alertas<|>Aparência<|>Ações</,
+    "a barra compacta não deve reintroduzir as segmentações removidas",
+  );
+  assert.match(compactToolbarSource, /<ReportExportActions[\s\S]*?compact/);
+  assert.doesNotMatch(
+    compactToolbarSource,
+    /OccupancyStatusColorsDialog|Cores da comparação|Configurar cenários|manager\/scenarios/,
+    "cores semânticas e gestão de cenários não devem ocupar a barra superior",
+  );
+  assert.match(
+    compactToolbarSource,
+    /Última atualização às \$\{formatTime\(lastUpdated\)\}/,
+    "somente o horário da última atualização deve permanecer junto das ações",
+  );
+  assert.match(
+    dashboardSource,
+    /aria-label="Configurações operacionais da ocupação"[\s\S]*?role="group"[\s\S]*?Séries históricas[\s\S]*?<MetricVisibilityControls[\s\S]*?Concluir/,
+    "o painel Operação deve conter somente a seleção das séries históricas",
+  );
+  const operationalPanelSource = dashboardSource.slice(
+    dashboardSource.indexOf('aria-label="Configurações operacionais da ocupação"'),
+    dashboardSource.indexOf("Nenhum cenário de ocupação configurado"),
+  );
+  assert.doesNotMatch(
+    operationalPanelSource,
+    /Atualização automática|Atualização ao vivo|Mapas e comparativos|liveRefreshSelectId|comparisonRefreshSelectId/,
+  );
+  assert.match(dashboardSource, /const OCCUPANCY_REFRESH_SECONDS = 5/);
+  assert.match(dashboardSource, /aggregateRefreshMs: OCCUPANCY_REFRESH_MS/);
+  assert.match(dashboardSource, /aria-label="Cenário de ocupação em foco"/);
+  assert.match(
+    comparisonSource,
+    /return \{ cards, reportAssets, settings, updateSettings \}/,
+    "o painel superior precisa atualizar a mesma preferência persistida dos widgets",
+  );
+  assert.equal(
+    (comparisonSource.match(/<OccupancyPaletteSelect/g) ?? []).length,
+    1,
+    "somente o simulador hexagonal deve manter seletor de paleta local",
+  );
+  assert.match(
+    comparisonSource,
+    /colorPalette=\{selectedHexColorPalette\.colors\}[\s\S]*?paletteId=\{settings\.hexColorPaletteId\}[\s\S]*?ariaLabel="Paleta de cores do simulador hexagonal"[\s\S]*?onSettingsChange\(\{ hexColorPaletteId \}\)/,
+  );
+  assert.equal(
+    (comparisonSource.match(/<OccupancyStatusColorsDialog/g) ?? []).length,
+    1,
+    "somente o simulador hexagonal deve manter cores semânticas locais",
+  );
+  assert.match(
+    comparisonSource,
+    /statusColors=\{settings\.hexStatusColors\}[\s\S]*?buttonLabel="Cores do hex"[\s\S]*?onSettingsChange\(\{ hexStatusColors \}\)/,
+  );
+  assert.match(
+    comparisonSource,
+    /const persisted = onChange\(draft\);[\s\S]*?if \(persisted === false\) return;[\s\S]*?toast\.success\(successMessage\)/,
+    "o diálogo não deve confirmar uma preferência que falhou ao persistir",
+  );
+  assert.match(
+    comparisonSource,
+    /displayStatusColors\.unoccupied[\s\S]*?Todos desocupados/,
+    "o estado zerado deve usar a cor corrigida para o tema atual",
+  );
+  assert.match(
+    comparisonSource,
+    /grid min-w-0 gap-3 xl:grid-cols-\[minmax\(220px,0\.8fr\)_minmax\(0,1\.2fr\)\][\s\S]*?<Hexagon[\s\S]*?flex min-w-0 flex-wrap items-center gap-2 xl:justify-end/,
+    "o cabeçalho do Hex deve distribuir título e controles sem criar uma faixa vazia",
+  );
+  const heatmapCardsSource = comparisonSource.slice(
+    comparisonSource.indexOf("function OccupancyDayHourHeatmapCard"),
+    comparisonSource.indexOf("function ScenarioScopeDialog"),
+  );
+  assert.equal(
+    (heatmapCardsSource.match(/fallbackColor=\{colorPalette\[0\]\}/g) ?? [])
+      .length,
+    2,
+    "as duas legendas de heatmap devem usar o mesmo fallback cromático das séries",
+  );
+  assert.match(comparisonSource, /useWidgetColor\(fallbackColor\)/);
+});
+
+test("Contagem usa barras compactas e o mesmo seletor profissional de período da Ocupação", () => {
+  const liveSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const analysisSource = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const pickerSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-date-range-picker.tsx"),
+    "utf8",
+  );
+
+  const liveToolbar = liveSource.slice(
+    liveSource.indexOf('aria-label="Controles da visão ao vivo de Contagem"'),
+    liveSource.indexOf("{operationalSettingsOpen ? ("),
+  );
+  assert.match(
+    liveToolbar,
+    /className="[^"]*flex min-w-0 items-center gap-2 overflow-x-auto pb-1"/,
+  );
+  assert.match(liveToolbar, /<ReportExportActions[\s\S]*?compact/);
+  assert.match(liveToolbar, /<MonitorModeButton[\s\S]*?compact/);
+  assert.match(liveToolbar, /aria-label="Bases de comparação"/);
+  assert.doesNotMatch(liveToolbar, />\s*5 segundos\s*</);
+  assert.match(
+    liveSource,
+    /aria-label="Bases de comparação da Contagem"[\s\S]*?operationalSettings\.intradayComparison[\s\S]*?operationalSettings\.monthComparison/,
+    "a compactação não pode remover as duas bases algorítmicas",
+  );
+
+  const analysisToolbar = analysisSource.slice(
+    analysisSource.indexOf('aria-label="Controles da análise de Contagem"'),
+    analysisSource.indexOf("{loadingScenarios && !scopeOptions.length"),
+  );
+  assert.match(analysisToolbar, /<AnalysisDateRangePicker/);
+  assert.match(
+    analysisToolbar,
+    /key=\{`\$\{companyScopeId \?\? ""\}\|\$\{user\?\.id \?\? ""\}`\}/,
+    "trocar empresa ou usuário deve descartar o rascunho aberto",
+  );
+  assert.match(analysisToolbar, /contextLabel="análise de Contagem"/);
+  assert.doesNotMatch(
+    analysisToolbar,
+    /disabled=\{loadingData\}/,
+    "o calendário deve continuar acessível enquanto uma consulta anterior termina",
+  );
+  assert.doesNotMatch(analysisToolbar, /type="date"|>Consultar<|>Dia<|>Período</);
+  assert.match(
+    analysisSource,
+    /mode: startInput === endInput \? "day" : "range"/,
+    "um único dia deve continuar acionando os algoritmos diários",
+  );
+  assert.match(
+    analysisSource,
+    /try \{[\s\S]*?savePeriodAnalysisSettings[\s\S]*?catch \{[\s\S]*?será aplicado, mas não pôde ser salvo/,
+    "falha do armazenamento não pode impedir a consulta escolhida",
+  );
+  assert.match(
+    pickerSource,
+    /export function AnalysisDateRangePicker/,
+    "Contagem e Ocupação devem compartilhar o mesmo componente visual",
+  );
+  assert.match(pickerSource, /maximumDays\?: number/);
+  assert.match(
+    pickerSource,
+    /maximumDays=\{MAX_OCCUPANCY_ANALYSIS_RANGE_DAYS\}/,
+    "o limite de 366 dias deve continuar exclusivo da Ocupação",
+  );
+  assert.match(pickerSource, /aria-haspopup="dialog"/);
+  assert.match(
+    analysisSource,
+    /maximumInput=\{companyDateKey\(new Date\(\), companyTimeZone\)\}/,
+    "o limite futuro deve seguir o dia civil da empresa",
+  );
+});
+
+test("contador civil compartilhado preserva intervalos longos sem depender de DST", () => {
+  assert.equal(
+    occupancyAnalysisWindow.countOccupancyAnalysisDateRangeDays(
+      "2024-01-01",
+      "2025-12-31",
+    ),
+    731,
+  );
+  assert.equal(
+    occupancyAnalysisWindow.countOccupancyAnalysisDateRangeDays(
+      "2026-10-31",
+      "2026-11-02",
+    ),
+    3,
+  );
+});
+
+test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () => {
+  const wrapper = readFileSync(
+    resolve(projectRoot, "components/app/analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const moduleTabs = readFileSync(
+    resolve(projectRoot, "components/app/dashboard-module-tabs.tsx"),
+    "utf8",
+  );
+  const reports = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const picker = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-date-range-picker.tsx"),
+    "utf8",
+  );
+
+  assert.match(wrapper, /<DashboardModuleTabs/);
+  assert.match(moduleTabs, /TabsTrigger value="occupancy"[\s\S]*?Ocupação/);
+  assert.match(wrapper, /<OccupancyReportsDashboard analysis manager=\{manager\}/);
+  assert.match(reports, /<OccupancyDateRangePicker[\s\S]*?onApply=\{updateAnalysisRangeInput\}/);
+  assert.match(
+    reports,
+    /aria-label=\{analysis \? "Controles da análise de Ocupação" : undefined\}/,
+    "a análise de Ocupação deve reunir os filtros em uma única barra acessível",
+  );
+  assert.match(
+    reports,
+    /analysis[\s\S]*?"[^"]*flex min-w-0 items-center gap-2 overflow-x-auto pb-1"/,
+    "a barra compacta deve permanecer em uma linha sem comprimir os controles",
+  );
+  assert.match(reports, /aria-label=\{analysis \? "Tipo de visão da análise de Ocupação"/);
+  assert.match(
+    reports,
+    /aria-label="Configurações da análise de Ocupação"[\s\S]*?<SlidersHorizontal/,
+    "comparação e séries devem ficar acessíveis por uma única ação compacta",
+  );
+  assert.match(
+    reports,
+    /id="occupancy-analysis-settings"[\s\S]*?Comparação temporal[\s\S]*?<PreviousPeriodToggle[\s\S]*?compact[\s\S]*?<ComparisonModeSelect[\s\S]*?compact[\s\S]*?Séries históricas[\s\S]*?<MetricVisibilityControls[\s\S]*?compact/,
+    "a otimização não pode remover os algoritmos de comparação nem as séries históricas",
+  );
+  assert.match(reports, /<ReportExportActions[\s\S]*?compact/);
+  assert.match(reports, /<MonitorModeButton[\s\S]*?compact=\{analysis\}/);
+  assert.match(
+    reports,
+    /loadingScopes && !scopeOptions\.length/,
+    "uma atualização silenciosa não deve desmontar os filtros nem perder o foco",
+  );
+  assert.doesNotMatch(
+    reports,
+    />\s*Período da análise|Intervalo inclusivo no dia civil da empresa/,
+    "a barra não deve reintroduzir um cabeçalho explicativo que consome outra linha",
+  );
+  assert.match(reports, /analysisIncludesToday \? clock : undefined/);
+  assert.match(reports, /companyDateKey\(clock, companyTimeZone\)/);
+  assert.match(reports, /openBucket: definition\.openBucket/);
+  assert.match(picker, /<Dialog[\s\S]*?<DialogTrigger[\s\S]*?<DialogContent/);
+  assert.match(picker, /Início[\s\S]*?type="date"[\s\S]*?Fim[\s\S]*?type="date"/);
+  assert.match(picker, /Cancelar[\s\S]*?Aplicar período/);
+  assert.match(picker, /Últimos 7 dias[\s\S]*?Semana passada[\s\S]*?Mês anterior/);
+});
+
+test("ocupação histórica usa somente semanas e meses civis já fechados", () => {
+  const reference = new Date(2026, 7, 9, 23, 59, 59, 999);
+  const week = occupancyAnalysisWindow.buildClosedOccupancyHistoricalRange(
+    reference,
+    "week",
+    8,
+  );
+  const month = occupancyAnalysisWindow.buildClosedOccupancyHistoricalRange(
+    reference,
+    "month",
+    12,
+  );
+
+  assert.deepEqual(localOccupancyDateParts(week.to), [2026, 8, 3]);
+  assert.deepEqual(localOccupancyDateParts(week.from), [2026, 6, 8]);
+  assert.deepEqual(localOccupancyDateParts(month.to), [2026, 8, 1]);
+  assert.deepEqual(localOccupancyDateParts(month.from), [2025, 8, 1]);
+  assert.ok(week.to <= reference);
+  assert.ok(month.to <= reference);
+
+  const intervalFrom = new Date(2026, 6, 1, 0, 0, 0, 0);
+  const intervalTo = new Date(2026, 8, 1, 0, 0, 0, 0);
+  const weeks =
+    occupancyAnalysisWindow.listClosedOccupancyBucketsWithinRange(
+      intervalFrom,
+      intervalTo,
+      "week",
+    );
+  const months =
+    occupancyAnalysisWindow.listClosedOccupancyBucketsWithinRange(
+      intervalFrom,
+      intervalTo,
+      "month",
+    );
+  assert.ok(weeks.length > 0);
+  assert.ok(
+    weeks.every(
+      (bucket) =>
+        bucket >= intervalFrom &&
+        new Date(
+          bucket.getFullYear(),
+          bucket.getMonth(),
+          bucket.getDate() + 7,
+        ) <= intervalTo,
+    ),
+  );
+  assert.deepEqual(months.map(localOccupancyDateParts), [
+    [2026, 7, 1],
+    [2026, 8, 1],
+  ]);
+});
+
+test("intervalo futuro de ocupação é normalizado antes de construir a consulta", () => {
+  const clock = new Date(2026, 7, 10, 14, 30, 0, 0);
+
+  assert.equal(
+    occupancyAnalysisWindow.normalizeOccupancyAnalysisDateInput(
+      "2026-08-11",
+      clock,
+    ),
+    "2026-08-10",
+  );
+  assert.equal(
+    occupancyAnalysisWindow.resolveOccupancyAnalysisReference(
+      clock,
+      "2026-08-11",
+      true,
+    ).getTime(),
+    clock.getTime(),
+  );
+  const historical =
+    occupancyAnalysisWindow.resolveOccupancyAnalysisReference(
+      clock,
+      "2026-08-09",
+      true,
+    );
+  assert.deepEqual(localOccupancyDateParts(historical), [2026, 8, 9]);
+  assert.equal(historical.getHours(), 23);
+  assert.equal(historical.getMinutes(), 59);
+  assert.equal(historical.getSeconds(), 59);
+  assert.equal(historical.getMilliseconds(), 999);
+
+  assert.deepEqual(
+    occupancyAnalysisWindow.normalizeOccupancyAnalysisDateRangeInput(
+      "2026-08-01",
+      "2026-08-11",
+      "2026-08-10",
+    ),
+    { endInput: "2026-08-10", startInput: "2026-08-01" },
+  );
+  const range = occupancyAnalysisWindow.resolveOccupancyAnalysisRange(
+    clock,
+    "2026-08-01",
+    "2026-08-09",
+    true,
+    "2026-08-10",
+  );
+  assert.deepEqual(localOccupancyDateParts(range.from), [2026, 8, 1]);
+  assert.deepEqual(localOccupancyDateParts(range.to), [2026, 8, 10]);
+  assert.equal(range.from.getHours(), 0);
+  assert.equal(range.to.getHours(), 0);
+  assert.equal(range.includesToday, false);
+  assert.equal(range.dayCount, 9);
+  assert.doesNotThrow(() =>
+    occupancyAnalysisWindow.resolveOccupancyAnalysisRange(
+      clock,
+      "2025-08-10",
+      "2026-08-10",
+      true,
+      "2026-08-10",
+    ),
+  );
+  assert.throws(
+    () =>
+      occupancyAnalysisWindow.resolveOccupancyAnalysisRange(
+        clock,
+        "2025-08-09",
+        "2026-08-10",
+        true,
+        "2026-08-10",
+      ),
+    /não pode exceder 366 dias/,
+  );
+});
+
+test("intervalo civil preserva DST e bloqueia runtime diferente da empresa", () => {
+  const originalTimeZone = process.env.TZ;
+  try {
+    process.env.TZ = "America/New_York";
+    const clock = new Date(2026, 2, 9, 12, 0, 0, 0);
+    const range = occupancyAnalysisWindow.resolveOccupancyAnalysisRange(
+      clock,
+      "2026-03-08",
+      "2026-03-08",
+      true,
+      "2026-03-09",
+    );
+    assert.deepEqual(localOccupancyDateParts(range.from), [2026, 3, 8]);
+    assert.deepEqual(localOccupancyDateParts(range.to), [2026, 3, 9]);
+    assert.equal(
+      range.to.getTime() - range.from.getTime(),
+      23 * 60 * 60 * 1000,
+      "o dia da virada de DST não pode ser forçado para 24 horas",
+    );
+    assert.equal(
+      companyTimeZone.requireRuntimeCompanyTimeZone("America/New_York"),
+      "America/New_York",
+    );
+    assert.throws(
+      () => companyTimeZone.requireRuntimeCompanyTimeZone("Asia/Tokyo"),
+      /consulta civil foi bloqueada/,
+    );
+  } finally {
+    if (originalTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimeZone;
+  }
+});
+
+test("buckets grossos nunca incluem a semana ou o mês corrente de hoje", () => {
+  const clock = new Date(2026, 4, 31, 12, 0, 0, 0); // domingo e último dia do mês
+  const range = occupancyAnalysisWindow.resolveOccupancyAnalysisRange(
+    clock,
+    "2026-05-01",
+    "2026-05-31",
+    true,
+    "2026-05-31",
+  );
+  const closedTo =
+    occupancyAnalysisWindow.occupancyAnalysisClosedBucketCutoff(range);
+  assert.deepEqual(localOccupancyDateParts(closedTo), [2026, 5, 31]);
+  assert.equal(closedTo.getHours(), 0);
+
+  const weeks =
+    occupancyAnalysisWindow.listClosedOccupancyBucketsWithinRange(
+      range.from,
+      closedTo,
+      "week",
+    );
+  const months =
+    occupancyAnalysisWindow.listClosedOccupancyBucketsWithinRange(
+      range.from,
+      closedTo,
+      "month",
+    );
+  assert.deepEqual(weeks.map(localOccupancyDateParts), [
+    [2026, 5, 4],
+    [2026, 5, 11],
+    [2026, 5, 18],
+  ]);
+  assert.deepEqual(months, []);
+});
+
+test("intervalo de ocupação persiste isolado por empresa e usuário sem bloquear a UI", () => {
+  const originalWindow = globalThis.window;
+  const values = new Map();
+  const localStorage = {
+    getItem(key) {
+      return values.get(key) ?? null;
+    },
+    setItem(key, value) {
+      values.set(key, value);
+    },
+  };
+  globalThis.window = { localStorage };
+  try {
+    const rangeA = { endInput: "2026-08-10", startInput: "2026-08-01" };
+    const rangeB = { endInput: "2026-08-09", startInput: "2026-08-09" };
+    occupancyAnalysisWindow.saveOccupancyAnalysisDateRange(
+      rangeA,
+      "company-a",
+      "user-a",
+    );
+    occupancyAnalysisWindow.saveOccupancyAnalysisDateRange(
+      rangeB,
+      "company-b",
+      "user-a",
+    );
+    assert.deepEqual(
+      occupancyAnalysisWindow.loadOccupancyAnalysisDateRange(
+        "2026-08-10",
+        "company-a",
+        "user-a",
+      ),
+      rangeA,
+    );
+    assert.deepEqual(
+      occupancyAnalysisWindow.loadOccupancyAnalysisDateRange(
+        "2026-08-10",
+        "company-b",
+        "user-a",
+      ),
+      rangeB,
+    );
+
+    localStorage.setItem = () => {
+      throw new Error("quota indisponível");
+    };
+    assert.doesNotThrow(() =>
+      occupancyAnalysisWindow.saveOccupancyAnalysisDateRange(
+        rangeA,
+        "company-a",
+        "user-b",
+      ),
+    );
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("dataset de ocupação muda com empresa, cenário, intervalo e comparação", () => {
+  const base = {
+    analysis: true,
+    companyScopeId: "company-a",
+    endDateInput: "2026-08-09",
+    intradayComparison: "yesterday",
+    scopeId: "scenario-a",
+    showPreviousPeriod: true,
+    startDateInput: "2026-08-01",
+    timeZone: "America/Sao_Paulo",
+  };
+  const key = occupancyAnalysisWindow.occupancyAnalysisDatasetKey(base);
+
+  for (const changed of [
+    { ...base, companyScopeId: "company-b" },
+    { ...base, scopeId: "scenario-b" },
+    { ...base, startDateInput: "2026-07-31" },
+    { ...base, endDateInput: "2026-08-08" },
+    { ...base, intradayComparison: "last_week" },
+    { ...base, showPreviousPeriod: false },
+    { ...base, timeZone: "Asia/Tokyo" },
+  ]) {
+    assert.notEqual(
+      occupancyAnalysisWindow.occupancyAnalysisDatasetKey(changed),
+      key,
+    );
+  }
+
+  const reports = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(reports, /chartDataScopeKey === requestedChartScopeKey/);
+  assert.match(reports, /requestScopeKey !== requestedChartScopeKeyRef\.current/);
+  assert.match(reports, /chartAbortControllerRef\.current\?\.abort\(\)/);
+  assert.match(reports, /if \(windowRetry < 1\) await execute\(windowRetry \+ 1\)/);
+  assert.match(
+    reports,
+    /function summarizeOccupancyRangeMetrics[\s\S]*?average: latest\.average[\s\S]*?completeMinimum[\s\S]*?completePeak/,
+  );
+  assert.match(
+    reports,
+    /while \(cursor < end && guard < 500\)[\s\S]*?if \(cursor < end\)[\s\S]*?throw new RangeError/,
+  );
+});
+
+test("widgets customizados de ocupação normalizam tipos e IDs sem misturar configurações", () => {
+  const widgets = occupancyCustomWidgets.normalizeOccupancyCustomWidgets([
+    {
+      created_at: "2026-08-05T10:00:00.000Z",
+      id: "metric-a",
+      kind: "kpi",
+      metric: "utilization",
+      title: "  Utilização  ",
+      updated_at: "2026-08-05T10:00:00.000Z",
+    },
+    {
+      created_at: "2026-08-05T10:00:00.000Z",
+      granularity: "hour",
+      id: "trend-a",
+      kind: "trend",
+      title: "Tendência",
+      updated_at: "2026-08-05T10:00:00.000Z",
+    },
+    {
+      created_at: "2026-08-05T10:00:00.000Z",
+      id: "metric-a",
+      kind: "metric",
+      metric: "current",
+      title: "Atual substituído",
+      updated_at: "2026-08-05T11:00:00.000Z",
+    },
+    { id: "invalid", kind: "metric", metric: "unknown" },
+  ]);
+
+  assert.equal(widgets.length, 2);
+  assert.equal(widgets[0].title, "Atual substituído");
+  assert.equal(widgets[0].metric, "current");
+  assert.deepEqual(widgets[1].series, {
+    average: true,
+    minimum: true,
+    peak: true,
+  });
+});
+
+test("configurações de ocupação ficam isoladas por empresa, usuário e cenário", () => {
+  const storage = memoryStorage();
+  const previousWindow = globalThis.window;
+  const previousCustomEvent = globalThis.CustomEvent;
+  globalThis.CustomEvent = class CustomEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  };
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    occupancyCustomWidgets.upsertOccupancyCustomWidget(
+      { kind: "metric", metric: "current", title: "Atual" },
+      "company-a",
+      { userId: "user-a", viewId: "scenario-a" },
+    );
+    assert.equal(
+      occupancyCustomWidgets.loadOccupancyCustomWidgets("company-a", {
+        userId: "user-a",
+        viewId: "scenario-a",
+      }).length,
+      1,
+    );
+    assert.equal(
+      occupancyCustomWidgets.loadOccupancyCustomWidgets("company-a", {
+        userId: "user-a",
+        viewId: "scenario-b",
+      }).length,
+      0,
+    );
+
+    const legacyWidgetSettings = Object.fromEntries(
+      Object.entries(
+        occupancyWidgetSettings.DEFAULT_OCCUPANCY_WIDGET_SETTINGS,
+      ).filter(
+        ([key]) =>
+          key !== "hexColorPaletteId" &&
+          key !== "hexStatusColors",
+      ),
+    );
+    const legacyStoredSettings = {
+      ...legacyWidgetSettings,
+      dayCount: 14,
+    };
+    storage.setItem(
+      occupancyWidgetSettings.occupancyWidgetSettingsStorageKey(
+        "company-a",
+        "user-a",
+      ),
+      JSON.stringify(legacyStoredSettings),
+    );
+    assert.equal(
+      occupancyWidgetSettings.loadOccupancyWidgetSettings(
+        "company-a",
+        "user-a",
+        "scenario-a",
+      ).dayCount,
+      14,
+      "a configuração antiga deve ser herdada até o cenário salvar sua própria visão",
+    );
+    assert.deepEqual(
+      occupancyWidgetSettings.loadOccupancyWidgetSettings(
+        "company-a",
+        "user-a",
+        "scenario-a",
+      ).hexStatusColors,
+      occupancyWidgetSettings.DEFAULT_OCCUPANCY_STATUS_COLORS,
+      "a visão antiga sem cores próprias do hex deve receber o preset neutro",
+    );
+    assert.equal(
+      occupancyWidgetSettings.loadOccupancyWidgetSettings(
+        "company-a",
+        "user-a",
+        "scenario-a",
+      ).hexColorPaletteId,
+      occupancyColorPalettes.DEFAULT_OCCUPANCY_COLOR_PALETTE_ID,
+      "a visão antiga sem paleta própria do hex deve herdar a paleta compartilhada",
+    );
+    occupancyWidgetSettings.saveOccupancyWidgetSettings(
+      {
+        ...legacyStoredSettings,
+        colorPaletteId: "aurora",
+        hexColorPaletteId: "ocean",
+        hexStatusColors:
+          occupancyWidgetSettings.occupancyStatusColorsForPreset(
+            "availability",
+          ),
+        dayCount: 30,
+      },
+      "company-a",
+      "user-a",
+      "scenario-a",
+    );
+    assert.equal(
+      occupancyWidgetSettings.loadOccupancyWidgetSettings(
+        "company-a",
+        "user-a",
+        "scenario-a",
+      ).dayCount,
+      30,
+    );
+    assert.equal(
+      occupancyWidgetSettings.loadOccupancyWidgetSettings(
+        "company-a",
+        "user-a",
+        "scenario-a",
+      ).hexStatusColors.preset,
+      "availability",
+      "as cores semânticas locais do hex devem persistir no cenário",
+    );
+    const separatedPaletteSettings =
+      occupancyWidgetSettings.loadOccupancyWidgetSettings(
+        "company-a",
+        "user-a",
+        "scenario-a",
+      );
+    assert.equal(separatedPaletteSettings.colorPaletteId, "aurora");
+    assert.equal(
+      separatedPaletteSettings.hexColorPaletteId,
+      "ocean",
+      "a paleta do hex deve persistir sem alterar os demais comparativos",
+    );
+    assert.equal(
+      occupancyWidgetSettings.loadOccupancyWidgetSettings(
+        "company-a",
+        "user-a",
+        "scenario-b",
+      ).dayCount,
+      14,
+    );
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    if (previousCustomEvent === undefined) delete globalThis.CustomEvent;
+    else globalThis.CustomEvent = previousCustomEvent;
+  }
+});
+
+
+test("visão salva remapeia capacidades junto com o cenário de destino", () => {
+  const storage = memoryStorage();
+  const previousWindow = globalThis.window;
+  const previousCustomEvent = globalThis.CustomEvent;
+  globalThis.CustomEvent = class CustomEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  };
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    const sourceSettings = {
+      ...occupancyWidgetSettings.DEFAULT_OCCUPANCY_WIDGET_SETTINGS,
+      capacities: { "scenario-a": 12, "scenario-b": 7 },
+      colorPaletteId: "aurora",
+      heatmapScenarioId: "scenario-a",
+      hexColorPaletteId: "ocean",
+      hexLayout: {
+        cells: [
+          {
+            column: 0,
+            id: "source-cell",
+            label: "Posição principal",
+            row: 0,
+            scenarioId: "scenario-a",
+          },
+        ],
+        columns: 4,
+        preset: "custom",
+        rows: 1,
+        version: 1,
+      },
+      scenarioIds: ["scenario-a"],
+    };
+    const sourceScope = { id: "scenario-a", name: "Cenário A" };
+    const targetScope = { id: "scenario-b", name: "Cenário B" };
+    widgetViewPresets.applyWidgetViewPreset(
+      {
+        createdAt: "2026-08-11T12:00:00.000Z",
+        id: "occupancy-view-a",
+        isDefault: false,
+        name: "Operação padrão",
+        snapshot: {
+          cardIds: [],
+          capturedAt: "2026-08-11T12:00:00.000Z",
+          menuKey: "occupancy",
+          preferences: [],
+          sourceScope,
+          storage: [
+            {
+              baseKey:
+                occupancyWidgetSettings.OCCUPANCY_WIDGET_SETTINGS_KEY,
+              value: JSON.stringify(sourceSettings),
+            },
+          ],
+          version: 1,
+        },
+        updatedAt: "2026-08-11T12:00:00.000Z",
+      },
+      {
+        companyId: "company-a",
+        targetScope,
+        userId: "user-a",
+      },
+    );
+
+    const applied = occupancyWidgetSettings.loadOccupancyWidgetSettings(
+      "company-a",
+      "user-a",
+      "scenario-b",
+    );
+    assert.deepEqual(applied.capacities, { "scenario-b": 12 });
+    assert.deepEqual(applied.scenarioIds, ["scenario-b"]);
+    assert.equal(applied.heatmapScenarioId, "scenario-b");
+    assert.equal(applied.hexLayout.cells[0].scenarioId, "scenario-b");
+    assert.equal(applied.colorPaletteId, "aurora");
+    assert.equal(applied.hexColorPaletteId, "ocean");
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    if (previousCustomEvent === undefined) delete globalThis.CustomEvent;
+    else globalThis.CustomEvent = previousCustomEvent;
+  }
+});
+
+test("preferências operacionais de ocupação normalizam intervalos e séries", () => {
+  assert.deepEqual(
+    occupancyDashboardSettings.normalizeOccupancyDashboardSettings({
+      comparisonRefreshSeconds: 120,
+      liveRefreshSeconds: 30,
+      metricVisibility: {
+        average: false,
+        minimum: true,
+        peak: false,
+      },
+      schemaVersion: 99,
+    }),
+    {
+      metricVisibility: {
+        average: false,
+        minimum: true,
+        peak: false,
+      },
+      schemaVersion: 2,
+    },
+  );
+});
 
 test("bucket horário sem offset preserva o relógio local", () => {
   const bucket = aggregateTime.parseAggregateBucket(
@@ -68,14 +2588,8 @@ test("bucket horário sem offset preserva o relógio local", () => {
   assert.equal(bucket.getMilliseconds(), 250);
 });
 
-test("bucket RFC3339 com offset permanece um instante absoluto", () => {
-  const bucket = aggregateTime.parseAggregateBucket(
-    "2026-07-22T13:15:30Z",
-    "hour",
-  );
 
-  assert.equal(bucket?.toISOString(), "2026-07-22T13:15:30.000Z");
-});
+
 
 test("consulta horária envia os limites locais como instantes UTC", () => {
   const localStart = new Date(2026, 6, 22, 0, 0, 0, 0);
@@ -844,6 +3358,49 @@ test("agregado de ocupação exige tuplas completas, ordenadas e não negativas"
       ),
     /cenário "scenario-b".*"scenario-a"/,
   );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          complete: false,
+          data: validRows,
+          granularity: "hour",
+          scenario_id: "scenario-a",
+        },
+        "hour",
+        "scenario-a",
+      ),
+    /incompleto ou inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          as_of: "2026-07-22 10:30:00",
+          data: validRows,
+          granularity: "hour",
+          scenario_id: "scenario-a",
+        },
+        "hour",
+        "scenario-a",
+      ),
+    /as_of.*inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          data: validRows,
+          granularity: "hour",
+          scenario_id: "scenario-a",
+          timezone: "UTC",
+        },
+        "hour",
+        "scenario-a",
+        "America/Sao_Paulo",
+      ),
+    /API agregou.*UTC.*Dashboard.*America\/Sao_Paulo/,
+  );
 
   const invalidRows = [
     {
@@ -889,6 +3446,13 @@ test("agregado de ocupação exige tuplas completas, ordenadas e não negativas"
       area_min: 3,
       bucket,
       scenario_total_avg: 10,
+    },
+    {
+      bucket,
+      scenario_total_avg: 10,
+      scenario_total_final: 15,
+      scenario_total_max: 14,
+      scenario_total_min: 6,
     },
   ];
 
@@ -961,6 +3525,75 @@ test("totais de cenário repetidos precisam ser idênticos no mesmo bucket", () 
   );
 });
 
+test("agregado rejeita soma independente de máximos de várias áreas", () => {
+  const bucket = "2026-08-07T13:15:00Z";
+  const repeatedWrongTotal = {
+    scenario_total_avg: 12.04884,
+    scenario_total_max: 34,
+    scenario_total_min: 0,
+  };
+  const rows = [
+    {
+      area_avg: 5.5,
+      area_id: "area-a",
+      area_max: 16,
+      area_min: 0,
+      bucket,
+      camera_id: "camera-a",
+      ...repeatedWrongTotal,
+    },
+    {
+      area_avg: 6.54884,
+      area_id: "area-b",
+      area_max: 18,
+      area_min: 0,
+      bucket,
+      camera_id: "camera-b",
+      ...repeatedWrongTotal,
+    },
+  ];
+
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          data: rows,
+          granularity: "minute",
+          scenario_id: "scenario-a",
+        },
+        "minute",
+        "scenario-a",
+      ),
+    /soma de AVG\/MIN\/MAX independentes de 2 áreas.*não pode ser certificado/,
+  );
+});
+
+test("agregado preserva zero certificado em cenários com várias áreas", () => {
+  const bucket = "2026-08-07T13:15:00Z";
+  const zeroTotal = {
+    scenario_total_avg: 0,
+    scenario_total_max: 0,
+    scenario_total_min: 0,
+  };
+  const data = ["area-a", "area-b"].map((areaId, index) => ({
+    area_avg: 0,
+    area_id: areaId,
+    area_max: 0,
+    area_min: 0,
+    bucket,
+    camera_id: `camera-${index + 1}`,
+    ...zeroTotal,
+  }));
+
+  assert.doesNotThrow(() =>
+    occupancyAggregateValidation.requireOccupancyAggregateRows(
+      { data, granularity: "minute", scenario_id: "scenario-a" },
+      "minute",
+      "scenario-a",
+    ),
+  );
+});
+
 test("total do cenário prevalece sobre áreas independentemente da ordem", () => {
   const bucket = "2026-07-22T10:00:00";
   const areaA = {
@@ -982,6 +3615,7 @@ test("total do cenário prevalece sobre áreas independentemente da ordem", () =
   const scenarioTotal = {
     bucket,
     scenario_total_avg: 20,
+    scenario_total_final: 18,
     scenario_total_max: 30,
     scenario_total_min: 10,
   };
@@ -1005,6 +3639,7 @@ test("total do cenário prevalece sobre áreas independentemente da ordem", () =
       );
     assert.deepEqual(totals.get(key), {
       average: 20,
+      final: 18,
       minimum: 10,
       peak: 30,
     });
@@ -1044,6 +3679,204 @@ test("total do cenário prevalece sobre áreas independentemente da ordem", () =
   );
 });
 
+test("agregado aceita parcial somente no bucket aberto explicitamente solicitado", () => {
+  const openBucket = new Date(2026, 6, 22, 10, 0, 0, 0);
+  const openRow = {
+    bucket: "2026-07-22T10:00:00",
+    complete: false,
+    scenario_total_avg: 4,
+    scenario_total_max: 7,
+    scenario_total_min: 1,
+    status: "partial",
+  };
+  const response = {
+    complete: false,
+    data: [openRow],
+    granularity: "hour",
+    scenario_id: "scenario-a",
+    status: "partial",
+  };
+
+  assert.equal(
+    occupancyAggregateValidation.requireOccupancyAggregateRows(
+      response,
+      "hour",
+      "scenario-a",
+      undefined,
+      { openBucket },
+    ),
+    response.data,
+  );
+  const openCoverage =
+    occupancyAggregateValidation.aggregateOccupancyRowsForRequestedBuckets(
+      response.data,
+      "hour",
+      [openBucket],
+      { openBucket },
+    );
+  assert.equal(openCoverage.missingBuckets.length, 0);
+  assert.equal(
+    openCoverage.totals.get(
+      occupancyAggregateValidation.occupancyAggregateBucketKey(
+        openBucket,
+        "hour",
+      ),
+    ).peak,
+    7,
+    "o contexto parcial precisa sobreviver também à consolidação de cobertura",
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.aggregateOccupancyRowsForRequestedBuckets(
+        response.data,
+        "hour",
+        [openBucket],
+      ),
+    /incompleto|status incompleto/,
+    "sem o bucket aberto explícito, a mesma linha parcial deve continuar bloqueada",
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          ...response,
+          data: [
+            {
+              ...openRow,
+              bucket: "2026-07-22T09:00:00",
+            },
+            openRow,
+          ],
+        },
+        "hour",
+        "scenario-a",
+        undefined,
+        { openBucket },
+      ),
+    /bucket na posição 0.*incompleto|status incompleto/,
+    "um bucket histórico parcial não pode ser liberado junto com o aberto",
+  );
+});
+
+test("agregado diário mantém buckets certificados e sinaliza lacunas sem inventar zero", () => {
+  const requestedBuckets = Array.from({ length: 7 }, (_, index) =>
+    new Date(2026, 6, 29 + index),
+  );
+  const rows = [
+    {
+      area_avg: 1.775,
+      area_id: "aeroporto|3|1|ocupacao1|region",
+      area_max: 5,
+      area_min: 0,
+      bucket: "2026-08-03T00:00:00Z",
+      camera_id: "camera-a",
+      scenario_total_avg: 1.775,
+      scenario_total_max: 5,
+      scenario_total_min: 0,
+    },
+    {
+      area_avg: 1.82,
+      area_id: "aeroporto|3|1|ocupacao1|region",
+      area_max: 5,
+      area_min: 0,
+      bucket: "2026-08-04T00:00:00Z",
+      camera_id: "camera-a",
+      scenario_total_avg: 1.82,
+      scenario_total_max: 5,
+      scenario_total_min: 0,
+    },
+  ];
+
+  const coverage =
+    occupancyAggregateValidation.aggregateOccupancyRowsForRequestedBuckets(
+      rows,
+      "day",
+      requestedBuckets,
+    );
+
+  assert.equal(coverage.totals.size, 2);
+  assert.deepEqual(
+    coverage.missingBuckets.map((bucket) => [
+      bucket.getFullYear(),
+      bucket.getMonth(),
+      bucket.getDate(),
+    ]),
+    [
+      [2026, 6, 29],
+      [2026, 6, 30],
+      [2026, 6, 31],
+      [2026, 7, 1],
+      [2026, 7, 2],
+    ],
+  );
+  assert.match(
+    occupancyAggregateValidation.occupancyAggregateCoverageWarning(
+      coverage.missingBuckets.length,
+      requestedBuckets.length,
+    ),
+    /5 de 7 períodos.*sem valor.*não é ocupação zero/,
+  );
+  assert.equal(
+    occupancyAggregateValidation.occupancyAggregateCoverageWarning(0, 7),
+    undefined,
+  );
+});
+
+test("agregado sem metadados é explicitamente provisório em qualquer granularidade", () => {
+  assert.match(
+    occupancyAggregateValidation.occupancyAggregateMetadataWarning(
+      {
+        data: [],
+        granularity: "day",
+        scenario_id: "scenario-a",
+      },
+      "day",
+    ),
+    /provisório.*timezone.*complete.*status.*as_of.*não podem ser certificados/,
+  );
+  assert.equal(
+    occupancyAggregateValidation.occupancyAggregateMetadataWarning(
+      {
+        as_of: "2026-08-04T13:00:00Z",
+        complete: true,
+        data: [],
+        granularity: "day",
+        scenario_id: "scenario-a",
+        status: "complete",
+        timezone: "America/Sao_Paulo",
+      },
+      "day",
+    ),
+    undefined,
+  );
+  assert.match(
+    occupancyAggregateValidation.occupancyAggregateMetadataWarning(
+      { data: [], granularity: "hour", scenario_id: "scenario-a" },
+      "hour",
+    ),
+    /intradiário provisório.*timezone.*complete.*status.*as_of/,
+  );
+});
+
+test("agregado de ocupação rejeita bucket fora do período solicitado", () => {
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.aggregateOccupancyRowsForRequestedBuckets(
+        [
+          {
+            bucket: "2026-08-04T00:00:00Z",
+            scenario_total_avg: 2,
+            scenario_total_max: 3,
+            scenario_total_min: 1,
+          },
+        ],
+        "day",
+        [new Date(2026, 7, 3)],
+      ),
+    /fora do período solicitado/,
+  );
+});
+
 test("metadados de cenário válidos preservam identidades e multiplicadores", () => {
   const rows = [
     {
@@ -1066,6 +3899,33 @@ test("metadados de cenário válidos preservam identidades e multiplicadores", (
   ];
 
   assert.deepEqual(scenarioValidation.requireScenarioRows(rows), rows);
+});
+
+test("cenário sem company_id só é normalizado pelo escopo autenticado esperado", () => {
+  const scenario = {
+    active: true,
+    id: "scenario-jwt",
+    lines: [{ action_multiplier: 1, line_count_id: "line-a" }],
+    name: "Fluxo JWT",
+  };
+
+  assert.equal(
+    scenarioValidation.requireScenarioRows([scenario], "company-a")[0]
+      .company_id,
+    "company-a",
+  );
+  assert.throws(
+    () => scenarioValidation.requireScenarioRows([scenario]),
+    /company_id.*inválido ou ausente/,
+  );
+  assert.throws(
+    () =>
+      scenarioValidation.requireScenarioRows(
+        [{ ...scenario, company_id: "company-b" }],
+        "company-a",
+      ),
+    /fora da empresa autenticada "company-a"/,
+  );
 });
 
 test("metadados de cenário rejeitam padding e IDs duplicados", () => {
@@ -1155,6 +4015,14 @@ test("metadados de infraestrutura exigem identidade e status canônicos", () => 
       name: "Câmera A",
       sub_location_id: "sub-location-a",
     },
+    {
+      active: true,
+      company_id: "company-a",
+      id: "camera-without-sub-location",
+      location_id: null,
+      name: "Câmera sem sublocal",
+      sub_location_id: null,
+    },
   ]);
   const locations = metadataValidation.requireLocationRows([
     {
@@ -1177,23 +4045,84 @@ test("metadados de infraestrutura exigem identidade e status canônicos", () => 
     workers: [
       {
         active: true,
+        auth_user_id: null,
         company_id: "company-a",
         id: "worker-a",
         name: "Worker A",
+        worker_id: null,
       },
     ],
   });
 
   assert.equal(cameras[0].id, "camera-a");
+  assert.equal(cameras[1].location_id, undefined);
+  assert.equal(cameras[1].sub_location_id, undefined);
   assert.equal(locations[0].id, "location-a");
   assert.equal(subLocations[0].id, "sub-location-a");
   assert.equal(workers[0].id, "worker-a");
+  assert.equal(workers[0].auth_user_id, undefined);
+  assert.equal(workers[0].worker_id, undefined);
   assert.doesNotThrow(() =>
     metadataValidation.requireInfrastructureRelations({
       cameras,
       locations,
       subLocations,
     }),
+  );
+});
+
+test("infraestrutura implícita usa somente o company_id esperado da requisição", () => {
+  const cameras = metadataValidation.requireCameraRows(
+    [{ active: true, id: "camera-jwt", name: "Câmera JWT" }],
+    "company-a",
+  );
+  const locations = metadataValidation.requireLocationRows(
+    [{ active: true, id: "location-jwt", name: "Local JWT" }],
+    "company-a",
+  );
+  const subLocations = metadataValidation.requireSubLocationRows(
+    [
+      {
+        active: true,
+        id: "sub-location-jwt",
+        location_id: "location-jwt",
+        name: "Sublocal JWT",
+      },
+    ],
+    "company-a",
+  );
+  const workers = metadataValidation.requireWorkerRows(
+    { workers: [{ active: true, id: "worker-jwt", name: "Worker JWT" }] },
+    "company-a",
+  );
+
+  assert.deepEqual(
+    [cameras[0], locations[0], subLocations[0], workers[0]].map(
+      (row) => row.company_id,
+    ),
+    ["company-a", "company-a", "company-a", "company-a"],
+  );
+  assert.throws(
+    () =>
+      metadataValidation.requireCameraRows(
+        [
+          {
+            active: true,
+            company_id: "company-b",
+            id: "camera-foreign",
+            name: "Câmera estrangeira",
+          },
+        ],
+        "company-a",
+      ),
+    /fora da empresa autenticada "company-a"/,
+  );
+  assert.throws(
+    () =>
+      metadataValidation.requireCameraRows([
+        { active: true, id: "camera-unscoped", name: "Sem escopo" },
+      ]),
+    /company_id.*inválido ou ausente/,
   );
 });
 
@@ -1277,6 +4206,334 @@ test("relações de infraestrutura inválidas cancelam a certificação", () => 
   );
 });
 
+test("catálogo de ocupação usa somente rotas autorizadas ao usuário", async () => {
+  const from = new Date("2026-08-03T12:00:00.000Z");
+  const to = new Date("2026-08-03T13:00:00.000Z");
+  const areaId = "camera-a|3|1|ocupacao|region";
+  const requestedPaths = [];
+  const request = async (path) => {
+    requestedPaths.push(path);
+
+    if (path === "/cameras") {
+      return [
+        {
+          active: true,
+          company_id: "company-a",
+          id: "camera-a",
+          name: "Câmera A",
+        },
+      ];
+    }
+    if (path === "/cameras/camera-a/line-counts") {
+      return [
+        {
+          active: true,
+          camera_id: "camera-a",
+          company_id: "company-a",
+          id: "line-entry-a",
+          line_code: "entrada",
+          metric_type: "count",
+          name: "Entrada",
+        },
+      ];
+    }
+    if (path === "/occupancy/areas") {
+      return {
+        complete: true,
+        data: [
+          {
+            active: true,
+            area_id: areaId,
+            area_name: "Ocupação principal",
+            camera_id: "camera-a",
+            company_id: "company-a",
+            last_seen_at: "2026-08-03T12:30:00.000Z",
+            object_class: "person",
+            source_kind: "region",
+          },
+          {
+            active: true,
+            area_id: "area-without-baseline",
+            area_name: "Área ainda não medida",
+            camera_id: "camera-a",
+            company_id: "company-a",
+            last_seen_at: null,
+            object_class: "person",
+            source_kind: "region",
+          },
+        ],
+      };
+    }
+    if (path.startsWith("/occupancy?")) {
+      return {
+        data: [
+          {
+            area: areaId,
+            avg: 7,
+            camera_id: "camera-a",
+            current_at: "2026-08-03T12:30:00.000Z",
+            current_value: 7,
+            min: 7,
+            object_class: "person",
+            peak: 7,
+          },
+        ],
+      };
+    }
+
+    throw new Error(`Rota inesperada: ${path}`);
+  };
+
+  const catalog = await occupancyAreaOptions.fetchOccupancyAreaCatalog({
+    companyId: "company-a",
+    from,
+    request,
+    to,
+  });
+  const options = catalog.options;
+
+  assert.equal(catalog.authoritative, true);
+  assert.equal(
+    requestedPaths.some((path) => path === "/workers/config"),
+    false,
+  );
+  assert.equal(
+    requestedPaths.some((path) => path === "/occupancy/areas"),
+    true,
+  );
+  assert.equal(
+    requestedPaths.some(
+      (path) =>
+        path.startsWith("/occupancy?") || path.endsWith("/line-counts"),
+    ),
+    false,
+  );
+  assert.deepEqual(options, [
+    {
+      area_id: areaId,
+      camera_id: "camera-a",
+      detail: `${areaId} / camera-a`,
+      key: JSON.stringify(["camera-a", areaId]),
+      label: "Ocupação principal / Câmera A",
+      object_class: "person",
+    },
+  ]);
+  assert.doesNotThrow(() =>
+    occupancyAreaOptions.requireOccupancyAreaClassCompatibility({
+      authoritative: true,
+      areas: [{ area_id: areaId, camera_id: "camera-a" }],
+      objectClass: "person",
+      options,
+    }),
+  );
+  assert.throws(
+    () =>
+      occupancyAreaOptions.requireOccupancyAreaClassCompatibility({
+        authoritative: true,
+        areas: [{ area_id: areaId, camera_id: "camera-a" }],
+        objectClass: "vehicle",
+        options,
+      }),
+    /não mede a classe "vehicle"/,
+  );
+  assert.throws(
+    () =>
+      occupancyAreaOptions.requireOccupancyAreaClassCompatibility({
+        authoritative: true,
+        areas: [{ area_id: "unknown-area", camera_id: "camera-a" }],
+        objectClass: "person",
+        options,
+      }),
+    /não consta no catálogo ativo/,
+  );
+  assert.doesNotThrow(() =>
+    occupancyAreaOptions.requireOccupancyAreaClassCompatibility({
+      authoritative: false,
+      areas: [{ area_id: "legacy-area", camera_id: "camera-a" }],
+      objectClass: "person",
+      options,
+    }),
+  );
+});
+
+test("descoberta de ocupação mantém snapshot como fallback do catálogo novo", async () => {
+  const from = new Date("2026-08-03T12:00:00.000Z");
+  const to = new Date("2026-08-03T13:00:00.000Z");
+  const areaId = "camera-a|3|1|ocupacao|region";
+  const request = async (path) => {
+    if (path === "/occupancy/areas") {
+      const error = new Error("Rota ainda não publicada.");
+      error.status = 404;
+      throw error;
+    }
+    if (path === "/cameras") {
+      return [
+        {
+          active: true,
+          company_id: "company-a",
+          id: "camera-a",
+          name: "Câmera A",
+        },
+      ];
+    }
+    if (path === "/cameras/camera-a/line-counts") {
+      return [
+        {
+          active: true,
+          camera_id: "camera-a",
+          company_id: "company-a",
+          id: "line-entry-a",
+          line_code: "entrada",
+          metric_type: "count",
+          name: "Entrada",
+        },
+        {
+          active: true,
+          camera_id: "camera-a",
+          company_id: "company-a",
+          id: "legacy-region-a",
+          line_code: areaId,
+          metric_type: "count",
+          name: "Ocupação observada",
+        },
+      ];
+    }
+    if (path.startsWith("/occupancy?")) {
+      return {
+        data: [
+          {
+            area: areaId,
+            area_label: "Ocupação observada",
+            avg: 4,
+            camera_id: "camera-a",
+            current_at: "2026-08-03T12:30:00.000Z",
+            current_value: 4,
+            min: 4,
+            object_class: "person",
+            peak: 4,
+          },
+        ],
+      };
+    }
+    throw new Error(`Rota inesperada: ${path}`);
+  };
+
+  const catalog = await occupancyAreaOptions.fetchOccupancyAreaCatalog({
+    companyId: "company-a",
+    from,
+    request,
+    to,
+  });
+  const options = catalog.options;
+
+  assert.equal(catalog.authoritative, false);
+  assert.equal(options.length, 1);
+  assert.equal(options[0].area_id, areaId);
+  assert.equal(options[0].label, "Ocupação observada / Câmera A");
+  assert.equal(options[0].object_class, "person");
+});
+
+test("fallback de ocupação não perde snapshots quando linhas aninhadas retornam 404", async () => {
+  const from = new Date("2026-08-03T12:00:00.000Z");
+  const to = new Date("2026-08-03T13:00:00.000Z");
+  const areaId = "camera-a|3|1|ocupacao1|region";
+  const request = async (path) => {
+    if (path === "/occupancy/areas") {
+      const error = new Error("Rota ainda não publicada.");
+      error.status = 405;
+      throw error;
+    }
+    if (path === "/cameras") {
+      return [
+        {
+          active: true,
+          company_id: "company-a",
+          id: "camera-a",
+          name: "Câmera A",
+        },
+      ];
+    }
+    if (path === "/cameras/camera-a/line-counts") {
+      const error = new Error("Rota indisponível no escopo selecionado.");
+      error.status = 404;
+      throw error;
+    }
+    if (path.startsWith("/occupancy?")) {
+      return {
+        data: [
+          {
+            area: areaId,
+            avg: 4,
+            camera_id: "camera-a",
+            current_at: "2026-08-03T12:30:00.000Z",
+            current_value: 4,
+            min: 4,
+            object_class: "person",
+            peak: 4,
+          },
+        ],
+      };
+    }
+    throw new Error(`Rota inesperada: ${path}`);
+  };
+
+  const catalog = await occupancyAreaOptions.fetchOccupancyAreaCatalog({
+    companyId: "company-a",
+    from,
+    request,
+    to,
+  });
+
+  assert.equal(catalog.authoritative, false);
+  assert.deepEqual(catalog.options, [
+    {
+      area_id: areaId,
+      camera_id: "camera-a",
+      detail: `${areaId} / camera-a`,
+      key: JSON.stringify(["camera-a", areaId]),
+      label: "ocupacao1 / Câmera A",
+      object_class: "person",
+    },
+  ]);
+});
+
+test("identidades opacas de ocupação não colidem e classes conflitantes falham", () => {
+  assert.notEqual(
+    occupancyAreas.buildOccupancyAreaKey("camera::a", "area"),
+    occupancyAreas.buildOccupancyAreaKey("camera", "a::area"),
+  );
+
+  const merged = occupancyAreas.buildOccupancyAreaOptions([
+    {
+      area: "area-a",
+      camera_id: "camera-a",
+      object_class: undefined,
+    },
+    {
+      area: "area-a",
+      camera_id: "camera-a",
+      object_class: "person",
+    },
+  ]);
+  assert.equal(merged[0].object_class, "person");
+  assert.throws(
+    () =>
+      occupancyAreas.buildOccupancyAreaOptions([
+        {
+          area: "area-a",
+          camera_id: "camera-a",
+          object_class: "person",
+        },
+        {
+          area: "area-a",
+          camera_id: "camera-a",
+          object_class: "vehicle",
+        },
+      ]),
+    /divergiram sobre a classe/,
+  );
+});
+
 test("lista de cenários de ocupação exige contrato completo e único", () => {
   const valid = {
     active: true,
@@ -1316,6 +4573,13 @@ test("lista de cenários de ocupação exige contrato completo e único", () => 
   assert.throws(
     () =>
       occupancyValidation.requireOccupancyScenarioRows({
+        data: [{ ...valid, object_class: "Person" }],
+      }),
+    /object_class não normalizado/,
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancyScenarioRows({
         data: [
           {
             ...valid,
@@ -1338,6 +4602,32 @@ test("lista de cenários de ocupação exige contrato completo e único", () => 
         data: [{ ...valid, areas: [] }],
       }),
     /sem nenhuma área/,
+  );
+});
+
+test("cenário de ocupação implícito não atravessa a empresa autenticada", () => {
+  const scenario = {
+    active: true,
+    areas: [{ area_id: "area-a", camera_id: "camera-a" }],
+    id: "occupancy-jwt",
+    name: "Ocupação JWT",
+    object_class: "person",
+  };
+
+  assert.equal(
+    occupancyValidation.requireOccupancyScenarioRows(
+      { data: [scenario] },
+      "company-a",
+    )[0].company_id,
+    "company-a",
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancyScenarioRows(
+        { data: [{ ...scenario, company_id: "company-b" }] },
+        "company-a",
+      ),
+    /fora da empresa autenticada "company-a"/,
   );
 });
 
@@ -1372,6 +4662,58 @@ test("snapshots de ocupação válidos preservam zero explícito", () => {
       peak: rows[0].peak,
     },
     { average: 0, current: 0, minimum: 0, peak: 0 },
+  );
+});
+
+test("descoberta câmera-linha-área aceita escopo JWT implícito e rejeita conflito", async () => {
+  const from = new Date("2026-07-22T10:00:00Z");
+  const to = new Date("2026-07-22T11:00:00Z");
+  let foreignLine = false;
+  const request = async (path) => {
+    if (path === "/occupancy/areas") {
+      const error = new Error("not found");
+      error.status = 404;
+      throw error;
+    }
+    if (path === "/cameras") {
+      return [{ active: true, id: "camera-jwt", name: "Câmera JWT" }];
+    }
+    if (path === "/cameras/camera-jwt/line-counts") {
+      return [
+        {
+          active: true,
+          camera_id: "camera-jwt",
+          ...(foreignLine ? { company_id: "company-b" } : {}),
+          id: "line-area-jwt",
+          line_code: "camera-jwt|3|1|ocupacao|region",
+          metric_type: "occupancy",
+          name: "Área JWT",
+        },
+      ];
+    }
+    if (path.startsWith("/occupancy?")) return { data: [] };
+    throw new Error(`Rota inesperada: ${path}`);
+  };
+
+  const options = await occupancyAreaOptions.fetchOccupancyAreaOptions({
+    companyId: "company-a",
+    from,
+    request,
+    to,
+  });
+  assert.equal(options.length, 1);
+  assert.equal(options[0].camera_id, "camera-jwt");
+  assert.equal(options[0].area_id, "camera-jwt|3|1|ocupacao|region");
+
+  foreignLine = true;
+  await assert.rejects(
+    occupancyAreaOptions.fetchOccupancyAreaOptions({
+      companyId: "company-a",
+      from,
+      request,
+      to,
+    }),
+    /fora da empresa autenticada "company-a"/,
   );
 });
 
@@ -1464,6 +4806,23 @@ test("snapshots de ocupação rejeitam envelope, valores e identidades ambíguas
         scope,
       ),
     /fora do bucket/,
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancySnapshotRows(
+        [{ ...valid, current_at: "2026-07-22 10:30:00" }],
+        scope,
+      ),
+    /current_at.*inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancySnapshotRows(
+        [{ ...valid, current_at: "2026-07-22T09:30:00Z" }],
+        scope,
+      ),
+    /fora do bucket/,
+    "o limite inferior também deve pertencer ao bucket solicitado",
   );
   assert.throws(
     () =>
@@ -1683,6 +5042,289 @@ test("resumo de ocupação preserva zero atual e não certifica ausência", () =
       minimum: null,
       peak: null,
     },
+  );
+});
+
+test("troca de área atualiza o rótulo padrão e preserva rótulo customizado", () => {
+  assert.equal(
+    occupancyAreas.resolveOccupancyAreaSelectionLabel({
+      currentLabel: "ocupacao1 / aeroporto",
+      currentOptionLabel: "ocupacao1 / aeroporto",
+      nextOptionLabel: "ocupacao2 / aeroporto",
+    }),
+    "ocupacao2 / aeroporto",
+  );
+  assert.equal(
+    occupancyAreas.resolveOccupancyAreaSelectionLabel({
+      currentLabel: "Vitrine principal",
+      currentOptionLabel: "ocupacao1 / aeroporto",
+      nextOptionLabel: "ocupacao2 / aeroporto",
+    }),
+    "Vitrine principal",
+  );
+});
+
+test("indicadores de hoje usam o bucket diário certificado, não a média das horas", () => {
+  const dailyMetric = occupancyMetrics.latestOccupancyMetric([
+    { average: 6, current: null, minimum: 1, peak: 11 },
+    { average: 8.4, current: null, minimum: 2, peak: 14 },
+  ]);
+  const unsafeHourlySummary = occupancyMetrics.summarizeOccupancyMetrics([
+    { average: 6, current: null, minimum: 1, peak: 11 },
+    { average: 14, current: null, minimum: 10, peak: 18 },
+  ]);
+
+  assert.deepEqual(dailyMetric, {
+    average: 8.4,
+    current: null,
+    minimum: 2,
+    peak: 14,
+  });
+  assert.equal(unsafeHourlySummary.average, 10);
+  assert.notEqual(dailyMetric.average, unsafeHourlySummary.average);
+});
+
+test("eixo horário de ocupação mantém 24 slots sem inventar futuro", () => {
+  const day = new Date(2026, 6, 22);
+  const points = occupancyHourAxis.buildFixedOccupancyHourlyPoints(day, [
+    {
+      average: 2,
+      bucket: new Date(2026, 6, 22, 0).toISOString(),
+      current: 3,
+      label: "00h",
+      minimum: 1,
+      peak: 4,
+    },
+    {
+      average: 5,
+      bucket: new Date(2026, 6, 22, 10).toISOString(),
+      current: 6,
+      label: "10h",
+      minimum: 2,
+      peak: 8,
+    },
+  ]);
+
+  assert.equal(points.length, 24);
+  assert.equal(points[0].label, "00h");
+  assert.equal(points[23].label, "23h–24h");
+  assert.equal(points[10].peak, 8);
+  assert.deepEqual(
+    points
+      .slice(11)
+      .map((point) => [
+        point.average,
+        point.current,
+        point.minimum,
+        point.peak,
+      ]),
+    Array.from({ length: 13 }, () => [null, null, null, null]),
+  );
+  assert.deepEqual(
+    [points[1].average, points[1].current, points[1].minimum, points[1].peak],
+    [null, null, null, null],
+    "uma hora ausente continua sem valor; o eixo não a converte em zero",
+  );
+});
+
+test("eixo horário consolida hora DST repetida sem somar nem perder o pico", () => {
+  const previousTimeZone = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  try {
+    const points = occupancyHourAxis.buildFixedOccupancyHourlyPoints(
+      new Date("2026-11-01T04:00:00Z"),
+      [
+        {
+          average: 3,
+          bucket: "2026-11-01T05:00:00.000Z",
+          current: 4,
+          label: "01h",
+          minimum: 1,
+          peak: 7,
+        },
+        {
+          average: 5,
+          bucket: "2026-11-01T06:00:00.000Z",
+          current: 6,
+          label: "01h",
+          minimum: 2,
+          peak: 9,
+        },
+      ],
+    );
+
+    assert.equal(points.length, 24);
+    assert.deepEqual(points[1], {
+      average: null,
+      bucket: "2026-11-01T06:00:00.000Z",
+      current: 6,
+      label: "01h",
+      minimum: 1,
+      peak: 9,
+    });
+  } finally {
+    if (previousTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimeZone;
+  }
+});
+
+test("Cenário e Relatórios fixam o eixo depois da consulta horária parcial", () => {
+  for (const relativePath of [
+    "components/app/occupancy-scenario-dashboard.tsx",
+    "components/app/occupancy-reports-dashboard.tsx",
+  ]) {
+    const source = readFileSync(resolve(projectRoot, relativePath), "utf8");
+    assert.match(source, /to: hourEnd/);
+    assert.match(
+      source,
+      /buildFixedOccupancyHourlyPoints\(definition\.from, points\)/,
+    );
+  }
+});
+
+test("comparativo semanal preserva um bucket temporal exato por semana exibida", () => {
+  const currentBuckets = [
+    new Date(2026, 3, 20),
+    new Date(2026, 3, 27),
+    new Date(2026, 4, 4),
+    new Date(2026, 4, 11),
+  ];
+  const comparisonBuckets =
+    occupancyReportComparison.occupancyComparisonBucketStarts({
+      bucketStarts: currentBuckets,
+      granularity: "week",
+      intradayComparison: "yesterday",
+    });
+  const localParts = (date) => [
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+  ];
+
+  assert.equal(comparisonBuckets.length, currentBuckets.length);
+  assert.deepEqual(comparisonBuckets.map(localParts), [
+    [2026, 2, 23],
+    [2026, 2, 30],
+    [2026, 3, 6],
+    [2026, 3, 13],
+  ]);
+});
+
+test("comparativo semanal permanece único e monotônico nas viradas de mês", () => {
+  const comparisonBuckets =
+    occupancyReportComparison.occupancyComparisonBucketStarts({
+      bucketStarts: Array.from(
+        { length: 60 },
+        (_, index) => new Date(2026, 0, 5 + index * 7),
+      ),
+      granularity: "week",
+      intradayComparison: "yesterday",
+    });
+
+  assert.equal(new Set(comparisonBuckets.map(Number)).size, 60);
+  comparisonBuckets.slice(1).forEach((bucket, index) => {
+    const previous = comparisonBuckets[index];
+    assert.equal(bucket.getDay(), 1);
+    assert.equal(
+      Math.round((bucket.getTime() - previous.getTime()) / (24 * 60 * 60 * 1000)),
+      7,
+    );
+  });
+});
+
+test("comparativo horário preserva instantes DST repetidos sem duplicar o destino", () => {
+  const previousTimeZone = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  try {
+    const fallbackSource = [
+      "2026-11-01T04:00:00Z",
+      "2026-11-01T05:00:00Z",
+      "2026-11-01T06:00:00Z",
+      "2026-11-01T07:00:00Z",
+    ].map((value) => new Date(value));
+    const normalTarget =
+      occupancyReportComparison.occupancyComparisonBucketStarts({
+        bucketStarts: fallbackSource,
+        granularity: "hour",
+        intradayComparison: "yesterday",
+      });
+
+    assert.equal(new Set(normalTarget.map(Number)).size, normalTarget.length);
+    assert.deepEqual(normalTarget.map((date) => date.getHours()), [0, 1, 2]);
+
+    const normalSource = [
+      "2026-11-02T05:00:00Z",
+      "2026-11-02T06:00:00Z",
+      "2026-11-02T07:00:00Z",
+    ].map((value) => new Date(value));
+    const fallbackTarget =
+      occupancyReportComparison.occupancyComparisonBucketStarts({
+        bucketStarts: normalSource,
+        granularity: "hour",
+        intradayComparison: "yesterday",
+      });
+
+    assert.equal(
+      new Set(fallbackTarget.map(Number)).size,
+      fallbackTarget.length,
+    );
+    assert.deepEqual(fallbackTarget.map((date) => date.getHours()), [0, 1, 1, 2]);
+    assert.deepEqual(
+      fallbackTarget.map((date) => date.toISOString()),
+      [
+        "2026-11-01T04:00:00.000Z",
+        "2026-11-01T05:00:00.000Z",
+        "2026-11-01T06:00:00.000Z",
+        "2026-11-01T07:00:00.000Z",
+      ],
+    );
+  } finally {
+    if (previousTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimeZone;
+  }
+});
+
+test("comparativos mensal, semestral e anual preservam o bucket equivalente", () => {
+  const parts = (date) => [date.getFullYear(), date.getMonth(), date.getDate()];
+
+  assert.deepEqual(
+    occupancyReportComparison
+      .occupancyComparisonBucketStarts({
+        bucketStarts: [new Date(2026, 0, 1), new Date(2026, 11, 1)],
+        granularity: "month",
+        intradayComparison: "yesterday",
+      })
+      .map(parts),
+    [[2025, 0, 1], [2025, 11, 1]],
+  );
+  assert.deepEqual(
+    occupancyReportComparison
+      .occupancyComparisonBucketStarts({
+        bucketStarts: [new Date(2026, 0, 1), new Date(2026, 6, 1)],
+        granularity: "semester",
+        intradayComparison: "yesterday",
+      })
+      .map(parts),
+    [[2025, 0, 1], [2025, 6, 1]],
+  );
+  assert.deepEqual(
+    occupancyReportComparison
+      .occupancyComparisonBucketStarts({
+        bucketStarts: [new Date(2024, 0, 1), new Date(2025, 0, 1)],
+        granularity: "year",
+        intradayComparison: "yesterday",
+      })
+      .map(parts),
+    [[2023, 0, 1], [2024, 0, 1]],
+  );
+  assert.throws(
+    () =>
+      occupancyReportComparison.occupancyComparisonBucketStart(
+        new Date(2024, 1, 29),
+        "month",
+        "yesterday",
+      ),
+    /não está alinhado/,
   );
 });
 
@@ -3564,6 +7206,997 @@ test("ocupação histórica do modelo respeita o início configurado até 23h", 
   });
 });
 
+test("proxy de snapshots preserva erro e nunca converte ausência em zero", async () => {
+  const routeSource = readFileSync(
+    resolve(projectRoot, "app/api/v1/occupancy/snapshots/route.ts"),
+    "utf8",
+  );
+  assert.match(routeSource, /resolveOccupancySnapshotsProxyResult\(response\)/);
+  assert.doesNotMatch(routeSource, /status === 404|status === 405|data: \[\]/);
+
+  const unavailable =
+    await occupancySnapshotsProxy.resolveOccupancySnapshotsProxyResult(null);
+  assert.equal(unavailable.status, 502);
+  assert.equal(Object.hasOwn(unavailable.payload, "data"), false);
+
+  const notFound =
+    await occupancySnapshotsProxy.resolveOccupancySnapshotsProxyResult(
+      new Response(JSON.stringify({ error: "rota ausente" }), {
+        headers: { "content-type": "application/json" },
+        status: 404,
+      }),
+    );
+  assert.deepEqual(notFound, {
+    payload: { error: "rota ausente" },
+    status: 404,
+  });
+
+  const methodNotAllowed =
+    await occupancySnapshotsProxy.resolveOccupancySnapshotsProxyResult(
+      new Response("método ausente", { status: 405 }),
+    );
+  assert.equal(methodNotAllowed.status, 405);
+  assert.equal(Object.hasOwn(methodNotAllowed.payload, "data"), false);
+
+  const invalidSuccess =
+    await occupancySnapshotsProxy.resolveOccupancySnapshotsProxyResult(
+      new Response("resposta inválida", { status: 200 }),
+    );
+  assert.equal(invalidSuccess.status, 502);
+  assert.equal(Object.hasOwn(invalidSuccess.payload, "data"), false);
+
+  const nullSuccess =
+    await occupancySnapshotsProxy.resolveOccupancySnapshotsProxyResult(
+      new Response("null", {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      }),
+    );
+  assert.equal(nullSuccess.status, 502);
+  assert.equal(Object.hasOwn(nullSuccess.payload, "data"), false);
+
+  const certified =
+    await occupancySnapshotsProxy.resolveOccupancySnapshotsProxyResult(
+      new Response(JSON.stringify({ data: [{ total: 0 }] }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      }),
+    );
+  assert.deepEqual(certified, {
+    payload: { data: [{ total: 0 }] },
+    status: 200,
+  });
+});
+
+test("exportação não transforma corte temporal ausente no relógio do navegador", () => {
+  const exportSource = readFileSync(
+    resolve(projectRoot, "lib/report-export.ts"),
+    "utf8",
+  );
+  const occupancyReportsSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(exportSource, /dataCompleteUntil: Date \| null/);
+  assert.match(exportSource, /Corte temporal não certificado/);
+  assert.doesNotMatch(
+    exportSource,
+    /dataCompleteUntil\s*\?\?\s*payload\.generatedAt/,
+  );
+  assert.match(
+    occupancyReportsSource,
+    /resolveCertifiedOccupancyDataCutoff\(\s*reportCertificationSources/,
+  );
+  assert.match(
+    occupancyReportsSource,
+    /reportDataCompleteUntil === null/,
+  );
+});
+
+test("análise por período não reinicia uma consulta ainda em andamento", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /const refreshWhenIdle = \(\) => \{[\s\S]*?requestRef\.current !== null[\s\S]*?return;[\s\S]*?setQueryVersion/,
+    "o timer deve pular o tick enquanto a consulta anterior estiver ativa",
+  );
+  assert.match(
+    source,
+    /setInterval\([\s\S]*?refreshWhenIdle[\s\S]*?LIVE_ANALYSIS_REFRESH_MS/,
+  );
+});
+
+test("visão embutida separa metadados do polling ao vivo e aborta escopos antigos", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/embedded-live-view.tsx"),
+    "utf8",
+  );
+  const dataStart = source.indexOf("  const loadData = React.useCallback");
+  const metadataStart = source.indexOf("  const loadMetadata = React.useCallback");
+  const effectsStart = source.indexOf("  React.useEffect(() => {", metadataStart);
+
+  assert.ok(dataStart >= 0 && metadataStart > dataStart && effectsStart > metadataStart);
+  const dataLoader = source.slice(dataStart, metadataStart);
+  const metadataLoader = source.slice(metadataStart, effectsStart);
+
+  assert.doesNotMatch(
+    dataLoader,
+    /request<unknown>\("\/(?:scenarios|cameras|locations|workers)"\)/,
+    "o ciclo de 5 s não deve recarregar catálogos",
+  );
+  assert.match(metadataLoader, /request<unknown>\("\/scenarios"\)/);
+  assert.match(metadataLoader, /request<unknown>\("\/cameras"\)/);
+  assert.match(metadataLoader, /request<unknown>\("\/locations"\)/);
+  assert.match(dataLoader, /signal: controller\.signal/);
+  assert.match(metadataLoader, /signal: controller\.signal/);
+  assert.match(dataLoader, /metadataSnapshotRef\.current !== metadataSnapshot/);
+  assert.match(
+    metadataLoader,
+    /viewIdentityKeyRef\.current !== requestedIdentityKey/,
+  );
+  assert.match(
+    source,
+    /setInterval\([\s\S]*?refreshMetadataWhenVisible[\s\S]*?RESOURCE_METADATA_REFRESH_INTERVAL_MS/,
+  );
+  assert.match(
+    source,
+    /setInterval\([\s\S]*?refreshDataWhenVisible[\s\S]*?REFRESH_SECONDS \* 1000/,
+  );
+  assert.match(source, /metadataRequestControllerRef\.current\?\.abort\(\)/);
+  assert.match(source, /dataRequestControllerRef\.current\?\.abort\(\)/);
+  assert.match(
+    dataLoader,
+    /fetchHourlyAggregateRanges\([\s\S]*?signal: controller\.signal/,
+    "o cache horário mais novo deve continuar abortável",
+  );
+});
+
+test("metadados de exportação usam o último instante realmente coberto", () => {
+  const scenarioDataCompleteUntil = loadStandaloneFunction(
+    "components/app/scenario-reports-dashboard.tsx",
+    "scenarioReportDataCompleteUntil",
+  );
+  const analysisDataCompleteUntil = loadStandaloneFunction(
+    "components/app/period-analysis-dashboard.tsx",
+    "periodAnalysisDataCompleteUntil",
+  );
+  const period = {
+    from: new Date("2026-07-01T00:00:00.000Z"),
+    to: new Date("2026-08-01T00:00:00.000Z"),
+  };
+
+  assert.equal(
+    scenarioDataCompleteUntil(
+      period,
+      new Date("2026-08-11T12:00:00.000Z"),
+    ).toISOString(),
+    "2026-07-31T23:59:59.999Z",
+    "período histórico deve terminar em to - 1 ms",
+  );
+  assert.equal(
+    scenarioDataCompleteUntil(
+      period,
+      new Date("2026-07-22T12:34:56.789Z"),
+    ).toISOString(),
+    "2026-07-22T12:34:56.789Z",
+    "período aberto deve terminar no menor valor entre agora e to - 1 ms",
+  );
+  assert.equal(
+    analysisDataCompleteUntil(
+      period,
+      new Date("2026-08-11T12:00:00.000Z"),
+    ).toISOString(),
+    "2026-07-31T23:59:59.999Z",
+    "a análise não pode publicar 00:00 como fim inclusivo",
+  );
+  assert.equal(
+    analysisDataCompleteUntil(
+      period,
+      new Date("2026-07-22T12:34:56.789Z"),
+    ).toISOString(),
+    "2026-07-22T12:34:56.789Z",
+    "a análise aberta deve publicar somente o instante já coberto",
+  );
+
+  const reportsSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const analysisSource = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(
+    reportsSource,
+    /const generatedAt = new Date\(\);[\s\S]*?generatedAt,[\s\S]*?scenarioReportDataCompleteUntil\([\s\S]*?effectivePeriodDates,[\s\S]*?generatedAt/,
+    "generatedAt deve representar a geração, separado do corte dos dados",
+  );
+  assert.doesNotMatch(
+    analysisSource,
+    /dataCompleteUntil:\s*addDays\(period\.to,\s*-1\)/,
+  );
+});
+
+test("análise por período envia empresa e abort signal em toda consulta", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+
+  for (const path of ["scenarios", "cameras", "locations"]) {
+    assert.match(
+      source,
+      new RegExp(
+        `apiFetch<unknown>\\("/${path}", \\{[\\s\\S]*?companyScopeId: requestCompanyScopeId,[\\s\\S]*?signal: controller\\.signal`,
+      ),
+      `/${path} deve receber o escopo selecionado e o cancelamento`,
+    );
+  }
+  assert.match(
+    source,
+    /`\/locations\/\$\{location\.id\}\/sub-locations`,[\s\S]*?companyScopeId: companyScopeId\?\.trim\(\) \|\| undefined,[\s\S]*?signal/,
+    "sub-locations também deve usar a empresa e o mesmo cancelamento",
+  );
+  assert.equal(
+    source.match(/`\/analytics\/aggregate\?/g)?.length,
+    1,
+    "todas as agregações da análise devem passar pelo helper certificado",
+  );
+  assert.match(
+    source,
+    /function fetchAnalysisAggregate\([\s\S]*?companyScopeId\?: string \| null,[\s\S]*?signal\?: AbortSignal[\s\S]*?`\/analytics\/aggregate\?\$\{params\.toString\(\)\}`,[\s\S]*?companyScopeId: companyScopeId\?\.trim\(\) \|\| undefined,[\s\S]*?signal/,
+    "o helper agregado deve preservar simultaneamente escopo e abort signal",
+  );
+  assert.ok(
+    source.match(/companyScopeId,\s*controller\.signal/g)?.length >= 3,
+    "cada dataset agregado deve receber o escopo efetivo",
+  );
+});
+
+test("exportação da Ocupação Ao Vivo inclui os oito comparativos configurados", () => {
+  const dashboardSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const reportBuilderSource = comparisonSource.slice(
+    comparisonSource.indexOf("function buildOccupancyComparisonReportAssets"),
+    comparisonSource.indexOf("function OccupancyHalfDonutCard"),
+  );
+  const expectedCardIds = [
+    "occupancy_scenario_half_donut",
+    "occupancy_scenario_bar_race",
+    "occupancy_scenario_max_hour",
+    "occupancy_scenario_max_month",
+    "occupancy_scenario_max_year",
+    "occupancy_hex_layout",
+    "occupancy_day_hour_heatmap",
+    "occupancy_scenario_hour_heatmap",
+  ];
+
+  for (const cardId of expectedCardIds) {
+    assert.match(
+      reportBuilderSource,
+      new RegExp(`cardId: "${cardId}"`),
+      `${cardId} precisa gerar um asset de relatório`,
+    );
+  }
+  assert.match(reportBuilderSource, /theme = "light" as const/);
+  assert.doesNotMatch(
+    reportBuilderSource,
+    /occupancy:\s*entry\.total\s*\?\?|value:\s*cell\.value\s*\?\?/,
+    "as tabelas do relatório não podem converter ausência certificada em zero",
+  );
+  assert.match(
+    reportBuilderSource,
+    /cell\.value === null \? "Sem bucket certificado" : "Certificado"/,
+  );
+  assert.match(
+    comparisonSource,
+    /dateKey=\{scenarioHourHeatmapDateKey\}[\s\S]*?onDateKeyChange=\{\(scenarioHourHeatmapDateKey\) =>[\s\S]*?updateSettings\(\{ scenarioHourHeatmapDateKey \}\)/,
+    "a data exibida no heatmap cenários x horários deve ser a mesma persistida e exportada",
+  );
+  assert.match(
+    dashboardSource,
+    /reportAssets: occupancyComparisonReportAssets[\s\S]*?occupancyComparisonReportAssets\.forEach\(\(\{ cardId, chart \}\) =>/,
+    "o relatório deve incorporar os assets usando as preferências de ordem, visibilidade e título",
+  );
+});
+
+test("calendário de ocupação expõe uma grade ARIA de sete colunas", () => {
+  const picker = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-date-range-picker.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    picker,
+    /role="grid"[\s\S]*?aria-labelledby=\{monthLabelId\}[\s\S]*?aria-colcount=\{7\}/,
+  );
+  assert.match(
+    picker,
+    /role="grid"[\s\S]*?role="row"[\s\S]*?role="columnheader"/,
+    "os cabeçalhos dos dias devem pertencer a uma linha da grade",
+  );
+  assert.match(
+    picker,
+    /role="rowgroup"[\s\S]*?Array\.from\(\{ length: 6 \}[\s\S]*?role="row"[\s\S]*?role="gridcell"/,
+    "as 42 posições devem estar agrupadas em seis semanas válidas",
+  );
+  assert.doesNotMatch(
+    picker,
+    /role="gridcell"\s+aria-hidden/,
+    "células vazias não podem desaparecer da estrutura de sete colunas",
+  );
+});
+
+test("calendário mantém navegação por teclado no mês visível em telas móveis", () => {
+  const picker = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-date-range-picker.tsx"),
+    "utf8",
+  );
+
+  assert.match(picker, /calendarRootRef = React\.useRef/);
+  assert.match(picker, /window\.matchMedia\("\(min-width: 768px\)"\)\.matches/);
+  assert.match(
+    picker,
+    /desktopCalendar[\s\S]*?: !sameMonth\(nextDate, visibleMonth\)[\s\S]*?setVisibleMonth\(nextMonth\)/,
+  );
+  assert.match(picker, /focusCalendarDate\(calendarRootRef\.current, nextInput\)/);
+  assert.doesNotMatch(picker, /document\s*\.querySelector<HTMLButtonElement>/);
+});
+
+test("presets legados de ocupação migram isolados por superfície", () => {
+  const storage = memoryStorage();
+  const previousWindow = globalThis.window;
+  const previousCustomEvent = globalThis.CustomEvent;
+  globalThis.CustomEvent = class CustomEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  };
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  const preset = (id, scopeId) => ({
+    createdAt: "2026-08-11T12:00:00.000Z",
+    id,
+    isDefault: false,
+    name: id,
+    snapshot: {
+      cardIds: [`card-${id}`],
+      capturedAt: "2026-08-11T12:00:00.000Z",
+      menuKey: "occupancy",
+      preferences: [],
+      sourceScope: { id: scopeId, name: scopeId },
+      storage: [],
+      version: 1,
+    },
+    updatedAt: "2026-08-11T12:00:00.000Z",
+  });
+
+  try {
+    widgetViewPresets.saveWidgetViewPresets(
+      "occupancy",
+      [
+        preset("live", "scenario-a"),
+        preset("analysis", "analysis:scenario-a"),
+        preset("reports", "reports:scenario-a"),
+      ],
+      "company-a",
+      "user-a",
+    );
+
+    assert.deepEqual(
+      widgetViewPresets
+        .loadWidgetViewPresets(
+          "occupancy",
+          "company-a",
+          "user-a",
+          "occupancy-live",
+        )
+        .map(({ id }) => id),
+      ["live"],
+    );
+    assert.deepEqual(
+      widgetViewPresets
+        .loadWidgetViewPresets(
+          "occupancy",
+          "company-a",
+          "user-a",
+          "occupancy-analysis",
+        )
+        .map(({ id }) => id),
+      ["analysis"],
+    );
+    assert.deepEqual(
+      widgetViewPresets
+        .loadWidgetViewPresets(
+          "occupancy",
+          "company-a",
+          "user-a",
+          "occupancy-reports",
+        )
+        .map(({ id }) => id),
+      ["reports"],
+    );
+
+    widgetViewPresets.deleteWidgetViewPreset(
+      "occupancy",
+      "analysis",
+      "company-a",
+      "user-a",
+      "occupancy-analysis",
+    );
+    assert.equal(
+      widgetViewPresets.loadWidgetViewPresets(
+        "occupancy",
+        "company-a",
+        "user-a",
+        "occupancy-analysis",
+      ).length,
+      0,
+    );
+    assert.equal(
+      widgetViewPresets.loadWidgetViewPresets(
+        "occupancy",
+        "company-a",
+        "user-a",
+        "occupancy-reports",
+      ).length,
+      1,
+    );
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    if (previousCustomEvent === undefined) delete globalThis.CustomEvent;
+    else globalThis.CustomEvent = previousCustomEvent;
+  }
+});
+
+test("dashboards de ocupação selecionam o namespace de preset da própria superfície", () => {
+  const layoutSource = readFileSync(
+    resolve(projectRoot, "components/app/card-layout.tsx"),
+    "utf8",
+  );
+  const reportsSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    layoutSource,
+    /menuKey === "occupancy" \? "occupancy-live" : menuKey/,
+  );
+  assert.match(
+    reportsSource,
+    /presetNamespace=\{[\s\S]*?analysis \? "occupancy-analysis" : "occupancy-reports"/,
+  );
+});
+
+test("bucket RFC3339 com offset permanece um instante absoluto", () => {
+  const bucket = aggregateTime.parseAggregateBucket(
+    "2026-07-22T13:15:30Z",
+    "hour",
+  );
+
+  assert.equal(bucket?.toISOString(), "2026-07-22T13:15:30.000Z");
+});
+
+test("as_of do bucket aberto fica entre o início e o instante solicitado", () => {
+  const openBucket = new Date(2026, 6, 22, 10, 0, 0, 0);
+  const requestedAt = new Date(openBucket.getTime() + 37 * 60_000);
+  const certifiedAt = new Date(openBucket.getTime() + 35 * 60_000);
+  const runtimeTimeZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const partialRow = {
+    bucket: "2026-07-22T10:00:00",
+    complete: false,
+    scenario_total_avg: 4,
+    scenario_total_final: 5,
+    scenario_total_max: 7,
+    scenario_total_min: 1,
+    status: "partial",
+  };
+  const partialResponse = {
+    as_of: certifiedAt.toISOString(),
+    complete: false,
+    data: [partialRow],
+    granularity: "hour",
+    scenario_id: "scenario-a",
+    status: "partial",
+    timezone: runtimeTimeZone,
+  };
+
+  assert.deepEqual(
+    occupancyAggregateValidation.requireOccupancyOpenBucketAsOf(
+      certifiedAt.toISOString(),
+      "hour",
+      openBucket,
+      requestedAt,
+    ),
+    certifiedAt,
+  );
+  assert.equal(
+    occupancyAggregateValidation.requireOccupancyAggregateRows(
+      partialResponse,
+      "hour",
+      "scenario-a",
+      runtimeTimeZone,
+      { openBucket, requestedAt, requireCertification: true },
+    ),
+    partialResponse.data,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          ...partialResponse,
+          as_of: new Date(requestedAt.getTime() + 1).toISOString(),
+        },
+        "hour",
+        "scenario-a",
+        runtimeTimeZone,
+        { openBucket, requestedAt, requireCertification: true },
+      ),
+    /fora da janela certificável/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyOpenBucketAsOf(
+        new Date(openBucket.getTime() - 1).toISOString(),
+        "hour",
+        openBucket,
+        requestedAt,
+      ),
+    /fora da janela certificável/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyOpenBucketAsOf(
+        new Date(requestedAt.getTime() + 1).toISOString(),
+        "hour",
+        openBucket,
+        requestedAt,
+      ),
+    /fora da janela certificável/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyOpenBucketAsOf(
+        certifiedAt.toISOString(),
+        "hour",
+        openBucket,
+        undefined,
+      ),
+    /instante solicitado é obrigatório/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyOpenBucketAsOf(
+        certifiedAt.toISOString(),
+        "hour",
+        openBucket,
+        new Date(openBucket.getTime() + 60 * 60_000),
+      ),
+    /não pertence ao bucket aberto/,
+  );
+});
+
+test("corte do relatório exige as_of RFC3339 em todas as fontes sem erro ou aviso", () => {
+  const cutoff =
+    occupancyAggregateValidation.resolveCertifiedOccupancyDataCutoff([
+      { asOf: "2026-07-22T13:35:00Z" },
+      { asOf: "2026-07-22T13:31:00Z" },
+      { asOf: "2026-07-22T13:33:00Z" },
+    ]);
+  assert.deepEqual(cutoff, new Date("2026-07-22T13:31:00Z"));
+
+  for (const sources of [
+    [],
+    [{ asOf: undefined }],
+    [{ asOf: "2026-07-22 13:31:00" }],
+    [{ asOf: "2026-02-30T13:31:00Z" }],
+    [{ asOf: "2026-07-22T13:31:00Z", error: "falha" }],
+    [{ asOf: "2026-07-22T13:31:00Z", warning: "parcial" }],
+  ]) {
+    assert.equal(
+      occupancyAggregateValidation.resolveCertifiedOccupancyDataCutoff(
+        sources,
+      ),
+      null,
+    );
+  }
+});
+
+test("descoberta de áreas preserva snapshots quando metadados legados não existem", async () => {
+  const from = new Date("2026-07-22T10:00:00Z");
+  const to = new Date("2026-07-22T11:00:00Z");
+  const areaId = "camera-a|3|1|ocupacao1|region";
+  const requestedPaths = [];
+  const request = async (path) => {
+    requestedPaths.push(path);
+    if (path === "/cameras") {
+      return [
+        {
+          active: true,
+          company_id: "company-a",
+          id: "camera-a",
+          name: "Câmera A",
+        },
+      ];
+    }
+    if (path === "/occupancy/areas") {
+      const error = new Error("not found");
+      error.status = 404;
+      throw error;
+    }
+    if (path === "/cameras/camera-a/line-counts") {
+      const error = new Error("not found");
+      error.status = 404;
+      throw error;
+    }
+    if (path.startsWith("/occupancy?")) {
+      return {
+        data: [
+          {
+            area: areaId,
+            avg: 4,
+            camera_id: "camera-a",
+            current_at: "2026-07-22T10:30:00Z",
+            current_value: 5,
+            min: 2,
+            object_class: "person",
+            peak: 8,
+          },
+        ],
+      };
+    }
+    throw new Error(`Rota inesperada: ${path}`);
+  };
+
+  const options = await occupancyAreaOptions.fetchOccupancyAreaOptions({
+    companyId: "company-a",
+    from,
+    request,
+    to,
+  });
+
+  assert.equal(options.length, 1);
+  assert.equal(options[0].area_id, areaId);
+  assert.equal(options[0].camera_id, "camera-a");
+  assert.equal(options[0].label, "ocupacao1 / Câmera A");
+  assert.deepEqual(requestedPaths.sort(), [
+    "/cameras",
+    "/cameras/camera-a/line-counts",
+    "/occupancy/areas",
+    "/occupancy?from=2026-07-22T10%3A00%3A00.000Z&to=2026-07-22T11%3A00%3A00.000Z",
+  ]);
+});
+
+test("rollup preserva transições IANA de uma hora e de trinta minutos", () => {
+  for (const [timezone, probe] of [
+    ["America/New_York", "fallback"],
+    ["Australia/Lord_Howe", "half-hour-forward"],
+  ]) {
+    const result = spawnSync(
+      process.execPath,
+      ["tests/timezone-reconciliation-probe.mjs", probe],
+      {
+        cwd: projectRoot,
+        encoding: "utf8",
+        env: { ...process.env, TZ: timezone },
+      },
+    );
+
+    assert.equal(
+      result.status,
+      0,
+      `${timezone}: ${result.stderr || result.stdout}`,
+    );
+  }
+});
+
+test("exportação da análise propaga o título personalizado para métricas e tabelas", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /metrics: models\.flatMap\(\(\{ defaultTitle, model, title \}\)[\s\S]*?title === defaultTitle[\s\S]*?metrics\.length === 1 \? title : `\$\{title\} · \$\{metric\.label\}`/,
+  );
+  assert.match(
+    source,
+    /tables: models\.flatMap\(\(\{ defaultTitle, model, title \}\)[\s\S]*?title: title === defaultTitle \? model\.table\.title : title/,
+  );
+});
+
+test("contagem bloqueia fuso divergente com mensagem compacta", () => {
+  const runtimeTimeZone = companyTimeZone.canonicalCompanyTimeZone(
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+  );
+  assert.ok(runtimeTimeZone);
+  assert.equal(
+    countingTimeZone.requireCountingRuntimeTimeZone(runtimeTimeZone),
+    runtimeTimeZone,
+  );
+
+  const differentTimeZone = ["UTC", "America/Sao_Paulo", "Asia/Tokyo"]
+    .map((candidate) => companyTimeZone.canonicalCompanyTimeZone(candidate))
+    .find((candidate) => candidate && candidate !== runtimeTimeZone);
+  assert.ok(differentTimeZone);
+  assert.throws(
+    () => countingTimeZone.requireCountingRuntimeTimeZone(differentTimeZone),
+    (error) =>
+      error instanceof Error &&
+      error.message ===
+        `Fuso incompatível: navegador ${runtimeTimeZone}; empresa ${differentTimeZone}. Ajuste o navegador.`,
+  );
+});
+
+test("dashboard bloqueia timezone padrão quando a empresa não o certificou", () => {
+  const runtimeTimeZone = companyTimeZone.canonicalCompanyTimeZone(
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+  );
+  assert.ok(runtimeTimeZone);
+  assert.equal(
+    companyTimeZone.requireCertifiedCompanyTimeZone({
+      fallback: false,
+      source: "selected-company",
+      timeZone: runtimeTimeZone,
+    }),
+    runtimeTimeZone,
+  );
+  assert.throws(
+    () =>
+      companyTimeZone.requireCertifiedCompanyTimeZone({
+        fallback: true,
+        source: "fallback",
+        timeZone: runtimeTimeZone,
+      }),
+    /Fuso da empresa não certificado/,
+  );
+});
+
+test("Ao Vivo, Análises, Relatórios e comparativos certificam o fuso antes da consulta", () => {
+  const sources = {
+    analysis: readFileSync(
+      resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+      "utf8",
+    ),
+    comparison: readFileSync(
+      resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+      "utf8",
+    ),
+    live: readFileSync(
+      resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+      "utf8",
+    ),
+    reports: readFileSync(
+      resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+      "utf8",
+    ),
+  };
+
+  for (const surface of ["analysis", "live", "reports"]) {
+    assert.match(
+      sources[surface],
+      /useEffectiveCompanyTimeZoneResolution\(user\)/,
+      `${surface} deve resolver o fuso da empresa selecionada`,
+    );
+    assert.match(
+      sources[surface],
+      /Consulta bloqueada: \{[a-zA-Z]+CertificationError\}/,
+      `${surface} deve exibir uma mensagem compacta`,
+    );
+  }
+
+  assert.match(
+    sources.live,
+    /companyTimeZoneResolution\.fallback/,
+    "Ao Vivo deve recusar fallback de timezone antes da consulta",
+  );
+  for (const surface of ["analysis", "reports"]) {
+    assert.match(
+      sources[surface],
+      /requireCertifiedCountingRuntimeTimeZone\(companyTimeZoneResolution\)/,
+      `${surface} deve exigir timezone certificado e compatível`,
+    );
+  }
+
+  assert.ok(
+    sources.reports.match(
+      /requireCertifiedCountingRuntimeTimeZone\(companyTimeZoneResolution\)/g,
+    )?.length >= 2,
+    "relatórios devem certificar carga inicial e atualização do período aberto",
+  );
+  assert.match(
+    sources.comparison,
+    /requireCountingRuntimeTimeZone\(companyTimeZone\);/,
+    "comparativos e suas exportações devem certificar o fuso",
+  );
+});
+
+test("compatibilidade legada só relaxa certificação de buckets instantâneos RFC3339", () => {
+  const legacyRows = [
+    {
+      bucket: "2026-07-22T13:00:00Z",
+      scenario_total_avg: 4,
+      scenario_total_max: 7,
+      scenario_total_min: 1,
+    },
+  ];
+  const legacyResponse = {
+    data: legacyRows,
+    granularity: "hour",
+    scenario_id: "scenario-a",
+  };
+  const compatibility = {
+    allowLegacyUncertifiedInstantBuckets: true,
+    requireCertification: true,
+  };
+
+  assert.equal(
+    occupancyAggregateValidation.requireOccupancyAggregateRows(
+      legacyResponse,
+      "hour",
+      "scenario-a",
+      "America/Sao_Paulo",
+      compatibility,
+    ),
+    legacyRows,
+  );
+  const totals =
+    occupancyAggregateValidation.aggregateOccupancyRowsByBucket(
+      legacyRows,
+      "hour",
+      compatibility,
+    );
+  const bucketKey = occupancyAggregateValidation.occupancyAggregateBucketKey(
+    new Date("2026-07-22T13:00:00Z"),
+    "hour",
+  );
+  assert.deepEqual(totals.get(bucketKey), {
+    average: 4,
+    minimum: 1,
+    peak: 7,
+  });
+  assert.equal(
+    occupancyAggregateValidation.occupancyAggregateMetadataWarning(
+      legacyResponse,
+      "hour",
+    )?.includes("provisório"),
+    true,
+  );
+
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          ...legacyResponse,
+          data: [{ ...legacyRows[0], bucket: "2026-07-22T10:00:00" }],
+        },
+        "hour",
+        "scenario-a",
+        "America/Sao_Paulo",
+        compatibility,
+      ),
+    /não informou (?:complete|status|as_of|o timezone)/,
+    "timestamp sem offset não pode ativar a compatibilidade legada",
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          ...legacyResponse,
+          data: [{ ...legacyRows[0], bucket: "2026-07-22T00:00:00Z" }],
+          granularity: "day",
+        },
+        "day",
+        "scenario-a",
+        "America/Sao_Paulo",
+        compatibility,
+      ),
+    /não informou (?:complete|status|as_of|o timezone)/,
+    "granularidade civil nunca pode usar o relaxamento legado",
+  );
+
+  for (const partialMetadata of [
+    { timezone: "America/Sao_Paulo" },
+    { complete: true },
+    { status: "complete" },
+    { as_of: "2026-07-22T14:00:00Z" },
+  ]) {
+    assert.throws(
+      () =>
+        occupancyAggregateValidation.requireOccupancyAggregateRows(
+          { ...legacyResponse, ...partialMetadata },
+          "hour",
+          "scenario-a",
+          "America/Sao_Paulo",
+          compatibility,
+        ),
+      /não informou (?:complete|status|as_of|o timezone)/,
+      "migração parcial do envelope deve continuar no contrato estrito",
+    );
+  }
+
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          as_of: "2026-07-22T14:00:00Z",
+          complete: true,
+          data: legacyRows,
+          granularity: "hour",
+          scenario_id: "scenario-a",
+          status: "complete",
+          timezone: "America/Sao_Paulo",
+        },
+        "hour",
+        "scenario-a",
+        "America/Sao_Paulo",
+        compatibility,
+      ),
+    /linha agregada de ocupação inválida/,
+    "envelope moderno deve continuar exigindo o valor final certificado",
+  );
+
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.aggregateOccupancyRowsByBucket(
+        [{ ...legacyRows[0], bucket: "2026-07-22T10:00:00" }],
+        "hour",
+        compatibility,
+      ),
+    /linha agregada de ocupação inválida/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.aggregateOccupancyRowsByBucket(
+        [{ ...legacyRows[0], bucket: "2026-07-22T00:00:00Z" }],
+        "day",
+        compatibility,
+      ),
+    /linha agregada de ocupação inválida/,
+  );
+});
+
+test("falha de uma série de ocupação não derruba o snapshot ao vivo nem libera exportação parcial", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /const occupancyCertificationError = metadataError \|\| dataLoadError;/,
+    "somente catálogo ou snapshot principal podem bloquear todo o módulo",
+  );
+  assert.match(
+    source,
+    /const hasIncompleteOccupancyCoverage = Object\.values\([\s\S]*?state\.error \|\| state\.warning/,
+    "erro ou lacuna de uma série deve permanecer rastreado localmente",
+  );
+  assert.match(
+    source,
+    /<ReportExportActions[\s\S]*?disabled=\{[\s\S]*?hasIncompleteOccupancyCoverage/,
+    "dados provisórios podem ser vistos, mas não exportados como certificados",
+  );
+});
+
 function loadTypeScriptModule(relativePath) {
   const filename = resolve(projectRoot, relativePath);
   const cached = moduleCache.get(filename);
@@ -3599,6 +8232,39 @@ function loadTypeScriptModule(relativePath) {
     filename,
     dirname(filename),
   );
+  return loadedModule.exports;
+}
+
+function loadStandaloneFunction(relativePath, functionName) {
+  const filename = resolve(projectRoot, relativePath);
+  const source = readFileSync(filename, "utf8");
+  const sourceFile = ts.createSourceFile(
+    filename,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const declaration = sourceFile.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === functionName,
+  );
+  assert.ok(declaration, `${functionName} deve existir em ${relativePath}`);
+
+  const output = ts.transpileModule(
+    `${declaration.getText(sourceFile)}\nmodule.exports = ${functionName};`,
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+      fileName: filename,
+    },
+  ).outputText;
+  const loadedModule = { exports: {} };
+  const execute = new Function("exports", "module", output);
+  execute(loadedModule.exports, loadedModule);
   return loadedModule.exports;
 }
 
@@ -3719,3 +8385,421 @@ function memoryStorage() {
     },
   };
 }
+test("layout hexagonal escala em lote para 40, 100 e 300 posições sem perder células", () => {
+  const initial = {
+    cells: [
+      {
+        column: 0,
+        id: "existing-a",
+        label: "Caixa especial",
+        row: 0,
+        scenarioId: "scenario-a",
+      },
+      {
+        column: 1,
+        id: "existing-b",
+        label: "Reserva",
+        row: 0,
+        scenarioId: null,
+      },
+    ],
+    columns: 4,
+    preset: "custom",
+    rows: 1,
+    version: 1,
+  };
+
+  const boxes = occupancyHexLayout.expandOccupancyHexLayout({
+    columns: 8,
+    labelPrefix: "Caixa",
+    layout: initial,
+    targetCellCount: 40,
+  });
+  assert.equal(boxes.added, 38);
+  assert.equal(boxes.layout.cells.length, 40);
+  assert.equal(boxes.layout.columns, 8);
+  assert.equal(boxes.layout.rows, 5);
+  assert.deepEqual(boxes.layout.cells[0], initial.cells[0]);
+  assert.equal(boxes.layout.cells[2].label, "Caixa 03");
+  assert.equal(boxes.layout.cells.at(-1).label, "Caixa 40");
+
+  const desks = occupancyHexLayout.expandOccupancyHexLayout({
+    columns: 10,
+    labelPrefix: "Mesa",
+    layout: boxes.layout,
+    targetCellCount: 100,
+  });
+  assert.equal(desks.added, 60);
+  assert.equal(desks.layout.cells.length, 100);
+  assert.equal(desks.layout.columns, 10);
+  assert.equal(desks.layout.rows, 10);
+
+  const parking = occupancyHexLayout.expandOccupancyHexLayout({
+    columns: 20,
+    labelPrefix: "Vaga",
+    layout: desks.layout,
+    targetCellCount: 300,
+  });
+  assert.equal(parking.added, 200);
+  assert.equal(parking.layout.cells.length, 300);
+  assert.equal(parking.layout.columns, 20);
+  assert.equal(parking.layout.rows, 15);
+  assert.equal(parking.layout.cells.at(-1).label, "Vaga 300");
+  assert.equal(
+    new Set(parking.layout.cells.map((cell) => `${cell.column}:${cell.row}`))
+      .size,
+    300,
+  );
+  assert.equal(
+    new Set(parking.layout.cells.map((cell) => cell.id)).size,
+    300,
+  );
+
+  const noShrink = occupancyHexLayout.expandOccupancyHexLayout({
+    columns: 20,
+    layout: parking.layout,
+    targetCellCount: 100,
+  });
+  assert.equal(noShrink.added, 0);
+  assert.equal(noShrink.layout.cells.length, 300);
+});
+
+test("layout hexagonal vincula cenários em lote usando reservas antes de criar células", () => {
+  const layout = occupancyHexLayout.expandOccupancyHexLayout({
+    columns: 4,
+    labelPrefix: "Mesa",
+    layout: {
+      cells: [
+        {
+          column: 0,
+          id: "bound",
+          label: "Gerência",
+          row: 0,
+          scenarioId: "scenario-a",
+        },
+      ],
+      columns: 4,
+      preset: "custom",
+      rows: 1,
+      version: 1,
+    },
+    targetCellCount: 4,
+  }).layout;
+  const reservedIds = layout.cells.slice(1).map((cell) => cell.id);
+  const result =
+    occupancyHexLayout.bindOccupancyHexScenariosToAvailableCells({
+      layout,
+      scenarioIds: [
+        "scenario-a",
+        "scenario-b",
+        "scenario-b",
+        "scenario-c",
+        "scenario-d",
+        "scenario-e",
+      ],
+    });
+
+  assert.equal(result.bound, 4);
+  assert.equal(result.created, 1);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.layout.cells.length, 5);
+  assert.deepEqual(
+    result.layout.cells.slice(1, 4).map((cell) => cell.id),
+    reservedIds,
+  );
+  assert.deepEqual(
+    result.layout.cells.map((cell) => cell.scenarioId),
+    ["scenario-a", "scenario-b", "scenario-c", "scenario-d", "scenario-e"],
+  );
+});
+
+test("viewport hexagonal aplica densidade e desliga animação para operações grandes", () => {
+  const boxes = occupancyHexLayout.occupancyHexViewportMetrics({
+    cellCount: 40,
+    columns: 8,
+    rows: 5,
+  });
+  const desks = occupancyHexLayout.occupancyHexViewportMetrics({
+    cellCount: 100,
+    columns: 10,
+    rows: 10,
+  });
+  const parking = occupancyHexLayout.occupancyHexViewportMetrics({
+    cellCount: 300,
+    columns: 20,
+    rows: 15,
+  });
+
+  assert.equal(boxes.density, "comfortable");
+  assert.equal(desks.density, "compact");
+  assert.equal(parking.density, "dense");
+  assert.equal(parking.showNames, false);
+  assert.equal(parking.showValues, true);
+  assert.ok(parking.height < 1_000);
+  assert.ok(parking.minimumWidth >= 20 * 48);
+  assert.equal(occupancyHexLayout.occupancyHexShouldAnimate(100), true);
+  assert.equal(occupancyHexLayout.occupancyHexShouldAnimate(300), false);
+  assert.equal(occupancyHexLayout.recommendedOccupancyHexColumns(300), 21);
+});
+
+test("normalização hexagonal rejeita excesso em vez de truncar dados silenciosamente", () => {
+  const overLimit = Array.from(
+    { length: occupancyHexLayout.OCCUPANCY_HEX_MAX_CELLS + 1 },
+    (_, index) => ({
+      column: index % 20,
+      id: `cell-${index}`,
+      label: "",
+      row: Math.floor(index / 20),
+      scenarioId: null,
+    }),
+  );
+  assert.equal(
+    occupancyHexLayout.normalizeOccupancyHexLayout({
+      cells: overLimit,
+      columns: 20,
+      preset: "custom",
+      rows: Math.ceil(overLimit.length / 20),
+      version: 1,
+    }),
+    null,
+  );
+  assert.throws(
+    () =>
+      occupancyHexLayout.expandOccupancyHexLayout({
+        columns: 20,
+        layout: {
+          cells: [],
+          columns: 20,
+          preset: "custom",
+          rows: 1,
+          version: 1,
+        },
+        targetCellCount: occupancyHexLayout.OCCUPANCY_HEX_MAX_CELLS + 1,
+      }),
+    /total do layout/,
+  );
+});
+
+
+test("hexbin aplica cores semânticas com contraste gráfico e textual nos dois temas", () => {
+  const semanticColors = {
+    occupied: "#0F766E",
+    unoccupied: "#B91C1C",
+  };
+  const maximum = {
+    capacity: 10,
+    cellId: "maximum",
+    colorRatio: 1,
+    overCapacity: false,
+    radiusRatio: 1,
+    state: "occupied",
+    total: 10,
+    valueRatio: 1,
+  };
+
+  for (const theme of ["light", "dark"]) {
+    const palette = occupancyHexPalette.getOccupancyHexPalette(
+      theme,
+      "#1267C4",
+      semanticColors,
+    );
+    const textColor = occupancyHexPalette.occupancyHexTextColor(
+      maximum,
+      palette,
+    );
+
+    assert.ok(
+      occupancyHexPalette.contrastRatio(palette.zero, palette.canvas) >= 3,
+      `${theme}: o estado desocupado precisa manter contraste não textual`,
+    );
+    assert.ok(
+      occupancyHexPalette.contrastRatio(textColor, palette.labelHalo) >= 4.5,
+      `${theme}: o texto constante precisa contrastar com seu halo`,
+    );
+    assert.equal(textColor, palette.labelText);
+  }
+});
+
+
+test("barras atuais preservam ordem, zero e ausência nos dois modos", () => {
+  const snapshots = [
+    { name: "Fila A", scenarioId: "a", total: 9 },
+    { name: "Fila B", scenarioId: "b", total: 0 },
+    { name: "Fila C", scenarioId: "c", total: null },
+  ];
+  const actual = occupancyComparison.buildOccupancyComparisonBarEntries(
+    snapshots,
+    "actual",
+  );
+  const status = occupancyComparison.buildOccupancyComparisonBarEntries(
+    snapshots,
+    "status",
+  );
+
+  assert.deepEqual(actual.map((entry) => entry.scenarioId), ["a", "b", "c"]);
+  assert.deepEqual(actual.map((entry) => entry.chartValue), [9, 0, 0]);
+  assert.deepEqual(actual.map((entry) => entry.state), [
+    "occupied",
+    "unoccupied",
+    "unknown",
+  ]);
+  assert.deepEqual(status.map((entry) => entry.chartValue), [1, 1, 0]);
+});
+
+test("barras verticais preservam semântica, ordem e navegação responsiva", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const start = source.indexOf(
+    "function buildCurrentComparisonVerticalBarOption",
+  );
+  const end = source.indexOf("function halfDonutEntryColor", start);
+  const optionSource = source.slice(start, end);
+
+  assert.ok(start >= 0 && end > start);
+  assert.match(source, /<SelectItem value="vertical_bars">Barras verticais<\/SelectItem>/);
+  assert.match(optionSource, /realtimeSort: false/);
+  assert.match(optionSource, /dataZoom: usesDataZoom/);
+  assert.match(optionSource, /endValue: visibleScenarioCount - 1/);
+  assert.match(optionSource, /xAxis:[\s\S]*?type: "category"/);
+  assert.match(optionSource, /yAxis:[\s\S]*?type: "value"/);
+  assert.match(optionSource, /filter\(\(entry\) => entry\.chartValue === 0\)/);
+  assert.doesNotMatch(optionSource, /emptyCircle/);
+  assert.match(
+    optionSource,
+    /color:\s*entry\.state === "unknown"[\s\S]*?chartPalette\.surface/,
+  );
+});
+
+test("catálogo de paletas de ocupação é amplo, persistível e seguro", () => {
+  assert.ok(occupancyColorPalettes.OCCUPANCY_COLOR_PALETTES.length >= 10);
+  for (const palette of occupancyColorPalettes.OCCUPANCY_COLOR_PALETTES) {
+    assert.ok(palette.colors.length >= 8);
+    assert.equal(new Set(palette.colors).size, palette.colors.length);
+    palette.colors.forEach((color) => assert.match(color, /^#[0-9A-F]{6}$/));
+  }
+  assert.equal(
+    occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+      colorPaletteId: "aurora",
+    }).colorPaletteId,
+    "aurora",
+  );
+  assert.equal(
+    occupancyColorPalettes.normalizeOccupancyColorPaletteId("desconhecida"),
+    occupancyColorPalettes.DEFAULT_OCCUPANCY_COLOR_PALETTE_ID,
+  );
+});
+
+test("simulador hexagonal centraliza uma única linha nos dois eixos", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const builderStart = source.indexOf("function buildHexLayoutOption(");
+  const builderEnd = source.indexOf("function hexagonPoints(", builderStart);
+  const builder = source.slice(builderStart, builderEnd);
+
+  assert.match(builder, /singleRenderedRow[\s\S]*?renderedMinX[\s\S]*?renderedMaxX/);
+  assert.match(
+    builder,
+    /xAxis:[\s\S]*?max: maxX \+ 0\.8[\s\S]*?singleRenderedRow \? renderedMinX/,
+  );
+  assert.match(
+    builder,
+    /yAxis:[\s\S]*?max: maxY \+ 0\.8[\s\S]*?singleRenderedRow \? renderedMinY/,
+  );
+});
+
+
+
+
+
+
+
+
+function localOccupancyDateParts(date) {
+  return [date.getFullYear(), date.getMonth() + 1, date.getDate()];
+}
+
+test("cenário mantém a mesma cor entre comparativos, ranking e máximos", () => {
+  const scenarioIds = ["fila-a", "posto-17", "vaga-204", "vitrine-norte"];
+  const widgetColor = "#2563EB";
+  const palette = ["#2563EB", "#0F766E", "#B45309", "#7C3AED"];
+  const ordered = occupancyScenarioColors.buildOccupancyScenarioColorMap(
+    scenarioIds,
+    widgetColor,
+    palette,
+  );
+  const reordered = occupancyScenarioColors.buildOccupancyScenarioColorMap(
+    [...scenarioIds].reverse(),
+    "#DC2626",
+    palette,
+  );
+
+  scenarioIds.forEach((scenarioId) => {
+    assert.equal(ordered.get(scenarioId), reordered.get(scenarioId));
+    assert.equal(
+      ordered.get(scenarioId),
+      occupancyScenarioColors.occupancyScenarioColor(
+        scenarioId,
+        widgetColor,
+        palette,
+      ),
+    );
+  });
+
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  assert.match(
+    comparisonSource,
+    /buildOccupancyScenarioColorMap\([\s\S]*?ensureGraphicContrast\(color, surface, 3\)/,
+    "os máximos devem usar o mesmo slot estável e o mesmo contraste por tema",
+  );
+  assert.equal(
+    (comparisonSource.match(/occupancyScenarioColor\(entry\.scenarioId/g) ?? [])
+      .length,
+    3,
+    "meia rosca e as duas orientações de barra devem usar a identidade do cenário",
+  );
+});
+
+test("gráficos e modo monitor preservam navegação por teclado", () => {
+  const chartSource = readFileSync(
+    resolve(projectRoot, "components/app/echart.tsx"),
+    "utf8",
+  );
+  const monitorSource = readFileSync(
+    resolve(projectRoot, "components/app/monitor-mode.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+
+  assert.match(chartSource, /aria-describedby=\{descriptionId\}/);
+  assert.match(chartSource, /aria-label=\{accessibility\.label\}/);
+  assert.match(chartSource, /role="group"/);
+  assert.match(chartSource, /tabIndex=\{0\}/);
+  assert.match(chartSource, /focus-visible:ring-2/);
+  assert.match(chartSource, /chartOptionAriaDescription\(option\)/);
+  assert.match(monitorSource, /returnFocusRef\.current = activeElement/);
+  assert.match(monitorSource, /data-monitor-mode-trigger/);
+  assert.match(monitorSource, /focusTarget\?\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(monitorSource, /buttonRef\.current\?\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(
+    comparisonSource,
+    /aria-label="Cenário do mapa de calor por dias e horários"/,
+  );
+  assert.match(
+    comparisonSource,
+    /aria-label="Período do mapa de calor por dias e horários"/,
+  );
+  assert.match(
+    comparisonSource,
+    /aria-label="Métrica dos mapas de calor de ocupação"/,
+  );
+});

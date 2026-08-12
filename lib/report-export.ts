@@ -38,7 +38,8 @@ export type ReportPayload = {
   subtitle?: string;
   filename: string;
   generatedAt: Date;
-  dataCompleteUntil?: Date;
+  /** `null` means that the source did not certify a temporal cut-off. */
+  dataCompleteUntil: Date | null;
   context?: string[];
   metrics: ReportMetric[];
   charts: ReportChart[];
@@ -251,8 +252,10 @@ function buildExcelHeader(
   sheet.getCell("A4").font = labelFont();
   sheet.getCell("B4").font = valueFont();
 
-  sheet.getCell("A5").value = "Dados completos até";
-  sheet.getCell("B5").value = formatDateTime(dataCompleteUntil(payload));
+  sheet.getCell("A5").value = payload.dataCompleteUntil
+    ? "Dados completos até"
+    : "Certificação temporal";
+  sheet.getCell("B5").value = reportCompletenessValue(payload);
   sheet.getCell("A5").font = labelFont();
   sheet.getCell("B5").font = valueFont();
 
@@ -445,12 +448,23 @@ function drawPdfCover(
   });
 }
 
-function dataCompleteUntil(payload: ReportPayload) {
-  return payload.dataCompleteUntil ?? payload.generatedAt;
+function certifiedDataCompleteUntil(payload: ReportPayload) {
+  const value = payload.dataCompleteUntil;
+  return value instanceof Date && Number.isFinite(value.getTime())
+    ? value
+    : null;
 }
 
 function reportCompletenessLabel(payload: ReportPayload) {
-  return `Dados completos até ${formatDateTime(dataCompleteUntil(payload))}`;
+  const value = certifiedDataCompleteUntil(payload);
+  return value
+    ? `Dados completos até ${formatDateTime(value)}`
+    : "Corte temporal não certificado";
+}
+
+function reportCompletenessValue(payload: ReportPayload) {
+  const value = certifiedDataCompleteUntil(payload);
+  return value ? formatDateTime(value) : "Não certificado";
 }
 
 function modeLabel(mode: ReportExportMode) {

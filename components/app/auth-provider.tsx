@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import {
+  ApiError,
   apiFetch,
   clearStoredSession,
   currentUserRequest,
@@ -12,7 +13,9 @@ import {
   getStoredSession,
   loginRequest,
   SESSION_EXPIRED_EVENT,
+  setAuthenticatedMasterAccess,
 } from "@/lib/api";
+import { reconcileCurrentUserWithAccessToken } from "@/lib/access-token-claims";
 import { hasDeclaredManagerAccess, hasMasterAccess } from "@/lib/access";
 import { readCachedCompany, writeCompanyCache } from "@/lib/company-cache";
 import { migrateLegacyLiveDefault } from "@/lib/legacy-dashboard-view-migration";
@@ -20,6 +23,7 @@ import {
   clearStoredCurrentCompanyScope,
   clearStoredMasterCompanyScope,
   getCurrentUserCompanyId,
+  getEffectiveCompanyScopeId,
   getStoredMasterCompanyScope,
   setStoredCurrentCompanyScope,
   setStoredMasterCompanyScope,
@@ -51,6 +55,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isManager, setIsManager] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const gridSyncErrorShown = React.useRef(false);
+  const userRef = React.useRef<CurrentUser | null>(null);
+
+  React.useEffect(() => {
+    userRef.current = user;
+  }, [user]);
 
   const resolveManagerAccess = React.useCallback(async (currentUser: CurrentUser | null) => {
     if (!currentUser) return false;
@@ -63,17 +72,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const currentUser = await hydrateAuthenticatedUser(
         await currentUserRequest(),
+        userRef.current,
       );
       const canManage = await resolveManagerAccess(currentUser);
       setUser(currentUser);
       setIsManager(canManage);
       return currentUser;
-    } catch {
-      clearStoredSession();
-      clearUserGridSync();
-      setUser(null);
-      setIsManager(false);
-      return null;
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+        clearStoredSession();
+        clearUserGridSync();
+        setUser(null);
+        setIsManager(false);
+        return null;
+      }
+
+      // Rede/5xx não invalidam uma sessão previamente autenticada. Preserve o
+      // último perfil até que uma nova tentativa consiga revalidá-lo.
+      return userRef.current;
     }
   }, [resolveManagerAccess]);
 
@@ -199,7 +215,10 @@ export function useAuth() {
   return context;
 }
 
-async function hydrateCurrentUser(user: CurrentUser) {
+async function hydrateCurrentUser(
+  user: CurrentUser,
+  fallbackUser: CurrentUser | null = null,
+) {
   const preliminaryCompanyScope = getUserCompanyScope(user);
   if (hasMasterAccess(user)) {
     clearStoredCurrentCompanyScope();
@@ -216,7 +235,10 @@ async function hydrateCurrentUser(user: CurrentUser) {
   }
 
   const [permissions, company] = await Promise.all([
-    hydrateUserPermissions(user),
+    hydrateUserPermissions(
+      user,
+      fallbackUser?.permissions ?? user.permissions ?? [],
+    ),
     hydrateUserCompany(user),
   ]);
 
@@ -225,6 +247,8 @@ async function hydrateCurrentUser(user: CurrentUser) {
     permissions,
     company: company ?? user.company,
     company_name: company?.name ?? user.company_name,
+    company_timezone:
+      company?.timezone ?? user.company_timezone ?? user.company?.timezone,
     company_trade_name: company?.trade_name ?? user.company_trade_name,
   };
 
@@ -249,10 +273,25 @@ async function hydrateCurrentUser(user: CurrentUser) {
   return hydratedUser;
 }
 
-async function hydrateAuthenticatedUser(user: CurrentUser) {
-  const hydratedUser = await hydrateCurrentUser(user);
+async function hydrateAuthenticatedUser(
+  user: CurrentUser,
+  fallbackUser: CurrentUser | null = null,
+) {
+  const accessToken = getStoredSession()?.access_token ?? "";
+  const tokenEnrichedUser = reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken,
+  );
+  if (!tokenEnrichedUser) {
+    throw new ApiError(
+      "A identidade retornada pela API diverge do contexto autenticado no JWT.",
+      401,
+    );
+  }
+  setAuthenticatedMasterAccess(tokenEnrichedUser);
+  const hydratedUser = await hydrateCurrentUser(tokenEnrichedUser, fallbackUser);
   await hydrateUserGridFromServer(hydratedUser.id);
-  const companyId = getCurrentUserCompanyId(hydratedUser);
+  const companyId = getEffectiveCompanyScopeId(hydratedUser);
   if (companyId) {
     await migrateLegacyLiveDefault({
       companyId,
@@ -262,13 +301,21 @@ async function hydrateAuthenticatedUser(user: CurrentUser) {
   return hydratedUser;
 }
 
-async function hydrateUserPermissions(user: CurrentUser) {
-  if (!user.id) return [];
+async function hydrateUserPermissions(
+  user: CurrentUser,
+  fallbackPermissions: UserPermission[],
+) {
+  if (!user.id) return fallbackPermissions;
 
   try {
-    return await apiFetch<UserPermission[]>(`/users/${user.id}/permissions`);
+    return await apiFetch<UserPermission[]>(`/users/${user.id}/permissions`, {
+      // This request hydrates the authenticated principal itself. The backend
+      // derives that identity from the same JWT; a company selected by a
+      // superadmin must not leak into this bootstrap request.
+      jwtCompanyScopeOnly: true,
+    });
   } catch {
-    return [];
+    return fallbackPermissions;
   }
 }
 
@@ -303,6 +350,7 @@ function getDeclaredCompany(user: CurrentUser) {
     return {
       ...user.company,
       id: user.company.id || companyId,
+      timezone: user.company.timezone ?? user.company_timezone ?? null,
     };
   }
   if (!companyId || !user.company_name) return null;
@@ -310,6 +358,7 @@ function getDeclaredCompany(user: CurrentUser) {
   return {
     id: companyId,
     name: user.company_name,
+    timezone: user.company_timezone ?? null,
     trade_name: user.company_trade_name ?? null,
   } satisfies CurrentUserCompany;
 }
@@ -326,6 +375,7 @@ function getUserCompanyScope(user: CurrentUser) {
       user.company?.trade_name ||
       user.company_trade_name ||
       id,
+    timezone: user.company?.timezone ?? user.company_timezone ?? null,
     trade_name: user.company?.trade_name ?? user.company_trade_name ?? null,
   };
 }

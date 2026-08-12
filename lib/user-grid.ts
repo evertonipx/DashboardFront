@@ -33,9 +33,40 @@ export const USER_GRID_SYNC_STATUS_EVENT = "ipxdata:user-grid-sync-status";
 
 const GRID_FORMAT = "ipxdata-user-grid";
 const GRID_VERSION = 1;
-const SYNC_INTERVAL_MS = 800;
+const SYNC_INTERVAL_MS = 5_000;
 const SAVE_DEBOUNCE_MS = 600;
 const RETRY_DELAY_MS = 5_000;
+
+// Only preferences that are explicitly personal and already carry a user
+// scope may be synchronized. Company-only/legacy keys remain available to the
+// feature loaders for their own migrations, but the grid must never upload or
+// delete them because the same browser may be used by more than one account.
+const MANAGED_GRID_BASE_KEYS = new Set([
+  "ipxdata.card-views.v1",
+  "ipxdata.counting-report-period.v1",
+  "ipxdata.counting-report-view-settings.v1",
+  "ipxdata.legacy-dashboard-default-migration.v1.live",
+  "ipxdata.live-dashboard-settings.v1",
+  "ipxdata.live-operational-settings.v1",
+  "ipxdata.occupancy-analysis-range.v1",
+  "ipxdata.occupancy-custom-widgets.v1",
+  "ipxdata.occupancy-dashboard-settings.v1",
+  "ipxdata.occupancy-widget-settings.v1",
+  "ipxdata.period-analysis-settings.v1",
+  "ipxdata.period-analysis-widgets.schema.v5",
+  "ipxdata.period-analysis-widgets.v1",
+  "ipxdata.realtime-custom-widgets.v1",
+  "ipxdata.report-custom-widgets.v1",
+  "ipxdata.saved-live-views.v1",
+  "ipxdata.video-walls.v1",
+]);
+
+const MANAGED_GRID_BASE_PATTERNS = [
+  /^ipxdata\.widget-view-presets\.v1\.(?:analysis|live|occupancy(?:-(?:analysis|live|reports))?|reports)$/,
+  /^ipxdata\.widget-view-preset-applied\.v1\.(?:analysis|live|occupancy(?:-(?:analysis|live|reports))?|reports)$/,
+  /^ipxdata\.live-custom-.+\.scenario-comparison\.v1$/,
+  /^ipxdata\.reports(?:-custom-.+)?\.scenario-comparison\.v1$/,
+];
 
 let activeUserId = "";
 let activeDocument: UserGridDocument | null = null;
@@ -68,7 +99,12 @@ export async function hydrateUserGridFromServer(userId: string) {
 
     const parsed = normalizeGridDocument(response.grid);
     if (parsed.nativeDocument) {
-      activeDocument = parsed.document;
+      const localEntries = collectManagedEntries(cleanUserId);
+      const mergedEntries = mergeDocumentEntries(
+        parsed.document.entries,
+        localEntries,
+      );
+      activeDocument = { ...parsed.document, entries: mergedEntries };
       applyRemoteEntries(parsed.document.entries, cleanUserId);
     } else {
       activeDocument = {
@@ -84,17 +120,26 @@ export async function hydrateUserGridFromServer(userId: string) {
     emitHydrated();
     emitStatus("ready");
 
-    if (!parsed.nativeDocument && localSnapshot.size) {
+    const nativeDocumentNeedsMerge =
+      parsed.nativeDocument &&
+      !entriesEqual(activeDocument.entries, parsed.document.entries);
+    if (
+      (!parsed.nativeDocument && localSnapshot.size) ||
+      nativeDocumentNeedsMerge
+    ) {
       await persistActiveDocument(currentGeneration).catch(() => undefined);
     }
 
     return true;
   } catch {
     if (currentGeneration !== generation) return false;
-    activeDocument = createEmptyDocument(collectManagedEntries(cleanUserId));
-    localSnapshot = new Map(Object.entries(activeDocument.entries));
-    hydrated = true;
-    emitHydrated();
+    // A failed read provides no safe merge base for the whole-document PUT.
+    // Keep local preferences untouched, but do not create a writable document
+    // or announce hydration. A later explicit hydration may retry the GET.
+    activeDocument = null;
+    localSnapshot = new Map();
+    hydrated = false;
+    pendingChanges.clear();
     emitStatus("error");
     return false;
   }
@@ -116,7 +161,9 @@ export function startUserGridSync(userId: string) {
     if (document.visibilityState === "hidden") scheduleFlush(0);
   };
 
-  const interval = window.setInterval(scan, SYNC_INTERVAL_MS);
+  const interval = window.setInterval(() => {
+    if (document.visibilityState === "visible") scan();
+  }, SYNC_INTERVAL_MS);
   window.addEventListener("storage", handleStorage);
   document.addEventListener("visibilitychange", handleVisibility);
   scan();
@@ -244,16 +291,9 @@ async function persistActiveDocument(currentGeneration: number) {
 function applyRemoteEntries(entries: Record<string, string>, userId: string) {
   if (typeof window === "undefined") return;
 
-  const remoteKeys = new Set(Object.keys(entries));
-  const localKeys: string[] = [];
-  for (let index = 0; index < window.localStorage.length; index += 1) {
-    const key = window.localStorage.key(index);
-    if (key && isManagedGridKey(key, userId)) localKeys.push(key);
-  }
-
-  localKeys.forEach((key) => {
-    if (!remoteKeys.has(key)) window.localStorage.removeItem(key);
-  });
+  // Absence in the server document is not a deletion marker. Applying only
+  // values that are present prevents an incomplete/legacy grid from erasing
+  // another company or user's local preferences.
   Object.entries(entries).forEach(([key, value]) => {
     if (isManagedGridKey(key, userId)) {
       window.localStorage.setItem(key, value);
@@ -278,20 +318,62 @@ function collectManagedEntries(userId: string) {
 }
 
 function isManagedGridKey(key: string, userId: string) {
-  if (!key.startsWith("ipxdata.")) return false;
-  if (
-    key.startsWith("ipxdata.camera-groups.") ||
-    key.startsWith("ipxdata.camera-worker-assignments.") ||
-    key.startsWith("ipxdata.worker-location-assignments.") ||
-    key.startsWith("ipxdata.user-grid.")
-  ) {
-    return false;
-  }
+  const baseKey = managedGridBaseKey(key, userId);
+  return Boolean(
+    baseKey &&
+      (MANAGED_GRID_BASE_KEYS.has(baseKey) ||
+        MANAGED_GRID_BASE_PATTERNS.some((pattern) => pattern.test(baseKey))),
+  );
+}
 
-  const userMarker = ".user.";
-  if (!key.includes(userMarker)) return true;
-  const scopedUserMarker = `${userMarker}${encodeStorageSegment(userId)}`;
-  return key.endsWith(scopedUserMarker) || key.includes(`${scopedUserMarker}.`);
+function managedGridBaseKey(key: string, userId: string) {
+  const encodedUserId = encodeStorageSegment(userId);
+  if (!encodedUserId) return null;
+
+  const userMarker = `.user.${encodedUserId}`;
+  const markerIndex = key.indexOf(userMarker);
+  if (markerIndex <= 0) return null;
+
+  const trailingScope = key.slice(markerIndex + userMarker.length);
+  if (trailingScope && !/^\.view\.[^.]+$/.test(trailingScope)) return null;
+
+  const leadingScope = key.slice(0, markerIndex);
+  const companyMarker = ".company.";
+  const companyIndex = leadingScope.lastIndexOf(companyMarker);
+  if (companyIndex < 0) return leadingScope;
+
+  const encodedCompanyId = leadingScope.slice(
+    companyIndex + companyMarker.length,
+  );
+  return encodedCompanyId && !encodedCompanyId.includes(".")
+    ? leadingScope.slice(0, companyIndex)
+    : null;
+}
+
+function mergeDocumentEntries(
+  remoteEntries: Record<string, string>,
+  localManagedEntries: Record<string, string>,
+) {
+  // Unknown/legacy remote entries stay opaque and round-trip unchanged. Local
+  // managed entries fill only missing keys; the server remains authoritative
+  // when both sides have a value for the same preference.
+  return Object.fromEntries(
+    Object.entries({ ...localManagedEntries, ...remoteEntries }).sort(
+      ([left], [right]) => left.localeCompare(right),
+    ),
+  );
+}
+
+function entriesEqual(
+  left: Record<string, string>,
+  right: Record<string, string>,
+) {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => left[key] === right[key])
+  );
 }
 
 function normalizeGridDocument(value: unknown): {

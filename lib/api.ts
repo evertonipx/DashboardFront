@@ -6,9 +6,18 @@ import type {
   TokenResponse,
 } from "@/lib/types";
 import {
+  accessTokenDeclaresMasterAccess,
+  accessTokenExpirationMilliseconds,
+  accessTokenMatchesUserIdentity,
+  accessTokensShareUserIdentity,
+  resolveAccessTokenContext,
+} from "@/lib/access-token-claims";
+import {
   clearStoredCurrentCompanyScope,
   clearStoredMasterCompanyScope,
+  getStoredMasterCompanyScope,
 } from "@/lib/master-company-scope";
+import { isMasterUser } from "@/lib/user-role";
 
 const ACCESS_KEY = "access_token";
 const REFRESH_KEY = "refresh_token";
@@ -19,11 +28,19 @@ const REFRESH_SKEW_MS = 60_000;
 
 export const SESSION_EXPIRED_EVENT = "ipxdata:session-expired";
 
-let refreshPromise: Promise<Session | TokenResponse | null> | null = null;
+type RefreshAttempt = {
+  promise: Promise<Session | TokenResponse | null>;
+  refreshToken: string;
+};
+
+let refreshAttempt: RefreshAttempt | null = null;
+let authenticatedMasterAccessToken = "";
 
 type ApiFetchOptions = Omit<RequestInit, "body"> & {
   auth?: boolean;
   body?: unknown;
+  companyScopeId?: string;
+  jwtCompanyScopeOnly?: boolean;
   retry?: boolean;
 };
 
@@ -72,21 +89,50 @@ export function getStoredRefreshToken() {
 export function setStoredSession(tokens: TokenResponse | Session) {
   if (!isBrowser()) return;
 
+  if (window.localStorage.getItem(ACCESS_KEY) !== tokens.access_token) {
+    authenticatedMasterAccessToken = "";
+  }
+
   window.localStorage.setItem(ACCESS_KEY, tokens.access_token);
   window.localStorage.setItem(REFRESH_KEY, tokens.refresh_token);
   window.localStorage.setItem(TOKEN_TYPE_KEY, tokens.token_type ?? "Bearer");
 
-  if (tokens.expires_in) {
-    window.localStorage.setItem(EXPIRES_KEY, String(tokens.expires_in));
+  const expiresIn =
+    typeof tokens.expires_in === "number" &&
+    Number.isFinite(tokens.expires_in) &&
+    tokens.expires_in > 0
+      ? tokens.expires_in
+      : null;
+  const jwtExpiresAt = accessTokenExpirationMilliseconds(tokens.access_token);
+  const responseExpiresAt =
+    expiresIn !== null ? Date.now() + expiresIn * 1000 : null;
+  const expiresAt = [jwtExpiresAt, responseExpiresAt]
+    .filter((value): value is number => value !== null)
+    .reduce<number | null>(
+      (earliest, value) => earliest === null ? value : Math.min(earliest, value),
+      null,
+    );
+
+  if (expiresIn !== null) {
+    window.localStorage.setItem(EXPIRES_KEY, String(expiresIn));
+  } else {
+    window.localStorage.removeItem(EXPIRES_KEY);
+  }
+  if (expiresAt !== null) {
     window.localStorage.setItem(
       EXPIRES_AT_KEY,
-      String(Date.now() + tokens.expires_in * 1000),
+      String(expiresAt),
     );
+  } else {
+    window.localStorage.removeItem(EXPIRES_AT_KEY);
   }
 }
 
 export function clearStoredSession() {
+  authenticatedMasterAccessToken = "";
   if (!isBrowser()) return;
+
+  refreshAttempt = null;
 
   window.localStorage.removeItem(ACCESS_KEY);
   window.localStorage.removeItem(REFRESH_KEY);
@@ -130,6 +176,12 @@ function shouldRefreshSoon(session: Session | null) {
 }
 
 async function performRefresh(capturedRefreshToken: string) {
+  const sessionBeforeRefresh = getStoredSession();
+  const preserveAuthenticatedMasterAccess = Boolean(
+    sessionBeforeRefresh?.access_token &&
+      sessionBeforeRefresh.refresh_token === capturedRefreshToken &&
+      authenticatedMasterAccessToken === sessionBeforeRefresh.access_token,
+  );
   const response = await fetch(`${apiBase()}/auth/refresh`, {
     method: "POST",
     headers: {
@@ -150,27 +202,50 @@ async function performRefresh(capturedRefreshToken: string) {
     return getStoredSession();
   }
 
-  setStoredSession(payload as TokenResponse);
-  return payload as TokenResponse;
+  // A login can replace the tenant session while this request is in flight.
+  // Never let a late response from the previous account overwrite it.
+  if (getStoredRefreshToken() !== capturedRefreshToken) {
+    return getStoredSession();
+  }
+
+  const refreshedTokens = requireTokenResponse(payload, capturedRefreshToken);
+  setStoredSession(refreshedTokens);
+  if (
+    preserveAuthenticatedMasterAccess &&
+    sessionBeforeRefresh?.access_token &&
+    accessTokensShareUserIdentity(
+      sessionBeforeRefresh.access_token,
+      refreshedTokens.access_token,
+    ) &&
+    accessTokenDeclaresMasterAccess(refreshedTokens.access_token)
+  ) {
+    authenticatedMasterAccessToken = refreshedTokens.access_token;
+  }
+  return refreshedTokens;
 }
 
 async function refreshSession() {
   const refreshToken = getStoredRefreshToken();
   if (!refreshToken) return null;
 
-  if (!refreshPromise) {
-    refreshPromise = performRefresh(refreshToken).finally(() => {
-      refreshPromise = null;
+  if (!refreshAttempt || refreshAttempt.refreshToken !== refreshToken) {
+    const promise = performRefresh(refreshToken).finally(() => {
+      if (refreshAttempt?.promise === promise) {
+        refreshAttempt = null;
+      }
     });
+    refreshAttempt = { promise, refreshToken };
   }
 
-  return refreshPromise;
+  return refreshAttempt.promise;
 }
 
 export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
   const {
     auth = true,
     body,
+    companyScopeId,
+    jwtCompanyScopeOnly = false,
     retry = true,
     headers,
     ...init
@@ -195,9 +270,54 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     requestHeaders.set("Authorization", `Bearer ${session.access_token}`);
   }
 
-  // Tenant authorization comes from the signed JWT claims. A client-selected
-  // company must never override that authorization context.
+  // Company users remain scoped exclusively by their signed JWT. A master
+  // user, however, needs to forward the company selected in the UI to the
+  // tenant-aware endpoints. The backend remains the authorization boundary
+  // and decides whether the token may use this scope.
   requestHeaders.delete("X-Company-ID");
+  const tokenContext = session?.access_token
+    ? resolveAccessTokenContext(session.access_token)
+    : null;
+  const tokenDeclaresMaster = Boolean(
+    session?.access_token &&
+      accessTokenDeclaresMasterAccess(session.access_token),
+  );
+  const authMeConfirmedMaster = Boolean(
+    session?.access_token &&
+      authenticatedMasterAccessToken === session.access_token,
+  );
+  const requestedCompanyScope = companyScopeId?.trim() ?? "";
+  const pathCompanyScope = companyScopeFromAdministrativePath(path);
+  if (
+    auth &&
+    tokenContext?.companyId &&
+    !tokenDeclaresMaster &&
+    !authMeConfirmedMaster &&
+    ((requestedCompanyScope && requestedCompanyScope !== tokenContext.companyId) ||
+      (pathCompanyScope && pathCompanyScope !== tokenContext.companyId))
+  ) {
+    throw new ApiError(
+      "A empresa solicitada não corresponde ao escopo autenticado no JWT.",
+      403,
+    );
+  }
+  const masterCompanyScope =
+    auth &&
+    !jwtCompanyScopeOnly &&
+    session?.access_token &&
+    (tokenDeclaresMaster || authMeConfirmedMaster) &&
+    shouldSendMasterCompanyScope(path)
+      ? requestedCompanyScope || getStoredMasterCompanyScope()?.id.trim()
+      : "";
+  if (masterCompanyScope) {
+    if (pathCompanyScope && pathCompanyScope !== masterCompanyScope) {
+      throw new ApiError(
+        "A empresa da rota diverge da empresa selecionada para a operação.",
+        403,
+      );
+    }
+    requestHeaders.set("X-Company-ID", masterCompanyScope);
+  }
   const response = await fetch(`${apiBase()}${path}`, {
     ...init,
     headers: requestHeaders,
@@ -228,11 +348,13 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
 }
 
 export async function loginRequest(email: string, password: string) {
-  const tokens = await apiFetch<TokenResponse>("/auth/login", {
+  const payload = await apiFetch<unknown>("/auth/login", {
     method: "POST",
     auth: false,
     body: { email, password },
   });
+  const tokens = requireTokenResponse(payload);
+  refreshAttempt = null;
   clearStoredMasterCompanyScope();
   clearStoredCurrentCompanyScope();
   setStoredSession(tokens);
@@ -242,4 +364,91 @@ export async function loginRequest(email: string, password: string) {
 
 export function currentUserRequest() {
   return apiFetch<CurrentUser>("/auth/me");
+}
+
+function requireTokenResponse(payload: unknown, fallbackRefreshToken = "") {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("A API retornou uma sessão inválida.");
+  }
+
+  const record = payload as Record<string, unknown>;
+  const accessToken = requireNonEmptyToken(record.access_token, "access_token");
+  const refreshToken =
+    typeof record.refresh_token === "string" && record.refresh_token.trim()
+      ? record.refresh_token
+      : fallbackRefreshToken;
+  const tokenType =
+    typeof record.token_type === "string" && record.token_type.trim()
+      ? record.token_type.trim()
+      : "Bearer";
+  const expiresIn = record.expires_in;
+
+  if (!refreshToken || typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+    throw new Error("A API retornou uma sessão inválida.");
+  }
+
+  return {
+    access_token: accessToken,
+    expires_in: expiresIn,
+    refresh_token: refreshToken,
+    token_type: tokenType,
+  } satisfies TokenResponse;
+}
+
+function requireNonEmptyToken(value: unknown, field: string) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`A API retornou ${field} inválido.`);
+  }
+  return value;
+}
+
+/**
+ * Records the authorization returned by /auth/me for the active token.
+ * Some backend JWT versions omit role/is_master even though /auth/me confirms
+ * master access. The marker is memory-only, token-bound and cleared whenever
+ * the authenticated session changes. The backend remains the authority that
+ * accepts or rejects a cross-company X-Company-ID header.
+ */
+export function setAuthenticatedMasterAccess(user: CurrentUser | null) {
+  const accessToken = getStoredSession()?.access_token ?? "";
+  authenticatedMasterAccessToken =
+    accessToken &&
+    user &&
+    isMasterUser(user) &&
+    accessTokenMatchesUserIdentity(accessToken, user)
+      ? accessToken
+      : "";
+}
+
+function shouldSendMasterCompanyScope(path: string) {
+  const pathname = path.split(/[?#]/, 1)[0] ?? path;
+  if (pathname === "/users/me" || pathname.startsWith("/users/me/")) {
+    return false;
+  }
+  if (/^\/companies\/[^/]+(?:\/|$)/.test(pathname)) return true;
+
+  return [
+    "/analytics",
+    "/cameras",
+    "/company/modules",
+    "/dashboard-views",
+    "/locations",
+    "/occupancy",
+    "/scenarios",
+    "/users",
+    "/workers",
+  ].some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+}
+
+function companyScopeFromAdministrativePath(path: string) {
+  const pathname = path.split(/[?#]/, 1)[0] ?? path;
+  const match = /^\/companies\/([^/]+)(?:\/|$)/.exec(pathname);
+  if (!match?.[1]) return "";
+  try {
+    return decodeURIComponent(match[1]).trim();
+  } catch {
+    return match[1].trim();
+  }
 }

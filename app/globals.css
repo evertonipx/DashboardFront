@@ -79,7 +79,8 @@
       box-shadow 180ms ease;
   }
 
-  [data-premium-card]:hover {
+  [data-premium-card][data-premium-hover="true"]:hover,
+  [data-layout-reorder-enabled="true"] > [data-premium-card]:hover {
     border-color: hsl(var(--primary) / 0.28);
     box-shadow:
       var(--shadow-soft),
@@ -182,6 +183,37 @@
   .text-balance {
     text-wrap: balance;
   }
+
+  /* Keep dense dashboard toolbars and wide data regions discoverable on
+     narrow screens while preserving native touch and keyboard scrolling. */
+  .enterprise-horizontal-scroll {
+    overscroll-behavior-inline: contain;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.48) transparent;
+    scrollbar-width: thin;
+    background:
+      linear-gradient(to right, hsl(var(--card)) 30%, transparent) left center,
+      linear-gradient(to left, hsl(var(--card)) 30%, transparent) right center,
+      linear-gradient(to right, hsl(var(--foreground) / 0.14), transparent) left center,
+      linear-gradient(to left, hsl(var(--foreground) / 0.14), transparent) right center;
+    background-attachment: local, local, scroll, scroll;
+    background-repeat: no-repeat;
+    background-size: 1.75rem 100%, 1.75rem 100%, 0.75rem 100%, 0.75rem 100%;
+  }
+
+  .enterprise-horizontal-scroll::-webkit-scrollbar {
+    height: 0.375rem;
+  }
+
+  .enterprise-horizontal-scroll::-webkit-scrollbar-thumb {
+    border-radius: 9999px;
+    background: hsl(var(--muted-foreground) / 0.48);
+  }
+
+  .enterprise-horizontal-scroll:focus-visible {
+    border-radius: calc(var(--radius) - 2px);
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
 }
 
 /* Container queries live outside Tailwind layers so they override viewport
@@ -218,7 +250,27 @@
   }
 }
 
-@container (min-width: 1080px) {
+/* A three-column stage keeps corporate-width dashboards balanced after the
+   expanded sidebar reduces the content area to roughly 1,000-1,150px. */
+@container (min-width: 960px) and (max-width: 1199px) {
+  [data-card-layout-grid] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  [data-card-layout-grid]
+    > [data-layout-card-id][data-layout-card-size="wide"] {
+    grid-column: span 2 / span 2 !important;
+  }
+
+  [data-card-layout-grid]
+    > [data-layout-card-id][data-layout-card-size="large"],
+  [data-card-layout-grid]
+    > [data-layout-card-id][data-layout-card-size="full"] {
+    grid-column: span 3 / span 3 !important;
+  }
+}
+
+@container (min-width: 1200px) {
   [data-card-layout-grid] {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }

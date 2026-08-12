@@ -255,7 +255,11 @@ export function ScenarioPicker({
                 Carregando cenários...
               </div>
             ) : filteredScenarios.length ? (
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-1">
+              <div
+                role="group"
+                aria-label={`${label} disponíveis`}
+                className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-1"
+              >
                 {filteredScenarios.map((scenario) => {
                   const selected = selectedIdSet.has(scenario.id);
 
@@ -263,8 +267,9 @@ export function ScenarioPicker({
                     <button
                       key={scenario.id}
                       type="button"
+                      aria-pressed={selected}
                       className={cn(
-                        "min-w-0 rounded-md border px-3 py-2 text-left text-sm transition",
+                        "min-w-0 rounded-md border px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                         selected
                           ? "border-primary bg-primary/10 text-primary"
                           : "border-transparent bg-card hover:border-primary/40",

@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,11 +55,16 @@ import {
 } from "@/lib/master-company-scope";
 import {
   buildOccupancyAreaKey,
+  resolveOccupancyAreaSelectionLabel,
   type OccupancyAreaOption,
 } from "@/lib/occupancy-areas";
-import { fetchOccupancyAreaOptions } from "@/lib/occupancy-area-options";
+import {
+  fetchOccupancyAreaCatalog,
+  requireOccupancyAreaClassCompatibility,
+} from "@/lib/occupancy-area-options";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
 import { canManageOccupancy, canManageScenarios } from "@/lib/permissions";
+import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
 import type {
   OccupancyScenario,
   OccupancyScenarioArea,
@@ -91,6 +97,9 @@ export function OccupancyScenarioManager() {
   const [loadingAreas, setLoadingAreas] = React.useState(true);
   const [scenarioCatalogError, setScenarioCatalogError] = React.useState("");
   const [areaCatalogError, setAreaCatalogError] = React.useState("");
+  const [areaCatalogWarning, setAreaCatalogWarning] = React.useState("");
+  const [areaCatalogAuthoritative, setAreaCatalogAuthoritative] =
+    React.useState(false);
   const [scenarioCatalogReady, setScenarioCatalogReady] = React.useState(false);
   const [areaCatalogReady, setAreaCatalogReady] = React.useState(false);
   const [scenarioCatalogCompanyId, setScenarioCatalogCompanyId] =
@@ -113,25 +122,32 @@ export function OccupancyScenarioManager() {
   const catalogsReady =
     scenarioCatalogCertified && areaCatalogCertified;
 
-  const loadScenarios = React.useCallback(async () => {
+  const loadScenarios = React.useCallback(async (
+    { silent = false }: { silent?: boolean } = {},
+  ) => {
     const requestSequence = ++scenarioRequestSequenceRef.current;
-    setLoading(true);
-    setScenarioCatalogReady(false);
-    setScenarioCatalogCompanyId("");
-    setScenarioCatalogError("");
+    if (!silent) {
+      setLoading(true);
+      setScenarioCatalogReady(false);
+      setScenarioCatalogCompanyId("");
+      setScenarioCatalogError("");
+    }
     try {
       if (!companyScopeId) {
         throw new Error(
           "Empresa ativa não definida para carregar cenários de ocupação.",
         );
       }
-      const response = await apiFetch<unknown>("/occupancy/scenarios");
+      const response = await apiFetch<unknown>("/occupancy/scenarios", {
+        companyScopeId,
+      });
       const rows = filterScopedApiRows(
-        requireOccupancyScenarioRows(response),
+        requireOccupancyScenarioRows(response, companyScopeId),
         companyScopeId,
       );
       if (requestSequence !== scenarioRequestSequenceRef.current) return;
       setScenarios(rows);
+      setScenarioCatalogError("");
       setScenarioCatalogCompanyId(companyScopeId);
       setScenarioCatalogReady(true);
     } catch (error) {
@@ -140,39 +156,56 @@ export function OccupancyScenarioManager() {
         error instanceof Error
           ? error.message
           : "Não foi possível carregar cenários de ocupação.";
-      setScenarios([]);
-      setScenarioCatalogCompanyId("");
-      setScenarioCatalogError(message);
-      setScenarioCatalogReady(false);
-      toast.error(message);
+      if (!silent) {
+        setScenarios([]);
+        setScenarioCatalogCompanyId("");
+        setScenarioCatalogError(message);
+        setScenarioCatalogReady(false);
+        toast.error(message);
+      }
     } finally {
-      if (requestSequence === scenarioRequestSequenceRef.current) {
+      if (!silent && requestSequence === scenarioRequestSequenceRef.current) {
         setLoading(false);
       }
     }
   }, [companyScopeId]);
 
-  const loadAreaOptions = React.useCallback(async () => {
+  const loadAreaOptions = React.useCallback(async (
+    { silent = false }: { silent?: boolean } = {},
+  ) => {
     const requestSequence = ++areaRequestSequenceRef.current;
     const now = new Date();
-    setLoadingAreas(true);
-    setAreaOptions([]);
-    setAreaCatalogReady(false);
-    setAreaCatalogCompanyId("");
-    setAreaCatalogError("");
+    if (!silent) {
+      setLoadingAreas(true);
+      setAreaOptions([]);
+      setAreaCatalogReady(false);
+      setAreaCatalogCompanyId("");
+      setAreaCatalogError("");
+      setAreaCatalogWarning("");
+      setAreaCatalogAuthoritative(false);
+    }
     try {
       if (!companyScopeId) {
         throw new Error(
           "Empresa ativa não definida para descobrir áreas de ocupação.",
         );
       }
-      const options = await fetchOccupancyAreaOptions({
+      const catalog = await fetchOccupancyAreaCatalog({
         companyId: companyScopeId,
         from: new Date(now.getTime() - 4 * HOUR_MS),
+        request: <T,>(path: string) =>
+          apiFetch<T>(path, { companyScopeId }),
         to: now,
       });
       if (requestSequence !== areaRequestSequenceRef.current) return;
-      setAreaOptions(options);
+      setAreaOptions(catalog.options);
+      setAreaCatalogError("");
+      setAreaCatalogAuthoritative(catalog.authoritative);
+      setAreaCatalogWarning(
+        catalog.authoritative
+          ? ""
+          : "A API ainda não publicou o catálogo definitivo de regiões. A lista abaixo usa snapshots recentes e pode omitir uma área estável; o cadastro manual continua disponível.",
+      );
       setAreaCatalogCompanyId(companyScopeId);
       setAreaCatalogReady(true);
     } catch (error) {
@@ -181,13 +214,17 @@ export function OccupancyScenarioManager() {
         error instanceof Error
           ? error.message
           : "Não foi possível certificar o catálogo de áreas de ocupação.";
-      setAreaOptions([]);
-      setAreaCatalogCompanyId("");
-      setAreaCatalogError(message);
-      setAreaCatalogReady(false);
-      toast.error(message);
+      if (!silent) {
+        setAreaOptions([]);
+        setAreaCatalogCompanyId("");
+        setAreaCatalogError(message);
+        setAreaCatalogWarning("");
+        setAreaCatalogAuthoritative(false);
+        setAreaCatalogReady(false);
+        toast.error(message);
+      }
     } finally {
-      if (requestSequence === areaRequestSequenceRef.current) {
+      if (!silent && requestSequence === areaRequestSequenceRef.current) {
         setLoadingAreas(false);
       }
     }
@@ -203,6 +240,19 @@ export function OccupancyScenarioManager() {
     void loadScenarios();
     void loadAreaOptions();
   }, [loadAreaOptions, loadScenarios]);
+
+  useResourceAutoRefresh(
+    async () => {
+      await Promise.all([
+        loadScenarios({ silent: true }),
+        loadAreaOptions({ silent: true }),
+      ]);
+    },
+    {
+      enabled: Boolean(companyScopeId) && !loading && !loadingAreas,
+      intervalMs: RESOURCE_METADATA_REFRESH_INTERVAL_MS,
+    },
+  );
 
   function openCreateDialog() {
     if (!canEdit) {
@@ -265,7 +315,10 @@ export function OccupancyScenarioManager() {
 
     const requestedCompanyId = companyScopeId;
     try {
-      await apiFetch(`/occupancy/scenarios/${scenario.id}`, { method: "DELETE" });
+      await apiFetch(`/occupancy/scenarios/${scenario.id}`, {
+        companyScopeId: requestedCompanyId,
+        method: "DELETE",
+      });
       requireUnchangedCompanyScope(
         requestedCompanyId,
         companyScopeIdRef.current,
@@ -335,7 +388,11 @@ export function OccupancyScenarioManager() {
             </div>
           ) : loadingAreas ? (
             <div className="rounded-md border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
-              Certificando câmeras, workers, linhas e snapshots de ocupação...
+              Carregando câmeras, catálogo e snapshots de ocupação...
+            </div>
+          ) : areaCatalogWarning ? (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
+              {areaCatalogWarning}
             </div>
           ) : null}
           {loading ? (
@@ -430,6 +487,7 @@ export function OccupancyScenarioManager() {
       </Card>
 
       <OccupancyScenarioDialog
+        areaCatalogAuthoritative={areaCatalogAuthoritative}
         areaCatalogError={areaCatalogError}
         areaCatalogReady={areaCatalogCertified}
         areaOptions={areaOptions}
@@ -444,6 +502,7 @@ export function OccupancyScenarioManager() {
 }
 
 function OccupancyScenarioDialog({
+  areaCatalogAuthoritative,
   areaCatalogError,
   areaCatalogReady,
   areaOptions,
@@ -453,6 +512,7 @@ function OccupancyScenarioDialog({
   open,
   scenario,
 }: {
+  areaCatalogAuthoritative: boolean;
   areaCatalogError: string;
   areaCatalogReady: boolean;
   areaOptions: AreaOption[];
@@ -465,6 +525,13 @@ function OccupancyScenarioDialog({
   const [draft, setDraft] = React.useState<Draft>(() => createEmptyDraft());
   const [saving, setSaving] = React.useState(false);
   const companyIdRef = React.useRef(companyId);
+  const compatibleAreaOptions = React.useMemo(() => {
+    const objectClass = draft.object_class.trim().toLowerCase();
+    return areaOptions.filter(
+      (option) =>
+        !option.object_class || option.object_class === objectClass,
+    );
+  }, [areaOptions, draft.object_class]);
 
   React.useEffect(() => {
     companyIdRef.current = companyId;
@@ -486,7 +553,17 @@ function OccupancyScenarioDialog({
 
   function addArea() {
     const used = new Set(draft.areas.map(areaKey));
-    const option = areaOptions.find((item) => !used.has(item.key)) ?? areaOptions[0];
+    const option = compatibleAreaOptions.find(
+      (item) => !used.has(areaKey(item)),
+    );
+    if (!option && areaCatalogAuthoritative) {
+      toast.error(
+        compatibleAreaOptions.length
+          ? "Todas as áreas disponíveis desta classe já foram incluídas."
+          : "Não há outra área ativa desta classe no catálogo de ocupação.",
+      );
+      return;
+    }
 
     setDraft((current) => ({
       ...current,
@@ -526,6 +603,12 @@ function OccupancyScenarioDialog({
     let payload: ReturnType<typeof buildScenarioPayload>;
     try {
       payload = buildScenarioPayload(draft);
+      requireOccupancyAreaClassCompatibility({
+        authoritative: areaCatalogAuthoritative && draft.active,
+        areas: payload.areas,
+        objectClass: payload.object_class,
+        options: areaOptions,
+      });
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -546,6 +629,7 @@ function OccupancyScenarioDialog({
               ...payload,
               active: draft.active,
             },
+            companyScopeId: companyId,
           },
         );
         requireUnchangedCompanyScope(companyId, companyIdRef.current);
@@ -560,6 +644,7 @@ function OccupancyScenarioDialog({
         const response = await apiFetch<unknown>("/occupancy/scenarios", {
           method: "POST",
           body: payload,
+          companyScopeId: companyId,
         });
         requireUnchangedCompanyScope(companyId, companyIdRef.current);
         requireSavedScenario(response, { companyId, payload });
@@ -660,7 +745,7 @@ function OccupancyScenarioDialog({
                     }))
                   }
                   className={cn(
-                    "flex h-10 w-full items-center justify-between rounded-md border px-3 text-sm transition",
+                    "flex h-10 w-full items-center justify-between rounded-md border px-3 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                     draft.active
                       ? "border-primary/30 bg-primary/10 text-primary"
                       : "border-border bg-background text-muted-foreground",
@@ -710,8 +795,9 @@ function OccupancyScenarioDialog({
                 {draft.areas.map((area, index) => (
                   <ScenarioAreaEditor
                     key={`${area.camera_id}-${area.area_id}-${index}`}
+                    allowManual={!areaCatalogAuthoritative}
                     area={area}
-                    areaOptions={areaOptions}
+                    areaOptions={compatibleAreaOptions}
                     onPatch={(patch) => updateArea(index, patch)}
                     onRemove={() => removeArea(index)}
                   />
@@ -749,21 +835,23 @@ function OccupancyScenarioDialog({
 }
 
 function ScenarioAreaEditor({
+  allowManual,
   area,
   areaOptions,
   onPatch,
   onRemove,
 }: {
+  allowManual: boolean;
   area: OccupancyScenarioArea;
   areaOptions: AreaOption[];
   onPatch: (patch: Partial<OccupancyScenarioArea>) => void;
   onRemove: () => void;
 }) {
-  const selectedOptionKey =
-    areaOptions.find(
-      (option) =>
-        option.area_id === area.area_id && option.camera_id === area.camera_id,
-    )?.key ?? MANUAL_AREA_OPTION;
+  const selectedOption = areaOptions.find(
+    (option) =>
+      option.area_id === area.area_id && option.camera_id === area.camera_id,
+  );
+  const selectedOptionKey = selectedOption?.key ?? MANUAL_AREA_OPTION;
 
   return (
     <div className="grid gap-3 rounded-md border bg-card p-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
@@ -778,7 +866,11 @@ function ScenarioAreaEditor({
             onPatch({
               area_id: option.area_id,
               camera_id: option.camera_id,
-              label: area.label?.trim() ? area.label : option.label,
+              label: resolveOccupancyAreaSelectionLabel({
+                currentLabel: area.label,
+                currentOptionLabel: selectedOption?.label,
+                nextOptionLabel: option.label,
+              }),
             });
           }}
         >
@@ -786,7 +878,9 @@ function ScenarioAreaEditor({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={MANUAL_AREA_OPTION}>Manual</SelectItem>
+            <SelectItem value={MANUAL_AREA_OPTION} disabled={!allowManual}>
+              {allowManual ? "Manual" : "Indisponível no catálogo ativo"}
+            </SelectItem>
             {areaOptions.map((option) => (
               <SelectItem key={option.key} value={option.key}>
                 {option.label}
@@ -800,6 +894,7 @@ function ScenarioAreaEditor({
           value={area.camera_id}
           onChange={(event) => onPatch({ camera_id: event.target.value })}
           placeholder="camera_id"
+          readOnly={!allowManual}
         />
       </FormField>
       <FormField label="Área">
@@ -807,6 +902,7 @@ function ScenarioAreaEditor({
           value={area.area_id}
           onChange={(event) => onPatch({ area_id: event.target.value })}
           placeholder="area-1"
+          readOnly={!allowManual}
         />
       </FormField>
       <FormField label="Rótulo">
@@ -871,7 +967,7 @@ function buildScenarioPayload(draft: Draft) {
   if (!name) {
     throw new Error("Informe o nome do cenário.");
   }
-  const objectClass = draft.object_class.trim();
+  const objectClass = draft.object_class.trim().toLowerCase();
   if (!objectClass) {
     throw new Error("Informe a classe de objeto.");
   }
@@ -946,7 +1042,7 @@ function requireSavedScenario(
     payload: ReturnType<typeof buildScenarioPayload>;
   },
 ) {
-  const [scenario] = requireOccupancyScenarioRows([value]);
+  const [scenario] = requireOccupancyScenarioRows([value], companyId);
   if (scenario.company_id !== companyId) {
     throw new Error(
       `A API salvou o cenário na empresa "${scenario.company_id}", não na empresa ativa "${companyId}".`,

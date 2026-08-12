@@ -16,6 +16,7 @@ export type OccupancyChartPalette = {
   rangeEnd: string;
   rangeStart: string;
   shadow: string;
+  surface: string;
   tooltipBackground: string;
   tooltipBorder: string;
   tooltipText: string;
@@ -26,10 +27,10 @@ export function getOccupancyChartPalette(
 ): OccupancyChartPalette {
   if (theme === "dark") {
     return {
-      average: "#FFFFFF",
+      average: "#5EEAD4",
       axisLine: "#334155",
       axisText: "#A8B3C7",
-      current: "#FFFFFF",
+      current: "#60A5FA",
       gridLine: "#273244",
       legendText: "#CBD5E1",
       maximumLimit: "#FF6B7D",
@@ -41,6 +42,7 @@ export function getOccupancyChartPalette(
       rangeEnd: "#7DD3FC",
       rangeStart: "#2563EB",
       shadow: "rgba(96, 165, 250, 0.08)",
+      surface: "#131316",
       tooltipBackground: "#0F172A",
       tooltipBorder: "#334155",
       tooltipText: "#E2E8F0",
@@ -48,10 +50,10 @@ export function getOccupancyChartPalette(
   }
 
   return {
-    average: "#FFFFFF",
+    average: "#0F766E",
     axisLine: "#D8E3F2",
     axisText: "#66758A",
-    current: "#FFFFFF",
+    current: "#1267C4",
     gridLine: "#E8EEF6",
     legendText: "#526477",
     maximumLimit: "#9F1D35",
@@ -63,6 +65,7 @@ export function getOccupancyChartPalette(
     rangeEnd: "#4C95D9",
     rangeStart: "#124E91",
     shadow: "rgba(18, 78, 145, 0.05)",
+    surface: "#FFFFFF",
     tooltipBackground: "#FFFFFF",
     tooltipBorder: "#D8E3F2",
     tooltipText: "#13233A",

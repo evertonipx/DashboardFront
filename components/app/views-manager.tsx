@@ -175,6 +175,8 @@ export function ViewsManager() {
   );
   const [viewWidgets, setViewWidgets] = React.useState<ViewWidget[]>([]);
   const [loadingScenarios, setLoadingScenarios] = React.useState(false);
+  const companyScopeIdRef = React.useRef(companyScopeId);
+  const scenarioRequestSequenceRef = React.useRef(0);
   const selectedView = viewOptions.find((option) => option.value === chart);
   const selectedScenarioNames = selectedScenarioIds
     .map((id) => scenarios.find((scenario) => scenario.id === id)?.name)
@@ -292,11 +294,38 @@ export function ViewsManager() {
   }, [widgetChart]);
 
   React.useEffect(() => {
+    companyScopeIdRef.current = companyScopeId;
+  }, [companyScopeId]);
+
+  React.useEffect(() => {
+    const requestedCompanyScopeId = companyScopeId.trim();
+    const requestSequence = ++scenarioRequestSequenceRef.current;
+    let active = true;
+    const isCurrentRequest = () =>
+      active &&
+      requestSequence === scenarioRequestSequenceRef.current &&
+      companyScopeIdRef.current.trim() === requestedCompanyScopeId;
+
     async function loadScenarios() {
+      setScenarios([]);
+      setSelectedScenarioIds([]);
+      setWidgetSelectedScenarioIds([]);
+      if (!requestedCompanyScopeId) {
+        setLoadingScenarios(false);
+        return;
+      }
+
       setLoadingScenarios(true);
       try {
-        const rows = await apiFetch<Scenario[]>("/scenarios");
-        const scopedRows = filterScopedApiRows(rows, companyScopeId);
+        const rows = await apiFetch<Scenario[]>("/scenarios", {
+          companyScopeId: requestedCompanyScopeId,
+        });
+        const scopedRows = filterScopedApiRows(
+          rows,
+          requestedCompanyScopeId,
+        );
+        if (!isCurrentRequest()) return;
+
         setScenarios(scopedRows);
         setSelectedScenarioIds((current) =>
           current.filter((id) => scopedRows.some((scenario) => scenario.id === id)),
@@ -307,14 +336,19 @@ export function ViewsManager() {
           ),
         );
       } catch {
+        if (!isCurrentRequest()) return;
         setScenarios([]);
+        setSelectedScenarioIds([]);
         setWidgetSelectedScenarioIds([]);
       } finally {
-        setLoadingScenarios(false);
+        if (isCurrentRequest()) setLoadingScenarios(false);
       }
     }
 
-    loadScenarios();
+    void loadScenarios();
+    return () => {
+      active = false;
+    };
   }, [companyScopeId]);
 
   function updateChart(value: ViewChart) {

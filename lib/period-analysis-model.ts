@@ -15,8 +15,9 @@ import {
   type ScenarioCompositionChartType,
 } from "@/lib/chart-composition";
 import {
+  buildCurrentYearComparisonTable,
   buildCurrentYearComparisonOption,
-  type CurrentYearMonthPoint,
+  buildCurrentYearMonthPoints,
 } from "@/lib/current-year-chart";
 import { buildHourlyOccupancyOption } from "@/lib/hourly-occupancy-chart";
 import {
@@ -668,51 +669,17 @@ function buildCurrentYearModel(
 ): PeriodAnalysisWidgetModel {
   const reference = new Date(period.to.getTime() - 1);
   const year = reference.getFullYear();
-  const currentMonth = reference.getMonth();
-  const monthLabels = [
-    "Jan",
-    "Fev",
-    "Mar",
-    "Abr",
-    "Mai",
-    "Jun",
-    "Jul",
-    "Ago",
-    "Set",
-    "Out",
-    "Nov",
-    "Dez",
-  ];
-  let accumulated = 0;
-  const points = monthLabels.map<CurrentYearMonthPoint>((label, month) => {
-    let value: number | null = null;
-    if (month <= currentMonth) {
-      const from = new Date(year, month, 1);
-      const to =
-        month < currentMonth
-          ? new Date(year, month + 1, 1)
-          : new Date(
-              Math.min(
-                periodRangeThroughNow(period).to.getTime(),
-                new Date(year, month + 1, 1).getTime(),
-              ),
-            );
-      value = sumSelectedScenarioRows({
+  const points = buildCurrentYearMonthPoints({
+    reference,
+    through: periodRangeThroughNow(period).to,
+    valueForRange: (from, to) =>
+      sumSelectedScenarioRows({
         from,
         rows: data.month.rows,
         scenarios,
         sourceGranularity: data.month.granularity,
         to,
-      });
-    }
-
-    if (value !== null) accumulated += value;
-    return {
-      accumulated: value === null ? null : accumulated,
-      label,
-      month,
-      value,
-    };
+      }),
   });
   const accumulatedView = widget.kind === "year_accumulated";
   const recorded = points.filter((point) => point.value !== null);
@@ -745,20 +712,7 @@ function buildCurrentYearModel(
       year,
       color,
     ),
-    table: {
-      columns: [
-        { key: "month", label: "Mês", width: 18 },
-        { key: "value", label: "Valor mensal", numeric: true, width: 22 },
-        { key: "accumulated", label: "Acumulado", numeric: true, width: 22 },
-      ],
-      description: String(year),
-      rows: recorded.map((point) => ({
-        accumulated: point.accumulated ?? 0,
-        month: point.label,
-        value: point.value ?? 0,
-      })),
-      title: widget.title,
-    },
+    table: buildCurrentYearComparisonTable(points, widget.title, year),
   };
 }
 

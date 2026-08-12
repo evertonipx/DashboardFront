@@ -69,6 +69,15 @@ export function summarizeOccupancyMetrics(
   };
 }
 
+export function latestOccupancyMetric(
+  points: readonly NullableOccupancyMetric[],
+): NullableOccupancyMetric {
+  const latest = points.at(-1);
+  return latest
+    ? summarizeOccupancyMetrics([latest])
+    : emptyOccupancyMetric();
+}
+
 function roundOccupancyValue(value: number) {
   return Math.round(value * 10) / 10;
 }

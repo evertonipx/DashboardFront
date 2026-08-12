@@ -23,14 +23,24 @@ export function writeCompanyCache(companies: CurrentUserCompany[]) {
   const cache = readCompanyCache();
 
   for (const company of validCompanies) {
+    const cached = cache[company.id];
+    const timezone =
+      company.timezone === undefined
+        ? cached?.timezone
+        : normalizeOptionalString(company.timezone);
     cache[company.id] = {
       id: company.id,
       name: company.name,
+      timezone,
       trade_name: company.trade_name ?? null,
     };
   }
 
   window.localStorage.setItem(COMPANY_CACHE_KEY, JSON.stringify(cache));
+}
+
+function normalizeOptionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function readCompanyCache(): CompanyCache {

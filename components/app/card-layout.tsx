@@ -51,6 +51,7 @@ import { cn } from "@/lib/utils";
 import {
   applyDefaultWidgetViewPresetIfEmpty,
   type WidgetViewPreset,
+  type WidgetViewPresetNamespace,
   type WidgetViewScope,
 } from "@/lib/widget-view-presets";
 import {
@@ -68,6 +69,8 @@ import {
 type LayoutCard = {
   chartTypeEnabled?: boolean;
   chartTypes?: readonly CardChartType[];
+  colorEditable?: boolean;
+  colorPreview?: "gradient" | "solid";
   id: string;
   label?: string;
   defaultHeight?: CardHeight;
@@ -89,8 +92,10 @@ type CardLayoutProps = {
   monitorMode?: boolean;
   onApplySavedViewSource?: (preset: WidgetViewPreset) => boolean;
   onOrganizerOpenChange?: (open: boolean) => void;
+  onPreferencesChange?: (preferences: CardPreference[]) => void;
   onReorderModeChange?: (enabled: boolean) => void;
   organizerOpen?: boolean;
+  presetNamespace?: WidgetViewPresetNamespace;
   preferenceScopeId?: string | null;
   reorderMode?: boolean;
   showOrganizerTrigger?: boolean;
@@ -107,8 +112,10 @@ export function CardLayout({
   monitorMode = false,
   onApplySavedViewSource,
   onOrganizerOpenChange,
+  onPreferencesChange,
   onReorderModeChange,
   organizerOpen: controlledOrganizerOpen,
+  presetNamespace,
   preferenceScopeId,
   reorderMode: controlledReorderMode,
   showOrganizerTrigger = true,
@@ -153,6 +160,8 @@ export function CardLayout({
   );
   const cardIds = React.useMemo(() => cards.map((card) => card.id), [cards]);
   const companyId = useEffectiveCompanyScopeId(user) || null;
+  const resolvedPresetNamespace =
+    presetNamespace ?? (menuKey === "occupancy" ? "occupancy-live" : menuKey);
   const preferences = useCardPreferences(menuKey, cardIds, companyId, {
     userId: user?.id,
     viewId: preferenceScopeId,
@@ -168,10 +177,15 @@ export function CardLayout({
     : null;
 
   React.useEffect(() => {
+    onPreferencesChange?.(preferences);
+  }, [onPreferencesChange, preferences]);
+
+  React.useEffect(() => {
     if (!preferenceScopeId || !user?.id) return;
     let cancelled = false;
     const applicationKey = [
       menuKey,
+      resolvedPresetNamespace,
       companyId ?? "",
       user.id,
       preferenceScopeId,
@@ -183,6 +197,7 @@ export function CardLayout({
       cardIds,
       companyId,
       menuKey,
+      presetNamespace: resolvedPresetNamespace,
       targetScope: {
         id: preferenceScopeId,
         name: viewScopeName?.trim() || "Tela atual",
@@ -203,6 +218,7 @@ export function CardLayout({
     companyId,
     menuKey,
     preferenceScopeId,
+    resolvedPresetNamespace,
     user?.id,
     viewScopeName,
   ]);
@@ -473,6 +489,7 @@ export function CardLayout({
           onOpenChange={setSavedViewsOpen}
           open={savedViewsOpen}
           preferences={preferences}
+          presetNamespace={resolvedPresetNamespace}
           scopes={viewScopes}
           sourceMenuKeys={savedViewSourceMenus}
           userId={user?.id}
@@ -588,6 +605,7 @@ function CardLayoutItem({
   return (
     <div
       data-layout-card-id={card.id}
+      data-layout-reorder-enabled={reorderEnabled ? "true" : undefined}
       data-layout-card-height={currentHeight}
       data-layout-card-min-compact-height={minimumCardHeight(card, "compact")}
       data-layout-card-min-height={minimumHeight}
@@ -618,7 +636,7 @@ function CardLayoutItem({
           draggable
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
-          className="absolute left-1/2 top-0 z-30 flex h-6 w-8 -translate-x-1/2 -translate-y-1/2 cursor-grab items-center justify-center rounded-md border bg-card/95 text-muted-foreground shadow-sm transition hover:text-foreground active:cursor-grabbing"
+          className="absolute left-1/2 top-0 z-30 flex h-6 w-8 -translate-x-1/2 -translate-y-1/2 cursor-grab items-center justify-center rounded-md border bg-card/95 text-muted-foreground shadow-sm transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 active:cursor-grabbing"
           aria-grabbed={draggingId === card.id}
           aria-label={`Mover ${card.label ?? card.id}`}
           title="Arrastar para mover"
@@ -801,11 +819,14 @@ function WidgetOrganizerDialog({
                       zoom={currentZoom}
                     />
                   ) : null}
-                  <WidgetColorPicker
-                    cardId={card.id}
-                    color={preference?.color}
-                    onChange={onColorChange}
-                  />
+                  {card.colorEditable !== false ? (
+                    <WidgetColorPicker
+                      cardId={card.id}
+                      color={preference?.color}
+                      gradient={card.colorPreview === "gradient"}
+                      onChange={onColorChange}
+                    />
+                  ) : null}
                   <Button
                     type="button"
                     variant="outline"
@@ -1090,7 +1111,7 @@ function WidgetChartTypePicker({
             key={type}
             type="button"
             className={cn(
-              "flex h-6 w-7 items-center justify-center rounded-sm text-muted-foreground transition hover:text-foreground",
+              "flex h-6 w-7 items-center justify-center rounded-sm text-muted-foreground transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
               chartType === type &&
                 "bg-primary text-primary-foreground shadow-sm hover:text-primary-foreground",
             )}
@@ -1140,18 +1161,19 @@ const WIDGET_CHART_TYPE_OPTIONS = {
 function WidgetColorPicker({
   cardId,
   color,
+  gradient = false,
   onChange,
 }: {
   cardId: string;
   color?: string;
+  gradient?: boolean;
   onChange: (cardId: string, color?: string) => void;
 }) {
-  const usesGradient = cardId === "live_month_hour_heatmap";
-
   return (
     <div
       className="inline-flex h-8 items-center gap-1 rounded-md border bg-background px-1.5"
-      aria-label={usesGradient ? "Gradiente do mapa de calor" : "Cor do widget"}
+      aria-label={gradient ? "Gradiente do mapa de calor" : "Cor do widget"}
+      role="group"
     >
       <Palette className="h-3.5 w-3.5 text-muted-foreground" />
       {PASTEL_BAR_COLORS.slice(0, 4).map((swatch) => (
@@ -1159,12 +1181,12 @@ function WidgetColorPicker({
           key={swatch}
           type="button"
           className={cn(
-            "h-4 w-4 rounded-sm border transition",
+            "h-4 w-4 rounded-sm border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
             color === swatch && "ring-2 ring-primary ring-offset-1",
           )}
-          style={widgetColorPreviewStyle(swatch, usesGradient)}
+          style={widgetColorPreviewStyle(swatch, gradient)}
           onClick={() => onChange(cardId, swatch)}
-          aria-label={`${usesGradient ? "Usar gradiente" : "Usar cor"} ${swatch}`}
+          aria-label={`${gradient ? "Usar gradiente" : "Usar cor"} ${swatch}`}
           title={swatch}
         />
       ))}
@@ -1176,7 +1198,7 @@ function WidgetColorPicker({
           className="absolute inset-0"
           style={widgetColorPreviewStyle(
             color ?? "#1267C4",
-            usesGradient,
+            gradient,
           )}
         />
         <input
@@ -1190,7 +1212,7 @@ function WidgetColorPicker({
       {color ? (
         <button
           type="button"
-          className="flex h-4 w-4 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted"
+          className="flex h-4 w-4 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
           onClick={() => onChange(cardId, undefined)}
           aria-label="Restaurar cor padrão"
           title="Cor padrão"

@@ -15,7 +15,10 @@ import {
 
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
-import { useWidgetColor } from "@/components/app/widget-appearance";
+import {
+  WidgetTitleText,
+  useWidgetColor,
+} from "@/components/app/widget-appearance";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -183,6 +186,7 @@ export function buildCountingIntelligenceWidgetCards({
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.yearOverYearMonth,
       label: "Tabela mensal comparativa",
+      colorEditable: false,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: <YearOverYearMatrixCard loading={loading} model={model} />,
@@ -223,7 +227,7 @@ export function buildCountingIntelligenceWidgetCards({
         />
       ),
     },
-  ];
+  ].map((card) => ({ ...card, titleEditable: true as const }));
 }
 
 function ExecutiveMetricCard({
@@ -249,15 +253,18 @@ function ExecutiveMetricCard({
     trend !== undefined && trend !== null && trend < 0
       ? ArrowDownRight
       : ArrowUpRight;
+  const widgetColor = useWidgetColor();
 
   return (
     <Card className="h-full min-w-0 overflow-hidden">
       <CardHeader className="space-y-0 px-4 pb-1 pt-3">
         <div className="flex min-w-0 items-center justify-between gap-2">
-          <CardTitle className="truncate text-[11px] font-semibold uppercase text-muted-foreground">
-            {label}
+          <CardTitle className="truncate text-xs font-semibold uppercase text-muted-foreground">
+            <WidgetTitleText fallback={label} />
           </CardTitle>
-          <Icon className="h-4 w-4 shrink-0 text-primary" />
+          <span className="shrink-0" style={{ color: widgetColor }}>
+            <Icon className="h-4 w-4" />
+          </span>
         </div>
       </CardHeader>
       <CardContent className="min-w-0 px-4 pb-3 pt-1">
@@ -275,12 +282,12 @@ function ExecutiveMetricCard({
           </div>
         )}
         <div
-          className="mt-1 truncate text-[10px] text-muted-foreground"
+          className="mt-1 truncate text-[11px] text-muted-foreground"
           title={period}
         >
           {period}
         </div>
-        <div className="mt-1 flex min-w-0 items-center gap-1 text-[10px] text-muted-foreground">
+        <div className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
           {trend !== undefined && trend !== null ? (
             <TrendIcon
               className={cn(
@@ -393,14 +400,16 @@ function ExecutiveChartCard({
       <CardHeader className="border-b px-4 py-3">
         <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
-            <CardTitle className="text-sm">{title}</CardTitle>
-            <p className="mt-1 text-[10px] text-muted-foreground">
+            <CardTitle className="text-sm">
+              <WidgetTitleText fallback={title} />
+            </CardTitle>
+            <p className="mt-1 text-[11px] text-muted-foreground">
               {description}
             </p>
           </div>
           <Badge
             variant="outline"
-            className="max-w-full truncate text-[10px]"
+            className="max-w-full truncate text-[11px]"
             title={badge}
           >
             {badge}
@@ -456,8 +465,10 @@ function AccessRankingCard({
       <CardHeader className="border-b px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-[min(100%,16rem)] flex-1">
-            <CardTitle className="text-sm">Ranking dos acessos</CardTitle>
-            <CardDescription className="mt-1 text-[10px] leading-4">
+            <CardTitle className="text-sm">
+              <WidgetTitleText fallback="Ranking dos acessos" />
+            </CardTitle>
+            <CardDescription className="mt-1 text-[11px] leading-4">
               Cada acesso corresponde a um cenário; os picos horários consideram
               o período selecionado.
             </CardDescription>
@@ -465,12 +476,12 @@ function AccessRankingCard({
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             <Badge
               variant="outline"
-              className="max-w-[180px] truncate text-[10px]"
+              className="max-w-[180px] truncate text-[11px]"
               title={formatCountingIntelligencePeriod(model)}
             >
               {formatCountingIntelligencePeriod(model)}
             </Badge>
-            <Badge variant="outline" className="text-[10px]">
+            <Badge variant="outline" className="text-[11px]">
               {model.accesses.length} acessos · 100%
             </Badge>
             <div className="inline-flex overflow-hidden rounded-md border bg-card">
@@ -569,24 +580,31 @@ function YearOverYearMatrixCard({
       <CardHeader className="border-b px-4 py-3 sm:px-5">
         <div className="flex flex-wrap items-end justify-between gap-2">
           <div className="min-w-0">
-            <CardTitle className="text-sm">Tabela mensal comparativa</CardTitle>
-            <p className="mt-1 text-[10px] text-muted-foreground">
+            <CardTitle className="text-sm">
+              <WidgetTitleText fallback="Tabela mensal comparativa" />
+            </CardTitle>
+            <p className="mt-1 text-[11px] text-muted-foreground">
               Anos, meses, acumulado e média; a variação usa sempre o ano mais
               recente contra o anterior.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline" className="gap-1 bg-card text-[10px]">
+            <Badge variant="outline" className="gap-1 bg-card text-[11px]">
               <CalendarRange className="h-3.5 w-3.5" />
               {formatCountingIntelligencePeriod(model)}
             </Badge>
-            <Badge variant="outline" className="text-[10px]">
+            <Badge variant="outline" className="text-[11px]">
               Var. {comparison.latestYear}/{comparison.comparisonYear}
             </Badge>
           </div>
         </div>
       </CardHeader>
-      <CardContent className="max-w-full overflow-x-auto px-2 pb-3 pt-2 sm:px-4">
+      <CardContent
+        aria-label="Comparativo anual; role horizontalmente para ver todos os meses"
+        className="enterprise-horizontal-scroll max-w-full overflow-x-auto px-2 pb-3 pt-2 sm:px-4"
+        role="region"
+        tabIndex={0}
+      >
         {loading ? (
           <Skeleton className="h-[190px] min-w-[1040px]" />
         ) : comparison.rows.length ? (
@@ -627,9 +645,7 @@ function YearOverYearMatrixCard({
                   average={row.average}
                   baselineOnly={row.baselineOnly}
                   current={row.year === comparison.latestYear}
-                  key={`${row.year}:${
-                    row.baselineOnly ? "baseline" : "selected"
-                  }`}
+                  key={row.year}
                   label={String(row.year)}
                   values={row.months}
                 />
@@ -690,7 +706,7 @@ function YearComparisonValueRow({
       >
         {label}
         {baselineOnly ? (
-          <span className="ml-1 text-[9px] font-normal text-muted-foreground">
+          <span className="ml-1 text-[10px] font-normal text-muted-foreground">
             base
           </span>
         ) : null}
@@ -724,7 +740,7 @@ function DeltaCell({
   return (
     <td
       className={cn(
-        "border-b px-1.5 py-2 text-right text-[10px] font-medium tabular-nums",
+        "border-b px-1.5 py-2 text-right text-[11px] font-medium tabular-nums",
         value !== null && value > 0
           ? "text-emerald-600 dark:text-emerald-400"
           : value !== null && value < 0

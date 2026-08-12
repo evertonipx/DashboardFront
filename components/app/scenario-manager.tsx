@@ -97,19 +97,39 @@ export function ScenarioManager() {
   const [editingScenario, setEditingScenario] = React.useState<Scenario | null>(
     null,
   );
+  const companyScopeIdRef = React.useRef(companyScopeId);
+  const scenarioRequestSequenceRef = React.useRef(0);
 
   const loadScenarios = React.useCallback(async () => {
+    const requestedCompanyScopeId = companyScopeId.trim();
+    const requestSequence = ++scenarioRequestSequenceRef.current;
+    const isCurrentRequest = () =>
+      requestSequence === scenarioRequestSequenceRef.current &&
+      companyScopeIdRef.current.trim() === requestedCompanyScopeId;
+
+    if (!requestedCompanyScopeId) {
+      setScenarios([]);
+      setResults({});
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
-      const data = await apiFetch<Scenario[]>("/scenarios");
-      const scopedScenarios = filterScopedApiRows(data, companyScopeId);
-      setScenarios(scopedScenarios);
+      const data = await apiFetch<Scenario[]>("/scenarios", {
+        companyScopeId: requestedCompanyScopeId,
+      });
+      const scopedScenarios = filterScopedApiRows(
+        data,
+        requestedCompanyScopeId,
+      );
 
       const entries = await Promise.all(
         scopedScenarios.map(async (scenario) => {
           try {
             const result = await apiFetch<ScenarioResult>(
               `/scenarios/${scenario.id}/result`,
+              { companyScopeId: requestedCompanyScopeId },
             );
             return [scenario.id, result] as const;
           } catch {
@@ -117,20 +137,33 @@ export function ScenarioManager() {
           }
         }),
       );
+      if (!isCurrentRequest()) return;
+
+      setScenarios(scopedScenarios);
       setResults(Object.fromEntries(entries));
     } catch (error) {
+      if (!isCurrentRequest()) return;
       const message =
         error instanceof Error
           ? error.message
           : "Não foi possível carregar os cenários.";
+      setScenarios([]);
+      setResults({});
       toast.error(message);
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) setLoading(false);
     }
   }, [companyScopeId]);
 
   React.useEffect(() => {
-    loadScenarios();
+    companyScopeIdRef.current = companyScopeId;
+    setDialogOpen(false);
+    setBulkDialogOpen(false);
+    setEditingScenario(null);
+  }, [companyScopeId]);
+
+  React.useEffect(() => {
+    void loadScenarios();
   }, [loadScenarios]);
 
   function openCreateDialog() {
@@ -161,11 +194,23 @@ export function ScenarioManager() {
 
     if (!window.confirm(`Excluir o cenário "${scenario.name}"?`)) return;
 
+    const requestedCompanyScopeId = companyScopeId.trim();
+    if (!requestedCompanyScopeId) {
+      toast.error("Selecione uma empresa antes de excluir o cenário.");
+      return;
+    }
+
     try {
-      await apiFetch(`/scenarios/${scenario.id}`, { method: "DELETE" });
+      await apiFetch(`/scenarios/${scenario.id}`, {
+        companyScopeId: requestedCompanyScopeId,
+        method: "DELETE",
+      });
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
+
       toast.success("Cenário excluído");
       await loadScenarios();
     } catch (error) {
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
       const message =
         error instanceof Error ? error.message : "Não foi possível excluir.";
       toast.error(message);
@@ -362,6 +407,11 @@ function ScenarioDialog({
   const [lineSearch, setLineSearch] = React.useState("");
   const [loadingOptions, setLoadingOptions] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const companyScopeIdRef = React.useRef(companyScopeId);
+
+  React.useEffect(() => {
+    companyScopeIdRef.current = companyScopeId;
+  }, [companyScopeId]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -445,6 +495,12 @@ function ScenarioDialog({
   }
 
   async function saveScenario() {
+    const requestedCompanyScopeId = companyScopeId.trim();
+    if (!requestedCompanyScopeId) {
+      toast.error("Selecione uma empresa antes de salvar o cenário.");
+      return;
+    }
+
     const cleanName = name.trim();
     const cleanLines = lines
       .filter((line) => line.line_count_id)
@@ -479,20 +535,25 @@ function ScenarioDialog({
     try {
       if (scenario) {
         await apiFetch(`/scenarios/${scenario.id}`, {
-          method: "PUT",
           body: payload,
+          companyScopeId: requestedCompanyScopeId,
+          method: "PUT",
         });
+        if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
         toast.success("Cenário atualizado");
       } else {
         await apiFetch("/scenarios", {
-          method: "POST",
           body: payload,
+          companyScopeId: requestedCompanyScopeId,
+          method: "POST",
         });
+        if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
         toast.success("Cenário criado");
       }
 
       await onSaved();
     } catch (error) {
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
       const message =
         error instanceof Error ? error.message : "Não foi possível salvar.";
       toast.error(message);
@@ -751,6 +812,7 @@ function BulkScenarioDialog({
   );
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
   const [createdCount, setCreatedCount] = React.useState(0);
+  const companyScopeIdRef = React.useRef(companyScopeId);
   const individualScenarioLineIds = React.useMemo(
     () =>
       new Set(
@@ -772,6 +834,10 @@ function BulkScenarioDialog({
   const availableOptions = lineOptions.filter(
     (option) => !individualScenarioLineIds.has(option.id),
   );
+
+  React.useEffect(() => {
+    companyScopeIdRef.current = companyScopeId;
+  }, [companyScopeId]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -822,6 +888,12 @@ function BulkScenarioDialog({
   }
 
   async function createScenarios() {
+    const requestedCompanyScopeId = companyScopeId.trim();
+    if (!requestedCompanyScopeId) {
+      toast.error("Selecione uma empresa antes de criar os cenários.");
+      return;
+    }
+
     const selectedOptions = lineOptions.filter(
       (option) =>
         selectedSet.has(option.id) && !individualScenarioLineIds.has(option.id),
@@ -863,6 +935,7 @@ function BulkScenarioDialog({
             };
             return apiFetch("/scenarios", {
               body: payload,
+              companyScopeId: requestedCompanyScopeId,
               method: "POST",
             });
           }),
@@ -872,10 +945,13 @@ function BulkScenarioDialog({
           if (result.status === "fulfilled") created += 1;
           else if (chunk[resultIndex]) failedIds.push(chunk[resultIndex].id);
         });
+        if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
         setCreatedCount(created);
       }
 
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
       await onSaved();
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
       if (failedIds.length) {
         setSelectedIds(failedIds);
         toast.error(
@@ -1059,20 +1135,30 @@ function BulkScenarioDialog({
 }
 
 async function loadCountingLineOptions(companyScopeId: string) {
+  const requestedCompanyScopeId = companyScopeId.trim();
+  if (!requestedCompanyScopeId) {
+    throw new Error("Selecione uma empresa antes de carregar as linhas.");
+  }
+
   const cameras = filterScopedApiRows(
-    await apiFetch<Camera[]>("/cameras"),
-    companyScopeId,
+    await apiFetch<Camera[]>("/cameras", {
+      companyScopeId: requestedCompanyScopeId,
+    }),
+    requestedCompanyScopeId,
   );
   const lineGroups = await Promise.all(
     cameras.map(async (camera) => {
       try {
         const cameraLines = await apiFetch<CameraLineCount[]>(
           `/cameras/${camera.id}/line-counts`,
+          { companyScopeId: requestedCompanyScopeId },
         );
-        return filterScopedApiRows(cameraLines, companyScopeId).map((line) => ({
-          ...line,
-          cameraName: camera.name,
-        }));
+        return filterScopedApiRows(cameraLines, requestedCompanyScopeId).map(
+          (line) => ({
+            ...line,
+            cameraName: camera.name,
+          }),
+        );
       } catch {
         return [];
       }

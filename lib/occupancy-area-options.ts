@@ -8,20 +8,26 @@ import {
   type OccupancyAreaOption,
 } from "@/lib/occupancy-areas";
 import { requireOccupancySnapshotRows } from "@/lib/occupancy-validation";
+import { createTenantCompanyIdResolver } from "@/lib/tenant-scope-validation";
 import type {
   Camera,
   CameraArea,
   CameraLineCount,
   OccupancyRow,
-  WorkerConfigCamera,
-  WorkerConfigLineCount,
-  WorkerConfigResponse,
 } from "@/lib/types";
 
 type FetchOccupancyAreaOptionsInput = {
   companyId: string;
   from: Date;
+  request?: OccupancyAreaRequest;
   to: Date;
+};
+
+type OccupancyAreaRequest = <T>(path: string) => Promise<T>;
+
+export type OccupancyAreaCatalogResult = {
+  authoritative: boolean;
+  options: OccupancyAreaOption[];
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -38,46 +44,116 @@ const OCCUPANCY_DISCOVERY_COLLECTION_KEYS = [
   "items",
 ] as const;
 
-export async function fetchOccupancyAreaOptions({
+const OCCUPANCY_AREA_CATALOG_COLLECTION_KEYS = [
+  "data",
+  "areas",
+  "occupancy_areas",
+] as const;
+
+const RFC3339_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+export async function fetchOccupancyAreaOptions(
+  input: FetchOccupancyAreaOptionsInput,
+): Promise<OccupancyAreaOption[]> {
+  return (await fetchOccupancyAreaCatalog(input)).options;
+}
+
+export function requireOccupancyAreaClassCompatibility({
+  authoritative,
+  areas,
+  objectClass,
+  options,
+}: {
+  authoritative: boolean;
+  areas: Array<{ area_id: string; camera_id: string }>;
+  objectClass: string;
+  options: readonly OccupancyAreaOption[];
+}) {
+  const expectedClass = objectClass.trim();
+
+  areas.forEach((area) => {
+    const candidates = options.filter(
+      (option) =>
+        option.area_id === area.area_id &&
+        option.camera_id === area.camera_id,
+    );
+    if (!candidates.length && authoritative) {
+      throw new Error(
+        `A área "${area.area_id}" da câmera "${area.camera_id}" não consta no catálogo ativo de ocupação.`,
+      );
+    }
+    if (
+      candidates.length &&
+      candidates.every(
+        (option) =>
+          option.object_class !== undefined &&
+          option.object_class !== expectedClass,
+      )
+    ) {
+      throw new Error(
+        `A área "${area.area_id}" da câmera "${area.camera_id}" não mede a classe "${expectedClass}".`,
+      );
+    }
+  });
+}
+
+export async function fetchOccupancyAreaCatalog({
   companyId,
   from,
+  request = apiFetch,
   to,
-}: FetchOccupancyAreaOptionsInput): Promise<OccupancyAreaOption[]> {
+}: FetchOccupancyAreaOptionsInput): Promise<OccupancyAreaCatalogResult> {
   const expectedCompanyId = requireId(
     companyId,
     "empresa ativa para descobrir áreas de ocupação",
   );
   requireValidRange(from, to);
 
-  const [snapshotPayload, cameraPayload, workerConfigPayload] =
-    await Promise.all([
-    apiFetch<unknown>(occupancyDiscoveryPath(from, to)),
-    apiFetch<unknown>("/cameras"),
-    apiFetch<unknown>("/workers/config"),
+  const [cameraPayload, areaCatalogPayload] = await Promise.all([
+    request<unknown>("/cameras"),
+    fetchOptionalOccupancyAreaCatalog(request),
   ]);
   const cameras = filterScopedApiRows(
-    requireCameraRows(cameraPayload),
+    requireCameraRows(cameraPayload, expectedCompanyId),
     expectedCompanyId,
   );
+  const camerasById = new Map(cameras.map((camera) => [camera.id, camera]));
   const cameraIds = new Set(cameras.map((camera) => camera.id));
+  if (areaCatalogPayload !== null) {
+    return {
+      authoritative: true,
+      options: buildOccupancyAreaOptions(
+        requireOccupancyAreaCatalogRows(
+          areaCatalogPayload,
+          expectedCompanyId,
+          cameras,
+        ),
+      ),
+    };
+  }
+
+  // Compatibilidade temporária: snapshots e metadados legados podem omitir
+  // regiões estáveis. O catálogo autorizado acima é a única fonte completa.
+  const [snapshotPayload, cameraLineRows] = await Promise.all([
+    request<unknown>(occupancyDiscoveryPath(from, to)),
+    fetchCameraAreaLineRows(cameras, expectedCompanyId, request),
+  ]);
   const snapshotCameraIds = requireSnapshotCameraIds(
     snapshotPayload,
     cameraIds,
   );
-  const snapshotRows = requireOccupancySnapshotRows(snapshotPayload, {
-    expectedCameraIds: snapshotCameraIds,
-    from,
-    to,
-  });
-  const workerConfig = requireWorkerConfig(
-    workerConfigPayload,
-    expectedCompanyId,
-    cameraIds,
-  );
-  const cameraLineRows = await fetchCameraAreaLineRows(
-    cameras,
-    expectedCompanyId,
-  );
+  const snapshotRows = requireOccupancySnapshotRows(
+    snapshotPayload,
+    {
+      expectedCameraIds: snapshotCameraIds,
+      from,
+      to,
+    },
+  ).map((row) => ({
+    ...row,
+    camera_name: camerasById.get(row.camera_id)!.name,
+  }));
   const embeddedCameraRows = cameras.flatMap((camera) =>
     requireEmbeddedCameraLineRows(camera, expectedCompanyId).flatMap((line) =>
       cameraLineCountToAreaRows(camera, line),
@@ -86,23 +162,134 @@ export async function fetchOccupancyAreaOptions({
   const embeddedCameraAreaRows = cameras.flatMap((camera) =>
     embeddedAreaRows(camera, camera.id, expectedCompanyId),
   );
-  const workerLineRows = workerConfig.cameras!.flatMap(workerCameraAreaRows);
-  const workerAreaRows = workerConfig.cameras!.flatMap((camera) =>
-    embeddedAreaRows(
-      camera,
-      requireWorkerCameraId(camera),
-      expectedCompanyId,
-    ),
-  );
 
-  return buildOccupancyAreaOptions([
-    ...snapshotRows,
-    ...embeddedCameraRows,
-    ...embeddedCameraAreaRows,
-    ...cameraLineRows,
-    ...workerLineRows,
-    ...workerAreaRows,
-  ]);
+  return {
+    authoritative: false,
+    options: buildOccupancyAreaOptions([
+      ...embeddedCameraRows,
+      ...embeddedCameraAreaRows,
+      ...cameraLineRows,
+      ...snapshotRows,
+    ]),
+  };
+}
+
+async function fetchOptionalOccupancyAreaCatalog(
+  request: OccupancyAreaRequest,
+) {
+  try {
+    return await request<unknown>("/occupancy/areas");
+  } catch (error) {
+    if (isMissingApiRoute(error)) return null;
+    throw error;
+  }
+}
+
+function isMissingApiRoute(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const status = (error as { status?: unknown }).status;
+  return status === 404 || status === 405;
+}
+
+function requireOccupancyAreaCatalogRows(
+  value: unknown,
+  companyId: string,
+  cameras: Camera[],
+): OccupancyRow[] {
+  const resolveCompanyId = createTenantCompanyIdResolver(companyId);
+  const response = requireRecord(value, "catálogo de áreas de ocupação");
+  const complete = requireBoolean(
+    response.complete,
+    "complete do catálogo de áreas de ocupação",
+  );
+  if (!complete) {
+    throw new Error(
+      "A API ainda não concluiu o catálogo de áreas de ocupação.",
+    );
+  }
+  const rows = requireSingleArrayEnvelope(
+    response,
+    OCCUPANCY_AREA_CATALOG_COLLECTION_KEYS,
+    "catálogo de áreas de ocupação",
+  );
+  const camerasById = new Map(cameras.map((camera) => [camera.id, camera]));
+  const identities = new Set<string>();
+
+  return rows.flatMap((candidate, index) => {
+    const context = `área na posição ${index} do catálogo de ocupação`;
+    const row = requireRecord(candidate, context);
+    resolveCompanyId(
+      row.company_id,
+      `company_id da ${context}`,
+    );
+
+    const cameraId = requireId(row.camera_id, `camera_id da ${context}`);
+    const camera = camerasById.get(cameraId);
+    if (!camera) {
+      throw new Error(
+        `A ${context} referencia a câmera desconhecida "${cameraId}".`,
+      );
+    }
+    const areaId = requireId(row.area_id, `area_id da ${context}`);
+    const objectClass = requireId(
+      row.object_class,
+      `object_class da ${context}`,
+    );
+    if (objectClass !== objectClass.toLowerCase()) {
+      throw new Error(
+        `A ${context} possui object_class não normalizado em lowercase.`,
+      );
+    }
+    const identity = JSON.stringify([cameraId, areaId]);
+    if (identities.has(identity)) {
+      throw new Error(
+        `O catálogo retornou a área duplicada "${areaId}" da câmera "${cameraId}".`,
+      );
+    }
+    identities.add(identity);
+
+    const active = requireBoolean(row.active, `active da ${context}`);
+    const label = requireId(
+      row.area_name ?? row.area_label ?? row.label ?? row.name,
+      `nome da ${context}`,
+    );
+    const sourceKind = requireId(
+      row.source_kind,
+      `source_kind da ${context}`,
+    );
+    if (sourceKind !== "region") {
+      throw new Error(
+        `A ${context} possui source_kind "${sourceKind}", não "region".`,
+      );
+    }
+    requireOptionalTimestamp(row.last_seen, `last_seen da ${context}`);
+    requireOptionalTimestamp(row.last_seen_at, `last_seen_at da ${context}`);
+    const hasBaseline =
+      (row.last_seen !== null && row.last_seen !== undefined) ||
+      (row.last_seen_at !== null && row.last_seen_at !== undefined);
+
+    if (!active || camera.active === false || !hasBaseline) return [];
+    return [
+      {
+        area: areaId,
+        area_label: label,
+        camera_id: cameraId,
+        camera_name: camera.name,
+        object_class: objectClass,
+      },
+    ];
+  });
+}
+
+function requireOptionalTimestamp(value: unknown, context: string) {
+  if (value === undefined || value === null) return;
+  const timestamp = requireId(value, context);
+  if (
+    !RFC3339_TIMESTAMP_PATTERN.test(timestamp) ||
+    Number.isNaN(Date.parse(timestamp))
+  ) {
+    throw new Error(`A API retornou ${context} inválido.`);
+  }
 }
 
 function occupancyDiscoveryPath(from: Date, to: Date) {
@@ -117,12 +304,21 @@ function occupancyDiscoveryPath(from: Date, to: Date) {
 async function fetchCameraAreaLineRows(
   cameras: Camera[],
   companyId: string,
+  request: OccupancyAreaRequest,
 ) {
   const rows = await Promise.all(
     cameras.map(async (camera) => {
-      const payload = await apiFetch<unknown>(
-        `/cameras/${camera.id}/line-counts`,
-      );
+      let payload: unknown;
+      try {
+        payload = await request<unknown>(
+          `/cameras/${camera.id}/line-counts`,
+        );
+      } catch (error) {
+        // This is a legacy compatibility source. Some deployments expose
+        // occupancy snapshots cross-tenant but not nested line-count routes.
+        if (isMissingApiRoute(error)) return [];
+        throw error;
+      }
       return requireCameraLineCountRows(
         payload,
         camera,
@@ -133,12 +329,6 @@ async function fetchCameraAreaLineRows(
   );
 
   return rows.flat();
-}
-
-function workerCameraAreaRows(camera: WorkerConfigCamera) {
-  return camera.line_counts!.flatMap((line) =>
-    workerLineCountToAreaRows(camera, line),
-  );
 }
 
 function cameraLineCountToAreaRows(
@@ -154,31 +344,13 @@ function cameraLineCountToAreaRows(
       area_label: displayNameFromLineCount(line) || areaCode,
       camera_id: cameraIdFromLineCount(line) || camera.id,
       camera_name: cameraNameFromLineCount(line) || camera.name,
-      object_class: metricFromLineCount(line),
-    },
-  ];
-}
-
-function workerLineCountToAreaRows(
-  camera: WorkerConfigCamera,
-  line: WorkerConfigLineCount,
-): OccupancyRow[] {
-  if (line.active === false || !isOccupancyAreaLineCount(line)) return [];
-  const areaCode = areaCodeFromLineCount(line);
-
-  return [
-    {
-      area: areaCode,
-      area_label: displayNameFromLineCount(line) || areaCode,
-      camera_id: cameraIdFromLineCount(line) || camera.camera_id || camera.id,
-      camera_name: camera.name,
-      object_class: metricFromLineCount(line),
+      object_class: objectClassFromLineCount(line),
     },
   ];
 }
 
 export function isOccupancyAreaLineCount(
-  line: CameraLineCount | WorkerConfigLineCount,
+  line: CameraLineCount,
 ) {
   const record = line as Record<string, unknown>;
   const code = areaCodeFromLineCount(line).toLowerCase();
@@ -233,7 +405,7 @@ function isRegionCode(code: string) {
   );
 }
 
-function areaCodeFromLineCount(line: CameraLineCount | WorkerConfigLineCount) {
+function areaCodeFromLineCount(line: CameraLineCount) {
   const record = line as Record<string, unknown>;
 
   return (
@@ -250,7 +422,7 @@ function areaCodeFromLineCount(line: CameraLineCount | WorkerConfigLineCount) {
   ).trim();
 }
 
-function displayNameFromLineCount(line: CameraLineCount | WorkerConfigLineCount) {
+function displayNameFromLineCount(line: CameraLineCount) {
   const record = line as Record<string, unknown>;
 
   return (
@@ -262,7 +434,7 @@ function displayNameFromLineCount(line: CameraLineCount | WorkerConfigLineCount)
   );
 }
 
-function metricFromLineCount(line: CameraLineCount | WorkerConfigLineCount) {
+function metricFromLineCount(line: CameraLineCount) {
   const record = line as Record<string, unknown>;
 
   return (
@@ -273,7 +445,20 @@ function metricFromLineCount(line: CameraLineCount | WorkerConfigLineCount) {
   );
 }
 
-function cameraIdFromLineCount(line: CameraLineCount | WorkerConfigLineCount) {
+function objectClassFromLineCount(line: CameraLineCount) {
+  const record = line as Record<string, unknown>;
+
+  return (
+    stringValue(record.object_class) ||
+    stringValue(record.objectClass) ||
+    stringValue(line.object_type) ||
+    stringValue(record.objectType) ||
+    stringValue(record.target_class) ||
+    stringValue(record.targetClass)
+  );
+}
+
+function cameraIdFromLineCount(line: CameraLineCount) {
   const record = line as Record<string, unknown>;
 
   return (
@@ -283,7 +468,7 @@ function cameraIdFromLineCount(line: CameraLineCount | WorkerConfigLineCount) {
   );
 }
 
-function cameraNameFromLineCount(line: CameraLineCount | WorkerConfigLineCount) {
+function cameraNameFromLineCount(line: CameraLineCount) {
   const record = line as Record<string, unknown>;
 
   return (
@@ -400,6 +585,7 @@ function requireCameraLineCountRows(
   context: string,
 ): CameraLineCount[] {
   const rows = requireArray(value, context);
+  const resolveCompanyId = createTenantCompanyIdResolver(companyId);
   const ids = new Set<string>();
 
   return rows.map((candidate, index) => {
@@ -419,7 +605,7 @@ function requireCameraLineCountRows(
         `A linha "${id}" referencia a câmera "${cameraId}", mas foi consultada em "${camera.id}".`,
       );
     }
-    const rowCompanyId = requireId(
+    const rowCompanyId = resolveCompanyId(
       row.company_id,
       `company_id de ${context}, posição ${index}`,
     );
@@ -456,132 +642,8 @@ function requireCameraLineCountRows(
   });
 }
 
-function requireWorkerConfig(
-  value: unknown,
-  companyId: string,
-  cameraIds: Set<string>,
-): WorkerConfigResponse & { cameras: WorkerConfigCamera[] } {
-  const response = requireRecord(value, "configuração do worker");
-  const responseCompanyId = requireId(
-    response.company_id,
-    "company_id da configuração do worker",
-  );
-  if (responseCompanyId !== companyId) {
-    throw new Error(
-      `A configuração do worker pertence à empresa "${responseCompanyId}", não à empresa ativa "${companyId}".`,
-    );
-  }
-  const cameraRows = requireArray(
-    response.cameras,
-    "câmeras da configuração do worker",
-  );
-  const seenCameras = new Set<string>();
-  const cameras = cameraRows.map((candidate, index) => {
-    const camera = requireRecord(
-      candidate,
-      `câmera na posição ${index} da configuração do worker`,
-    );
-    const id = requireOptionalId(
-      camera.id,
-      `id da câmera na posição ${index} da configuração do worker`,
-    );
-    const cameraId = requireOptionalId(
-      camera.camera_id,
-      `camera_id da câmera na posição ${index} da configuração do worker`,
-    );
-    const resolvedId = cameraId ?? id;
-    if (!resolvedId) {
-      throw new Error(
-        `A câmera na posição ${index} da configuração do worker não possui id.`,
-      );
-    }
-    if (!cameraIds.has(resolvedId)) {
-      throw new Error(
-        `A configuração do worker referencia a câmera desconhecida "${resolvedId}".`,
-      );
-    }
-    if (seenCameras.has(resolvedId)) {
-      throw new Error(
-        `A configuração do worker retornou a câmera duplicada "${resolvedId}".`,
-      );
-    }
-    seenCameras.add(resolvedId);
-    requireOptionalId(
-      camera.name,
-      `nome da câmera "${resolvedId}" na configuração do worker`,
-    );
-    const lineCounts = requireWorkerLineCountRows(
-      camera.line_counts,
-      resolvedId,
-    );
-    requireAreaCollections(camera, resolvedId, companyId);
-
-    return {
-      ...camera,
-      id: id ?? resolvedId,
-      camera_id: resolvedId,
-      line_counts: lineCounts,
-    } as WorkerConfigCamera;
-  });
-
-  return {
-    ...response,
-    company_id: responseCompanyId,
-    cameras,
-  } as WorkerConfigResponse & { cameras: WorkerConfigCamera[] };
-}
-
-function requireWorkerCameraId(camera: WorkerConfigCamera) {
-  const id = camera.camera_id ?? camera.id;
-  if (!id) {
-    throw new Error(
-      "A configuração validada do worker perdeu a identidade da câmera.",
-    );
-  }
-  return id;
-}
-
-function requireWorkerLineCountRows(
-  value: unknown,
-  cameraId: string,
-): WorkerConfigLineCount[] {
-  const rows = requireArray(
-    value,
-    `linhas da câmera "${cameraId}" na configuração do worker`,
-  );
-  const ids = new Set<string>();
-
-  return rows.map((candidate, index) => {
-    const context =
-      `linha na posição ${index} da câmera "${cameraId}" na configuração do worker`;
-    const row = requireRecord(candidate, context);
-    const id = requireId(row.id, `id da ${context}`);
-    if (ids.has(id)) {
-      throw new Error(
-        `A configuração do worker retornou a linha duplicada "${id}" na câmera "${cameraId}".`,
-      );
-    }
-    ids.add(id);
-    const lineCode = requireOptionalId(row.line_code, `line_code da ${context}`);
-    const name = requireOptionalId(row.name, `nome da ${context}`);
-    const active = requireOptionalBoolean(row.active, `active da ${context}`);
-    requireOptionalTextFields(row, LINE_OPTIONAL_TEXT_KEYS, context, index, [
-      "camera_id",
-    ]);
-    requireMatchingCameraReferences(row, cameraId, context);
-
-    return {
-      ...row,
-      id,
-      line_code: lineCode,
-      name,
-      active,
-    } as WorkerConfigLineCount;
-  });
-}
-
 function embeddedAreaRows(
-  source: Camera | WorkerConfigCamera,
+  source: Camera,
   cameraId: string,
   companyId: string,
 ): OccupancyRow[] {
@@ -781,7 +843,7 @@ function requireId(value: unknown, context: string) {
 }
 
 function requireOptionalId(value: unknown, context: string) {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
   return requireId(value, context);
 }
 
@@ -793,7 +855,7 @@ function requireBoolean(value: unknown, context: string) {
 }
 
 function requireOptionalBoolean(value: unknown, context: string) {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
   return requireBoolean(value, context);
 }
 

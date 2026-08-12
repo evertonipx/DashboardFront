@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
+import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 
 import {
@@ -10,6 +11,7 @@ import {
 import { resolveBackendBaseUrl } from "@/lib/backend-routing";
 import { permissionsAllowWidgetManagement } from "@/lib/permissions";
 import type { CurrentUser, UserPermission } from "@/lib/types";
+import { reconcileCurrentUserWithAccessToken } from "@/lib/access-token-claims";
 
 type DashboardViewStore = Partial<
   Record<string, Partial<Record<CardMenuKey, CardPreference[]>>>
@@ -29,6 +31,10 @@ const validMenuKeys = new Set<CardMenuKey>([
 ]);
 const dataDirectory = path.join(process.cwd(), ".ipxdata");
 const dataFile = path.join(dataDirectory, "dashboard-views.json");
+const lockFile = path.join(dataDirectory, "dashboard-views.lock");
+const LOCK_TIMEOUT_MS = 5_000;
+const STALE_LOCK_MS = 30_000;
+let storeWriteQueue: Promise<void> = Promise.resolve();
 
 export async function GET(request: NextRequest, context: RouteContext) {
   const menuKey = await resolveMenuKey(context);
@@ -39,7 +45,13 @@ export async function GET(request: NextRequest, context: RouteContext) {
   const session = await resolveSession(request, "read");
   if ("response" in session) return session.response;
 
-  const store = await readStore();
+  const store = await readStore().catch(() => null);
+  if (!store) {
+    return NextResponse.json(
+      { error: "Não foi possível ler as visões salvas." },
+      { status: 500 },
+    );
+  }
   const preferences = store[session.companyId]?.[menuKey];
 
   return NextResponse.json({
@@ -69,12 +81,20 @@ export async function PUT(request: NextRequest, context: RouteContext) {
     Array.isArray(payload?.preferences) ? payload.preferences : [],
     Array.isArray(payload?.card_ids) ? payload.card_ids : undefined,
   );
-  const store = await readStore();
-  const companyViews = store[session.companyId] ?? {};
-  companyViews[menuKey] = preferences;
-  store[session.companyId] = companyViews;
-
-  await writeStore(store);
+  const saved = await updateStore((store) => {
+    const companyViews = store[session.companyId] ?? {};
+    companyViews[menuKey] = preferences;
+    store[session.companyId] = companyViews;
+  }).then(
+    () => true,
+    () => false,
+  );
+  if (!saved) {
+    return NextResponse.json(
+      { error: "Não foi possível salvar a visão." },
+      { status: 500 },
+    );
+  }
 
   return NextResponse.json({
     menuKey,
@@ -110,19 +130,36 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
     };
   }
 
-  const user = await backendFetch<CurrentUser>(
+  const userResult = await backendFetch(
     backendBaseUrl,
     "/api/v1/auth/me",
     authorization,
+    request.signal,
   );
+  if (!userResult.ok) {
+    return {
+      response: backendFailureResponse(userResult.status, "validar a sessão"),
+    };
+  }
+  const rawUser = requireCurrentUser(userResult.payload);
+  const accessToken = authorization.replace(/^Bearer\s+/i, "").trim();
+  const user = rawUser
+    ? reconcileCurrentUserWithAccessToken(rawUser, accessToken)
+    : null;
   if (!user) {
     return {
-      response: NextResponse.json({ error: "Sessão inválida." }, { status: 401 }),
+      response: NextResponse.json(
+        { error: "O backend retornou uma sessão inválida." },
+        { status: 502 },
+      ),
     };
   }
 
   const isMaster = hasMasterAccess(user);
-  const companyId = user.company_id;
+  const requestedCompanyId = request.headers.get("x-company-id")?.trim();
+  const companyId = isMaster && requestedCompanyId
+    ? requestedCompanyId
+    : user.company_id;
 
   if (!companyId) {
     return {
@@ -134,12 +171,31 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   }
 
   if (mode === "write" && !isMaster) {
-    const permissions =
-      (await backendFetch<UserPermission[]>(
-        backendBaseUrl,
-        `/api/v1/users/${user.id}/permissions`,
-        authorization,
-      )) ?? [];
+    const permissionResult = await backendFetch(
+      backendBaseUrl,
+      `/api/v1/users/${encodeURIComponent(user.id)}/permissions`,
+      authorization,
+      request.signal,
+    );
+    if (!permissionResult.ok) {
+      return {
+        response: backendFailureResponse(
+          permissionResult.status,
+          "validar as permissões",
+        ),
+      };
+    }
+    const permissions = Array.isArray(permissionResult.payload)
+      ? (permissionResult.payload as UserPermission[])
+      : null;
+    if (!permissions) {
+      return {
+        response: NextResponse.json(
+          { error: "O backend retornou permissões inválidas." },
+          { status: 502 },
+        ),
+      };
+    }
 
     if (!permissionsAllowWidgetManagement(permissions)) {
       return {
@@ -154,36 +210,109 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   return { user, companyId };
 }
 
-async function backendFetch<T>(
+async function backendFetch(
   backendBaseUrl: string,
   pathname: string,
   authorization: string,
+  signal: AbortSignal,
 ) {
   const headers = new Headers({ Authorization: authorization });
 
   const response = await fetch(`${backendBaseUrl}${pathname}`, {
     headers,
     cache: "no-store",
+    signal,
   }).catch(() => null);
 
-  if (!response?.ok) return null;
+  if (!response) return { ok: false as const, status: 0 };
+  if (!response.ok) return { ok: false as const, status: response.status };
 
-  return (await response.json()) as T;
+  const payload = await response.json().catch(() => null);
+  if (payload === null) return { ok: false as const, status: 502 };
+
+  return { ok: true as const, payload };
+}
+
+function backendFailureResponse(status: number, action: string) {
+  if (status === 401 || status === 403) {
+    return NextResponse.json({ error: "Sessão inválida." }, { status: 401 });
+  }
+  return NextResponse.json(
+    { error: `Backend indisponível ao ${action}.` },
+    { status: status === 0 ? 502 : 503 },
+  );
+}
+
+function requireCurrentUser(payload: unknown): CurrentUser | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const user = payload as CurrentUser;
+  return typeof user.id === "string" && user.id.trim() ? user : null;
 }
 
 async function readStore(): Promise<DashboardViewStore> {
   try {
     const content = await fs.readFile(dataFile, "utf8");
-    const parsed = JSON.parse(content) as DashboardViewStore;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
+    const parsed = JSON.parse(content) as DashboardViewStore | null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Armazenamento de visões inválido.");
+    }
+    return parsed;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+}
+
+function updateStore(update: (store: DashboardViewStore) => void) {
+  const operation = storeWriteQueue.then(async () => {
+    const releaseLock = await acquireStoreLock();
+    try {
+      const store = await readStore();
+      update(store);
+      await writeStore(store);
+    } finally {
+      await releaseLock();
+    }
+  });
+  storeWriteQueue = operation.catch(() => undefined);
+  return operation;
+}
+
+async function acquireStoreLock() {
+  await fs.mkdir(dataDirectory, { recursive: true });
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
+  while (true) {
+    try {
+      const handle = await fs.open(lockFile, "wx");
+      return async () => {
+        await handle.close().catch(() => undefined);
+        await fs.rm(lockFile, { force: true }).catch(() => undefined);
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const stat = await fs.stat(lockFile).catch(() => null);
+      if (stat && Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+        await fs.rm(lockFile, { force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("Tempo esgotado ao bloquear o armazenamento de visões.");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
   }
 }
 
 async function writeStore(store: DashboardViewStore) {
   await fs.mkdir(dataDirectory, { recursive: true });
-  await fs.writeFile(dataFile, JSON.stringify(store, null, 2), "utf8");
+  const temporaryFile = `${dataFile}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporaryFile, JSON.stringify(store, null, 2), "utf8");
+    await fs.rename(temporaryFile, dataFile);
+  } finally {
+    await fs.rm(temporaryFile, { force: true }).catch(() => undefined);
+  }
 }
 
 function hasMasterAccess(user: CurrentUser) {

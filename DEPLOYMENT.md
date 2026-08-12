@@ -1,6 +1,6 @@
 # Implantacao do IPXData Frontend
 
-Este projeto e um frontend Next.js. Em producao ele atende o navegador e faz proxy das chamadas `/api/v1` para a API. Por padrao, o destino usa o mesmo hostname ou IP aberto no navegador e a porta `8080`.
+Este projeto e um frontend Next.js. Em producao ele atende o navegador e faz proxy das chamadas `/api/v1` para a API. O destino deve ser configurado explicitamente em `IPXDATA_API_URL`; o proxy nao deriva o backend de headers recebidos em producao.
 
 ## Requisitos
 
@@ -27,15 +27,15 @@ Copy-Item .env.production.example .env.production
 notepad .env.production
 ```
 
-4. Mantenha o destino dinamico para usar o IP ou hostname aberto no navegador:
+4. Informe o endereco fixo e confiavel da API:
 
 ```env
-IPXDATA_API_URL=
+IPXDATA_API_URL=http://127.0.0.1:8080
 IPXDATA_API_PROTOCOL=http
 IPXDATA_API_PORT=8080
 ```
 
-Por exemplo, ao abrir `http://10.0.0.20:3000`, as chamadas `/api/v1` serao encaminhadas para `http://10.0.0.20:8080`.
+Nesse exemplo, as chamadas `/api/v1` serao encaminhadas para a API local na porta `8080`, independentemente do hostname usado para abrir o Dashboard.
 
 Defina `IPXDATA_API_URL` apenas quando o backend estiver em outra maquina ou dominio:
 
@@ -80,18 +80,18 @@ Para usar um backend em outro host:
 
 ## Observacoes criticas
 
-- Com `IPXDATA_API_URL` vazio, o proxy resolve o destino em cada requisicao usando `Host` ou `X-Forwarded-Host`, sem gravar o IP no build.
+- `IPXDATA_API_URL` e obrigatorio em producao. Se estiver vazio, o proxy falha de forma fechada e nao encaminha credenciais para um host derivado da requisicao.
 - `IPXDATA_API_PROTOCOL` e `IPXDATA_API_PORT` definem o protocolo e a porta usados com o hostname do navegador. O padrao e `http` e `8080`.
-- `IPXDATA_API_URL` e um override opcional e deve ser usado somente quando frontend e backend estiverem em hosts diferentes.
+- `IPXDATA_API_URL` deve apontar para o endereco interno ou publico confiavel da API.
 - Alteracoes em `IPXDATA_API_URL`, `IPXDATA_API_PROTOCOL` ou `IPXDATA_API_PORT` exigem reiniciar o processo do frontend, mas nao exigem novo build.
-- Em proxy reverso, configure o proxy para sobrescrever `X-Forwarded-Host` com o host publico confiavel. Nao preserve esse header quando ele vier diretamente do cliente.
+- Em desenvolvimento, onde o fallback dinamico ainda existe, nao aceite `X-Forwarded-Host` enviado diretamente por clientes nao confiaveis.
 - `NEXT_PUBLIC_IPXDATA_API_BASE_URL` deve ficar como `/api/v1` na maioria dos casos. Isso evita problemas de CORS usando o proxy do Next.
 - `NEXT_PUBLIC_REPORT_HISTORY_START_YEAR` define o primeiro ano consultado pela matriz anual de Relatorios. O padrao e `2020`; ajuste para o inicio real da base antes do build e mantenha o valor estavel.
 - A tela de login pode ser customizada por empresa via `NEXT_PUBLIC_IPXDATA_LOGIN_BRANDS`. A empresa e resolvida antes do login por query string, como `/login?empresa=cliente-a`, ou por subdominio, como `cliente-a.seudominio.com`.
 - O vinculo `Location -> Worker` implementado no frontend fica salvo no navegador por empresa ate o backend expor `worker_id` em `Location` ou uma tabela de relacao. Em producao multiusuario, o backend precisa persistir esse vinculo para todos enxergarem a mesma configuracao.
 - Widgets personalizados, configuracoes de cenarios por periodo e grupos locais de cameras ainda usam `localStorage`. Eles nao acompanham outro navegador ou computador ate serem persistidos pelo backend.
 - `.ipxdata/dashboard-views.json` precisa ficar em volume persistente com backup. Para varias instancias do frontend, substitua esse arquivo por persistencia compartilhada no backend/DB.
-- `npm audit` ainda reporta vulnerabilidade moderada herdada de `exceljs -> uuid`. O `npm audit fix --force` sugere downgrade quebravel do `exceljs`, entao nao foi aplicado automaticamente.
+- Execute `npm audit` em cada entrega. Na revisao de 12/08/2026, nenhuma vulnerabilidade de dependencia foi reportada.
 
 ## Login customizado por empresa
 
@@ -113,7 +113,7 @@ Se nenhuma empresa for informada, o login padrao IPXData continua sendo exibido.
 ## Checklist de producao
 
 - `.env.production` criado e revisado
-- API acessivel no hostname do navegador e em `IPXDATA_API_PORT`, ou no override `IPXDATA_API_URL`
+- `IPXDATA_API_URL` definido e acessivel pelo processo do frontend
 - Proxy reverso validado para enviar um `X-Forwarded-Host` confiavel, quando aplicavel
 - `npm ci` executado sem erro
 - `npm run check:production` executado sem erro

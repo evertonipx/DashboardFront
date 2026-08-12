@@ -4,6 +4,7 @@ import type {
   OccupancyScenario,
   OccupancyScenarioHistoryResponse,
 } from "@/lib/types";
+import { createTenantCompanyIdResolver } from "@/lib/tenant-scope-validation";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -42,12 +43,19 @@ const OCCUPANCY_ROW_COLLECTION_KEYS = [
   "items",
 ] as const;
 
-export function requireOccupancyScenarioRows(value: unknown): OccupancyScenario[] {
+const RFC3339_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+export function requireOccupancyScenarioRows(
+  value: unknown,
+  expectedCompanyId?: string | null,
+): OccupancyScenario[] {
   const rows = requireSingleArrayEnvelope(
     value,
     ["data"],
     "cenários de ocupação",
   );
+  const resolveCompanyId = createTenantCompanyIdResolver(expectedCompanyId);
   const scenarioIds = new Set<string>();
 
   return Array.from(rows, (candidate, scenarioIndex) => {
@@ -66,7 +74,7 @@ export function requireOccupancyScenarioRows(value: unknown): OccupancyScenario[
     }
     scenarioIds.add(id);
 
-    const companyId = requireId(
+    const companyId = resolveCompanyId(
       row.company_id,
       `company_id do cenário de ocupação "${id}"`,
     );
@@ -78,6 +86,11 @@ export function requireOccupancyScenarioRows(value: unknown): OccupancyScenario[
       row.object_class,
       `object_class do cenário de ocupação "${id}"`,
     );
+    if (objectClass !== objectClass.toLowerCase()) {
+      throw new Error(
+        `A API retornou object_class não normalizado no cenário de ocupação "${id}".`,
+      );
+    }
     const active = requireBoolean(
       row.active,
       `active do cenário de ocupação "${id}"`,
@@ -599,7 +612,7 @@ function requireId(value: unknown, context: string) {
 }
 
 function requireOptionalId(value: unknown, context: string) {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
   return requireId(value, context);
 }
 
@@ -608,8 +621,8 @@ function requireText(value: unknown, context: string) {
 }
 
 function requireOptionalText(value: unknown, context: string) {
-  if (value === undefined) return;
-  requireText(value, context);
+  if (value === undefined || value === null) return undefined;
+  return requireText(value, context);
 }
 
 function requireBoolean(value: unknown, context: string) {
@@ -641,7 +654,7 @@ function requireOptionalNonNegativeNumber(
 function requireTimestamp(value: unknown, context: string) {
   const timestamp = requireText(value, context);
   const parsed = Date.parse(timestamp);
-  if (Number.isNaN(parsed)) {
+  if (!RFC3339_TIMESTAMP_PATTERN.test(timestamp) || Number.isNaN(parsed)) {
     throw new Error(`A API retornou ${context} inválido.`);
   }
   return parsed;

@@ -36,10 +36,12 @@ import {
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
+import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
 import {
+  WidgetTitleText,
   useWidgetChartType,
   useWidgetColor,
-  useWidgetTitle,
+  useWidgetColorOverride,
 } from "@/components/app/widget-appearance";
 import {
   MonitorModeButton,
@@ -122,13 +124,15 @@ import {
   buildSubLocationCameraOptions,
   readCameraGroups,
   readWorkerLocationAssignments,
-  resolveCameraGroupCompanyScope,
 } from "@/lib/camera-groups";
 import {
+  certifyCompanyScopeTimeZoneOverride,
   filterScopedApiRows,
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
+  useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
+import { requireCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
 import {
   requireCameraRows,
   requireInfrastructureRelations,
@@ -154,6 +158,7 @@ import {
   type RealtimeScenarioCustomWidget,
   type RealtimeScopeCustomWidget,
 } from "@/lib/realtime-custom-widgets";
+import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
 import {
   monochromeHeatmapPalette,
   pastelBarColor,
@@ -183,12 +188,18 @@ import {
   sundayCategoryIndexesForMonth,
 } from "@/lib/chart-calendar-axis";
 import {
-  COUNTING_MONTH_LABELS,
+  buildAnnualAccumulatedComparisonChartOption,
+  buildAnnualComparisonChartOption,
+  buildCountingIntelligenceReportAssets,
+  COUNTING_INTELLIGENCE_CARD_IDS,
+  formatCountingIntelligencePeriod,
+  type CountingIntelligenceModel,
 } from "@/lib/counting-intelligence";
 import {
-  buildCurrentYearComparisonOption,
-  type CurrentYearMonthPoint,
-} from "@/lib/current-year-chart";
+  buildLiveAnnualComparisonModel,
+  resolveLiveAnnualComparisonRanges,
+  rollupLiveAnnualHistoryRows,
+} from "@/lib/live-annual-comparison";
 import type {
   ReportMetric,
   ReportPayload,
@@ -343,6 +354,7 @@ const OPERATIONAL_TREND_DAYS_ID = "live_operational_trend_days";
 const OPERATIONAL_MONTH_HOURS_ID = "live_operational_month_hours";
 const OPERATIONAL_CURRENT_HOUR_MINUTES_ID =
   "live_operational_current_hour_minutes";
+const LIVE_ANNUAL_RECENT_MONTHS_ID = "live_annual_recent_months";
 const OCCUPANCY_HOURS_ID = "live_hourly_occupancy_data";
 const CANONICAL_HOUR_DERIVED_TARGETS: ReadonlyArray<{
   granularity: "hour" | "day" | "week" | "month";
@@ -358,6 +370,7 @@ const CANONICAL_HOUR_DERIVED_TARGETS: ReadonlyArray<{
   { id: OPERATIONAL_TREND_DAYS_ID, granularity: "day" },
   { id: "live_chart_week", granularity: "week" },
   { id: "live_chart_month", granularity: "month" },
+  { id: LIVE_ANNUAL_RECENT_MONTHS_ID, granularity: "month" },
 ];
 const CANONICAL_HOUR_DERIVED_IDS = new Set(
   CANONICAL_HOUR_DERIVED_TARGETS.map((target) => target.id),
@@ -436,7 +449,27 @@ export function RealtimeDashboard({
     requestFullscreen: !presentationMode,
   });
   const storedCompanyScopeId = useEffectiveCompanyScopeId(user);
-  const companyScopeId = companyIdOverride?.trim() || storedCompanyScopeId;
+  const companyTimeZoneResolution =
+    useEffectiveCompanyTimeZoneResolution(user);
+  const cleanCompanyIdOverride = companyIdOverride?.trim() ?? "";
+  const overrideScopeCertification = cleanCompanyIdOverride
+    ? certifyCompanyScopeTimeZoneOverride(user, cleanCompanyIdOverride)
+    : null;
+  const companyScopeId = cleanCompanyIdOverride || storedCompanyScopeId;
+  const companyTimeZone =
+    overrideScopeCertification?.timeZone ?? companyTimeZoneResolution.timeZone;
+  const companyScopeCertificationError =
+    overrideScopeCertification?.error ??
+    (!cleanCompanyIdOverride && companyTimeZoneResolution.fallback
+      ? "Fuso da empresa não certificado. Cadastre um timezone IANA válido antes de consultar dados civis."
+      : "");
+  const customGranularitySelectId = React.useId();
+  const customKindSelectId = React.useId();
+  const customModelSelectId = React.useId();
+  const customScopeModeSelectId = React.useId();
+  const customScopeSelectId = React.useId();
+  const intradayComparisonSelectId = React.useId();
+  const monthComparisonSelectId = React.useId();
   const canEditVisual = hasVisualAdminAccess(user);
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
   const [cameras, setCameras] = React.useState<Camera[]>([]);
@@ -452,8 +485,12 @@ export function RealtimeDashboard({
   const [chartData, setChartData] = React.useState<
     Record<string, RealtimeChartState>
   >({});
+  const [annualHistoryState, setAnnualHistoryState] =
+    React.useState<RealtimeChartState | null>(null);
   const [loadingScenarios, setLoadingScenarios] = React.useState(true);
   const [loadingCharts, setLoadingCharts] = React.useState(false);
+  const [loadingAnnualHistory, setLoadingAnnualHistory] =
+    React.useState(false);
   const [metadataError, setMetadataError] = React.useState("");
   const [chartLoadError, setChartLoadError] = React.useState("");
   const [hasLoadedCharts, setHasLoadedCharts] = React.useState(false);
@@ -486,8 +523,12 @@ export function RealtimeDashboard({
     });
 
   const requestRef = React.useRef<AbortController | null>(null);
+  const annualHistoryRequestRef = React.useRef<AbortController | null>(null);
   const runningRef = React.useRef(false);
   const hasLoadedChartsRef = React.useRef(false);
+  const annualHistoryRequestSequenceRef = React.useRef(0);
+  const annualHistoryLoadedDayRef = React.useRef("");
+  const annualHistoryAttemptMinuteRef = React.useRef("");
   const metadataRequestSequenceRef = React.useRef(0);
   const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
     new Map(),
@@ -589,7 +630,9 @@ export function RealtimeDashboard({
   const occupancyHourState = chartData[OCCUPANCY_HOURS_ID];
   const occupancyHourRows =
     occupancyHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
-  const monthRows = chartData.live_chart_month?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const annualRecentMonthState = chartData[LIVE_ANNUAL_RECENT_MONTHS_ID];
+  const annualRecentMonthRows =
+    annualRecentMonthState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const comparisonHourState = chartData[OPERATIONAL_COMPARISON_HOURS_ID];
   const comparisonHourRows =
     comparisonHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
@@ -618,12 +661,16 @@ export function RealtimeDashboard({
 
       const definition = buildOperationalMonthHoursDefinition(clock);
       return {
+        companyScopeId,
+        companyTimeZone,
         from: definition.from,
         rows: operationalMonthHourRows,
         to: definition.to,
       };
     }, [
       clock,
+      companyScopeId,
+      companyTimeZone,
       operationalMonthHourRows,
       operationalMonthHourState?.error,
       operationalMonthHourState?.granularity,
@@ -637,6 +684,7 @@ export function RealtimeDashboard({
       ? lastYearMonthDayState?.granularity ?? "hour"
       : previousMonthDayState?.granularity ?? "hour";
   const liveDataCertificationError =
+    companyScopeCertificationError ||
     metadataError ||
     chartLoadError ||
     Object.values(chartData).find((state) => state.error)?.error;
@@ -648,27 +696,43 @@ export function RealtimeDashboard({
         : "Comparativo indisponível sem a fonte horária canônica certificada."
       : undefined;
 
-  const loadScenarios = React.useCallback(async () => {
+  const loadScenarios = React.useCallback(async (
+    { silent = false }: LoadOptions = {},
+  ) => {
     const requestSequence = ++metadataRequestSequenceRef.current;
-    setLoadingScenarios(true);
-    setMetadataError("");
+    if (companyScopeCertificationError) {
+      setScenarios([]);
+      setCameras([]);
+      setLocations([]);
+      setSubLocations([]);
+      setWorkers([]);
+      setSelectedId("");
+      setChartData({});
+      setMetadataError(companyScopeCertificationError);
+      setLoadingScenarios(false);
+      return;
+    }
+    if (!silent) {
+      setLoadingScenarios(true);
+      setMetadataError("");
+    }
     try {
       const [data, cameraRows, locationRows, workerRows] = await Promise.all([
-        apiFetch<unknown>("/scenarios"),
-        apiFetch<unknown>("/cameras"),
-        apiFetch<unknown>("/locations"),
+        apiFetch<unknown>("/scenarios", { companyScopeId }),
+        apiFetch<unknown>("/cameras", { companyScopeId }),
+        apiFetch<unknown>("/locations", { companyScopeId }),
         fetchRealtimeWorkers(companyScopeId),
       ]);
       const scopedScenarios = filterScopedApiRows(
-        requireScenarioRows(data),
+        requireScenarioRows(data, companyScopeId),
         companyScopeId,
       );
       const scopedCameras = filterScopedApiRows(
-        requireCameraRows(cameraRows),
+        requireCameraRows(cameraRows, companyScopeId),
         companyScopeId,
       );
       const scopedLocations = filterScopedApiRows(
-        requireLocationRows(locationRows),
+        requireLocationRows(locationRows, companyScopeId),
         companyScopeId,
       );
       const subLocationRows = await fetchSubLocations(
@@ -726,6 +790,7 @@ export function RealtimeDashboard({
       });
     } catch (error) {
       if (requestSequence !== metadataRequestSequenceRef.current) return;
+      if (silent) return;
       const message =
         error instanceof Error
           ? error.message
@@ -740,12 +805,13 @@ export function RealtimeDashboard({
       setMetadataError(message);
       toast.error(message);
     } finally {
-      if (requestSequence === metadataRequestSequenceRef.current) {
+      if (!silent && requestSequence === metadataRequestSequenceRef.current) {
         setLoadingScenarios(false);
       }
     }
   }, [
     cameraGroups,
+    companyScopeCertificationError,
     companyScopeId,
     manager,
     scopeMode,
@@ -754,9 +820,57 @@ export function RealtimeDashboard({
 
   const loadCharts = React.useCallback(
     async ({ force = false, silent = false }: LoadOptions = {}) => {
-      if (!companyScopeId) {
+      if (companyScopeCertificationError) {
+        requestRef.current?.abort();
+        requestRef.current = null;
+        annualHistoryRequestRef.current?.abort();
+        annualHistoryRequestRef.current = null;
+        runningRef.current = false;
+        hasLoadedChartsRef.current = false;
+        clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
         setChartData({});
+        setAnnualHistoryState(null);
+        setChartLoadError(companyScopeCertificationError);
+        setHasLoadedCharts(false);
+        setLastUpdated(null);
         setLoadingCharts(false);
+        setLoadingAnnualHistory(false);
+        return;
+      }
+
+      if (!companyScopeId) {
+        hasLoadedChartsRef.current = false;
+        setChartData({});
+        setAnnualHistoryState(null);
+        setChartLoadError("");
+        setHasLoadedCharts(false);
+        setLastUpdated(null);
+        setLoadingCharts(false);
+        return;
+      }
+
+      try {
+        requireCountingRuntimeTimeZone(companyTimeZone);
+      } catch (error) {
+        requestRef.current?.abort();
+        requestRef.current = null;
+        annualHistoryRequestRef.current?.abort();
+        annualHistoryRequestRef.current = null;
+        runningRef.current = false;
+        hasLoadedChartsRef.current = false;
+        clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Fuso da empresa não disponível.";
+        setChartData({});
+        setAnnualHistoryState(null);
+        setChartLoadError(message);
+        setHasLoadedCharts(false);
+        setLastUpdated(null);
+        setLoadingCharts(false);
+        setLoadingAnnualHistory(false);
+        if (!silent) toast.error(message);
         return;
       }
 
@@ -784,6 +898,7 @@ export function RealtimeDashboard({
         buildOperationalBaselineMonthDefinition(now, "last_year"),
         buildOperationalTrendDaysDefinition(now),
         buildOperationalMonthHoursDefinition(now),
+        buildLiveAnnualRecentMonthsDefinition(now),
         buildOperationalCurrentHourMinutesDefinition(now),
         buildHourlyOccupancyDataDefinition(
           now,
@@ -811,6 +926,7 @@ export function RealtimeDashboard({
                   rows: await fetchHourlyAggregateRanges({
                     cache: hourlyAggregateCacheRef.current,
                     cacheScope: `live:${companyScopeId}`,
+                    companyScopeId,
                     now,
                     ranges: [definition],
                     signal: controller.signal,
@@ -821,7 +937,7 @@ export function RealtimeDashboard({
 
               const response = await apiFetch<AggregateEventsResponse>(
                 aggregatePath(definition),
-                { signal: controller.signal },
+                { companyScopeId, signal: controller.signal },
               );
               const responseGranularity = requireAggregateGranularity(
                 response.granularity,
@@ -854,6 +970,13 @@ export function RealtimeDashboard({
             }
           }),
         );
+
+        if (
+          controller.signal.aborted ||
+          requestRef.current !== controller
+        ) {
+          return;
+        }
 
         const nextData = hydrateRealtimeOpenBuckets(
           Object.fromEntries(entries),
@@ -892,21 +1015,143 @@ export function RealtimeDashboard({
       }
     },
     [
+      companyScopeCertificationError,
       companyScopeId,
+      companyTimeZone,
       operationalSettings.intradayComparison,
       operationalSettings.occupancyStartHour,
     ],
   );
 
+  const loadAnnualHistory = React.useCallback(async () => {
+    const requestSequence = ++annualHistoryRequestSequenceRef.current;
+    annualHistoryRequestRef.current?.abort();
+    annualHistoryRequestRef.current = null;
+
+    if (!companyScopeId || companyScopeCertificationError) {
+      setAnnualHistoryState(null);
+      setLoadingAnnualHistory(false);
+      return;
+    }
+
+    try {
+      requireCountingRuntimeTimeZone(companyTimeZone);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Fuso da empresa não disponível.";
+      setAnnualHistoryState({
+        error: message,
+        granularity: "month",
+        rows: [],
+      });
+      setLoadingAnnualHistory(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    annualHistoryRequestRef.current = controller;
+    setLoadingAnnualHistory(true);
+    const now = new Date();
+    annualHistoryAttemptMinuteRef.current = [
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      now.getHours(),
+      now.getMinutes(),
+    ].join("-");
+    const range = resolveLiveAnnualComparisonRanges(now);
+
+    try {
+      const hourlyRows = await fetchHourlyAggregateRanges({
+        cache: hourlyAggregateCacheRef.current,
+        cacheScope: `live:${companyScopeId}`,
+        companyScopeId,
+        now,
+        ranges: [
+          {
+            from: range.historyFrom,
+            to: range.historyTo,
+          },
+        ],
+        signal: controller.signal,
+      });
+      if (requestSequence !== annualHistoryRequestSequenceRef.current) return;
+
+      setAnnualHistoryState({
+        granularity: "month",
+        rows: rollupLiveAnnualHistoryRows(hourlyRows, now),
+      });
+      annualHistoryLoadedDayRef.current = [
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+      ].join("-");
+    } catch (error) {
+      if (isAbortError(error)) return;
+      if (requestSequence !== annualHistoryRequestSequenceRef.current) return;
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Não foi possível carregar o histórico anual.";
+      setAnnualHistoryState({
+        error: message,
+        granularity: "month",
+        rows: [],
+      });
+      toast.error(message);
+    } finally {
+      if (
+        requestSequence === annualHistoryRequestSequenceRef.current &&
+        annualHistoryRequestRef.current === controller
+      ) {
+        annualHistoryRequestRef.current = null;
+        setLoadingAnnualHistory(false);
+      }
+    }
+  }, [companyScopeCertificationError, companyScopeId, companyTimeZone]);
+  const annualHistoryDayKey = [
+    clock.getFullYear(),
+    clock.getMonth(),
+    clock.getDate(),
+  ].join("-");
+  const annualHistoryMinuteKey = [
+    annualHistoryDayKey,
+    clock.getHours(),
+    clock.getMinutes(),
+  ].join("-");
+  const annualHistoryRetryMinuteKey = annualHistoryState?.error
+    ? annualHistoryMinuteKey
+    : "";
+
   React.useEffect(() => {
-    loadScenarios();
+    void loadScenarios();
   }, [loadScenarios]);
+
+  useResourceAutoRefresh(
+    () => loadScenarios({ silent: true }),
+    {
+      enabled:
+        Boolean(companyScopeId) &&
+        !companyScopeCertificationError &&
+        !loadingScenarios,
+      intervalMs: RESOURCE_METADATA_REFRESH_INTERVAL_MS,
+    },
+  );
 
   React.useEffect(() => {
     function syncCameraGroups() {
-      const scopeId = resolveCameraGroupCompanyScope(user);
-      setCameraGroups(readCameraGroups(scopeId));
-      setWorkerLocationAssignments(readWorkerLocationAssignments(scopeId));
+      if (!companyScopeId || companyScopeCertificationError) {
+        setCameraGroups([]);
+        setWorkerLocationAssignments({});
+        return;
+      }
+      setCameraGroups(readCameraGroups(companyScopeId));
+      setWorkerLocationAssignments(
+        readWorkerLocationAssignments(companyScopeId),
+      );
     }
 
     syncCameraGroups();
@@ -917,7 +1162,7 @@ export function RealtimeDashboard({
       window.removeEventListener(CAMERA_GROUPS_UPDATED_EVENT, syncCameraGroups);
       window.removeEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCameraGroups);
     };
-  }, [user]);
+  }, [companyScopeCertificationError, companyScopeId]);
 
   React.useEffect(() => {
     function syncCustomWidgets() {
@@ -946,9 +1191,18 @@ export function RealtimeDashboard({
 
   React.useEffect(() => {
     requestRef.current?.abort();
+    requestRef.current = null;
+    runningRef.current = false;
+    annualHistoryRequestRef.current?.abort();
+    annualHistoryRequestRef.current = null;
+    annualHistoryRequestSequenceRef.current += 1;
+    annualHistoryLoadedDayRef.current = "";
+    annualHistoryAttemptMinuteRef.current = "";
     clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
     setMetadataError("");
-    setChartLoadError("");
+    setChartLoadError(companyScopeCertificationError);
+    setAnnualHistoryState(null);
+    setLoadingAnnualHistory(false);
     setScenarios([]);
     setCameras([]);
     setLocations([]);
@@ -959,7 +1213,41 @@ export function RealtimeDashboard({
     setChartData({});
     setHasLoadedCharts(false);
     hasLoadedChartsRef.current = false;
-  }, [companyScopeId, initialScopeId, initialScopeMode]);
+  }, [
+    companyScopeCertificationError,
+    companyScopeId,
+    companyTimeZone,
+    initialScopeId,
+    initialScopeMode,
+  ]);
+
+  React.useEffect(() => {
+    if (!hasLoadedCharts) return;
+    if (annualHistoryState?.error) {
+      if (
+        annualHistoryAttemptMinuteRef.current ===
+        annualHistoryRetryMinuteKey
+      ) {
+        return;
+      }
+    } else if (
+      annualHistoryLoadedDayRef.current === annualHistoryDayKey
+    ) {
+      return;
+    }
+
+    void loadAnnualHistory();
+
+    return () => {
+      annualHistoryRequestRef.current?.abort();
+    };
+  }, [
+    annualHistoryDayKey,
+    annualHistoryRetryMinuteKey,
+    annualHistoryState?.error,
+    hasLoadedCharts,
+    loadAnnualHistory,
+  ]);
 
   React.useEffect(() => {
     setCustomWidgetForm((current) => {
@@ -1393,13 +1681,41 @@ export function RealtimeDashboard({
       ),
     [scenarioTableMonthPoints, scenarioTableTodayPoints],
   );
-  const currentYearMonthPoints = React.useMemo(
+  const liveAnnualComparisonModel = React.useMemo(
     () =>
-      selectedScope
-        ? buildCurrentYearMonthPoints(monthRows, selectedScope, clock)
-        : [],
-    [clock, monthRows, selectedScope],
+      selectedScope &&
+      annualHistoryState &&
+      !annualHistoryState.error &&
+      annualRecentMonthState?.granularity === "month" &&
+      !annualRecentMonthState.error &&
+      operationalMonthHourState?.granularity === "hour" &&
+      !operationalMonthHourState.error
+        ? buildLiveAnnualComparisonModel({
+            historicalMonthRows: annualHistoryState.rows,
+            hourlyRows: operationalMonthHourRows,
+            now: clock,
+            recentMonthRows: annualRecentMonthRows,
+            scenarios,
+            scope: selectedScope,
+          })
+        : null,
+    [
+      annualHistoryState,
+      annualRecentMonthRows,
+      annualRecentMonthState,
+      clock,
+      operationalMonthHourRows,
+      operationalMonthHourState,
+      scenarios,
+      selectedScope,
+    ],
   );
+  const liveAnnualComparisonError =
+    annualHistoryState?.error ||
+    annualRecentMonthState?.error ||
+    operationalMonthHourState?.error;
+  const liveAnnualComparisonLoading =
+    initialLoading || (!annualHistoryState && !liveAnnualComparisonError);
   const peakDayPoints = React.useMemo(
     () =>
       buildTopScenarioPeakDays({
@@ -2119,16 +2435,18 @@ export function RealtimeDashboard({
       id: "live_current_year_monthly",
       chartTypeEnabled: true,
       label: "Comparativo mensal por ano",
-      defaultHeight: "standard" as const,
-      defaultSize: "wide" as const,
-      className: "sm:col-span-2 xl:col-span-2",
+      defaultHeight: "tall" as const,
+      defaultSize: "full" as const,
+      minHeight: "tall" as const,
+      className: "sm:col-span-2 xl:col-span-4",
       node: (
-        <CurrentYearComparisonCard
+        <LiveAnnualComparisonCard
           accumulated={false}
-          loading={initialLoading}
-          points={currentYearMonthPoints}
+          error={liveAnnualComparisonError}
+          loading={liveAnnualComparisonLoading}
+          model={liveAnnualComparisonModel}
+          refreshing={loadingAnnualHistory && Boolean(annualHistoryState)}
           scopeName={selectedScope?.name ?? "Visão selecionada"}
-          year={clock.getFullYear()}
         />
       ),
     },
@@ -2136,21 +2454,24 @@ export function RealtimeDashboard({
       id: "live_current_year_accumulated",
       chartTypeEnabled: true,
       label: "Comparativo acumulado por ano",
-      defaultHeight: "standard" as const,
-      defaultSize: "wide" as const,
-      className: "sm:col-span-2 xl:col-span-2",
+      defaultHeight: "tall" as const,
+      defaultSize: "full" as const,
+      minHeight: "tall" as const,
+      className: "sm:col-span-2 xl:col-span-4",
       node: (
-        <CurrentYearComparisonCard
+        <LiveAnnualComparisonCard
           accumulated
-          loading={initialLoading}
-          points={currentYearMonthPoints}
+          error={liveAnnualComparisonError}
+          loading={liveAnnualComparisonLoading}
+          model={liveAnnualComparisonModel}
+          refreshing={loadingAnnualHistory && Boolean(annualHistoryState)}
           scopeName={selectedScope?.name ?? "Visão selecionada"}
-          year={clock.getFullYear()}
         />
       ),
     },
     {
       id: "live_month_hour_heatmap",
+      colorPreview: "gradient" as const,
       label: "Mapa de calor dia x hora",
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
@@ -2289,6 +2610,7 @@ export function RealtimeDashboard({
     },
   ].map((card) => ({
     ...card,
+    colorEditable: card.id !== "live_scenario_totals_table",
     titleEditable: true as const,
     zoomEnabled: card.id !== "live_scenario_totals_table",
   }));
@@ -2381,6 +2703,7 @@ export function RealtimeDashboard({
             }
             autoRefresh
             companyId={companyScopeId}
+            companyTimeZone={companyTimeZone}
             disabledReason={liveComparisonDisabledReason}
             hourlySource={liveComparisonHourlySource}
             monitorMode={monitorMode}
@@ -2400,6 +2723,9 @@ export function RealtimeDashboard({
           widget.widgetType === "rose"
             ? (["rose", "treemap"] as const)
             : undefined,
+        colorEditable: widget.widgetType !== "totals_table",
+        colorPreview:
+          widget.widgetType === "heatmap" ? ("gradient" as const) : undefined,
         label: widget.title,
         titleEditable: true,
         zoomEnabled: widget.widgetType !== "totals_table",
@@ -2718,26 +3044,39 @@ export function RealtimeDashboard({
         liveColorByCardId.get("live_moving_average_trend"),
       ),
     ]);
-    liveChartEntries.push([
-      "live_current_year_monthly",
-      buildCurrentYearComparisonReportChart({
-        accumulated: false,
-        points: currentYearMonthPoints,
-        scopeName: selectedScope.name,
-        widgetColor: liveColorByCardId.get("live_current_year_monthly"),
-        year: clock.getFullYear(),
-      }),
-    ]);
-    liveChartEntries.push([
-      "live_current_year_accumulated",
-      buildCurrentYearComparisonReportChart({
-        accumulated: true,
-        points: currentYearMonthPoints,
-        scopeName: selectedScope.name,
-        widgetColor: liveColorByCardId.get("live_current_year_accumulated"),
-        year: clock.getFullYear(),
-      }),
-    ]);
+    if (liveAnnualComparisonModel) {
+      const annualAssets = buildCountingIntelligenceReportAssets(
+        liveAnnualComparisonModel,
+        {
+          [COUNTING_INTELLIGENCE_CARD_IDS.annualComparison]:
+            liveColorByCardId.get("live_current_year_monthly"),
+          [COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison]:
+            liveColorByCardId.get("live_current_year_accumulated"),
+        },
+      );
+      const monthly = annualAssets.charts.find(
+        (entry) =>
+          entry.cardId === COUNTING_INTELLIGENCE_CARD_IDS.annualComparison,
+      );
+      const accumulated = annualAssets.charts.find(
+        (entry) =>
+          entry.cardId ===
+          COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison,
+      );
+
+      if (monthly) {
+        liveChartEntries.push([
+          "live_current_year_monthly",
+          monthly.value,
+        ]);
+      }
+      if (accumulated) {
+        liveChartEntries.push([
+          "live_current_year_accumulated",
+          accumulated.value,
+        ]);
+      }
+    }
   }
   liveChartEntries.push([
     "live_hourly_occupancy",
@@ -3091,13 +3430,15 @@ export function RealtimeDashboard({
             const rows = await fetchScenarioComparisonRows(
               definition,
               liveComparisonHourlySource,
+              companyTimeZone,
+              companyScopeId,
             );
             const reportChart = buildScenarioComparisonReportChart({
               definition,
               rows,
               scenarios,
               settings,
-              title: widget.title,
+              title: resolveLiveTitle(cardId, widget.title),
               widgetColor: liveColorByCardId.get(cardId),
             });
             chartByCardId.set(cardId, {
@@ -3141,16 +3482,14 @@ export function RealtimeDashboard({
       id="ao-vivo"
       className={cn(
         monitorMode
-          ? "fixed inset-0 z-[100] h-screen overflow-y-auto bg-background p-3 text-foreground lg:p-4"
+          ? "fixed inset-0 z-[100] h-[100dvh] overflow-y-auto bg-background p-3 text-foreground lg:p-4"
           : "scroll-mt-6 space-y-4",
       )}
     >
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
       {liveDataCertificationError && !initialLoading ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
-          Dados não certificados: {liveDataCertificationError} Os widgets e as
-          exportações foram bloqueados para não apresentar um total
-          potencialmente incorreto.
+          Consulta bloqueada: {liveDataCertificationError}
         </div>
       ) : null}
 
@@ -3185,19 +3524,22 @@ export function RealtimeDashboard({
           </div>
         </div>
       ) : (
-      <div className="rounded-md border border-border bg-card p-4 shadow-soft">
+      <div className="rounded-md border border-border bg-card px-3 py-2 shadow-soft">
         {loadingScenarios ? (
-          <div className="grid gap-3 lg:grid-cols-[1fr_auto_auto]">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-32" />
-            <Skeleton className="h-10 w-32" />
+          <div className="flex items-center gap-2 overflow-hidden">
+            <Skeleton className="h-8 w-[170px] shrink-0" />
+            <Skeleton className="h-8 w-[220px] shrink-0" />
+            <Skeleton className="ml-auto h-8 w-48 shrink-0" />
           </div>
         ) : scopeOptions.length ? (
           <div className="space-y-3">
-            <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-end 2xl:justify-between">
-            <div className="grid min-w-0 flex-1 gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
-              <div className="space-y-2">
-                <div className="text-sm font-medium">Visão</div>
+            <div
+              aria-label="Controles da visão ao vivo de Contagem"
+              className="enterprise-horizontal-scroll flex min-w-0 items-center gap-2 overflow-x-auto pb-1"
+              role="group"
+              tabIndex={0}
+            >
+              <div className="w-[170px] shrink-0">
                 <Select
                   value={scopeMode}
                   onValueChange={(value) => {
@@ -3205,7 +3547,10 @@ export function RealtimeDashboard({
                     setSelectedId("");
                   }}
                 >
-                  <SelectTrigger className="bg-card">
+                  <SelectTrigger
+                    aria-label="Tipo da visão de Contagem"
+                    className="h-8 bg-card"
+                  >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -3217,10 +3562,12 @@ export function RealtimeDashboard({
                   </SelectContent>
                 </Select>
               </div>
-              <div className="min-w-0 space-y-2">
-                <div className="text-sm font-medium">{scopeModeLabel(scopeMode)}</div>
+              <div className="w-[220px] shrink-0">
                 <Select value={selectedId} onValueChange={setSelectedId}>
-                  <SelectTrigger className="bg-card">
+                  <SelectTrigger
+                    aria-label={`${scopeModeLabel(scopeMode)} em foco`}
+                    className="h-8 bg-card"
+                  >
                     <SelectValue placeholder="Selecione uma visão" />
                   </SelectTrigger>
                   <SelectContent>
@@ -3232,68 +3579,83 @@ export function RealtimeDashboard({
                   </SelectContent>
                 </Select>
               </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge
-                variant="outline"
-                className="gap-1 border-primary/30 bg-primary/10 text-primary"
+              <div
+                aria-label="Ações da visão ao vivo de Contagem"
+                className="ml-auto flex shrink-0 items-center gap-2"
+                role="group"
               >
-                <Zap className="h-3.5 w-3.5" />
-                5 segundos
-              </Badge>
-              {lastUpdated ? (
-                <Badge variant="outline" className="gap-1 bg-card">
-                  <Clock3 className="h-3.5 w-3.5" />
-                  {formatTime(lastUpdated)}
-                </Badge>
-              ) : null}
-              <ReportExportActions
-                disabled={
-                  initialLoading ||
-                  !selectedScope ||
-                  Boolean(liveDataCertificationError)
-                }
-                getPayload={buildConfiguredLiveReportPayload}
-                payload={liveReportPayload}
-              />
-              {canEditVisual ? (
-                <>
-                  <ReorderModeButton
-                    enabled={layoutReorderMode}
-                    onChange={setLayoutReorderMode}
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    onClick={() => setLayoutOrganizerOpen(true)}
-                    aria-label="Configurar widgets"
-                    title="Configurar widgets"
+                <ReportExportActions
+                  compact
+                  disabled={
+                    initialLoading ||
+                    loadingAnnualHistory ||
+                    !selectedScope ||
+                    Boolean(liveDataCertificationError) ||
+                    Boolean(liveAnnualComparisonError)
+                  }
+                  getPayload={buildConfiguredLiveReportPayload}
+                  payload={liveReportPayload}
+                />
+                {canEditVisual ? (
+                  <>
+                    <ReorderModeButton
+                      className="h-8 w-8"
+                      enabled={layoutReorderMode}
+                      onChange={setLayoutReorderMode}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setLayoutOrganizerOpen(true)}
+                      aria-label="Configurar widgets"
+                      title="Configurar widgets"
+                    >
+                      <Settings2 className="h-4 w-4" />
+                    </Button>
+                  </>
+                ) : null}
+                <Button
+                  type="button"
+                  variant={operationalSettingsOpen ? "default" : "outline"}
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() =>
+                    setOperationalSettingsOpen((current) => !current)
+                  }
+                  aria-label="Bases de comparação"
+                  title="Bases de comparação"
+                >
+                  <Target className="h-4 w-4" />
+                </Button>
+                {lastUpdated ? (
+                  <span
+                    aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
+                    className="inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
+                    title={`Última atualização às ${formatTime(lastUpdated)}`}
                   >
-                    <Settings2 className="h-4 w-4" />
-                  </Button>
-                </>
-              ) : null}
-              <Button
-                type="button"
-                variant={operationalSettingsOpen ? "default" : "outline"}
-                onClick={() =>
-                  setOperationalSettingsOpen((current) => !current)
-                }
-              >
-                <Target className="h-4 w-4" />
-                Bases de comparação
-              </Button>
-              <MonitorModeButton
-                onClick={enterMonitorMode}
-                disabled={!scopeOptions.length}
-              />
-            </div>
+                    <Clock3 className="h-3.5 w-3.5" />
+                    {formatTime(lastUpdated)}
+                  </span>
+                ) : null}
+                <MonitorModeButton
+                  compact
+                  onClick={enterMonitorMode}
+                  disabled={!scopeOptions.length}
+                />
+              </div>
             </div>
             {operationalSettingsOpen ? (
-              <div className="grid gap-3 rounded-md border bg-muted/15 p-3 md:grid-cols-2 md:items-end">
+              <div
+                aria-label="Bases de comparação da Contagem"
+                className="grid gap-3 rounded-xl border bg-muted/15 p-3 md:grid-cols-2 md:items-end"
+                role="group"
+              >
                 <div className="space-y-1.5">
-                  <Label>Comparação intradiária</Label>
+                  <Label htmlFor={intradayComparisonSelectId}>
+                    Comparação intradiária
+                  </Label>
                   <Select
                     value={operationalSettings.intradayComparison}
                     onValueChange={(value) =>
@@ -3303,7 +3665,9 @@ export function RealtimeDashboard({
                       })
                     }
                   >
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger id={intradayComparisonSelectId}>
+                      <SelectValue />
+                    </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="yesterday">Ontem</SelectItem>
                       <SelectItem value="last_week">
@@ -3313,7 +3677,9 @@ export function RealtimeDashboard({
                   </Select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Base das médias e comparativos</Label>
+                  <Label htmlFor={monthComparisonSelectId}>
+                    Base das médias e comparativos
+                  </Label>
                   <Select
                     value={operationalSettings.monthComparison}
                     onValueChange={(value) =>
@@ -3323,7 +3689,9 @@ export function RealtimeDashboard({
                       })
                     }
                   >
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger id={monthComparisonSelectId}>
+                      <SelectValue />
+                    </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="previous_month">Mês anterior</SelectItem>
                       <SelectItem value="last_year">
@@ -3331,16 +3699,6 @@ export function RealtimeDashboard({
                       </SelectItem>
                     </SelectContent>
                   </Select>
-                </div>
-                <div className="flex justify-end md:col-span-2">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setOperationalSettingsOpen(false)}
-                  >
-                    Concluir
-                  </Button>
                 </div>
               </div>
             ) : null}
@@ -3409,12 +3767,12 @@ export function RealtimeDashboard({
 
           <div className="grid gap-4">
             <div className="space-y-2">
-              <Label>Tipo de widget</Label>
+              <Label htmlFor={customKindSelectId}>Tipo de widget</Label>
               <Select
                 value={customWidgetForm.kind}
                 onValueChange={handleCustomWidgetKindChange}
               >
-                <SelectTrigger>
+                <SelectTrigger id={customKindSelectId}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -3454,12 +3812,14 @@ export function RealtimeDashboard({
               <>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label>Tipo de visão</Label>
+                    <Label htmlFor={customScopeModeSelectId}>
+                      Tipo de visão
+                    </Label>
                     <Select
                       value={customWidgetForm.scopeMode}
                       onValueChange={handleCustomWidgetModeChange}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger id={customScopeModeSelectId}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -3473,13 +3833,15 @@ export function RealtimeDashboard({
                   </div>
 
                   <div className="space-y-2">
-                    <Label>{scopeModeLabel(customWidgetForm.scopeMode)}</Label>
+                    <Label htmlFor={customScopeSelectId}>
+                      {scopeModeLabel(customWidgetForm.scopeMode)}
+                    </Label>
                     <Select
                       value={customWidgetForm.scopeId}
                       onValueChange={handleCustomWidgetScopeChange}
                       disabled={!customWidgetScopeOptions.length}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger id={customScopeSelectId}>
                         <SelectValue placeholder="Selecione" />
                       </SelectTrigger>
                       <SelectContent>
@@ -3494,12 +3856,12 @@ export function RealtimeDashboard({
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Gráfico</Label>
+                  <Label htmlFor={customGranularitySelectId}>Gráfico</Label>
                   <Select
                     value={customWidgetForm.granularity}
                     onValueChange={handleCustomWidgetGranularityChange}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id={customGranularitySelectId}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -3531,12 +3893,12 @@ export function RealtimeDashboard({
             ) : (
               <div className="space-y-4 rounded-md border bg-muted/20 p-3">
                 <div className="space-y-2">
-                  <Label>Modelo</Label>
+                  <Label htmlFor={customModelSelectId}>Modelo</Label>
                   <Select
                     value={customWidgetForm.scenarioWidgetType}
                     onValueChange={handleScenarioWidgetTypeChange}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id={customModelSelectId}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -3619,12 +3981,16 @@ function MetricCard({
   comparison?: string;
   description: string;
   error?: string;
-  icon: React.ComponentType<{ className?: string }>;
+  icon: React.ComponentType<{
+    className?: string;
+    style?: React.CSSProperties;
+  }>;
   label: string;
   loading: boolean;
   tone: "primary" | "sky" | "indigo" | "slate";
   value: number | string;
 }) {
+  const widgetColorOverride = useWidgetColorOverride();
   const iconToneClass = {
     primary: "text-primary",
     sky: "text-sky-700 dark:text-sky-300",
@@ -3637,8 +4003,15 @@ function MetricCard({
       <CardContent className="h-full min-h-0 p-4">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium uppercase text-muted-foreground">
-            <Icon className={cn("h-3.5 w-3.5 shrink-0", iconToneClass)} />
-            <ResolvedWidgetTitle fallback={label} />
+            <Icon
+              className={cn("h-3.5 w-3.5 shrink-0", iconToneClass)}
+              style={
+                widgetColorOverride
+                  ? { color: widgetColorOverride }
+                  : undefined
+              }
+            />
+            <WidgetTitleText fallback={label} />
           </div>
           {loading ? (
             <Skeleton className="mt-3 h-8 w-24" />
@@ -3670,10 +4043,6 @@ function MetricCard({
       </CardContent>
     </Card>
   );
-}
-
-function ResolvedWidgetTitle({ fallback }: { fallback: string }) {
-  return <>{useWidgetTitle(fallback)}</>;
 }
 
 function metricComparisonClassName(value: string) {
@@ -3722,7 +4091,7 @@ function RealtimeChartCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={definition.label} />
+              <WidgetTitleText fallback={definition.label} />
             </CardTitle>
             <CardDescription className="mt-1">
               {definition.description}
@@ -3815,7 +4184,7 @@ function OperationalHourlyChartCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Hora a Hora" />
+              <WidgetTitleText fallback="Hora a Hora" />
             </CardTitle>
             <CardDescription className="mt-1">
               Base histórica à esquerda e hoje à direita. Linha tracejada: {averageDescription.toLowerCase()} convertida em média horária.
@@ -4170,7 +4539,7 @@ function OperationalHeatmapCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Grid3X3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Intensidade do fluxo nas 24 faixas horárias e nos dias 1 a 31
@@ -4266,6 +4635,7 @@ function HourlyOccupancyCard({
   startHour: number;
 }) {
   const widgetColor = useWidgetColor();
+  const startHourSelectId = React.useId();
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const option = React.useMemo(
     () => buildHourlyOccupancyOption(points, widgetColor),
@@ -4288,7 +4658,7 @@ function HourlyOccupancyCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <DoorOpen className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Ocupação hora a hora" />
+              <WidgetTitleText fallback="Ocupação hora a hora" />
             </CardTitle>
             <CardDescription className="mt-1">
               Saldo acumulado diariamente a partir de
@@ -4346,7 +4716,11 @@ function HourlyOccupancyCard({
                     : "Seleção manual por cenário"}
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-2 sm:w-[240px]">
+              <div
+                aria-label="Modo de associação direcional"
+                className="grid grid-cols-2 gap-2 sm:w-[240px]"
+                role="group"
+              >
                 <Button
                   type="button"
                   size="sm"
@@ -4366,12 +4740,12 @@ function HourlyOccupancyCard({
               </div>
             </div>
             <div className="max-w-[220px] space-y-1.5">
-              <Label>Início da contagem</Label>
+              <Label htmlFor={startHourSelectId}>Início da contagem</Label>
               <Select
                 value={String(startHour)}
                 onValueChange={(value) => onStartHourChange(Number(value))}
               >
-                <SelectTrigger>
+                <SelectTrigger id={startHourSelectId}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -4492,7 +4866,7 @@ function ScenarioCumulativeTotalsCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Sigma className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Total combinado e acumulado individual de hoje. A hora atual é
@@ -4598,7 +4972,7 @@ function ScenarioTotalsTableCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Table2 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Totais de hoje e do mês atual, linha por linha, incluindo os
@@ -4651,7 +5025,10 @@ function ScenarioTotalsTableCard({
           <Skeleton className="h-[240px] w-full" />
         ) : (
           <div className="max-h-[440px] overflow-auto rounded-md border sm:max-h-[460px]">
-            <Table className="min-w-[640px]">
+            <Table
+              className="min-w-[640px]"
+              scrollRegionLabel="Resultados por cenário; role horizontalmente para ver todas as colunas"
+            >
               <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
                   <TableHead>Cenário</TableHead>
@@ -4691,71 +5068,119 @@ function ScenarioTotalsTableCard({
   );
 }
 
-function CurrentYearComparisonCard({
+function LiveAnnualComparisonCard({
   accumulated,
+  error,
   loading,
-  points,
+  model,
+  refreshing,
   scopeName,
-  year,
 }: {
   accumulated: boolean;
+  error?: string;
   loading: boolean;
-  points: CurrentYearMonthPoint[];
+  model: CountingIntelligenceModel | null;
+  refreshing: boolean;
   scopeName: string;
-  year: number;
 }) {
   const widgetColor = useWidgetColor();
   const option = React.useMemo(
-    () => buildCurrentYearComparisonOption(points, accumulated, year, widgetColor),
-    [accumulated, points, widgetColor, year],
+    () =>
+      model
+        ? accumulated
+          ? buildAnnualAccumulatedComparisonChartOption(model, widgetColor)
+          : buildAnnualComparisonChartOption(model, widgetColor)
+        : {},
+    [accumulated, model, widgetColor],
   );
-  const values = points.flatMap((point) => {
-    const value = accumulated ? point.accumulated : point.value;
-    return value === null ? [] : [value];
-  });
-  const total = accumulated
-    ? values.at(-1) ?? 0
-    : values.reduce((sum, value) => sum + value, 0);
+  const currentYearRow = model?.yearRows.find(
+    (row) => row.year === model.currentYear,
+  );
+  const insightLabel = accumulated ? "Ano atual" : "Mês atual";
+  const insightValue = accumulated
+    ? currentYearRow?.total ?? 0
+    : model?.currentMonthValue ?? 0;
+  const hasData =
+    model?.yearRows.some((row) =>
+      row.months.some((value) => value !== null && value !== 0),
+    ) ?? false;
   const title = accumulated
     ? "Comparativo acumulado por ano"
     : "Comparativo mensal por ano";
+  const periodLabel = model
+    ? formatCountingIntelligencePeriod(model)
+    : "Histórico anual";
 
   return (
-    <Card className="min-w-0 overflow-hidden">
-      <CardHeader className="pb-2">
+    <Card className="h-full min-w-0 overflow-hidden">
+      <CardHeader className="border-b px-4 py-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
+          <div className="min-w-0 flex-1">
             <CardTitle className="flex items-center gap-2">
               {accumulated ? (
                 <TrendingUp className="h-4 w-4 text-primary" />
               ) : (
-                <CalendarDays className="h-4 w-4 text-primary" />
+                <BarChart3 className="h-4 w-4 text-primary" />
               )}
-              <ResolvedWidgetTitle fallback={title} />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               {accumulated
-                ? "Soma progressiva dos meses do ano atual."
-                : "Meses do ano atual com média mensal tracejada."} {scopeName}.
+                ? "Soma progressiva mês a mês para comparar a trajetória acumulada de cada ano e identificar avanço ou atraso."
+                : `Anos lado a lado. Linha tracejada: média mensal de ${
+                    (model?.currentYear ?? new Date().getFullYear()) - 1
+                  } como média-base; percentuais mostram a variação entre os anos comparáveis.`}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline">{year}</Badge>
-            <Badge variant="secondary" className="tabular-nums">
-              Total {formatNumber(total)}
+        </div>
+        <div className="min-w-0 pt-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <Badge
+              variant="outline"
+              className="max-w-full truncate"
+              title={scopeName}
+            >
+              {scopeName}
             </Badge>
+            <Badge variant="outline" title={periodLabel}>
+              {periodLabel}
+            </Badge>
+            {model ? (
+              <Badge
+                variant="secondary"
+                className="max-w-full gap-1 bg-primary/10 tabular-nums text-primary"
+                title={`${insightLabel}: ${formatNumber(insightValue)}`}
+              >
+                <span className="font-normal opacity-75">{insightLabel}</span>
+                <span className="truncate font-semibold">
+                  {formatNumber(insightValue)}
+                </span>
+              </Badge>
+            ) : null}
+            {refreshing ? (
+              <Badge variant="secondary">Atualizando histórico…</Badge>
+            ) : null}
+            {currentYearRow?.ytdYoy !== null &&
+            currentYearRow?.ytdYoy !== undefined ? (
+              <Badge variant="outline" className="tabular-nums">
+                vs {model?.currentYear ? model.currentYear - 1 : "-"}{" "}
+                {formatDelta(currentYearRow.ytdYoy)}
+              </Badge>
+            ) : null}
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0">
+      <CardContent className="min-w-0 px-3 pb-3 pt-2">
         {loading ? (
           <Skeleton className="h-[320px] w-full" />
-        ) : values.length ? (
+        ) : error ? (
+          <EmptyChartState className="h-[320px]" text={error} />
+        ) : hasData ? (
           <EChart option={option} className="h-[320px]" />
         ) : (
           <EmptyChartState
-            className="h-[220px]"
-            text={`Sem valores mensais em ${year} para esta visão.`}
+            className="h-[320px]"
+            text="Sem valores mensais no histórico desta visão."
           />
         )}
       </CardContent>
@@ -4792,7 +5217,7 @@ function OperationalMonthComparisonCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <CalendarDays className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Dias x meses" />
+              <WidgetTitleText fallback="Dias x meses" />
             </CardTitle>
             <CardDescription className="mt-1">
               {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Fins de semana e feriados nacionais e de São Paulo destacados.
@@ -4848,7 +5273,7 @@ function OperationalMonthCumulativeCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <TrendingUp className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Acumulado diário x mês-base" />
+              <WidgetTitleText fallback="Acumulado diário x mês-base" />
             </CardTitle>
             <CardDescription className="mt-1">
               Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Fins de semana e feriados nacionais e de São Paulo destacados.
@@ -4911,7 +5336,7 @@ function OperationalTrendCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <TrendingUp className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Tendência 7 x 30 dias" />
+              <WidgetTitleText fallback="Tendência 7 x 30 dias" />
             </CardTitle>
             <CardDescription className="mt-1">
               Dia atual parcial incluído e atualizado a cada 5 segundos. Eixo de 1 a 31; fins de semana e feriados nacionais e de São Paulo destacados.
@@ -5032,7 +5457,7 @@ function ScenarioRoseCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <ChartPie className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               {scenarioCompositionDescription(chartType)}
@@ -5144,7 +5569,7 @@ function MonthlyAccessRankingCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Volume e representatividade de cada cenário no mês em andamento.
@@ -5249,7 +5674,7 @@ function PeakDaysRankingCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Trophy className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Dias com maior volume acumulado nos cenários escolhidos; o dia
@@ -5328,7 +5753,7 @@ function MissingCustomWidgetCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle
+              <WidgetTitleText
                 fallback={title || "Widget personalizado"}
               />
             </CardTitle>
@@ -5376,7 +5801,7 @@ function TodayComparisonCard({
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2">
           <BarChart3 className="h-4 w-4 text-primary" />
-          <ResolvedWidgetTitle fallback={title} />
+          <WidgetTitleText fallback={title} />
         </CardTitle>
         <CardDescription>{description}</CardDescription>
       </CardHeader>
@@ -5400,7 +5825,7 @@ function EmptyRealtimeCard({ title }: { title: string }) {
     <Card>
       <CardHeader>
         <CardTitle>
-          <ResolvedWidgetTitle fallback={title} />
+          <WidgetTitleText fallback={title} />
         </CardTitle>
         <CardDescription>Selecione um cenário para ver o ao vivo.</CardDescription>
       </CardHeader>
@@ -5559,6 +5984,22 @@ function buildOperationalMonthHoursDefinition(
     granularity: "hour",
     from: historyStart,
     to: endOfAggregateBucket(startOfHour(now), "hour"),
+  };
+}
+
+function buildLiveAnnualRecentMonthsDefinition(
+  now: Date,
+): RealtimeChartDefinition {
+  const currentMonthStart = startOfMonth(now);
+
+  return {
+    id: LIVE_ANNUAL_RECENT_MONTHS_ID,
+    label: "Meses recentes do comparativo anual",
+    description:
+      "Rollup canônico do mês atual e dos 12 meses anteriores.",
+    granularity: "month",
+    from: addMonths(currentMonthStart, -12),
+    to: addMonths(currentMonthStart, 1),
   };
 }
 
@@ -5770,22 +6211,26 @@ async function fetchSubLocations(
   locations: Location[],
   companyScopeId?: string | null,
 ) {
+  const expectedCompanyId = companyScopeId?.trim() || undefined;
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<unknown>(`/locations/${location.id}/sub-locations`).then(
-        requireSubLocationRows,
-      ),
+      apiFetch<unknown>(`/locations/${location.id}/sub-locations`, {
+        companyScopeId: expectedCompanyId,
+      }).then((value) => requireSubLocationRows(value, expectedCompanyId)),
     ),
   );
 
   return filterScopedApiRows(
-    requireSubLocationRows(rows.flat()),
+    requireSubLocationRows(rows.flat(), expectedCompanyId),
     companyScopeId,
   );
 }
 
 async function fetchRealtimeWorkers(companyId?: string | null) {
-  const rows = await apiFetch<unknown>("/workers").then(requireWorkerRows);
+  const companyScopeId = companyId?.trim() || undefined;
+  const rows = await apiFetch<unknown>("/workers", { companyScopeId }).then(
+    (value) => requireWorkerRows(value, companyScopeId),
+  );
   const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
   return sortWorkersByActivity(collapseWorkerIdentityChains(scopedRows));
 }
@@ -6235,33 +6680,6 @@ function buildScenarioTotalsTableRows(
       (left, right) =>
         right.month - left.month || left.name.localeCompare(right.name, "pt-BR"),
     );
-}
-
-function buildCurrentYearMonthPoints(
-  rows: AggregateEventRow[],
-  scope: RealtimeScopeOption,
-  clock: Date,
-): CurrentYearMonthPoint[] {
-  const totals = aggregateScopeRowsByBucket(rows, scope, "month");
-  const year = clock.getFullYear();
-  const currentMonth = clock.getMonth();
-  let accumulated = 0;
-
-  return COUNTING_MONTH_LABELS.map((label, month) => {
-    const key = Date.UTC(year, month, 1);
-    const value = month <= currentMonth && totals.has(key)
-      ? totals.get(key) ?? 0
-      : null;
-
-    if (value !== null) accumulated += value;
-
-    return {
-      accumulated: value === null ? null : accumulated,
-      label,
-      month,
-      value,
-    };
-  });
 }
 
 function sumScopeRowsInRange(
@@ -7463,63 +7881,6 @@ function buildScenarioTotalsReportTable(
       })),
     ],
     title: "Tabela acumulada por cenário",
-  };
-}
-
-function buildCurrentYearComparisonReportChart({
-  accumulated,
-  points,
-  scopeName,
-  widgetColor = "#1267C4",
-  year,
-}: {
-  accumulated: boolean;
-  points: CurrentYearMonthPoint[];
-  scopeName: string;
-  widgetColor?: string;
-  year: number;
-}): ReportPayload["charts"][number] {
-  const title = accumulated
-    ? "Comparativo acumulado por ano"
-    : "Comparativo mensal por ano";
-  const values = points.flatMap((point) => {
-    const value = accumulated ? point.accumulated : point.value;
-    return value === null ? [] : [value];
-  });
-  const total = accumulated
-    ? values.at(-1) ?? 0
-    : values.reduce((sum, value) => sum + value, 0);
-
-  return {
-    comparison: `${year}: ${formatNumber(total)} eventos até o mês atual`,
-    description: `${
-      accumulated
-        ? "Soma progressiva dos meses"
-        : "Valores mensais do ano atual"
-    }. Visão: ${scopeName}.`,
-    option: buildCurrentYearComparisonOption(
-      points,
-      accumulated,
-      year,
-      widgetColor,
-    ),
-    table: {
-      title: `Dados - ${title}`,
-      columns: [
-        { key: "month", label: "Mês", width: 18 },
-        {
-          key: "value",
-          label: accumulated ? "Acumulado" : String(year),
-          numeric: true,
-          width: 22,
-        },
-      ],
-      rows: points.map((point) => ({
-        month: point.label,
-        value: accumulated ? point.accumulated : point.value,
-      })),
-    },
-    title,
   };
 }
 

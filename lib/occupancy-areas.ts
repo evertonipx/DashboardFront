@@ -9,6 +9,7 @@ export type OccupancyAreaOption = {
   camera_id: string;
   label: string;
   detail?: string;
+  object_class?: string;
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -188,7 +189,7 @@ export function normalizeOccupancyRow(
         (row as OccupancyRow).current_value,
       min: readNumber(records, ["min", "minimum"]) ?? (row as OccupancyRow).min,
       object_class:
-        firstString(records, ["object_class", "objectClass", "class", "status"]) ??
+        firstString(records, ["object_class", "objectClass", "class"]) ??
         (row as OccupancyRow).object_class,
       peak: readNumber(records, ["peak", "max", "maximum"]) ?? (row as OccupancyRow).peak,
     };
@@ -203,7 +204,7 @@ export function normalizeOccupancyRow(
     current_at: currentAt,
     current_value: count,
     min: count,
-    object_class: firstString(records, ["object_class", "objectClass", "class", "status"]),
+    object_class: firstString(records, ["object_class", "objectClass", "class"]),
     peak: count,
   };
 }
@@ -227,12 +228,28 @@ export function buildOccupancyAreaOptions(
     const cameraId = row.camera_id?.trim();
     if (!areaId || !cameraId) return;
 
+    const objectClass = row.object_class?.trim().toLowerCase() || undefined;
     const key = buildOccupancyAreaKey(cameraId, areaId);
-    if (options.has(key)) return;
+    const existing = options.get(key);
+    if (existing) {
+      if (
+        existing.object_class &&
+        objectClass &&
+        existing.object_class !== objectClass
+      ) {
+        throw new Error(
+          `As fontes de ocupação divergiram sobre a classe da área "${areaId}" da câmera "${cameraId}".`,
+        );
+      }
+      if (!existing.object_class && objectClass) {
+        options.set(key, { ...existing, object_class: objectClass });
+      }
+      return;
+    }
 
     const areaLabel = row.area_label?.trim();
     const cameraLabel = row.camera_name?.trim();
-    const areaText = areaLabel || areaId;
+    const areaText = areaLabel || regionNameFromAreaId(areaId) || areaId;
     const cameraText = cameraLabel || compactOccupancyId(cameraId);
     const detail =
       areaText !== areaId || cameraLabel
@@ -245,6 +262,7 @@ export function buildOccupancyAreaOptions(
       detail,
       key,
       label: `${areaText} / ${cameraText}`,
+      object_class: objectClass,
     });
   });
 
@@ -253,8 +271,37 @@ export function buildOccupancyAreaOptions(
   );
 }
 
+function regionNameFromAreaId(areaId: string) {
+  const parts = areaId.split("|").map((part) => part.trim());
+  if (parts.length < 2 || parts.at(-1)?.toLowerCase() !== "region") {
+    return "";
+  }
+  return parts.at(-2) ?? "";
+}
+
 export function buildOccupancyAreaKey(cameraId: string, areaId: string) {
-  return `${cameraId}::${areaId}`;
+  return JSON.stringify([cameraId, areaId]);
+}
+
+export function resolveOccupancyAreaSelectionLabel({
+  currentLabel,
+  currentOptionLabel,
+  nextOptionLabel,
+}: {
+  currentLabel?: string;
+  currentOptionLabel?: string;
+  nextOptionLabel: string;
+}) {
+  const normalizedCurrent = currentLabel?.trim();
+  if (
+    normalizedCurrent &&
+    currentOptionLabel &&
+    normalizedCurrent !== currentOptionLabel
+  ) {
+    return normalizedCurrent;
+  }
+
+  return nextOptionLabel;
 }
 
 function occupancyResponseRows(

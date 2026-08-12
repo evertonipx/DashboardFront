@@ -6,8 +6,6 @@ import {
   BarChart3,
   CalendarDays,
   CalendarRange,
-  ChevronLeft,
-  ChevronRight,
   Clock3,
   DoorOpen,
   Grid3X3,
@@ -22,10 +20,8 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
-import {
-  CardLayout,
-  ReorderModeButton,
-} from "@/components/app/card-layout";
+import { AnalysisDateRangePicker } from "@/components/app/occupancy-date-range-picker";
+import { CardLayout, ReorderModeButton } from "@/components/app/card-layout";
 import { EChart, applyChartTypePreference } from "@/components/app/echart";
 import {
   MonitorModeButton,
@@ -35,6 +31,7 @@ import {
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
+import { WidgetTitleText } from "@/components/app/widget-appearance";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -85,10 +82,14 @@ import {
 } from "@/lib/aggregate-reconciliation";
 import { apiFetch } from "@/lib/api";
 import { readCameraGroups } from "@/lib/camera-groups";
+import { companyDateKey } from "@/lib/company-time-zone";
+import { normalizeOccupancyAnalysisDateRangeInput } from "@/lib/occupancy-analysis-window";
 import {
   filterScopedApiRows,
   useEffectiveCompanyScopeId,
+  useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
+import { requireCertifiedCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
 import {
   requireCameraRows,
   requireInfrastructureRelations,
@@ -346,9 +347,7 @@ function analysisWidgetSupportsChartType(kind: PeriodAnalysisWidgetKind) {
   ].includes(kind);
 }
 
-function analysisGranularityLabel(
-  granularity: ScenarioAnalyticsGranularity,
-) {
+function analysisGranularityLabel(granularity: ScenarioAnalyticsGranularity) {
   return (
     {
       day: "Dia a dia",
@@ -415,6 +414,8 @@ export function PeriodAnalysisDashboard({
 }: PeriodAnalysisDashboardProps) {
   const { user } = useAuth();
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const companyTimeZoneResolution = useEffectiveCompanyTimeZoneResolution(user);
+  const companyTimeZone = companyTimeZoneResolution.timeZone;
   const canEditVisual = hasVisualAdminAccess(user);
   const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
@@ -422,9 +423,6 @@ export function PeriodAnalysisDashboard({
     PeriodAnalysisScopeOption[]
   >([]);
   const [widgets, setWidgets] = React.useState<PeriodAnalysisWidget[]>([]);
-  const [draftSettings, setDraftSettings] = React.useState<PeriodAnalysisSettings>(
-    () => createDefaultPeriodAnalysisSettings(),
-  );
   const [appliedSettings, setAppliedSettings] =
     React.useState<PeriodAnalysisSettings>(() =>
       createDefaultPeriodAnalysisSettings(),
@@ -439,13 +437,13 @@ export function PeriodAnalysisDashboard({
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
   const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
   const [widgetDialogOpen, setWidgetDialogOpen] = React.useState(false);
-  const [widgetForm, setWidgetForm] =
-    React.useState<PeriodAnalysisWidgetInput>(() => emptyWidgetForm());
-  const requestRef = React.useRef<AbortController | null>(null);
-  const hasLoadedDataRef = React.useRef(false);
-  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
-    new Map(),
+  const [widgetForm, setWidgetForm] = React.useState<PeriodAnalysisWidgetInput>(
+    () => emptyWidgetForm(),
   );
+  const requestRef = React.useRef<AbortController | null>(null);
+  const timeZoneBlockedRef = React.useRef(false);
+  const hasLoadedDataRef = React.useRef(false);
+  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(new Map());
   const period = React.useMemo(
     () =>
       resolvePeriodAnalysisRange(appliedSettings.from, appliedSettings.to) ??
@@ -492,53 +490,69 @@ export function PeriodAnalysisDashboard({
       ),
     [preferences],
   );
-  const dataRequirementsKey = React.useMemo(
-    () => {
-      const needsExactHour =
-        singleDayAnalysis ||
-        widgets.some(
-          (widget) =>
-              widget.kind === "hour_profile" ||
-              widget.kind === "hourly_occupancy" ||
-              ((widget.kind === "timeline" || widget.kind === "comparison") &&
-                widget.granularity === "hour"),
-        );
-      const baselineKinds = new Set<PeriodAnalysisWidgetKind>([
-        "cumulative",
-        "cumulative_metric",
-        "daily_comparison",
-        "target_progress",
-      ]);
-
-      return JSON.stringify({
-        baseline: Array.from(
-          new Set(
-            widgets
-              .filter((widget) => baselineKinds.has(widget.kind))
-              .map((widget) => widget.baseline),
-          ),
-        ).sort(),
-        // Daily totals always come from the same hourly source, regardless of
-        // which visual widgets happen to be enabled.
-        contextHour: true,
-        hour: needsExactHour,
-        minute: widgets.some(
-          (widget) =>
-            (widget.kind === "timeline" || widget.kind === "comparison") &&
-            widget.granularity === "minute",
+  const widgetTitleById = React.useMemo(
+    () =>
+      new Map(
+        preferences.flatMap((preference) =>
+          preference.title ? [[preference.id, preference.title] as const] : [],
         ),
-        month: widgets.some(
-          (widget) =>
-            widget.kind === "year_monthly" ||
-            widget.kind === "year_accumulated",
-        ),
-      });
-    },
-    [singleDayAnalysis, widgets],
+      ),
+    [preferences],
   );
+  const dataRequirementsKey = React.useMemo(() => {
+    const needsExactHour =
+      singleDayAnalysis ||
+      widgets.some(
+        (widget) =>
+          widget.kind === "hour_profile" ||
+          widget.kind === "hourly_occupancy" ||
+          ((widget.kind === "timeline" || widget.kind === "comparison") &&
+            widget.granularity === "hour"),
+      );
+    const baselineKinds = new Set<PeriodAnalysisWidgetKind>([
+      "cumulative",
+      "cumulative_metric",
+      "daily_comparison",
+      "target_progress",
+    ]);
+
+    return JSON.stringify({
+      baseline: Array.from(
+        new Set(
+          widgets
+            .filter((widget) => baselineKinds.has(widget.kind))
+            .map((widget) => widget.baseline),
+        ),
+      ).sort(),
+      // Daily totals always come from the same hourly source, regardless of
+      // which visual widgets happen to be enabled.
+      contextHour: true,
+      hour: needsExactHour,
+      minute: widgets.some(
+        (widget) =>
+          (widget.kind === "timeline" || widget.kind === "comparison") &&
+          widget.granularity === "minute",
+      ),
+      month: widgets.some(
+        (widget) =>
+          widget.kind === "year_monthly" || widget.kind === "year_accumulated",
+      ),
+    });
+  }, [singleDayAnalysis, widgets]);
 
   React.useEffect(() => {
-    const settings = loadPeriodAnalysisSettings(companyScopeId, user?.id);
+    const loadedSettings = loadPeriodAnalysisSettings(companyScopeId, user?.id);
+    const normalizedRange = normalizeOccupancyAnalysisDateRangeInput(
+      loadedSettings.from,
+      loadedSettings.to,
+      companyDateKey(new Date(), companyTimeZone),
+    );
+    const settings: PeriodAnalysisSettings = {
+      from: normalizedRange.startInput,
+      mode:
+        normalizedRange.startInput === normalizedRange.endInput ? "day" : "range",
+      to: normalizedRange.endInput,
+    };
     hasLoadedDataRef.current = false;
     clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
     setMetadataError("");
@@ -547,10 +561,9 @@ export function PeriodAnalysisDashboard({
     setScopeOptions([]);
     setData(emptyData());
     setLastUpdated(null);
-    setDraftSettings(settings);
     setAppliedSettings(settings);
     setWidgets(loadPeriodAnalysisWidgets(companyScopeId, user?.id));
-  }, [companyScopeId, user?.id]);
+  }, [companyScopeId, companyTimeZone, user?.id]);
 
   React.useEffect(() => {
     function syncWidgets() {
@@ -570,32 +583,44 @@ export function PeriodAnalysisDashboard({
 
   React.useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    const requestCompanyScopeId = companyScopeId?.trim() || undefined;
     setLoadingScenarios(true);
     setMetadataError("");
     setScenarios([]);
     setScopeOptions([]);
     Promise.all([
-      apiFetch<unknown>("/scenarios"),
-      apiFetch<unknown>("/cameras"),
-      apiFetch<unknown>("/locations"),
+      apiFetch<unknown>("/scenarios", {
+        companyScopeId: requestCompanyScopeId,
+        signal: controller.signal,
+      }),
+      apiFetch<unknown>("/cameras", {
+        companyScopeId: requestCompanyScopeId,
+        signal: controller.signal,
+      }),
+      apiFetch<unknown>("/locations", {
+        companyScopeId: requestCompanyScopeId,
+        signal: controller.signal,
+      }),
     ])
       .then(async ([scenarioRows, cameraRows, locationRows]) => {
         if (cancelled) return;
         const scopedScenarios = filterScopedApiRows(
-          requireScenarioRows(scenarioRows),
+          requireScenarioRows(scenarioRows, requestCompanyScopeId),
           companyScopeId,
         );
         const scopedCameras = filterScopedApiRows(
-          requireCameraRows(cameraRows),
+          requireCameraRows(cameraRows, requestCompanyScopeId),
           companyScopeId,
         );
         const scopedLocations = filterScopedApiRows(
-          requireLocationRows(locationRows),
+          requireLocationRows(locationRows, requestCompanyScopeId),
           companyScopeId,
         );
         const subLocations = await fetchAnalysisSubLocations(
           scopedLocations,
-          companyScopeId,
+          requestCompanyScopeId,
+          controller.signal,
         );
         requireInfrastructureRelations({
           cameras: scopedCameras,
@@ -636,6 +661,7 @@ export function PeriodAnalysisDashboard({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [companyScopeId, manager]);
 
@@ -647,6 +673,24 @@ export function PeriodAnalysisDashboard({
       minute: boolean;
       month: boolean;
     };
+    try {
+      requireCertifiedCountingRuntimeTimeZone(companyTimeZoneResolution);
+      timeZoneBlockedRef.current = false;
+    } catch (error) {
+      requestRef.current?.abort();
+      requestRef.current = null;
+      timeZoneBlockedRef.current = true;
+      hasLoadedDataRef.current = false;
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Fuso da empresa não disponível.";
+      setData(emptyData());
+      setDataLoadError(message);
+      setLastUpdated(null);
+      setLoadingData(false);
+      return;
+    }
     const controller = new AbortController();
     requestRef.current?.abort();
     requestRef.current = controller;
@@ -667,10 +711,10 @@ export function PeriodAnalysisDashboard({
       from: new Date(referenceDate.getFullYear(), 0, 1),
       to: periodCoverageTo,
     };
-    const baselineRanges = requirements.baseline.map((baseline) => [
-      baseline,
-      periodAnalysisBaselineDataRange(period, baseline),
-    ] as const);
+    const baselineRanges = requirements.baseline.map(
+      (baseline) =>
+        [baseline, periodAnalysisBaselineDataRange(period, baseline)] as const,
+    );
     const baselineComparableRanges = new Map(
       requirements.baseline.map((baseline) => [
         baseline,
@@ -695,6 +739,7 @@ export function PeriodAnalysisDashboard({
           hourlyAggregateCacheRef.current,
           `analysis:${companyScopeId ?? "jwt-company"}`,
           now,
+          companyScopeId,
           controller.signal,
         )
       : Promise.resolve(emptyDataset("hour"));
@@ -716,7 +761,12 @@ export function PeriodAnalysisDashboard({
             granularity: "minute" as const,
             rows: [],
           })
-        : fetchAnalysisDataset("minute", period, controller.signal)
+        : fetchAnalysisDataset(
+            "minute",
+            period,
+            companyScopeId,
+            controller.signal,
+          )
       : Promise.resolve(emptyDataset("minute"));
     const monthPromise = requirements.month
       ? canonicalHourPromise.then((dataset) =>
@@ -731,6 +781,7 @@ export function PeriodAnalysisDashboard({
       ? fetchAnalysisDataset(
           "minute",
           currentMinuteRange,
+          companyScopeId,
           controller.signal,
         )
       : Promise.resolve(emptyDataset("minute"));
@@ -747,16 +798,15 @@ export function PeriodAnalysisDashboard({
           const comparableRange =
             baselineComparableRanges.get(baseline) ?? baselineRange;
           const boundaryMinutePromise = Promise.all(
-            analysisPartialHourRanges(comparableRange).map(
-              async (range) => ({
-                dataset: await fetchAnalysisDataset(
-                  "minute",
-                  range,
-                  controller.signal,
-                ),
+            analysisPartialHourRanges(comparableRange).map(async (range) => ({
+              dataset: await fetchAnalysisDataset(
+                "minute",
                 range,
-              }),
-            ),
+                companyScopeId,
+                controller.signal,
+              ),
+              range,
+            })),
           );
           const dataset = sliceAnalysisHourlyDataset(
             await canonicalHourPromise,
@@ -796,9 +846,7 @@ export function PeriodAnalysisDashboard({
             dayRange,
             currentMinuteRange,
           );
-          const reconciledHour = requirements.hour
-            ? contextHour
-            : hour;
+          const reconciledHour = requirements.hour ? contextHour : hour;
           const reconciledMinute = requirements.minute
             ? reconcileAnalysisMinuteDataset(
                 minute,
@@ -851,9 +899,7 @@ export function PeriodAnalysisDashboard({
               : day;
           setData({
             baseline: Object.fromEntries(baselineEntries),
-            baselineComparable: Object.fromEntries(
-              baselineComparableEntries,
-            ),
+            baselineComparable: Object.fromEntries(baselineComparableEntries),
             contextHour,
             day: reconciledDay,
             hour: reconciledHour,
@@ -871,13 +917,9 @@ export function PeriodAnalysisDashboard({
               reconciledMinute.error ||
               month.error ||
               baselineEntries.some(([, dataset]) => dataset.error) ||
-              baselineComparableEntries.some(
-                ([, dataset]) => dataset.error,
-              ))
+              baselineComparableEntries.some(([, dataset]) => dataset.error))
           ) {
-            toast.error(
-              "Alguns dados da análise não puderam ser carregados.",
-            );
+            toast.error("Alguns dados da análise não puderam ser carregados.");
           }
         },
       )
@@ -902,6 +944,8 @@ export function PeriodAnalysisDashboard({
     return () => controller.abort();
   }, [
     companyScopeId,
+    companyTimeZone,
+    companyTimeZoneResolution,
     dataRequirementsKey,
     operationalPeriod,
     period,
@@ -912,17 +956,25 @@ export function PeriodAnalysisDashboard({
   React.useEffect(() => {
     if (!autoRefreshEnabled) return;
 
-    const refresh = () => {
-      if (document.visibilityState === "visible") {
-        setQueryVersion((value) => value + 1);
+    const refreshWhenIdle = () => {
+      if (
+        document.visibilityState !== "visible" ||
+        timeZoneBlockedRef.current ||
+        requestRef.current !== null
+      ) {
+        return;
       }
+      setQueryVersion((value) => value + 1);
     };
-    const interval = window.setInterval(refresh, LIVE_ANALYSIS_REFRESH_MS);
-    document.addEventListener("visibilitychange", refresh);
+    const interval = window.setInterval(
+      refreshWhenIdle,
+      LIVE_ANALYSIS_REFRESH_MS,
+    );
+    document.addEventListener("visibilitychange", refreshWhenIdle);
 
     return () => {
       window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", refresh);
+      document.removeEventListener("visibilitychange", refreshWhenIdle);
     };
   }, [autoRefreshEnabled, period]);
 
@@ -979,6 +1031,15 @@ export function PeriodAnalysisDashboard({
         : fullWidth
           ? "sm:col-span-2 xl:col-span-4"
           : "sm:col-span-2 xl:col-span-2",
+      colorEditable: ![
+        "cumulative_metric",
+        "day_total",
+        "summary",
+        "target_progress",
+        "totals_table",
+      ].includes(widget.kind),
+      colorPreview:
+        widget.kind === "heatmap" ? ("gradient" as const) : undefined,
       defaultHeight: short
         ? ("short" as const)
         : tall
@@ -992,6 +1053,7 @@ export function PeriodAnalysisDashboard({
       id: widget.id,
       label: widget.title,
       minHeight: short ? ("short" as const) : undefined,
+      titleEditable: true,
       node: (
         <PeriodAnalysisCard
           canConfigure={canEditVisual}
@@ -1016,9 +1078,7 @@ export function PeriodAnalysisDashboard({
             ? "row-span-1"
             : undefined,
       zoomEnabled:
-        widget.kind !== "summary" &&
-        widget.kind !== "totals_table" &&
-        !compact,
+        widget.kind !== "summary" && widget.kind !== "totals_table" && !compact,
     };
   });
   const visibleWidgetIds = new Set(
@@ -1033,91 +1093,70 @@ export function PeriodAnalysisDashboard({
       )
       .map((widget) => ({
         chartType: widgetChartTypeById.get(widget.id),
+        defaultTitle: widget.title,
         model: modelByWidgetId.get(widget.id)!,
-        title: widget.title,
+        title: widgetTitleById.get(widget.id) ?? widget.title,
       })),
     period,
   });
 
   function commitAnalysisSettings(nextSettings: PeriodAnalysisSettings) {
-    let normalizedSettings =
+    const requestedFrom =
       nextSettings.mode === "day"
-        ? {
-            ...nextSettings,
-            from: nextSettings.from || nextSettings.to,
-            to: nextSettings.from || nextSettings.to,
-          }
-        : nextSettings;
-    if (
-      normalizedSettings.mode === "range" &&
-      normalizedSettings.from === normalizedSettings.to
-    ) {
-      normalizedSettings = { ...normalizedSettings, mode: "day" };
-    }
+        ? nextSettings.from || nextSettings.to
+        : nextSettings.from;
+    const requestedTo =
+      nextSettings.mode === "day" ? requestedFrom : nextSettings.to;
+    const normalizedRange = normalizeOccupancyAnalysisDateRangeInput(
+      requestedFrom,
+      requestedTo,
+      companyDateKey(new Date(), companyTimeZone),
+    );
+    const normalizedSettings: PeriodAnalysisSettings = {
+      from: normalizedRange.startInput,
+      mode:
+        normalizedRange.startInput === normalizedRange.endInput ? "day" : "range",
+      to: normalizedRange.endInput,
+    };
     const nextPeriod = resolvePeriodAnalysisRange(
       normalizedSettings.from,
       normalizedSettings.to,
     );
     if (!nextPeriod) {
-      toast.error("Informe um período válido, com a data inicial antes da final.");
+      toast.error(
+        "Informe um período válido, com a data inicial antes da final.",
+      );
       return;
     }
 
-    savePeriodAnalysisSettings(normalizedSettings, companyScopeId, user?.id);
+    try {
+      savePeriodAnalysisSettings(normalizedSettings, companyScopeId, user?.id);
+    } catch {
+      toast.error(
+        "O período será aplicado, mas não pôde ser salvo neste navegador.",
+      );
+    }
     requestRef.current?.abort();
     requestRef.current = null;
     hasLoadedDataRef.current = false;
     setDataLoadError("");
     setData(emptyData());
-    setDraftSettings(normalizedSettings);
     setLoadingData(true);
     setAppliedSettings(normalizedSettings);
     setQueryVersion((value) => value + 1);
   }
 
-  function applyPeriod() {
-    commitAnalysisSettings(draftSettings);
-  }
-
-  function updateAnalysisMode(mode: PeriodAnalysisSettings["mode"]) {
-    if (mode === draftSettings.mode) return;
-
-    const referenceDate =
-      parseDateInputValue(draftSettings.to || draftSettings.from) ?? new Date();
-    if (mode === "day") {
-      const date = formatFileDate(referenceDate);
-      commitAnalysisSettings({ from: date, mode, to: date });
-      return;
-    }
-
+  function applyAnalysisRange({
+    endInput,
+    startInput,
+  }: {
+    endInput: string;
+    startInput: string;
+  }) {
     commitAnalysisSettings({
-      from: formatFileDate(addDays(referenceDate, -6)),
-      mode,
-      to: formatFileDate(referenceDate),
-    });
-  }
-
-  function selectAnalysisDay(value: string) {
-    if (!value) return;
-    commitAnalysisSettings({ from: value, mode: "day", to: value });
-  }
-
-  function shiftAnalysisDay(amount: number) {
-    const selectedDate = parseDateInputValue(appliedSettings.from);
-    if (!selectedDate) return;
-    selectAnalysisDay(formatFileDate(addDays(selectedDate, amount)));
-  }
-
-  function applyRangePreset(preset: "7d" | "30d" | "month") {
-    const endDate = parseDateInputValue(draftSettings.to) ?? new Date();
-    const startDate =
-      preset === "month"
-        ? new Date(endDate.getFullYear(), endDate.getMonth(), 1)
-        : addDays(endDate, preset === "7d" ? -6 : -29);
-    commitAnalysisSettings({
-      from: formatFileDate(startDate),
-      mode: "range",
-      to: formatFileDate(endDate),
+      from: startInput,
+      mode: startInput === endInput ? "day" : "range",
+      to: endInput,
     });
   }
 
@@ -1157,9 +1196,9 @@ export function PeriodAnalysisDashboard({
             ? "hour"
             : kind === "year_monthly" || kind === "year_accumulated"
               ? "month"
-            : kind === "timeline" || kind === "comparison"
-              ? current.granularity
-              : "day",
+              : kind === "timeline" || kind === "comparison"
+                ? current.granularity
+                : "day",
         kind,
         scopeMode: widgetSupportsScopeMode(kind)
           ? current.scopeMode
@@ -1207,9 +1246,7 @@ export function PeriodAnalysisDashboard({
   }
 
   function removeWidget(widgetId: string) {
-    setWidgets(
-      deletePeriodAnalysisWidget(widgetId, companyScopeId, user?.id),
-    );
+    setWidgets(deletePeriodAnalysisWidget(widgetId, companyScopeId, user?.id));
     toast.success("Widget removido.");
   }
 
@@ -1221,7 +1258,9 @@ export function PeriodAnalysisDashboard({
       snapshot: preset.snapshot,
     });
     if (!imported.widgets.length) {
-      toast.error("A visão escolhida não possui widgets compatíveis com Análises.");
+      toast.error(
+        "A visão escolhida não possui widgets compatíveis com Análises.",
+      );
       return false;
     }
 
@@ -1257,15 +1296,14 @@ export function PeriodAnalysisDashboard({
     <section
       className={cn(
         monitorMode
-          ? "fixed inset-0 z-[100] h-screen overflow-y-auto bg-background p-3 text-foreground lg:p-4"
+          ? "fixed inset-0 z-[100] h-[100dvh] overflow-y-auto bg-background p-3 text-foreground lg:p-4"
           : "space-y-4",
       )}
     >
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
       {analysisCertificationError ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
-          Dados não certificados: {analysisCertificationError} A exportação foi
-          bloqueada para não publicar totais parciais ou incorretos.
+          Consulta bloqueada: {analysisCertificationError}
         </div>
       ) : null}
 
@@ -1294,165 +1332,36 @@ export function PeriodAnalysisDashboard({
           </div>
         </div>
       ) : (
-        <div className="rounded-md border bg-card p-4 shadow-soft">
-          <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-end">
-            <div className="min-w-0 space-y-3">
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="inline-flex rounded-md border bg-muted/30 p-1">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={singleDayAnalysis ? "secondary" : "ghost"}
-                    className="h-8"
-                    onClick={() => updateAnalysisMode("day")}
-                  >
-                    <CalendarDays className="h-4 w-4" />
-                    Dia
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={singleDayAnalysis ? "ghost" : "secondary"}
-                    className="h-8"
-                    onClick={() => updateAnalysisMode("range")}
-                  >
-                    <Layers3 className="h-4 w-4" />
-                    Período
-                  </Button>
-                </div>
-                <div className="text-sm font-semibold">
-                  {singleDayAnalysis ? "Dia analisado" : "Período consolidado"}
-                </div>
-              </div>
-
-              {singleDayAnalysis ? (
-                <div className="flex flex-wrap items-end gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    onClick={() => shiftAnalysisDay(-1)}
-                    aria-label="Dia anterior"
-                    title="Dia anterior"
-                  >
-                    <ChevronLeft className="h-4 w-4" />
-                  </Button>
-                  <Field label="Data">
-                    <Input
-                      className="w-[180px]"
-                      max={formatFileDate(new Date())}
-                      type="date"
-                      value={draftSettings.from}
-                      onChange={(event) => selectAnalysisDay(event.target.value)}
-                    />
-                  </Field>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    disabled={
-                      appliedSettings.from >= formatFileDate(new Date())
-                    }
-                    onClick={() => shiftAnalysisDay(1)}
-                    aria-label="Próximo dia"
-                    title="Próximo dia"
-                  >
-                    <ChevronRight className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={
-                      appliedSettings.from === formatFileDate(new Date())
-                    }
-                    onClick={() => selectAnalysisDay(formatFileDate(new Date()))}
-                  >
-                    Hoje
-                  </Button>
-                </div>
-              ) : (
-                <div className="flex flex-wrap items-end gap-3">
-                  <Field label="De">
-                    <Input
-                      className="w-[180px]"
-                      max={draftSettings.to || formatFileDate(new Date())}
-                      type="date"
-                      value={draftSettings.from}
-                      onChange={(event) =>
-                        setDraftSettings((current) => ({
-                          ...current,
-                          from: event.target.value,
-                        }))
-                      }
-                    />
-                  </Field>
-                  <Field label="Até">
-                    <Input
-                      className="w-[180px]"
-                      max={formatFileDate(new Date())}
-                      min={draftSettings.from}
-                      type="date"
-                      value={draftSettings.to}
-                      onChange={(event) =>
-                        setDraftSettings((current) => ({
-                          ...current,
-                          to: event.target.value,
-                        }))
-                      }
-                    />
-                  </Field>
-                  <Button type="button" onClick={applyPeriod} disabled={loadingData}>
-                    <CalendarRange className="h-4 w-4" />
-                    Consultar
-                  </Button>
-                  <div className="flex flex-wrap gap-1">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => applyRangePreset("7d")}
-                    >
-                      7 dias
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => applyRangePreset("30d")}
-                    >
-                      30 dias
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => applyRangePreset("month")}
-                    >
-                      Mês
-                    </Button>
-                  </div>
-                </div>
-              )}
+        <div className="rounded-md border bg-card px-3 py-2 shadow-soft">
+          <div
+            aria-label="Controles da análise de Contagem"
+            className="enterprise-horizontal-scroll flex min-w-0 items-center gap-2 overflow-x-auto pb-1"
+            role="group"
+            tabIndex={0}
+          >
+            <div className="shrink-0">
+              <AnalysisDateRangePicker
+                key={`${companyScopeId ?? ""}|${user?.id ?? ""}`}
+                contextLabel="análise de Contagem"
+                maximumInput={companyDateKey(new Date(), companyTimeZone)}
+                onApply={applyAnalysisRange}
+                timeZoneLabel={companyTimeZone}
+                value={{
+                  endInput: appliedSettings.to,
+                  startInput: appliedSettings.from,
+                }}
+              />
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 2xl:justify-end">
-              <Badge variant="outline" className="gap-1 bg-background">
-                <Clock3 className="h-3.5 w-3.5" />
-                {formatPeriodAnalysisRange(period)}
-              </Badge>
-              {autoRefreshEnabled ? (
-                <Badge variant="outline" className="bg-background">
-                  Atualização 5 s
-                </Badge>
-              ) : null}
-              {lastUpdated ? (
-                <Badge variant="outline" className="gap-1 bg-background">
-                  {formatTime(lastUpdated)}
-                </Badge>
-              ) : null}
+            <div
+              aria-label="Ações da análise de Contagem"
+              className="ml-auto flex shrink-0 items-center gap-2"
+              role="group"
+            >
               {canEditVisual ? (
                 <>
                   <ReorderModeButton
+                    className="h-8 w-8"
                     enabled={layoutReorderMode}
                     onChange={setLayoutReorderMode}
                   />
@@ -1460,6 +1369,7 @@ export function PeriodAnalysisDashboard({
                     type="button"
                     variant="outline"
                     size="icon"
+                    className="h-8 w-8"
                     onClick={() => setLayoutOrganizerOpen(true)}
                     aria-label="Configurar widgets"
                     title="Configurar widgets"
@@ -1469,6 +1379,7 @@ export function PeriodAnalysisDashboard({
                 </>
               ) : null}
               <ReportExportActions
+                compact
                 disabled={
                   loadingData ||
                   loadingScenarios ||
@@ -1477,7 +1388,18 @@ export function PeriodAnalysisDashboard({
                 }
                 payload={reportPayload}
               />
+              {lastUpdated ? (
+                <span
+                  aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
+                  className="inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
+                  title={`Última atualização às ${formatTime(lastUpdated)}`}
+                >
+                  <Clock3 className="h-3.5 w-3.5" />
+                  {formatTime(lastUpdated)}
+                </span>
+              ) : null}
               <MonitorModeButton
+                compact
                 disabled={!widgets.length}
                 onClick={enterMonitorMode}
               />
@@ -1565,11 +1487,13 @@ function PeriodAnalysisCard({
             <CardTitle className="flex items-center gap-2">
               <Icon className="h-4 w-4 shrink-0 text-primary" />
               <span className="min-w-0 break-words leading-5">
-                {widget.title}
+                <WidgetTitleText fallback={widget.title} />
               </span>
             </CardTitle>
             <CardDescription
-              className={cn(compactContent ? "mt-0.5 text-xs leading-4" : "mt-1")}
+              className={cn(
+                compactContent ? "mt-0.5 text-xs leading-4" : "mt-1",
+              )}
             >
               {model.description}
             </CardDescription>
@@ -1603,62 +1527,65 @@ function PeriodAnalysisCard({
             ) : null}
           </div>
         </div>
-        {!compactWidget ? <div className="min-w-0 pt-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-            <Badge
-              variant="outline"
-              className="max-w-full truncate"
-              title={scenarioSummary}
-            >
-              {scenarioSummary}
-            </Badge>
-            {(widget.kind === "timeline" ||
-              widget.kind === "comparison" ||
-              widget.kind === "hourly_occupancy") && (
-              <Badge variant="outline">
-                {analysisGranularityLabel(effectiveGranularity)}
+        {!compactWidget ? (
+          <div className="min-w-0 pt-1">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <Badge
+                variant="outline"
+                className="max-w-full truncate"
+                title={scenarioSummary}
+              >
+                {scenarioSummary}
               </Badge>
-            )}
-            {widget.kind === "hourly_occupancy" ? (
-              <Badge variant="outline">
-                Início {formatOccupancyStartHour(widget.startHour)}
-              </Badge>
-            ) : null}
-            {(widget.kind === "cumulative" ||
+              {(widget.kind === "timeline" ||
+                widget.kind === "comparison" ||
+                widget.kind === "hourly_occupancy") && (
+                <Badge variant="outline">
+                  {analysisGranularityLabel(effectiveGranularity)}
+                </Badge>
+              )}
+              {widget.kind === "hourly_occupancy" ? (
+                <Badge variant="outline">
+                  Início {formatOccupancyStartHour(widget.startHour)}
+                </Badge>
+              ) : null}
+              {widget.kind === "cumulative" ||
               widget.kind === "cumulative_metric" ||
               widget.kind === "daily_comparison" ||
-              widget.kind === "target_progress") ? (
-              <Badge variant="outline">
-                {periodAnalysisBaselineLabel(widget.baseline)}
-              </Badge>
-            ) : null}
-            {model.insights?.map((insight) => (
-              <Badge
-                key={`${insight.label}-${insight.value}`}
-                variant={insight.tone === "primary" ? "secondary" : "outline"}
-                className={cn(
-                  "max-w-full gap-1 tabular-nums",
-                  insight.tone === "primary" && "bg-primary/10 text-primary",
-                  insight.tone === "muted" && "text-muted-foreground",
-                  insight.tone === "positive" &&
-                    "border-emerald-600/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-                  insight.tone === "negative" &&
-                    "border-orange-600/25 bg-orange-500/10 text-orange-700 dark:text-orange-300",
-                )}
-                title={`${insight.label}: ${insight.value}`}
-              >
-                <span className="font-normal opacity-75">{insight.label}</span>
-                <span className="truncate font-semibold">{insight.value}</span>
-              </Badge>
-            ))}
+              widget.kind === "target_progress" ? (
+                <Badge variant="outline">
+                  {periodAnalysisBaselineLabel(widget.baseline)}
+                </Badge>
+              ) : null}
+              {model.insights?.map((insight) => (
+                <Badge
+                  key={`${insight.label}-${insight.value}`}
+                  variant={insight.tone === "primary" ? "secondary" : "outline"}
+                  className={cn(
+                    "max-w-full gap-1 tabular-nums",
+                    insight.tone === "primary" && "bg-primary/10 text-primary",
+                    insight.tone === "muted" && "text-muted-foreground",
+                    insight.tone === "positive" &&
+                      "border-emerald-600/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                    insight.tone === "negative" &&
+                      "border-orange-600/25 bg-orange-500/10 text-orange-700 dark:text-orange-300",
+                  )}
+                  title={`${insight.label}: ${insight.value}`}
+                >
+                  <span className="font-normal opacity-75">
+                    {insight.label}
+                  </span>
+                  <span className="truncate font-semibold">
+                    {insight.value}
+                  </span>
+                </Badge>
+              ))}
+            </div>
           </div>
-        </div> : null}
+        ) : null}
       </CardHeader>
       <CardContent
-        className={cn(
-          "min-h-0 min-w-0 flex-1",
-          compactContent && "px-3 pb-3",
-        )}
+        className={cn("min-h-0 min-w-0 flex-1", compactContent && "px-3 pb-3")}
       >
         {loading ? (
           <Skeleton className="h-full min-h-[160px] w-full" />
@@ -1691,9 +1618,7 @@ function MetricGrid({
     <div
       className={cn(
         "grid gap-px overflow-hidden rounded-md border bg-border",
-        metrics.length === 1
-          ? "grid-cols-1"
-          : "grid-cols-2 sm:grid-cols-4",
+        metrics.length === 1 ? "grid-cols-1" : "grid-cols-2 sm:grid-cols-4",
       )}
     >
       {metrics.map((metric) => (
@@ -1763,7 +1688,11 @@ function AnalysisTable({
           {table.rows.map((row, rowIndex) => (
             <tr
               key={`${String(row[table.columns[0]?.key] ?? rowIndex)}-${rowIndex}`}
-              className={cn(rowIndex === 0 ? "bg-primary/5 font-semibold" : "odd:bg-muted/25")}
+              className={cn(
+                rowIndex === 0
+                  ? "bg-primary/5 font-semibold"
+                  : "odd:bg-muted/25",
+              )}
             >
               {table.columns.map((column) => {
                 const value = row[column.key];
@@ -1808,6 +1737,12 @@ function WidgetDialog({
   scenarios: Scenario[];
   scopeOptions: PeriodAnalysisScopeOption[];
 }) {
+  const widgetKindInputId = React.useId();
+  const widgetTitleInputId = React.useId();
+  const widgetScopeModeInputId = React.useId();
+  const widgetGranularityInputId = React.useId();
+  const widgetBaselineInputId = React.useId();
+  const widgetStartHourInputId = React.useId();
   const configurableGranularity =
     form.kind === "timeline" || form.kind === "comparison";
   const hourlyOccupancy = form.kind === "hourly_occupancy";
@@ -1856,14 +1791,16 @@ function WidgetDialog({
         </DialogHeader>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Tipo de análise">
+          <Field htmlFor={widgetKindInputId} label="Tipo de análise">
             <Select
               value={form.kind}
               onValueChange={(value) =>
                 onKindChange(value as PeriodAnalysisWidgetKind)
               }
             >
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger id={widgetKindInputId}>
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
                 {widgetKindGroups.map((group, groupIndex) => (
                   <React.Fragment key={group.value}>
@@ -1890,8 +1827,9 @@ function WidgetDialog({
             </p>
           </Field>
 
-          <Field label="Título">
+          <Field htmlFor={widgetTitleInputId} label="Título">
             <Input
+              id={widgetTitleInputId}
               value={form.title}
               onChange={(event) =>
                 onFormChange((current) => ({
@@ -1904,7 +1842,7 @@ function WidgetDialog({
           </Field>
 
           {scopeModeConfigurable && availableScopeModes.length > 1 ? (
-            <Field label="Tipo de visão">
+            <Field htmlFor={widgetScopeModeInputId} label="Tipo de visão">
               <Select
                 value={form.scopeMode}
                 onValueChange={(value) =>
@@ -1916,7 +1854,9 @@ function WidgetDialog({
                   }))
                 }
               >
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger id={widgetScopeModeInputId}>
+                  <SelectValue />
+                </SelectTrigger>
                 <SelectContent>
                   {availableScopeModes.map((mode) => (
                     <SelectItem key={mode} value={mode}>
@@ -1929,7 +1869,7 @@ function WidgetDialog({
           ) : null}
 
           {configurableGranularity ? (
-            <Field label="Granularidade">
+            <Field htmlFor={widgetGranularityInputId} label="Granularidade">
               <Select
                 value={form.granularity}
                 onValueChange={(value) =>
@@ -1939,7 +1879,9 @@ function WidgetDialog({
                   }))
                 }
               >
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger id={widgetGranularityInputId}>
+                  <SelectValue />
+                </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="minute">Minuto a minuto</SelectItem>
                   <SelectItem value="hour">Hora a hora</SelectItem>
@@ -1955,7 +1897,7 @@ function WidgetDialog({
           form.kind === "cumulative_metric" ||
           form.kind === "daily_comparison" ||
           form.kind === "target_progress" ? (
-            <Field label="Base de comparação">
+            <Field htmlFor={widgetBaselineInputId} label="Base de comparação">
               <Select
                 value={form.baseline}
                 onValueChange={(value) =>
@@ -1965,7 +1907,9 @@ function WidgetDialog({
                   }))
                 }
               >
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger id={widgetBaselineInputId}>
+                  <SelectValue />
+                </SelectTrigger>
                 <SelectContent>
                   {baselineOptions.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
@@ -1980,7 +1924,9 @@ function WidgetDialog({
           {hourlyOccupancy ? (
             <div className="space-y-3 sm:col-span-2">
               <div className="max-w-[220px] space-y-2">
-                <Label>Início da contagem diária</Label>
+                <Label htmlFor={widgetStartHourInputId}>
+                  Início da contagem diária
+                </Label>
                 <Select
                   value={String(form.startHour)}
                   onValueChange={(value) =>
@@ -1990,7 +1936,7 @@ function WidgetDialog({
                     }))
                   }
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id={widgetStartHourInputId}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -2018,7 +1964,9 @@ function WidgetDialog({
                     <Button
                       type="button"
                       size="sm"
-                      variant={form.selectionMode === "all" ? "default" : "outline"}
+                      variant={
+                        form.selectionMode === "all" ? "default" : "outline"
+                      }
                       onClick={() =>
                         onFormChange((current) => ({
                           ...current,
@@ -2031,7 +1979,9 @@ function WidgetDialog({
                     <Button
                       type="button"
                       size="sm"
-                      variant={form.selectionMode === "custom" ? "default" : "outline"}
+                      variant={
+                        form.selectionMode === "custom" ? "default" : "outline"
+                      }
                       onClick={() =>
                         onFormChange((current) => ({
                           ...current,
@@ -2057,7 +2007,8 @@ function WidgetDialog({
                         ...current,
                         entryScenarioIds,
                         exitScenarioIds: current.exitScenarioIds.filter(
-                          (scenarioId) => !entryScenarioIds.includes(scenarioId),
+                          (scenarioId) =>
+                            !entryScenarioIds.includes(scenarioId),
                         ),
                       }))
                     }
@@ -2121,7 +2072,11 @@ function WidgetDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+          >
             Cancelar
           </Button>
           <Button
@@ -2137,10 +2092,18 @@ function WidgetDialog({
   );
 }
 
-function Field({ children, label }: { children: React.ReactNode; label: string }) {
+function Field({
+  children,
+  htmlFor,
+  label,
+}: {
+  children: React.ReactNode;
+  htmlFor: string;
+  label: string;
+}) {
   return (
     <div className="space-y-2">
-      <Label>{label}</Label>
+      <Label htmlFor={htmlFor}>{label}</Label>
       {children}
     </div>
   );
@@ -2219,20 +2182,32 @@ function composePeriodAnalysisReport({
 }: {
   models: Array<{
     chartType?: CardChartType;
+    defaultTitle: string;
     model: PeriodAnalysisWidgetModel;
     title: string;
   }>;
   period: PeriodAnalysisRange;
 }): ReportPayload {
   const singleDay = isSingleDayAnalysisPeriod(period);
+  const generatedAt = new Date();
+  const dataCompleteUntil = periodAnalysisDataCompleteUntil(
+    period,
+    generatedAt,
+  );
   return {
-    charts: models.flatMap(({ chartType, model, title }) =>
+    charts: models.flatMap(({ chartType, defaultTitle, model, title }) =>
       model.hasData && model.option && model.table
         ? [
             {
               description: model.description,
               option: applyChartTypePreference(model.option, chartType),
-              table: model.table,
+              table: {
+                ...model.table,
+                title:
+                  title === defaultTitle
+                    ? model.table.title
+                    : `Dados - ${title}`,
+              },
               title,
             },
           ]
@@ -2242,15 +2217,29 @@ function composePeriodAnalysisReport({
       singleDay ? "Análise histórica diária" : "Período consolidado",
       formatPeriodAnalysisRange(period),
     ],
-    dataCompleteUntil: addDays(period.to, -1),
+    dataCompleteUntil,
     filename: `ipxdata-analises-${formatFileDate(period.from)}-${formatFileDate(
-      addDays(period.to, -1),
+      dataCompleteUntil,
     )}`,
-    generatedAt: new Date(),
-    metrics: models.flatMap(({ model }) => model.metrics ?? []),
+    generatedAt,
+    metrics: models.flatMap(({ defaultTitle, model, title }) => {
+      const metrics = model.metrics ?? [];
+      if (title === defaultTitle) return metrics;
+      return metrics.map((metric) => ({
+        ...metric,
+        label: metrics.length === 1 ? title : `${title} · ${metric.label}`,
+      }));
+    }),
     subtitle: formatPeriodAnalysisRange(period),
-    tables: models.flatMap(({ model }) =>
-      model.option || !model.table ? [] : [model.table],
+    tables: models.flatMap(({ defaultTitle, model, title }) =>
+      model.option || !model.table
+        ? []
+        : [
+            {
+              ...model.table,
+              title: title === defaultTitle ? model.table.title : title,
+            },
+          ],
     ),
     title: singleDay ? "Análise do dia" : "Análises por período",
   };
@@ -2259,17 +2248,20 @@ function composePeriodAnalysisReport({
 async function fetchAnalysisSubLocations(
   locations: Location[],
   companyScopeId?: string | null,
+  signal?: AbortSignal,
 ) {
+  const expectedCompanyId = companyScopeId?.trim() || undefined;
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<unknown>(
-        `/locations/${location.id}/sub-locations`,
-      ).then(requireSubLocationRows),
+      apiFetch<unknown>(`/locations/${location.id}/sub-locations`, {
+        companyScopeId: expectedCompanyId,
+        signal,
+      }).then((value) => requireSubLocationRows(value, expectedCompanyId)),
     ),
   );
 
   return filterScopedApiRows(
-    requireSubLocationRows(rows.flat()),
+    requireSubLocationRows(rows.flat(), expectedCompanyId),
     companyScopeId,
   );
 }
@@ -2277,10 +2269,16 @@ async function fetchAnalysisSubLocations(
 async function fetchAnalysisDataset(
   granularity: AggregateGranularity,
   range: PeriodAnalysisRange,
+  companyScopeId?: string | null,
   signal?: AbortSignal,
 ): Promise<PeriodAnalysisDataset> {
   try {
-    const response = await fetchAnalysisAggregate(granularity, range, signal);
+    const response = await fetchAnalysisAggregate(
+      granularity,
+      range,
+      companyScopeId,
+      signal,
+    );
     const responseGranularity = requireAggregateGranularity(
       response.granularity,
       granularity,
@@ -2309,11 +2307,22 @@ async function fetchAnalysisDataset(
   }
 }
 
+function periodAnalysisDataCompleteUntil(
+  period: PeriodAnalysisRange,
+  now: Date,
+) {
+  const inclusiveEnd = new Date(period.to.getTime() - 1);
+  return now >= period.from && now < period.to
+    ? new Date(Math.min(now.getTime(), inclusiveEnd.getTime()))
+    : inclusiveEnd;
+}
+
 async function fetchAnalysisHourlyDatasets(
   ranges: PeriodAnalysisRange[],
   cache: HourlyAggregateCache,
   cacheScope: string,
   now: Date,
+  companyScopeId?: string | null,
   signal?: AbortSignal,
 ): Promise<PeriodAnalysisDataset> {
   try {
@@ -2322,6 +2331,7 @@ async function fetchAnalysisHourlyDatasets(
       rows: await fetchHourlyAggregateRanges({
         cache,
         cacheScope,
+        companyScopeId: companyScopeId?.trim() || undefined,
         now,
         ranges,
         signal,
@@ -2343,6 +2353,7 @@ async function fetchAnalysisHourlyDatasets(
 function fetchAnalysisAggregate(
   granularity: AggregateGranularity,
   range: PeriodAnalysisRange,
+  companyScopeId?: string | null,
   signal?: AbortSignal,
 ) {
   const params = new URLSearchParams({
@@ -2354,7 +2365,10 @@ function fetchAnalysisAggregate(
 
   return apiFetch<AggregateEventsResponse>(
     `/analytics/aggregate?${params.toString()}`,
-    { signal },
+    {
+      companyScopeId: companyScopeId?.trim() || undefined,
+      signal,
+    },
   );
 }
 
@@ -2562,9 +2576,7 @@ function analysisPartialHourRanges(
   if (startOfHour(range.to).getTime() !== range.to.getTime()) {
     const lastIncluded = new Date(range.to.getTime() - 1);
     const toHour = startOfHour(lastIncluded);
-    const from = new Date(
-      Math.max(range.from.getTime(), toHour.getTime()),
-    );
+    const from = new Date(Math.max(range.from.getTime(), toHour.getTime()));
     if (from < range.to) {
       ranges.set(`${from.toISOString()}|${range.to.toISOString()}`, {
         from,
@@ -2605,8 +2617,7 @@ function reconcileAnalysisHourlyBoundaries(
       }
       if (dataset.granularity !== "minute") {
         return {
-          error:
-            "A granularidade usada na borda comparável é inválida.",
+          error: "A granularidade usada na borda comparável é inválida.",
           granularity: "hour",
           rows: [],
         };
@@ -2637,10 +2648,7 @@ function reconcileAnalysisHourlyBoundaries(
   }
 }
 
-function analysisCurrentMinuteRange(
-  ranges: PeriodAnalysisRange[],
-  now: Date,
-) {
+function analysisCurrentMinuteRange(ranges: PeriodAnalysisRange[], now: Date) {
   const from = startOfHour(now);
   const to = new Date(
     Math.min(
@@ -2706,14 +2714,6 @@ function addDays(date: Date, amount: number) {
     isDayBoundary ? 0 : date.getSeconds(),
     isDayBoundary ? 0 : date.getMilliseconds(),
   );
-}
-
-function parseDateInputValue(value: string) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) return null;
-
-  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function formatFileDate(date: Date) {
