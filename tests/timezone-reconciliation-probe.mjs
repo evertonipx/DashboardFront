@@ -19,7 +19,40 @@ const periodAnalysisModel = loadTypeScriptModule(
 );
 const probe = process.argv[2];
 
-if (probe === "fallback") {
+if (probe === "company-four-hour-offset") {
+  const occupancy = scenarioAnalytics.buildScenarioHourlyOccupancy({
+    companyTimeZone: "America/Manaus",
+    day: new Date(2026, 7, 3),
+    entryScenarios: [countingScenario()],
+    exitScenarios: [],
+    rows: [
+      aggregateRow("2026-08-03T13:00:00Z", 100),
+      aggregateRow("2026-08-03T14:00:00Z", 5),
+      aggregateRow("2026-08-03T15:00:00Z", 7),
+    ],
+    sourceGranularity: "hour",
+    startHour: 10,
+    through: new Date("2026-08-04T04:00:00Z"),
+  });
+
+  assert.deepEqual(
+    occupancy.slice(9, 12).map(({ entries, hour, occupancy: value }) => ({
+      entries,
+      hour,
+      occupancy: value,
+    })),
+    [
+      { entries: 0, hour: 9, occupancy: 0 },
+      { entries: 5, hour: 10, occupancy: 5 },
+      { entries: 12, hour: 11, occupancy: 12 },
+    ],
+  );
+  assert.equal(
+    occupancy.findIndex((point) => point.entries > 0),
+    10,
+    "10h da empresa não pode ser deslocado para 14h do runtime UTC",
+  );
+} else if (probe === "fallback") {
   const rows = reconciliation.rollupAggregateRows(
     [
       aggregateRow("2026-11-01T05:00:00Z", 2),
@@ -51,6 +84,7 @@ if (probe === "fallback") {
   assert.deepEqual(points.map((point) => point.total), [2, 3]);
 
   const occupancy = scenarioAnalytics.buildScenarioHourlyOccupancy({
+    companyTimeZone: "America/New_York",
     day: new Date("2026-11-01T05:00:00Z"),
     entryScenarios: [countingScenario()],
     exitScenarios: [],

@@ -33,6 +33,7 @@ import { OccupancyPaletteSelect } from "@/components/app/occupancy-palette-selec
 import { useAuth } from "@/components/app/auth-provider";
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
+import { WidgetCardActions } from "@/components/app/widget-card-actions";
 import {
   useWidgetChartType,
   useWidgetColor,
@@ -1104,7 +1105,7 @@ export function OccupancyScenarioDashboard() {
             state={sourceDefinition ? certifiedChartData[sourceDefinition.id] : undefined}
           />
         ) : (
-          <EmptyOccupancyCard title={widget.title} />
+          <EmptyOccupancyCard action={action} title={widget.title} />
         ),
     };
   });
@@ -1561,7 +1562,7 @@ function MetricCard({
 
   return (
     <Card className="h-full overflow-hidden">
-      <CardContent className="flex h-full min-h-[116px] items-center justify-between gap-4 p-4">
+      <CardContent className="grid h-full min-h-[116px] grid-cols-[minmax(0,1fr)_auto] items-start gap-3 p-4">
         <div className="min-w-0">
           <div className="text-xs font-medium uppercase text-muted-foreground">
             {resolvedTitle}
@@ -1577,7 +1578,7 @@ function MetricCard({
             {description}
           </div>
         </div>
-        <div className="flex shrink-0 items-start gap-1">
+        <div className="flex h-full shrink-0 flex-col items-end gap-2">
           {action}
           <div
             className={cn(
@@ -1665,18 +1666,18 @@ function OccupancyChartCard({
   return (
     <Card className="flex h-full min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
-              {resolvedTitle}
+              <span className="min-w-0 break-words">{resolvedTitle}</span>
             </CardTitle>
             <CardDescription className="mt-1">
               {definition.description}
             </CardDescription>
           </div>
-          <div className="flex items-center gap-1">
-            {action}
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center gap-1.5">
             <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
               {scenario.name}
             </Badge>
@@ -1958,7 +1959,7 @@ function CustomWidgetActions({
   title: string;
 }) {
   return (
-    <div className="flex items-center gap-0.5">
+    <WidgetCardActions label={`Ações do widget ${title}`}>
       <Button
         type="button"
         variant="ghost"
@@ -1987,7 +1988,7 @@ function CustomWidgetActions({
       >
         <Trash2 className="h-4 w-4" />
       </Button>
-    </div>
+    </WidgetCardActions>
   );
 }
 
@@ -2148,12 +2149,25 @@ function SmallInfo({ label, value }: { label: string; value: string }) {
   );
 }
 
-function EmptyOccupancyCard({ title }: { title: string }) {
+function EmptyOccupancyCard({
+  action,
+  title,
+}: {
+  action?: React.ReactNode;
+  title: string;
+}) {
+  const resolvedTitle = useWidgetTitle(title);
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <CardDescription>Selecione um cenário de ocupação.</CardDescription>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1">
+          <CardTitle className="min-w-0 break-words">{resolvedTitle}</CardTitle>
+          {action}
+          <CardDescription className="col-span-full">
+            Selecione um cenário de ocupação.
+          </CardDescription>
+        </div>
       </CardHeader>
       <CardContent>
         <EmptyChartState text="Nenhum cenário selecionado." />

@@ -9,6 +9,11 @@ import {
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
+  companyZonedDateParts,
+  requireCompanyTimeZone,
+  startOfCompanyTimeZoneCivilDay,
+} from "@/lib/company-time-zone";
+import {
   buildHourlyOccupancySeries,
   normalizeOccupancyStartHour,
   type HourlyOccupancySeriesPoint,
@@ -28,6 +33,19 @@ export type ScenarioAnalyticsPoint = {
   total: number;
   isSaturday: boolean;
   isSunday: boolean;
+};
+
+export type ScenarioCivilHourMagnitudePoint = {
+  bucket: string;
+  day: number;
+  hour: number;
+  total: number;
+};
+
+export type ScenarioAnalyticsSeries = {
+  id: string;
+  name: string;
+  points: ScenarioAnalyticsPoint[];
 };
 
 export type ScenarioRankingPoint = {
@@ -109,6 +127,194 @@ export function buildCombinedScenarioPoints({
     label: formatBucketLabel(bucket, granularity),
     total: totals.get(bucketKey(bucket, granularity)) ?? 0,
   }));
+}
+
+/**
+ * Builds an intensity series for widgets where direction must not make a
+ * recorded count disappear. Every selected physical line contributes once
+ * by magnitude, regardless of whether it represents entry or exit. This
+ * keeps an exit-only scenario visible, prevents opposite directions inside
+ * one scenario from cancelling and avoids counting a shared line twice.
+ */
+export function buildCombinedScenarioMagnitudePoints({
+  from,
+  granularity,
+  rows,
+  scenarios,
+  sourceGranularity,
+  to,
+}: {
+  from: Date;
+  granularity: ScenarioAnalyticsGranularity;
+  rows: AggregateEventRow[];
+  scenarios: Scenario[];
+  sourceGranularity: AggregateGranularity;
+  to: Date;
+}): ScenarioAnalyticsPoint[] {
+  const totals = aggregateScenarioMagnitudesByBucket({
+    deduplicateLines: true,
+    from,
+    granularity,
+    rows,
+    scenarios,
+    sourceGranularity,
+    to,
+  });
+
+  return listBucketStarts(from, to, granularity).map((bucket) => ({
+    bucket: bucket.toISOString(),
+    isSaturday: granularity === "day" && bucket.getDay() === 6,
+    isSunday: granularity === "day" && bucket.getDay() === 0,
+    label: formatBucketLabel(bucket, granularity),
+    total: totals.get(bucketKey(bucket, granularity)) ?? 0,
+  }));
+}
+
+/**
+ * Projects absolute hourly buckets into the company's civil calendar and
+ * explicitly merges repeated DST hours into one heatmap cell. The cell keeps
+ * the sum of both real instants instead of letting ECharts overlap them.
+ */
+export function buildScenarioCivilHourMagnitudePoints({
+  companyTimeZone,
+  from,
+  rows,
+  scenarios,
+  sourceGranularity,
+  to,
+}: {
+  companyTimeZone: string;
+  from: Date;
+  rows: AggregateEventRow[];
+  scenarios: Scenario[];
+  sourceGranularity: AggregateGranularity;
+  to: Date;
+}): ScenarioCivilHourMagnitudePoint[] {
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  const cells = new Map<
+    string,
+    ScenarioCivilHourMagnitudePoint & { month: number; year: number }
+  >();
+
+  buildCombinedScenarioMagnitudePoints({
+    from,
+    granularity: "hour",
+    rows,
+    scenarios,
+    sourceGranularity,
+    to,
+  }).forEach((point) => {
+    const bucket = new Date(point.bucket);
+    const parts = companyZonedDateParts(bucket, timeZone);
+    const key = JSON.stringify([
+      parts.year,
+      parts.month,
+      parts.day,
+      parts.hour,
+    ]);
+    const current = cells.get(key);
+    cells.set(key, {
+      bucket:
+        !current || bucket.getTime() < new Date(current.bucket).getTime()
+          ? point.bucket
+          : current.bucket,
+      day: parts.day,
+      hour: parts.hour,
+      month: parts.month,
+      total: (current?.total ?? 0) + point.total,
+      year: parts.year,
+    });
+  });
+
+  return Array.from(cells.values())
+    .sort(
+      (left, right) =>
+        left.year - right.year ||
+        left.month - right.month ||
+        left.day - right.day ||
+        left.hour - right.hour,
+    )
+    .map((point) => ({
+      bucket: point.bucket,
+      day: point.day,
+      hour: point.hour,
+      total: point.total,
+    }));
+}
+
+/** Builds every scenario series in one row pass instead of rescanning the
+ * complete aggregate payload once per scenario. */
+export function buildIndividualScenarioSeries({
+  from,
+  granularity,
+  includeOverlappingSourceBuckets = false,
+  rows,
+  scenarios,
+  sourceGranularity,
+  to,
+}: {
+  from: Date;
+  granularity: ScenarioAnalyticsGranularity;
+  includeOverlappingSourceBuckets?: boolean;
+  rows: AggregateEventRow[];
+  scenarios: Scenario[];
+  sourceGranularity: AggregateGranularity;
+  to: Date;
+}): ScenarioAnalyticsSeries[] {
+  const contributions = buildLineScenarioContributions(scenarios);
+  const totalsByScenario = new Map(
+    scenarios.map((scenario) => [scenario.id, new Map<number, number>()]),
+  );
+  const fromTime = from.getTime();
+  const toTime = to.getTime();
+
+  rows.forEach((row) => {
+    if (!row.line_count_id) return;
+    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    if (!bucket) return;
+    const bucketTime = bucket.getTime();
+    if (includeOverlappingSourceBuckets) {
+      const bucketEnd = endOfAggregateBucket(
+        bucket,
+        sourceGranularity,
+      ).getTime();
+      if (bucketTime >= toTime || bucketEnd <= fromTime) return;
+    } else if (bucketTime < fromTime || bucketTime >= toTime) {
+      return;
+    }
+
+    const key = bucketKey(bucket, granularity);
+    const total = Number.isFinite(row.total) ? row.total : 0;
+    (contributions.get(row.line_count_id) ?? []).forEach(
+      ({ multiplier, scenarioId }) => {
+        const scenarioTotals = totalsByScenario.get(scenarioId);
+        if (!scenarioTotals) return;
+        scenarioTotals.set(
+          key,
+          (scenarioTotals.get(key) ?? 0) + total * multiplier,
+        );
+      },
+    );
+  });
+
+  const buckets = listBucketStarts(from, to, granularity).map((bucket) => ({
+    bucket: bucket.toISOString(),
+    isSaturday: granularity === "day" && bucket.getDay() === 6,
+    isSunday: granularity === "day" && bucket.getDay() === 0,
+    key: bucketKey(bucket, granularity),
+    label: formatBucketLabel(bucket, granularity),
+  }));
+  return scenarios.map((scenario) => {
+    const totals = totalsByScenario.get(scenario.id) ?? new Map();
+    return {
+      id: scenario.id,
+      name: scenario.name,
+      points: buckets.map(({ key, ...point }) => ({
+        ...point,
+        total: totals.get(key) ?? 0,
+      })),
+    };
+  });
 }
 
 export function buildScenarioRanking({
@@ -223,6 +429,7 @@ export function buildTopScenarioPeakDays({
 }
 
 export function buildScenarioHourlyOccupancy({
+  companyTimeZone,
   day,
   entryScenarios,
   exitScenarios,
@@ -231,6 +438,7 @@ export function buildScenarioHourlyOccupancy({
   startHour = 0,
   through,
 }: {
+  companyTimeZone?: string;
   day: Date;
   entryScenarios: Scenario[];
   exitScenarios: Scenario[];
@@ -240,6 +448,18 @@ export function buildScenarioHourlyOccupancy({
   through: Date;
 }): ScenarioHourlyOccupancyPoint[] {
   const normalizedStartHour = normalizeOccupancyStartHour(startHour);
+  if (companyTimeZone) {
+    return buildCompanyTimeZoneHourlyOccupancy({
+      companyTimeZone,
+      day,
+      entryScenarios,
+      exitScenarios,
+      normalizedStartHour,
+      rows,
+      sourceGranularity,
+      through,
+    });
+  }
   const dayStart = new Date(
     day.getFullYear(),
     day.getMonth(),
@@ -251,7 +471,8 @@ export function buildScenarioHourlyOccupancy({
     day.getDate(),
     normalizedStartHour,
   );
-  const dayEnd = endOfAggregateBucket(dayStart, "day");
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
   const to = new Date(
     Math.min(dayEnd.getTime(), Math.max(from.getTime(), through.getTime())),
   );
@@ -283,6 +504,131 @@ export function buildScenarioHourlyOccupancy({
     startHour: normalizedStartHour,
     through,
   });
+}
+
+function buildCompanyTimeZoneHourlyOccupancy({
+  companyTimeZone,
+  day,
+  entryScenarios,
+  exitScenarios,
+  normalizedStartHour,
+  rows,
+  sourceGranularity,
+  through,
+}: {
+  companyTimeZone: string;
+  day: Date;
+  entryScenarios: Scenario[];
+  exitScenarios: Scenario[];
+  normalizedStartHour: number;
+  rows: AggregateEventRow[];
+  sourceGranularity: AggregateGranularity;
+  through: Date;
+}) {
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  const civilDate = {
+    day: day.getDate(),
+    month: day.getMonth() + 1,
+    year: day.getFullYear(),
+  };
+  const nextCivilDateValue = new Date(
+    Date.UTC(civilDate.year, civilDate.month - 1, civilDate.day + 1),
+  );
+  const dayStart = startOfCompanyTimeZoneCivilDay(civilDate, timeZone);
+  const dayEnd = startOfCompanyTimeZoneCivilDay(
+    {
+      day: nextCivilDateValue.getUTCDate(),
+      month: nextCivilDateValue.getUTCMonth() + 1,
+      year: nextCivilDateValue.getUTCFullYear(),
+    },
+    timeZone,
+  );
+  const effectiveEnd = new Date(
+    Math.min(
+      dayEnd.getTime(),
+      Math.max(dayStart.getTime(), through.getTime()),
+    ),
+  );
+  const entriesByHour = totalsByCompanyTimeZoneHour(
+    rows,
+    entryScenarios,
+    sourceGranularity,
+    dayStart,
+    effectiveEnd,
+    timeZone,
+  );
+  const exitsByHour = totalsByCompanyTimeZoneHour(
+    rows,
+    exitScenarios,
+    sourceGranularity,
+    dayStart,
+    effectiveEnd,
+    timeZone,
+  );
+  const lastIncludedHour =
+    effectiveEnd >= dayEnd
+      ? 23
+      : effectiveEnd <= dayStart
+        ? -1
+        : companyZonedDateParts(
+            new Date(effectiveEnd.getTime() - 1),
+            timeZone,
+          ).hour;
+  let cumulativeEntries = 0;
+  let cumulativeExits = 0;
+
+  return Array.from({ length: 24 }, (_, hour) => {
+    const beforeStart = hour < normalizedStartHour;
+    const included = !beforeStart && hour <= lastIncludedHour;
+    if (included) {
+      cumulativeEntries += entriesByHour[hour];
+      cumulativeExits += exitsByHour[hour];
+    }
+
+    return {
+      // This is a stable civil-hour identity. The chart uses the explicit
+      // label below; actual API instants remain authoritative for grouping.
+      bucket: new Date(
+        Date.UTC(civilDate.year, civilDate.month - 1, civilDate.day, hour),
+      ).toISOString(),
+      entries: cumulativeEntries,
+      exits: cumulativeExits,
+      hour,
+      label: `${String(hour).padStart(2, "0")}h`,
+      occupancy: beforeStart
+        ? 0
+        : included
+          ? cumulativeEntries - cumulativeExits
+          : null,
+    } satisfies ScenarioHourlyOccupancyPoint;
+  });
+}
+
+function totalsByCompanyTimeZoneHour(
+  rows: AggregateEventRow[],
+  scenarios: Scenario[],
+  sourceGranularity: AggregateGranularity,
+  from: Date,
+  to: Date,
+  timeZone: string,
+) {
+  const lineIds = activeScenarioLineIds(scenarios);
+  const values = Array.from({ length: 24 }, () => 0);
+  const fromTime = from.getTime();
+  const toTime = to.getTime();
+
+  rows.forEach((row) => {
+    if (!row.line_count_id || !lineIds.has(row.line_count_id)) return;
+    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    if (!bucket) return;
+    const timestamp = bucket.getTime();
+    if (timestamp < fromTime || timestamp >= toTime) return;
+
+    const hour = companyZonedDateParts(bucket, timeZone).hour;
+    values[hour] += Math.abs(Number.isFinite(row.total) ? row.total : 0);
+  });
+
+  return values;
 }
 
 function totalsByLocalHour(

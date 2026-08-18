@@ -38,13 +38,19 @@ import {
 } from "@/lib/camera-groups";
 import { pastelBarColor } from "@/lib/chart-palette";
 import {
+  requireCertifiedCountingRuntimeTimeZone,
+  requireCountingRuntimeTimeZone,
+} from "@/lib/counting-time-zone";
+import {
   buildFixedHourlyAxisValues,
   HOUR_OF_DAY_LABELS,
   latestHourlyPointHour,
 } from "@/lib/hourly-axis";
 import {
+  certifyCompanyScopeTimeZoneOverride,
   filterScopedApiRows,
   useEffectiveCompanyScopeId,
+  useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
 import {
   requireCameraRows,
@@ -159,9 +165,45 @@ export function EmbeddedLiveView() {
   const { user } = useAuth();
   const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const storedCompanyScopeId = useEffectiveCompanyScopeId(user);
+  const companyTimeZoneResolution =
+    useEffectiveCompanyTimeZoneResolution(user);
   const chart = normalizeChart(searchParams.get("chart"));
   const queryCompanyId = searchParams.get("company_id")?.trim() ?? "";
   const companyScopeId = queryCompanyId || storedCompanyScopeId;
+  const companyScopeCertification = React.useMemo(() => {
+    try {
+      if (queryCompanyId) {
+        const certification = certifyCompanyScopeTimeZoneOverride(
+          user,
+          queryCompanyId,
+        );
+        if (certification.error || !certification.timeZone) {
+          throw new Error(
+            certification.error ?? "Fuso da empresa do video wall não certificado.",
+          );
+        }
+        return {
+          error: "",
+          timeZone: requireCountingRuntimeTimeZone(certification.timeZone),
+        };
+      }
+
+      return {
+        error: "",
+        timeZone: requireCertifiedCountingRuntimeTimeZone(
+          companyTimeZoneResolution,
+        ),
+      };
+    } catch (certificationError) {
+      return {
+        error:
+          certificationError instanceof Error
+            ? certificationError.message
+            : "Escopo temporal do video wall não certificado.",
+        timeZone: "",
+      };
+    }
+  }, [companyTimeZoneResolution, queryCompanyId, user]);
   const scopeId = searchParams.get("scope_id")?.trim() ?? "";
   const scenarioIdsParam = searchParams.get("scenario_ids");
   const granularityParam = searchParams.get("granularity");
@@ -201,8 +243,13 @@ export function EmbeddedLiveView() {
   );
   const multiWidgetMode = Boolean(widgetsParam);
   const viewIdentityKey = React.useMemo(
-    () => JSON.stringify([companyScopeId ?? "", widgetConfigs]),
-    [companyScopeId, widgetConfigs],
+    () =>
+      JSON.stringify([
+        companyScopeId ?? "",
+        companyScopeCertification.timeZone,
+        widgetConfigs,
+      ]),
+    [companyScopeCertification.timeZone, companyScopeId, widgetConfigs],
   );
   const [widgetStates, setWidgetStates] = React.useState<EmbeddedWidgetState[]>(
     [],
@@ -229,6 +276,13 @@ export function EmbeddedLiveView() {
       metadataSnapshotRef.current,
     { force = false, silent = false }: EmbeddedLoadOptions = {},
   ) => {
+    if (companyScopeCertification.error) {
+      if (!silent) {
+        setError(companyScopeCertification.error);
+        setLoading(false);
+      }
+      return;
+    }
     if (!metadataSnapshot || metadataSnapshot.identityKey !== viewIdentityKey) {
       return;
     }
@@ -335,11 +389,24 @@ export function EmbeddedLiveView() {
         if (!silent) setLoading(false);
       }
     }
-  }, [companyScopeId, viewIdentityKey, widgetConfigs]);
+  }, [
+    companyScopeCertification.error,
+    companyScopeId,
+    viewIdentityKey,
+    widgetConfigs,
+  ]);
 
   const loadMetadata = React.useCallback(async (
     { force = false, silent = false }: EmbeddedLoadOptions = {},
   ) => {
+    if (companyScopeCertification.error) {
+      metadataRequestControllerRef.current?.abort();
+      dataRequestControllerRef.current?.abort();
+      metadataSnapshotRef.current = null;
+      setError(companyScopeCertification.error);
+      setLoading(false);
+      return;
+    }
     if (hasMasterAccess(user) && !companyScopeId) {
       metadataRequestControllerRef.current?.abort();
       dataRequestControllerRef.current?.abort();
@@ -468,7 +535,14 @@ export function EmbeddedLiveView() {
         metadataRequestRunningRef.current = false;
       }
     }
-  }, [companyScopeId, loadData, user, viewIdentityKey, widgetConfigs]);
+  }, [
+    companyScopeCertification.error,
+    companyScopeId,
+    loadData,
+    user,
+    viewIdentityKey,
+    widgetConfigs,
+  ]);
 
   React.useEffect(() => {
     viewIdentityKeyRef.current = viewIdentityKey;

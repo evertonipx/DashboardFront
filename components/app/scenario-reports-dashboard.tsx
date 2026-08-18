@@ -45,6 +45,7 @@ import {
   WidgetTitleText,
   useWidgetColor,
 } from "@/components/app/widget-appearance";
+import { WidgetCardActions } from "@/components/app/widget-card-actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -1555,20 +1556,22 @@ export function ScenarioReportsDashboard({
         node: (
           <ScenarioComparisonCard
             action={
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  removeCustomWidget(widget.id);
-                }}
-                aria-label={`Remover widget ${widget.title}`}
-                title="Remover widget"
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
+              <WidgetCardActions label={`Ações do widget ${widget.title}`}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeCustomWidget(widget.id);
+                  }}
+                  aria-label={`Remover widget ${widget.title}`}
+                  title="Remover widget"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </WidgetCardActions>
             }
             companyId={companyScopeId}
             companyTimeZone={companyTimeZone}
@@ -1611,19 +1614,22 @@ export function ScenarioReportsDashboard({
         <ScenarioAggregateChartCard
           action={
             monitorMode ? null : (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  removeCustomWidget(widget.id);
-                }}
-                aria-label={`Remover widget ${widget.title}`}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
+              <WidgetCardActions label={`Ações do widget ${widget.title}`}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeCustomWidget(widget.id);
+                  }}
+                  aria-label={`Remover widget ${widget.title}`}
+                  title="Remover widget"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </WidgetCardActions>
             )
           }
           definition={definition}
@@ -2552,10 +2558,10 @@ function ScenarioAggregateChartCard({
     previousPoints.some((point) => point.total !== 0);
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-3">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
               <WidgetTitleText fallback={definition.label} />
@@ -2565,12 +2571,12 @@ function ScenarioAggregateChartCard({
             </CardDescription>
           </div>
           {action}
-        </div>
-        {showPreviousPeriod ? (
-          <div className="max-w-full break-words rounded-md border border-primary/20 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">
+          {showPreviousPeriod ? (
+          <div className="col-span-full max-w-full break-words rounded-md border border-primary/20 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">
             {comparisonDescription(definition, intradayComparison)}
           </div>
         ) : null}
+        </div>
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -2599,10 +2605,10 @@ function MissingReportCustomWidgetCard({
   title: string;
 }) {
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-3">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
               <WidgetTitleText fallback={title || "Widget personalizado"} />
@@ -2612,16 +2618,19 @@ function MissingReportCustomWidgetCard({
             </CardDescription>
           </div>
           {onRemove ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={onRemove}
-              aria-label="Remover widget"
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
+            <WidgetCardActions label={`Ações do widget ${title}`}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                onClick={onRemove}
+                aria-label={`Remover widget ${title}`}
+                title="Remover widget"
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </WidgetCardActions>
           ) : null}
         </div>
       </CardHeader>
@@ -3740,6 +3749,12 @@ function listScenarioBucketStarts(definition: ScenarioAggregateDefinition) {
     starts.push(bucketStart);
     cursor = addGranularity(bucketStart, definition.granularity);
     guard += 1;
+  }
+
+  if (cursor < end) {
+    throw new RangeError(
+      "O período excede 500 intervalos no gráfico. Reduza a janela para evitar dados truncados.",
+    );
   }
 
   return starts;

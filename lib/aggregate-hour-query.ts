@@ -67,11 +67,7 @@ type FetchHourlyAggregateRangesOptions = {
 
 /**
  * Loads one deterministic, validated civil-month request per required month.
- * Month snapshots use stable civil-month requests for both open and closed
- * dates. Consumers reconcile only the current open hour from one canonical
- * minute snapshot, so a day does not change query shape after midnight.
- * Open and recently closed months are refreshed hourly so late corrections do
- * not leave one dashboard stale; older months are refreshed daily.
+ * Open and recently closed months refresh hourly; older months refresh daily.
  */
 export async function fetchHourlyAggregateRanges({
   cache,
@@ -109,12 +105,75 @@ export async function fetchHourlyAggregateRanges({
   return filterHourlyAggregateRowsToRanges(rows, ranges, metricType);
 }
 
+/**
+ * Same certified/cached loader used by the dashboards, but each civil-month
+ * request is clipped to the requested intersections. This is intended for a
+ * bounded drill-down window where fetching the rest of either edge month
+ * would defeat the range budget.
+ */
+export async function fetchBoundedHourlyAggregateRanges({
+  cache,
+  cacheScope,
+  companyScopeId,
+  metricType = DEFAULT_METRIC_TYPE,
+  now = new Date(),
+  queryConcurrency = DEFAULT_QUERY_CONCURRENCY,
+  ranges,
+  signal,
+}: FetchHourlyAggregateRangesOptions) {
+  requireValidFetchOptions(cacheScope, metricType, now, queryConcurrency);
+  const queries = planBoundedHourlyQueries(ranges);
+  const rowsByQuery = await mapWithConcurrency(
+    queries,
+    queryConcurrency,
+    (query) =>
+      loadHourlyAggregateQuery({
+        cache,
+        cacheScope,
+        companyScopeId,
+        query,
+        metricType,
+        revision: hourlyAggregateCacheRevision(query, now),
+        signal,
+      }),
+  );
+
+  return filterHourlyAggregateRowsToRanges(
+    rowsByQuery.flat(),
+    ranges,
+    metricType,
+  );
+}
+
+function planBoundedHourlyQueries(
+  ranges: readonly AggregateQueryRange[],
+): HourlyAggregateQuery[] {
+  const months = planHourlyCalendarMonthQueries(ranges);
+  const queries = new Map<string, HourlyAggregateQuery>();
+
+  months.forEach((month) => {
+    ranges.forEach((range) => {
+      const from = new Date(
+        Math.max(month.from.getTime(), range.from.getTime()),
+      );
+      const to = new Date(Math.min(month.to.getTime(), range.to.getTime()));
+      if (from >= to) return;
+
+      const key = `${month.key}:${from.toISOString()}:${to.toISOString()}`;
+      queries.set(key, { from, key, to });
+    });
+  });
+
+  return Array.from(queries.values()).sort(
+    (left, right) => left.from.getTime() - right.from.getTime(),
+  );
+}
+
 export function filterHourlyAggregateRowsToRanges(
   rows: AggregateEventRow[],
   ranges: readonly AggregateQueryRange[],
   metricType = DEFAULT_METRIC_TYPE,
 ) {
-  // Planning validates every range even when `rows` is empty.
   planHourlyCalendarMonthQueries(ranges);
   return requireAggregateRows(
     rows.filter((row) =>

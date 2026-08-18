@@ -43,6 +43,7 @@ import {
   useWidgetColor,
   useWidgetColorOverride,
 } from "@/components/app/widget-appearance";
+import { WidgetCardActions } from "@/components/app/widget-card-actions";
 import {
   MonitorModeButton,
   MonitorModeExitHint,
@@ -206,7 +207,7 @@ import type {
   ReportTable,
 } from "@/lib/report-export";
 import {
-  buildCombinedScenarioPoints,
+  buildScenarioCivilHourMagnitudePoints,
   buildScenarioCumulativeTotals,
   buildScenarioHourlyOccupancy,
   buildTopScenarioPeakDays,
@@ -925,7 +926,7 @@ export function RealtimeDashboard({
                   granularity: "hour",
                   rows: await fetchHourlyAggregateRanges({
                     cache: hourlyAggregateCacheRef.current,
-                    cacheScope: `live:${companyScopeId}`,
+                    cacheScope: `live:${companyScopeId}:${companyTimeZone}`,
                     companyScopeId,
                     now,
                     ranges: [definition],
@@ -1066,7 +1067,7 @@ export function RealtimeDashboard({
     try {
       const hourlyRows = await fetchHourlyAggregateRanges({
         cache: hourlyAggregateCacheRef.current,
-        cacheScope: `live:${companyScopeId}`,
+        cacheScope: `live:${companyScopeId}:${companyTimeZone}`,
         companyScopeId,
         now,
         ranges: [
@@ -1567,24 +1568,17 @@ export function RealtimeDashboard({
   ]);
   const operationalHeatmapPoints = React.useMemo(
     () =>
-      buildCombinedScenarioPoints({
+      buildScenarioCivilHourMagnitudePoints({
+        companyTimeZone,
         from: startOfMonth(clock),
-        granularity: "hour",
         rows: operationalMonthHourRows,
         scenarios: heatmapScenarios,
         sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
         to: endOfAggregateBucket(startOfHour(clock), "hour"),
-      }).map((point) => {
-        const bucket = new Date(point.bucket);
-        return {
-          bucket: point.bucket,
-          day: bucket.getDate(),
-          hour: bucket.getHours(),
-          total: point.total,
-        };
       }),
     [
       clock,
+      companyTimeZone,
       heatmapScenarios,
       operationalMonthHourRows,
       operationalMonthHourState?.granularity,
@@ -1735,6 +1729,7 @@ export function RealtimeDashboard({
   const hourlyOccupancyPoints = React.useMemo(
     () =>
       buildScenarioHourlyOccupancy({
+        companyTimeZone,
         day: clock,
         entryScenarios: occupancyEntryScenarios,
         exitScenarios: occupancyExitScenarios,
@@ -1745,6 +1740,7 @@ export function RealtimeDashboard({
       }),
     [
       clock,
+      companyTimeZone,
       occupancyEntryScenarios,
       occupancyExitScenarios,
       occupancyHourRows,
@@ -2749,6 +2745,7 @@ export function RealtimeDashboard({
           <CustomScenarioWidgetCard
             canConfigure={canEditVisual}
             clock={clock}
+            companyTimeZone={companyTimeZone}
             currentMonthDayGranularity={
               currentMonthDayState?.granularity ?? "day"
             }
@@ -3262,21 +3259,13 @@ export function RealtimeDashboard({
       }
 
       if (widget.widgetType === "heatmap") {
-        const points = buildCombinedScenarioPoints({
+        const points = buildScenarioCivilHourMagnitudePoints({
+          companyTimeZone,
           from: monthStart,
-          granularity: "hour",
           rows: operationalMonthHourRows,
           scenarios: selectedScenarios,
           sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
           to: endOfAggregateBucket(startOfHour(clock), "hour"),
-        }).map((point) => {
-          const bucket = new Date(point.bucket);
-          return {
-            bucket: point.bucket,
-            day: bucket.getDate(),
-            hour: bucket.getHours(),
-            total: point.total,
-          };
         });
         liveChartEntries.push([
           cardId,
@@ -4085,10 +4074,10 @@ function RealtimeChartCard({
   const hasData = points.some((point) => point.total !== 0);
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
               <WidgetTitleText fallback={definition.label} />
@@ -4097,11 +4086,11 @@ function RealtimeChartCard({
               {definition.description}
             </CardDescription>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center gap-2">
             <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
               {scope.name}
             </Badge>
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -4216,6 +4205,7 @@ function OperationalHourlyChartCard({
 function CustomScenarioWidgetCard({
   canConfigure,
   clock,
+  companyTimeZone,
   currentMonthDayGranularity,
   currentMonthDayRows,
   error,
@@ -4233,6 +4223,7 @@ function CustomScenarioWidgetCard({
 }: {
   canConfigure: boolean;
   clock: Date;
+  companyTimeZone: string;
   currentMonthDayGranularity: AggregateGranularity;
   currentMonthDayRows: AggregateEventRow[];
   error?: string;
@@ -4313,23 +4304,22 @@ function CustomScenarioWidgetCard({
   );
   const heatmapPoints = React.useMemo(
     () =>
-      buildCombinedScenarioPoints({
+      buildScenarioCivilHourMagnitudePoints({
+        companyTimeZone,
         from: monthStart,
-        granularity: "hour",
         rows: monthHourRows,
         scenarios: selectedScenarios,
         sourceGranularity: monthHourGranularity,
         to: endOfAggregateBucket(startOfHour(clock), "hour"),
-      }).map((point) => {
-        const bucket = new Date(point.bucket);
-        return {
-          bucket: point.bucket,
-          day: bucket.getDate(),
-          hour: bucket.getHours(),
-          total: point.total,
-        };
       }),
-    [clock, monthHourGranularity, monthHourRows, monthStart, selectedScenarios],
+    [
+      clock,
+      companyTimeZone,
+      monthHourGranularity,
+      monthHourRows,
+      monthStart,
+      selectedScenarios,
+    ],
   );
   const cumulativePoints = React.useMemo(
     () =>
@@ -4453,7 +4443,7 @@ function CustomWidgetActions({
   title: string;
 }) {
   return (
-    <div className="flex items-center gap-0.5">
+    <WidgetCardActions label={`Ações do widget ${title}`}>
       <Button
         type="button"
         variant="ghost"
@@ -4482,7 +4472,7 @@ function CustomWidgetActions({
       >
         <Trash2 className="h-4 w-4" />
       </Button>
-    </div>
+    </WidgetCardActions>
   );
 }
 
@@ -4535,8 +4525,8 @@ function OperationalHeatmapCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <Grid3X3 className="h-4 w-4 text-primary" />
               <WidgetTitleText fallback={title} />
@@ -4546,7 +4536,8 @@ function OperationalHeatmapCard({
               do mês atual; fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline" className="max-w-full truncate">
               {selectionLabel}
             </Badge>
@@ -4563,7 +4554,6 @@ function OperationalHeatmapCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -4862,8 +4852,8 @@ function ScenarioCumulativeTotalsCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <Sigma className="h-4 w-4 text-primary" />
               <WidgetTitleText fallback={title} />
@@ -4873,7 +4863,8 @@ function ScenarioCumulativeTotalsCard({
               parcial e atualiza a cada 5 segundos.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -4893,7 +4884,6 @@ function ScenarioCumulativeTotalsCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -4968,8 +4958,8 @@ function ScenarioTotalsTableCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <Table2 className="h-4 w-4 text-primary" />
               <WidgetTitleText fallback={title} />
@@ -4979,7 +4969,8 @@ function ScenarioTotalsTableCard({
               períodos parciais.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -5002,7 +4993,6 @@ function ScenarioTotalsTableCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -5453,8 +5443,8 @@ function ScenarioRoseCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <ChartPie className="h-4 w-4 text-primary" />
               <WidgetTitleText fallback={title} />
@@ -5463,7 +5453,8 @@ function ScenarioRoseCard({
               {scenarioCompositionDescription(chartType)}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -5483,7 +5474,6 @@ function ScenarioRoseCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -5565,8 +5555,8 @@ function MonthlyAccessRankingCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
               <WidgetTitleText fallback={title} />
@@ -5575,7 +5565,8 @@ function MonthlyAccessRankingCard({
               Volume e representatividade de cada cenário no mês em andamento.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -5592,7 +5583,6 @@ function MonthlyAccessRankingCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -5670,8 +5660,8 @@ function PeakDaysRankingCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <Trophy className="h-4 w-4 text-primary" />
               <WidgetTitleText fallback={title} />
@@ -5681,7 +5671,8 @@ function PeakDaysRankingCard({
               atual é parcial e acompanha a atualização ao vivo.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -5703,7 +5694,6 @@ function PeakDaysRankingCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -5747,10 +5737,10 @@ function MissingCustomWidgetCard({
   title: string;
 }) {
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-3">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
               <WidgetTitleText
@@ -6731,6 +6721,12 @@ function listBucketStarts(definition: RealtimeChartDefinition) {
     starts.push(bucketStart);
     cursor = addGranularity(bucketStart, definition.granularity);
     guard += 1;
+  }
+
+  if (cursor < end) {
+    throw new RangeError(
+      `O período de ${definition.label} excede ${MAX_REALTIME_BUCKETS} pontos e não pode ser exibido sem perda de dados.`,
+    );
   }
 
   return starts;

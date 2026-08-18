@@ -193,6 +193,49 @@ export function startOfCompanyTimeZoneDay(date: Date, timeZone: string) {
   throw new Error("Não foi possível localizar o início do dia da empresa.");
 }
 
+/**
+ * Resolves the first real instant of a civil date in the company's IANA
+ * timezone. The input is deliberately calendar-only: using `new Date(y, m,
+ * d)` here would silently borrow the browser timezone and can move a 10:00
+ * operational cutoff to 14:00 when the browser runs in UTC.
+ */
+export function startOfCompanyTimeZoneCivilDay(
+  {
+    day,
+    month,
+    year,
+  }: {
+    day: number;
+    month: number;
+    year: number;
+  },
+  timeZone: string,
+) {
+  const canonicalTimeZone = requireCompanyTimeZone(timeZone);
+  requireValidCivilDate(year, month, day);
+  const dateKey = `${year}-${String(month).padStart(2, "0")}-${String(
+    day,
+  ).padStart(2, "0")}`;
+  const cacheKey = `${canonicalTimeZone}|${dateKey}`;
+  const cached = dayStartCache.get(cacheKey);
+  if (cached !== undefined) return new Date(cached);
+
+  // Every current IANA offset is within this window. Finding any instant in
+  // the requested civil date lets the already DST-aware boundary search above
+  // locate its exact start, including midnight offset transitions.
+  const utcNoon = Date.UTC(year, month - 1, day, 12);
+  for (let hourDelta = -18; hourDelta <= 18; hourDelta += 1) {
+    const candidate = new Date(utcNoon + hourDelta * 60 * 60_000);
+    if (companyDateKey(candidate, canonicalTimeZone) === dateKey) {
+      return startOfCompanyTimeZoneDay(candidate, canonicalTimeZone);
+    }
+  }
+
+  throw new Error(
+    `A data civil ${dateKey} não existe no fuso ${canonicalTimeZone}.`,
+  );
+}
+
 export function listCompanyTimeZoneHourBuckets(
   from: Date,
   to: Date,
@@ -352,5 +395,23 @@ function timeZoneOffsetMinutes(date: Date, timeZone: string) {
 function requireValidDate(date: Date) {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
     throw new Error("O instante usado no timezone da empresa é inválido.");
+  }
+}
+
+function requireValidCivilDate(year: number, month: number, day: number) {
+  if (
+    !Number.isSafeInteger(year) ||
+    !Number.isSafeInteger(month) ||
+    !Number.isSafeInteger(day)
+  ) {
+    throw new Error("A data civil da empresa é inválida.");
+  }
+  const candidate = new Date(Date.UTC(year, month - 1, day));
+  if (
+    candidate.getUTCFullYear() !== year ||
+    candidate.getUTCMonth() !== month - 1 ||
+    candidate.getUTCDate() !== day
+  ) {
+    throw new Error("A data civil da empresa é inválida.");
   }
 }

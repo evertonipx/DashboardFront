@@ -477,10 +477,15 @@ export function ScenarioComparisonCard({
   }
 
   return (
-    <Card className={cn(monitorMode && "h-full shadow-none")}>
+    <Card
+      className={cn(
+        "min-w-0 overflow-hidden",
+        monitorMode && "h-full shadow-none",
+      )}
+    >
       <CardHeader className={cn("pb-3", monitorMode && "pb-2")}>
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-3">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4 text-primary" />
               {resolvedTitle}
@@ -489,7 +494,8 @@ export function ScenarioComparisonCard({
               {settingsOpen && !monitorMode ? description : configurationSummary}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          {!monitorMode ? action : null}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             {lastUpdated ? (
               <Badge variant="outline" className="gap-1 bg-card">
                 <Clock3 className="h-3.5 w-3.5" />
@@ -497,18 +503,15 @@ export function ScenarioComparisonCard({
               </Badge>
             ) : null}
             {monitorMode ? null : (
-              <>
-                {action}
-                <Button
-                  type="button"
-                  variant={settingsOpen ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setSettingsOpen((current) => !current)}
-                >
-                  <Settings2 className="h-3.5 w-3.5" />
-                  {settingsOpen ? "Ocultar" : "Configurar"}
-                </Button>
-              </>
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="sm"
+                onClick={() => setSettingsOpen((current) => !current)}
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+                {settingsOpen ? "Ocultar" : "Configurar"}
+              </Button>
             )}
           </div>
         </div>

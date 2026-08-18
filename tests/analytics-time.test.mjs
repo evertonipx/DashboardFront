@@ -30,6 +30,12 @@ const occupancyChartPalette = loadTypeScriptModule(
 const countingIntelligence = loadTypeScriptModule(
   "lib/counting-intelligence.ts",
 );
+const countingAnalysisRangePlan = loadTypeScriptModule(
+  "lib/counting-analysis-range-plan.ts",
+);
+const liveAnnualComparison = loadTypeScriptModule(
+  "lib/live-annual-comparison.ts",
+);
 const hourlyAxis = loadTypeScriptModule("lib/hourly-axis.ts");
 const metadataValidation = loadTypeScriptModule(
   "lib/metadata-validation.ts",
@@ -100,6 +106,9 @@ const periodAnalysisModel = loadTypeScriptModule(
 );
 const periodAnalysisWidgets = loadTypeScriptModule(
   "lib/period-analysis-widgets.ts",
+);
+const requestCancellation = loadTypeScriptModule(
+  "lib/request-cancellation.ts",
 );
 const scenarioAnalytics = loadTypeScriptModule("lib/scenario-analytics.ts");
 const scenarioValidation = loadTypeScriptModule(
@@ -1468,6 +1477,7 @@ test("configuração dos widgets de ocupação é normalizada por schema", () =>
       unoccupied: "#b91c1c",
     },
     metric: "peak",
+    scenarioHourHeatmapDateKey: "2026-08-10",
     scenarioIds: ["a", "a", "", " b "],
     schemaVersion: 99,
   });
@@ -1493,6 +1503,14 @@ test("configuração dos widgets de ocupação é normalizada por schema", () =>
     unoccupied: "#B91C1C",
   });
   assert.equal(settings.metric, "peak");
+  assert.equal(settings.scenarioHourHeatmapDateKey, "2026-08-10");
+  assert.equal(
+    occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
+      scenarioHourHeatmapDateKey: "10/08/2026",
+    }).scenarioHourHeatmapDateKey,
+    "",
+    "a data compartilhada do heatmap deve aceitar somente a chave civil ISO",
+  );
   const migratedV1 =
     occupancyWidgetSettings.normalizeOccupancyWidgetSettings({
       colorPaletteId: "aurora",
@@ -1897,6 +1915,14 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
     /maximumInput=\{companyDateKey\(new Date\(\), companyTimeZone\)\}/,
     "o limite futuro deve seguir o dia civil da empresa",
   );
+  assert.match(
+    readFileSync(
+      resolve(projectRoot, "lib/occupancy-analysis-window.ts"),
+      "utf8",
+    ),
+    /Date\.UTC\([\s\S]*?endUtc - startUtc/,
+    "a contagem visual de dias não pode truncar intervalos longos da Contagem",
+  );
 });
 
 test("contador civil compartilhado preserva intervalos longos sem depender de DST", () => {
@@ -1936,6 +1962,7 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
 
   assert.match(wrapper, /<DashboardModuleTabs/);
   assert.match(moduleTabs, /TabsTrigger value="occupancy"[\s\S]*?Ocupação/);
+  assert.match(moduleTabs, /DASHBOARD_MODULE_STORAGE_KEY/);
   assert.match(wrapper, /<OccupancyReportsDashboard analysis manager=\{manager\}/);
   assert.match(reports, /<OccupancyDateRangePicker[\s\S]*?onApply=\{updateAnalysisRangeInput\}/);
   assert.match(
@@ -2268,7 +2295,7 @@ test("dataset de ocupação muda com empresa, cenário, intervalo e comparação
   assert.match(reports, /if \(windowRetry < 1\) await execute\(windowRetry \+ 1\)/);
   assert.match(
     reports,
-    /function summarizeOccupancyRangeMetrics[\s\S]*?average: latest\.average[\s\S]*?completeMinimum[\s\S]*?completePeak/,
+    /function summarizeOccupancyRangeMetrics[\s\S]*?completeMinimum[\s\S]*?completePeak[\s\S]*?completeCoverage[\s\S]*?average: completeCoverage \? latest\.average : null[\s\S]*?current: completeCoverage \? latest\.current : null/,
   );
   assert.match(
     reports,
@@ -3344,6 +3371,54 @@ test("agregado de ocupação exige tuplas completas, ordenadas e não negativas"
       "scenario-a",
     ),
     validRows,
+  );
+  const certifiedRows = [
+    {
+      ...validRows[0],
+      area_final: 5,
+      complete: true,
+      status: "complete",
+    },
+    {
+      ...validRows[1],
+      complete: true,
+      scenario_total_final: 10,
+      status: "complete",
+    },
+  ];
+  assert.equal(
+    occupancyAggregateValidation.requireOccupancyAggregateRows(
+      {
+        as_of: "2026-07-22T13:00:00Z",
+        complete: true,
+        data: certifiedRows,
+        granularity: "hour",
+        scenario_id: "scenario-a",
+        status: "complete",
+        timezone: "America/Sao_Paulo",
+      },
+      "hour",
+      "scenario-a",
+      "America/Sao_Paulo",
+      { requireCertification: true },
+    ),
+    certifiedRows,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          data: certifiedRows,
+          granularity: "hour",
+          scenario_id: "scenario-a",
+        },
+        "hour",
+        "scenario-a",
+        "America/Sao_Paulo",
+        { requireCertification: true },
+      ),
+    /não informou (?:complete|status|as_of|o timezone)/,
+    "a UI não deve publicar agregado sem metadados de certificação",
   );
   assert.throws(
     () =>
@@ -5673,8 +5748,9 @@ test("horas repetidas no fim do DST permanecem buckets distintos", () => {
   assert.equal(rows.reduce((sum, row) => sum + row.total, 0), 5);
 });
 
-test("limites preservam transições IANA de uma hora, trinta minutos e meia-noite", () => {
+test("agrupamento horário preserva o fuso da empresa e transições IANA", () => {
   for (const [timezone, probe] of [
+    ["UTC", "company-four-hour-offset"],
     ["America/New_York", "fallback"],
     ["Australia/Lord_Howe", "half-hour-forward"],
     ["America/Sao_Paulo", "midnight-forward"],
@@ -6004,21 +6080,29 @@ test("análise de um dia usa somente as horas da data escolhida", () => {
 });
 
 test("período anterior mantém limites em meia-noite ao atravessar DST", () => {
-  const period = {
-    from: new Date(2026, 2, 8),
-    to: new Date(2026, 2, 9),
-  };
-  const baseline = periodAnalysisModel.periodAnalysisBaselineRange(
-    period,
-    "previous_period",
-  );
+  const previousTimeZone = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  try {
+    const period = {
+      from: new Date(2026, 2, 8),
+      to: new Date(2026, 2, 9),
+    };
+    const baseline = periodAnalysisModel.periodAnalysisBaselineRange(
+      period,
+      "previous_period",
+    );
 
-  assert.equal(baseline.from.getFullYear(), 2026);
-  assert.equal(baseline.from.getMonth(), 2);
-  assert.equal(baseline.from.getDate(), 7);
-  assert.equal(baseline.from.getHours(), 0);
-  assert.equal(baseline.to.getDate(), 8);
-  assert.equal(baseline.to.getHours(), 0);
+    assert.equal(period.to.getTime() - period.from.getTime(), 23 * 60 * 60_000);
+    assert.equal(baseline.from.getFullYear(), 2026);
+    assert.equal(baseline.from.getMonth(), 2);
+    assert.equal(baseline.from.getDate(), 7);
+    assert.equal(baseline.from.getHours(), 0);
+    assert.equal(baseline.to.getDate(), 8);
+    assert.equal(baseline.to.getHours(), 0);
+  } finally {
+    if (previousTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimeZone;
+  }
 });
 
 test("período anterior parcial termina antes do período atual sem sobrepor", () => {
@@ -6196,6 +6280,23 @@ test("Análises separa média-base completa do comparativo até o corte", () => 
   assert.equal(cumulativeMetric.table?.rows[0]?.baseline, 30);
 });
 
+test("Análises consulta e publica uma base comparável com bordas reconciliadas", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(source, /const baselineComparableRanges = new Map/);
+  assert.match(
+    source,
+    /fetchAnalysisConsolidatedDayDataset\(\s*comparableRange/,
+  );
+  assert.match(source, /splitAnalysisRangeAtDayBoundaries/);
+  assert.match(source, /analysisPartialHourRanges\(range\)/);
+  assert.match(source, /reconcileAnalysisHourlyBoundaries/);
+  assert.match(source, /baselineComparable: Object\.fromEntries/);
+});
+
 test("total diário respeita 00h–24h locais com buckets RFC3339", () => {
   const period = periodAnalysisModel.resolvePeriodAnalysisRange(
     "2026-07-22",
@@ -6369,6 +6470,10 @@ test("janeiro mantém o mesmo valor ao fechar e avançar para fevereiro", () => 
 
   const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
   const data = analysisData({
+    dayRows: [
+      aggregateRow("2026-01-01", "line-entry", 310),
+      aggregateRow("2026-02-01", "line-entry", 10),
+    ],
     monthRows: [
       aggregateRow("2026-01-01", "line-entry", 310),
       aggregateRow("2026-02-01", "line-entry", 10),
@@ -6425,7 +6530,10 @@ test("mês parcial anual ignora horas posteriores à data consultada", () => {
     new Date(2026, 0, 23),
   );
   const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
-    data: analysisData({ monthRows }),
+    data: analysisData({
+      dayRows: [aggregateRow("2026-01-22", "line-entry", 5)],
+      monthRows,
+    }),
     period,
     scenarios: [entryScenario],
     widget: analysisWidget("year_monthly", {
@@ -7307,7 +7415,7 @@ test("análise por período não reinicia uma consulta ainda em andamento", () =
   );
   assert.match(
     source,
-    /setInterval\([\s\S]*?refreshWhenIdle[\s\S]*?LIVE_ANALYSIS_REFRESH_MS/,
+    /setInterval\([\s\S]*?refreshWhenIdle[\s\S]*?analysisRangePlan\.refreshIntervalMs/,
   );
 });
 
@@ -7353,6 +7461,16 @@ test("visão embutida separa metadados do polling ao vivo e aborta escopos antig
     dataLoader,
     /fetchHourlyAggregateRanges\([\s\S]*?signal: controller\.signal/,
     "o cache horário mais novo deve continuar abortável",
+  );
+  assert.match(
+    source,
+    /certifyCompanyScopeTimeZoneOverride\([\s\S]*?queryCompanyId/,
+    "o company_id explícito deve ser certificado contra o escopo autenticado",
+  );
+  assert.match(
+    source,
+    /companyScopeCertification\.timeZone[\s\S]*?widgetConfigs/,
+    "a identidade embutida deve mudar quando o fuso certificado mudar",
   );
 });
 
@@ -7455,6 +7573,104 @@ test("análise por período envia empresa e abort signal em toda consulta", () =
   assert.ok(
     source.match(/companyScopeId,\s*controller\.signal/g)?.length >= 3,
     "cada dataset agregado deve receber o escopo efetivo",
+  );
+});
+
+test("cancelamento da análise não gera rejeição órfã nem mascara erro real", () => {
+  const controller = new AbortController();
+  const applicationError = new Error("falha real da consolidação");
+
+  requestCancellation.abortRequest(
+    controller,
+    "A consulta anterior foi substituída.",
+  );
+
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(controller.signal.reason.name, "AbortError");
+  assert.equal(
+    controller.signal.reason.message,
+    "A consulta anterior foi substituída.",
+  );
+  assert.equal(
+    requestCancellation.isAbortError(
+      controller.signal.reason,
+      controller.signal,
+    ),
+    true,
+  );
+  assert.equal(
+    requestCancellation.isAbortError(applicationError, controller.signal),
+    false,
+    "um erro de aplicação não pode ser escondido só porque o signal foi abortado",
+  );
+
+  const firstReason = controller.signal.reason;
+  requestCancellation.abortRequest(controller, "segundo cancelamento");
+  assert.equal(
+    controller.signal.reason,
+    firstReason,
+    "o cancelamento deve ser idempotente e preservar a causa original",
+  );
+
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /const \[hourly, boundaries\] = await Promise\.all\(\[\s*hourlyPromise,\s*boundaryPromise,\s*\]\)/,
+    "as consultas paralelas de hora e borda precisam receber handlers juntas",
+  );
+  assert.doesNotMatch(
+    source,
+    /reconcileAnalysisHourlyBoundaries\(\s*await hourlyPromise,\s*await boundaryPromise/,
+    "await sequencial deixa a segunda rejeição de abort sem consumidor",
+  );
+});
+
+test("Análises e Relatórios segmentam a base horária e validam a cobertura", () => {
+  const analysisSource = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const reportsSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    analysisSource,
+    /fetchAnalysisHourlyDatasets\([\s\S]*?fetchBoundedHourlyAggregateRanges\({[\s\S]*?ranges/,
+  );
+  assert.doesNotMatch(
+    analysisSource,
+    /function unionAnalysisRanges/,
+    "intervalos separados não podem virar uma consulta contínua e truncável",
+  );
+  assert.match(
+    reportsSource,
+    /definition\.id === COUNTING_HOUR_HISTORY_ID[\s\S]*?fetchHourlyAggregateRanges/,
+  );
+  assert.match(
+    reportsSource,
+    /requireAggregateRowsInRange\([\s\S]*?definition\.from,[\s\S]*?definition\.to/,
+  );
+  assert.match(
+    comparisonSource,
+    /definition\.granularity === "hour"[\s\S]*?fetchHourlyAggregateRanges/,
+  );
+  assert.match(
+    comparisonSource,
+    /requireAggregateRowsInRange\([\s\S]*?definition\.from,[\s\S]*?definition\.to/,
+  );
+  assert.match(
+    reportsSource,
+    /while \(cursor < end && guard < 500\)[\s\S]*?if \(cursor < end\) \{[\s\S]*?throw new RangeError/,
+    "o construtor de buckets deve falhar, nunca publicar uma série truncada",
   );
 });
 
@@ -8644,6 +8860,32 @@ test("barras atuais preservam ordem, zero e ausência nos dois modos", () => {
     "unknown",
   ]);
   assert.deepEqual(status.map((entry) => entry.chartValue), [1, 1, 0]);
+  assert.deepEqual(
+    actual.map((entry) => [
+      entry.scenarioId,
+      entry.chartValue,
+      entry.state,
+      entry.total,
+    ]),
+    [
+      ["a", 9, "occupied", 9],
+      ["b", 0, "unoccupied", 0],
+      ["c", 0, "unknown", null],
+    ],
+  );
+  assert.deepEqual(
+    status.map((entry) => [
+      entry.scenarioId,
+      entry.chartValue,
+      entry.state,
+      entry.total,
+    ]),
+    [
+      ["a", 1, "occupied", 9],
+      ["b", 1, "unoccupied", 0],
+      ["c", 0, "unknown", null],
+    ],
+  );
 });
 
 test("barras verticais preservam semântica, ordem e navegação responsiva", () => {
@@ -8669,6 +8911,12 @@ test("barras verticais preservam semântica, ordem e navegação responsiva", ()
   assert.match(
     optionSource,
     /color:\s*entry\.state === "unknown"[\s\S]*?chartPalette\.surface/,
+  );
+  assert.match(optionSource, /ausência não é ocupação zero/);
+  assert.match(
+    optionSource,
+    /data: indexedEntries\.map\(\(entry\) => entry\.scenarioId\)/,
+    "o eixo categórico deve manter a ordem de entrada dos cenários",
   );
 });
 
@@ -8802,4 +9050,718 @@ test("gráficos e modo monitor preservam navegação por teclado", () => {
     comparisonSource,
     /aria-label="Métrica dos mapas de calor de ocupação"/,
   );
+});
+
+test("Análises escolhe consolidação e janela horária por dias civis", () => {
+  const detailed = countingAnalysisRangePlan.buildCountingAnalysisRangePlan({
+    from: new Date(2026, 0, 1),
+    to: new Date(2026, 1, 1),
+  });
+  const consolidated =
+    countingAnalysisRangePlan.buildCountingAnalysisRangePlan({
+      from: new Date(2026, 0, 1),
+      to: new Date(2026, 1, 2),
+    });
+  const detail = countingAnalysisRangePlan.countingAnalysisHourlyDetailRange({
+    from: new Date(2025, 0, 1),
+    to: new Date(2026, 0, 1),
+  });
+
+  assert.equal(detailed.hourlyDetail, true);
+  assert.equal(detailed.refreshIntervalMs, 5_000);
+  assert.equal(consolidated.hourlyDetail, false);
+  assert.equal(consolidated.refreshIntervalMs, 60_000);
+  assert.equal(detail.limited, true);
+  assert.deepEqual(localOccupancyDateParts(detail.from), [2025, 12, 1]);
+  assert.deepEqual(localOccupancyDateParts(detail.to), [2026, 1, 1]);
+});
+
+test("granularidade visual promove pontos sem alterar o intervalo integral", () => {
+  const oneDay = { from: new Date(2026, 6, 22), to: new Date(2026, 6, 23) };
+  const oneYear = { from: new Date(2025, 0, 1), to: new Date(2026, 0, 1) };
+  const threeYears = {
+    from: new Date(2023, 0, 1),
+    to: new Date(2026, 0, 1),
+  };
+
+  assert.equal(
+    countingAnalysisRangePlan.resolveCountingAnalysisVisualGranularity(
+      "minute",
+      oneDay,
+    ),
+    "minute",
+  );
+  assert.equal(
+    countingAnalysisRangePlan.resolveCountingAnalysisVisualGranularity(
+      "hour",
+      { from: new Date(2026, 6, 1), to: new Date(2026, 6, 4) },
+    ),
+    "day",
+  );
+  assert.equal(
+    countingAnalysisRangePlan.resolveCountingAnalysisVisualGranularity(
+      "day",
+      oneYear,
+    ),
+    "week",
+  );
+  assert.equal(
+    countingAnalysisRangePlan.resolveCountingAnalysisVisualGranularity(
+      "day",
+      threeYears,
+    ),
+    "month",
+  );
+  assert.equal(
+    countingAnalysisRangePlan.resolveCountingAnalysisVisualGranularity(
+      "day",
+      oneYear,
+      100,
+    ),
+    "month",
+    "o orçamento deve considerar buckets multiplicados pelas séries",
+  );
+});
+
+test("perfil e saldo horários materializam somente a janela detalhada", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-01-01",
+    "2026-04-30",
+  );
+  assert.ok(period);
+  const entry = scenario("entry", "Entrada", "line-entry", 1);
+  const exit = scenario("exit", "Saída", "line-exit", -1);
+  const data = analysisData({
+    hourRows: [
+      aggregateRow("2026-01-10T10:00:00", "line-entry", 100),
+      aggregateRow("2026-01-10T10:00:00", "line-exit", 80),
+      aggregateRow("2026-04-10T10:00:00", "line-entry", 10),
+      aggregateRow("2026-04-10T10:00:00", "line-exit", 3),
+    ],
+  });
+  const profile = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data,
+    period,
+    scenarios: [entry, exit],
+    widget: analysisWidget("hour_profile", {
+      scenarioIds: [entry.id],
+      selectionMode: "custom",
+    }),
+  });
+  const balance = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data,
+    period,
+    scenarios: [entry, exit],
+    widget: analysisWidget("hourly_occupancy", {
+      entryScenarioIds: [entry.id],
+      exitScenarioIds: [exit.id],
+      selectionMode: "custom",
+      startHour: 0,
+    }),
+  });
+
+  assert.match(profile.description, /últimos 31 dias/);
+  assert.equal(
+    profile.table?.rows.find((row) => row.hour === "10h")?.total,
+    10,
+    "o perfil não pode incluir uma linha horária anterior ao detalhe",
+  );
+  assert.match(balance.description, /últimos 31 dias/);
+  assert.ok((balance.table?.rows.length ?? 0) <= 31 * 24);
+  assert.equal(
+    balance.table?.rows.some((row) => String(row.period).includes("10/01")),
+    false,
+  );
+});
+
+test("comparação extrema agrupa séries excedentes em Outros sem perder total", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2006-01-01",
+    "2025-12-31",
+  );
+  assert.ok(period);
+  const scenarios = Array.from({ length: 100 }, (_, index) =>
+    scenario(
+      `scenario-${index}`,
+      `Cenário ${index}`,
+      `line-${index}`,
+      1,
+    ),
+  );
+  const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data: analysisData({
+      dayRows: scenarios.map((item, index) =>
+        aggregateRow("2025-12-01", `line-${index}`, 1),
+      ),
+    }),
+    period,
+    scenarios,
+    widget: analysisWidget("comparison", {
+      granularity: "day",
+      selectionMode: "all",
+    }),
+  });
+  const series = Array.isArray(model.option?.series)
+    ? model.option.series
+    : [];
+
+  assert.ok(series.length <= Math.floor(5_000 / 240));
+  assert.match(model.description, /reunidos em Outros/);
+  assert.equal(
+    model.insights?.find((insight) => insight.label === "Total combinado")
+      ?.value,
+    "100",
+  );
+});
+
+test("comparação adapta resolução à seleção efetiva, não ao catálogo inteiro", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-07-22",
+    "2026-07-22",
+  );
+  assert.ok(period);
+  const scenarios = Array.from({ length: 100 }, (_, index) =>
+    scenario(
+      `scenario-${index}`,
+      `Cenário ${index}`,
+      `line-${index}`,
+      1,
+    ),
+  );
+  const selected = scenarios[0];
+  const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data: analysisData({
+      minuteRows: [
+        aggregateRow("2026-07-22T10:00:00", "line-0", 3),
+      ],
+    }),
+    period,
+    scenarios,
+    widget: analysisWidget("comparison", {
+      granularity: "minute",
+      scenarioIds: [selected.id],
+      selectionMode: "custom",
+    }),
+  });
+
+  assert.equal(model.appliedGranularity, "minute");
+  assert.equal(Array.isArray(model.option?.series), true);
+
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(source, /periodAnalysisComparisonSeriesCount\(widget, scenarios\)/);
+  assert.match(
+    source,
+    /modelByWidgetId\.get\(widget\.id\)\?\.appliedGranularity/,
+  );
+});
+
+test("tendência e acumulado amostram só a visualização e preservam o fechamento", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2022-01-01",
+    "2024-12-31",
+  );
+  assert.ok(period);
+  const selected = scenario("entry", "Entrada", "line-entry", 1);
+  const dayRows = [];
+  let cursor = new Date(period.from);
+  while (cursor < period.to) {
+    const lastDay =
+      cursor.getFullYear() === 2024 &&
+      cursor.getMonth() === 11 &&
+      cursor.getDate() === 31;
+    dayRows.push(
+      aggregateRow(
+        `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}-${String(cursor.getDate()).padStart(2, "0")}`,
+        "line-entry",
+        lastDay ? 9 : 1,
+      ),
+    );
+    cursor = new Date(
+      cursor.getFullYear(),
+      cursor.getMonth(),
+      cursor.getDate() + 1,
+    );
+  }
+  const data = analysisData({ dayRows });
+  const trend = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data,
+    period,
+    scenarios: [selected],
+    widget: analysisWidget("trend"),
+  });
+  const cumulative = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data,
+    period,
+    scenarios: [selected],
+    widget: analysisWidget("cumulative"),
+  });
+  const trendSeries = Array.isArray(trend.option?.series)
+    ? trend.option.series
+    : [];
+  const cumulativeSeries = Array.isArray(cumulative.option?.series)
+    ? cumulative.option.series
+    : [];
+  const visualDaily = trendSeries.find(
+    (series) => series.name === "Volume diário",
+  )?.data;
+  const visualCurrent = cumulativeSeries.find(
+    (series) => series.name === "Período selecionado",
+  )?.data;
+  const fullTrendRows = trend.table?.rows ?? [];
+  const fullCumulativeRows = cumulative.table?.rows ?? [];
+
+  assert.ok(fullTrendRows.length > 1_000);
+  assert.ok(fullCumulativeRows.length > 1_000);
+  assert.ok(Array.isArray(visualDaily));
+  assert.ok(Array.isArray(visualCurrent));
+  assert.ok(visualDaily.length <= 36);
+  assert.ok(visualCurrent.length <= 36);
+  assert.equal(visualDaily.at(-1), fullTrendRows.at(-1)?.total);
+  assert.equal(visualCurrent.at(-1), fullCumulativeRows.at(-1)?.current);
+  assert.match(trend.description, /sem alterar os cálculos diários/);
+  assert.match(cumulative.description, /fechamento acumulado exato/);
+});
+
+test("widgets com muitos cenários limitam a tela e mantêm o detalhamento exportável", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-07-01",
+    "2026-07-31",
+  );
+  assert.ok(period);
+  const scenarios = Array.from({ length: 100 }, (_, index) =>
+    scenario(
+      `scenario-${index}`,
+      `Cenário ${index}`,
+      `line-${index}`,
+      1,
+    ),
+  );
+  const data = analysisData({
+    dayRows: scenarios.map((item, index) =>
+      aggregateRow("2026-07-22", `line-${index}`, index + 1),
+    ),
+  });
+
+  for (const kind of ["ranking", "rose", "scenario_cumulative"]) {
+    const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+      data,
+      period,
+      scenarios,
+      widget: analysisWidget(kind),
+    });
+    const series = Array.isArray(model.option?.series)
+      ? model.option.series
+      : [];
+    const visiblePoints = series[0]?.data;
+
+    assert.ok(Array.isArray(visiblePoints), `${kind} deve publicar uma série`);
+    assert.ok(visiblePoints.length <= 20, `${kind} deve limitar a tela`);
+    assert.equal(model.table?.rows.length, 100, `${kind} preserva o export`);
+    assert.match(model.description, /Outros/);
+  }
+
+  const totals = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data,
+    period,
+    scenarios,
+    widget: analysisWidget("totals_table"),
+  });
+  assert.equal(totals.table?.rows.length, 101);
+  assert.ok((totals.displayTableData?.rows.length ?? 0) <= 21);
+  assert.equal(totals.displayTableData?.rows[0]?.selected, 5_050);
+});
+
+test("tabela consolidada mantém no mês os mesmos membros agrupados no dia", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-07-22",
+    "2026-07-22",
+  );
+  assert.ok(period);
+  const scenarios = Array.from({ length: 21 }, (_, index) =>
+    scenario(
+      `scenario-${index}`,
+      `Cenário ${index}`,
+      `line-${index}`,
+      1,
+    ),
+  );
+  const hourRows = scenarios.map((item, index) =>
+    aggregateRow(
+      "2026-07-22T10:00:00",
+      `line-${index}`,
+      100 - index,
+    ),
+  );
+  const dayRows = scenarios.flatMap((item, index) => [
+    aggregateRow(
+      "2026-07-01",
+      `line-${index}`,
+      index === 19 ? 1_000 : index === 20 ? 900 : 1,
+    ),
+    aggregateRow("2026-07-22", `line-${index}`, 100 - index),
+  ]);
+  const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data: analysisData({ dayRows, hourRows }),
+    period,
+    scenarios,
+    widget: analysisWidget("totals_table"),
+  });
+  const visibleRows = model.displayTableData?.rows ?? [];
+  const other = visibleRows.find((row) =>
+    String(row.scenario).startsWith("Outros"),
+  );
+
+  assert.equal(visibleRows.find((row) => row.scenario === "Cenário 0")?.month, 101);
+  assert.equal(other?.selected, 161);
+  assert.equal(other?.month, 2_061);
+  assert.equal(model.table?.rows.length, 22);
+});
+
+test("detalhe horário limitado preserva a segunda hora repetida no DST", () => {
+  const previousTimeZone = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  try {
+    const first = aggregateTime.startOfAggregateBucket(
+      new Date("2026-11-01T05:30:00Z"),
+      "hour",
+    );
+    const second = aggregateTime.startOfAggregateBucket(
+      new Date("2026-11-01T06:30:00Z"),
+      "hour",
+    );
+    const firstMinute = aggregateTime.startOfAggregateBucket(
+      new Date("2026-11-01T05:30:45Z"),
+      "minute",
+    );
+    const secondMinute = aggregateTime.startOfAggregateBucket(
+      new Date("2026-11-01T06:30:45Z"),
+      "minute",
+    );
+
+    assert.equal(first.toISOString(), "2026-11-01T05:00:00.000Z");
+    assert.equal(second.toISOString(), "2026-11-01T06:00:00.000Z");
+    assert.notEqual(first.getTime(), second.getTime());
+    assert.equal(firstMinute.toISOString(), "2026-11-01T05:30:00.000Z");
+    assert.equal(secondMinute.toISOString(), "2026-11-01T06:30:00.000Z");
+    assert.notEqual(firstMinute.getTime(), secondMinute.getTime());
+
+    const source = readFileSync(
+      resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+      "utf8",
+    );
+    assert.match(
+      source,
+      /function startOfHour\([\s\S]*?startOfAggregateBucket\(date, "hour"\)/,
+    );
+    assert.doesNotMatch(
+      source,
+      /function startOfHour\([\s\S]{0,120}?setMinutes/,
+    );
+    assert.match(
+      source,
+      /function startOfMinute\([\s\S]*?startOfAggregateBucket\(date, "minute"\)/,
+    );
+  } finally {
+    if (previousTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimeZone;
+  }
+});
+
+test("Análises longas consultam dia integral e limitam o detalhe horário", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(source, /fetchAnalysisConsolidatedDayDataset\(\s*dayRange/);
+  assert.match(
+    source,
+    /const boundedHourlyRange = \{[\s\S]*?hourlyDetailRange\.from[\s\S]*?requiredHourRanges =[\s\S]*?\[boundedHourlyRange\]/,
+  );
+  assert.match(
+    source,
+    /window\.setInterval\(\s*refreshWhenIdle,\s*analysisRangePlan\.refreshIntervalMs/,
+  );
+  assert.match(source, /const queryWidgets = React\.useMemo/);
+  assert.match(source, /queryWidgets\.map\(\(widget\) => \[/);
+  assert.match(source, /const MAX_ANALYSIS_DAY_CACHE_ENTRIES = 64/);
+  assert.match(
+    source,
+    /while \(cache\.size > MAX_ANALYSIS_DAY_CACHE_ENTRIES\)/,
+  );
+  assert.match(source, /Consolidação automática ativa/);
+  assert.match(source, /Detalhe horário · últimos \{hourlyDetailDayCount\} dias/);
+});
+
+test("loader horário limitado recorta os meses de borda na própria API", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (input) => {
+    requests.push(String(input));
+    return new Response(
+      JSON.stringify({ data: [], granularity: "hour" }),
+      { headers: { "content-type": "application/json" }, status: 200 },
+    );
+  };
+
+  try {
+    const range = {
+      from: new Date(2026, 5, 15),
+      to: new Date(2026, 6, 16),
+    };
+    await aggregateHourQuery.fetchBoundedHourlyAggregateRanges({
+      cache: new Map(),
+      cacheScope: "analysis-bounded",
+      now: new Date(2026, 7, 1),
+      ranges: [range],
+    });
+
+    assert.equal(requests.length, 2);
+    const parameters = requests.map((request) => {
+      const url = new URL(request, "http://localhost");
+      return {
+        from: new Date(url.searchParams.get("from")),
+        to: new Date(url.searchParams.get("to")),
+      };
+    });
+    assert.equal(parameters[0].from.getTime(), range.from.getTime());
+    assert.deepEqual(localOccupancyDateParts(parameters[0].to), [2026, 7, 1]);
+    assert.deepEqual(localOccupancyDateParts(parameters[1].from), [2026, 7, 1]);
+    assert.equal(parameters[1].to.getTime(), range.to.getTime());
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("heatmap de Contagem preserva toda linha selecionada nos dias 1 a 3", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const exitScenario = scenario("exit", "Saída", "line-exit", -1);
+  const repeatedExitScenario = scenario(
+    "repeated-exit",
+    "Saída repetida",
+    "line-exit",
+    -1,
+  );
+  const mixedScenario = {
+    active: true,
+    company_id: "company",
+    id: "mixed",
+    lines: [
+      { action_multiplier: 1, line_count_id: "line-mixed-entry" },
+      { action_multiplier: -1, line_count_id: "line-mixed-exit" },
+    ],
+    name: "Misto",
+  };
+  const from = new Date(2026, 7, 1);
+  const to = new Date(2026, 7, 4);
+  const points = scenarioAnalytics.buildScenarioCivilHourMagnitudePoints({
+    companyTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    from,
+    rows: [
+      aggregateRow("2026-08-01T10:00:00", "line-exit", 7),
+      aggregateRow("2026-08-02T11:00:00", "line-entry", 5),
+      aggregateRow("2026-08-02T11:00:00", "line-exit", 5),
+      aggregateRow("2026-08-03T08:00:00", "line-exit", 3),
+      aggregateRow("2026-08-03T14:00:00", "line-entry", 2),
+      aggregateRow("2026-08-03T16:00:00", "line-mixed-entry", 4),
+      aggregateRow("2026-08-03T16:00:00", "line-mixed-exit", 4),
+    ],
+    scenarios: [
+      entryScenario,
+      exitScenario,
+      repeatedExitScenario,
+      mixedScenario,
+    ],
+    sourceGranularity: "hour",
+    to,
+  });
+  const totals = new Map(
+    points
+      .filter((point) => point.total > 0)
+      .map((point) => [`${point.day}-${point.hour}`, point.total]),
+  );
+
+  assert.equal(totals.get("1-10"), 7);
+  assert.equal(totals.get("2-11"), 10);
+  assert.equal(totals.get("3-8"), 3);
+  assert.equal(totals.get("3-14"), 2);
+  assert.equal(
+    totals.get("3-16"),
+    8,
+    "direções opostas dentro do mesmo cenário representam fluxo, não cancelamento",
+  );
+});
+
+test("heatmap consolida as duas ocorrências da hora repetida em uma célula", () => {
+  const points = scenarioAnalytics.buildScenarioCivilHourMagnitudePoints({
+    companyTimeZone: "America/New_York",
+    from: new Date("2026-11-01T04:00:00Z"),
+    rows: [
+      aggregateRow("2026-11-01T05:00:00Z", "line-entry", 2),
+      aggregateRow("2026-11-01T06:00:00Z", "line-entry", 3),
+    ],
+    scenarios: [scenario("entry", "Entrada", "line-entry", 1)],
+    sourceGranularity: "hour",
+    to: new Date("2026-11-02T05:00:00Z"),
+  });
+  const repeatedHour = points.filter(
+    (point) => point.day === 1 && point.hour === 1,
+  );
+
+  assert.equal(repeatedHour.length, 1);
+  assert.equal(repeatedHour[0].total, 5);
+});
+
+test("comparativo anual ao vivo divide histórico e janela recente sem lacuna ou sobreposição", () => {
+  const now = new Date(2026, 6, 22, 10, 35);
+  const range = liveAnnualComparison.resolveLiveAnnualComparisonRanges(now);
+
+  assert.deepEqual(
+    [range.recentFrom.getFullYear(), range.recentFrom.getMonth()],
+    [2025, 6],
+  );
+  assert.equal(range.historyTo.getTime(), range.recentFrom.getTime());
+  assert.deepEqual(
+    [
+      range.periodTo.getFullYear(),
+      range.periodTo.getMonth(),
+      range.periodTo.getDate(),
+    ],
+    [2026, 7, 1],
+  );
+  assert.ok(range.historyFrom < range.historyTo);
+  assert.ok(range.periodFrom < range.periodTo);
+});
+
+test("Ao Vivo usa histórico multi-ano, cache por empresa e fuso e hora aberta canônica", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(source, /buildLiveAnnualComparisonModel/);
+  assert.match(source, /buildAnnualComparisonChartOption/);
+  assert.match(source, /buildAnnualAccumulatedComparisonChartOption/);
+  assert.match(
+    source,
+    /cacheScope: `live:\$\{companyScopeId\}:\$\{companyTimeZone\}`/,
+  );
+  assert.match(source, /requireAggregateRowsInRange/);
+  assert.match(source, /OPERATIONAL_CURRENT_HOUR_MINUTES_ID/);
+  assert.match(
+    source,
+    /if \(cursor < end\) \{[\s\S]*?throw new RangeError/,
+    "um eixo maior que o limite deve falhar explicitamente, nunca truncar",
+  );
+  assert.doesNotMatch(source, /function buildCurrentYearMonthPoints/);
+});
+
+test("Ao Vivo consulta agosto desde o primeiro dia civil, sem janela móvel", () => {
+  const from = new Date(2026, 7, 1);
+  const throughPartOfDayThree = new Date(2026, 7, 3, 14, 30);
+  const queries = aggregateQueryPlan.planHourlyCalendarMonthQueries([
+    { from, to: throughPartOfDayThree },
+  ]);
+
+  assert.equal(queries.length, 1);
+  assert.deepEqual(localOccupancyDateParts(queries[0].from), [2026, 8, 1]);
+  assert.equal(queries[0].from.getHours(), 0);
+  assert.deepEqual(localOccupancyDateParts(queries[0].to), [2026, 9, 1]);
+
+  const liveSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(
+    liveSource,
+    /buildScenarioCivilHourMagnitudePoints\(\{\s*companyTimeZone,\s*from: startOfMonth\(clock\)/,
+  );
+});
+
+test("séries individuais em uma passagem equivalem ao cálculo por cenário", () => {
+  const scenarios = [
+    scenario("entry", "Entrada", "line-entry", 1),
+    scenario("exit", "Saída", "line-exit", -1),
+  ];
+  const range = {
+    from: new Date(2026, 0, 1),
+    to: new Date(2026, 2, 1),
+  };
+  const rows = [
+    aggregateRow("2026-01-10", "line-entry", 8),
+    aggregateRow("2026-01-10", "line-exit", 3),
+    aggregateRow("2026-02-10", "line-entry", 5),
+    aggregateRow("2026-02-10", "line-exit", 2),
+  ];
+  const series = scenarioAnalytics.buildIndividualScenarioSeries({
+    ...range,
+    granularity: "month",
+    rows,
+    scenarios,
+    sourceGranularity: "day",
+  });
+
+  scenarios.forEach((item, index) => {
+    const legacy = scenarioAnalytics.buildCombinedScenarioPoints({
+      ...range,
+      granularity: "month",
+      rows,
+      scenarios: [item],
+      sourceGranularity: "day",
+    });
+    assert.deepEqual(series[index].points, legacy);
+  });
+});
+
+test("ações individuais dos widgets permanecem no topo direito em qualquer largura", () => {
+  const actionSource = readFileSync(
+    resolve(projectRoot, "components/app/widget-card-actions.tsx"),
+    "utf8",
+  );
+  const periodSource = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancySource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const realtimeSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+  const reportsSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const responsiveGrid = /grid-cols-\[minmax\(0,1fr\)_auto\]/g;
+
+  assert.match(actionSource, /data-widget-actions/);
+  assert.match(actionSource, /role="group"/);
+  assert.match(
+    actionSource,
+    /flex shrink-0 flex-nowrap items-center justify-end gap-0\.5 self-start justify-self-end/,
+  );
+  assert.equal((periodSource.match(responsiveGrid) ?? []).length >= 1, true);
+  assert.equal((occupancySource.match(responsiveGrid) ?? []).length >= 3, true);
+  assert.equal((realtimeSource.match(responsiveGrid) ?? []).length >= 8, true);
+  assert.equal((comparisonSource.match(responsiveGrid) ?? []).length >= 1, true);
+  assert.equal((reportsSource.match(responsiveGrid) ?? []).length >= 2, true);
+  assert.match(
+    periodSource,
+    /<WidgetCardActions label=\{`Ações do widget \$\{widget\.title\}`\}>[\s\S]*?title="Configurar widget"[\s\S]*?title="Remover widget"/,
+  );
+  assert.match(
+    occupancySource,
+    /<EmptyOccupancyCard action=\{action\} title=\{widget\.title\} \/>/,
+  );
+  assert.match(comparisonSource, /col-span-full flex min-w-0 flex-wrap/);
+  assert.match(reportsSource, /<WidgetCardActions label=\{`Ações do widget/);
 });

@@ -21,7 +21,10 @@ import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
 import { AnalysisDateRangePicker } from "@/components/app/occupancy-date-range-picker";
-import { CardLayout, ReorderModeButton } from "@/components/app/card-layout";
+import {
+  CardLayout,
+  ReorderModeButton,
+} from "@/components/app/card-layout";
 import { EChart, applyChartTypePreference } from "@/components/app/echart";
 import {
   MonitorModeButton,
@@ -31,6 +34,7 @@ import {
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
+import { WidgetCardActions } from "@/components/app/widget-card-actions";
 import { WidgetTitleText } from "@/components/app/widget-appearance";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -64,7 +68,6 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { hasVisualAdminAccess } from "@/lib/access";
 import {
-  aggregateBucketInRange,
   aggregateQueryIso,
   endOfAggregateBucket,
   requireAggregateGranularity,
@@ -73,7 +76,7 @@ import {
 } from "@/lib/aggregate-time";
 import {
   clearHourlyAggregateCache,
-  fetchHourlyAggregateRanges,
+  fetchBoundedHourlyAggregateRanges,
   type HourlyAggregateCache,
 } from "@/lib/aggregate-hour-query";
 import {
@@ -90,6 +93,11 @@ import {
   useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
 import { requireCertifiedCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
+import {
+  buildCountingAnalysisRangePlan,
+  countingAnalysisHourlyDetailRange,
+  resolveCountingAnalysisVisualGranularity,
+} from "@/lib/counting-analysis-range-plan";
 import {
   requireCameraRows,
   requireInfrastructureRelations,
@@ -119,6 +127,10 @@ import {
   type PeriodAnalysisScopeMode,
   type PeriodAnalysisScopeOption,
 } from "@/lib/period-analysis-scope";
+import {
+  abortRequest,
+  isAbortError,
+} from "@/lib/request-cancellation";
 import {
   PERIOD_ANALYSIS_WIDGETS_UPDATED_EVENT,
   createDefaultPeriodAnalysisSettings,
@@ -162,9 +174,16 @@ type PeriodAnalysisDashboardProps = {
 
 const MINUTE_MS = 60_000;
 const MAX_ANALYSIS_MINUTE_BUCKETS = 20_000;
-const LIVE_ANALYSIS_REFRESH_MS = 5_000;
+const MAX_ANALYSIS_DAY_CACHE_ENTRIES = 64;
 const DEFAULT_METRIC_TYPE = "count";
 const OCCUPANCY_START_HOURS = Array.from({ length: 24 }, (_, hour) => hour);
+
+type AnalysisDayCacheEntry = Readonly<{
+  dataset: PeriodAnalysisDataset;
+  revision: string;
+}>;
+
+type AnalysisDayCache = Map<string, AnalysisDayCacheEntry>;
 
 const widgetKindOptions: Array<{
   description: string;
@@ -347,7 +366,9 @@ function analysisWidgetSupportsChartType(kind: PeriodAnalysisWidgetKind) {
   ].includes(kind);
 }
 
-function analysisGranularityLabel(granularity: ScenarioAnalyticsGranularity) {
+function analysisGranularityLabel(
+  granularity: ScenarioAnalyticsGranularity,
+) {
   return (
     {
       day: "Dia a dia",
@@ -414,7 +435,8 @@ export function PeriodAnalysisDashboard({
 }: PeriodAnalysisDashboardProps) {
   const { user } = useAuth();
   const companyScopeId = useEffectiveCompanyScopeId(user);
-  const companyTimeZoneResolution = useEffectiveCompanyTimeZoneResolution(user);
+  const companyTimeZoneResolution =
+    useEffectiveCompanyTimeZoneResolution(user);
   const companyTimeZone = companyTimeZoneResolution.timeZone;
   const canEditVisual = hasVisualAdminAccess(user);
   const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
@@ -437,13 +459,13 @@ export function PeriodAnalysisDashboard({
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
   const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
   const [widgetDialogOpen, setWidgetDialogOpen] = React.useState(false);
-  const [widgetForm, setWidgetForm] = React.useState<PeriodAnalysisWidgetInput>(
-    () => emptyWidgetForm(),
-  );
+  const [widgetForm, setWidgetForm] =
+    React.useState<PeriodAnalysisWidgetInput>(() => emptyWidgetForm());
   const requestRef = React.useRef<AbortController | null>(null);
   const timeZoneBlockedRef = React.useRef(false);
   const hasLoadedDataRef = React.useRef(false);
   const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(new Map());
+  const dailyAggregateCacheRef = React.useRef<AnalysisDayCache>(new Map());
   const period = React.useMemo(
     () =>
       resolvePeriodAnalysisRange(appliedSettings.from, appliedSettings.to) ??
@@ -457,6 +479,14 @@ export function PeriodAnalysisDashboard({
   const operationalPeriod = React.useMemo(
     () => periodAnalysisOperationalRange(period),
     [period],
+  );
+  const analysisRangePlan = React.useMemo(
+    () => buildCountingAnalysisRangePlan(operationalPeriod),
+    [operationalPeriod],
+  );
+  const hourlyDetailRange = React.useMemo(
+    () => countingAnalysisHourlyDetailRange(operationalPeriod),
+    [operationalPeriod],
   );
   const autoRefreshEnabled =
     new Date() >= period.from && new Date() < period.to;
@@ -494,51 +524,84 @@ export function PeriodAnalysisDashboard({
     () =>
       new Map(
         preferences.flatMap((preference) =>
-          preference.title ? [[preference.id, preference.title] as const] : [],
+          preference.title
+            ? [[preference.id, preference.title] as const]
+            : [],
         ),
       ),
     [preferences],
   );
-  const dataRequirementsKey = React.useMemo(() => {
-    const needsExactHour =
-      singleDayAnalysis ||
-      widgets.some(
-        (widget) =>
-          widget.kind === "hour_profile" ||
-          widget.kind === "hourly_occupancy" ||
-          ((widget.kind === "timeline" || widget.kind === "comparison") &&
-            widget.granularity === "hour"),
-      );
-    const baselineKinds = new Set<PeriodAnalysisWidgetKind>([
-      "cumulative",
-      "cumulative_metric",
-      "daily_comparison",
-      "target_progress",
-    ]);
+  const queryWidgets = React.useMemo(() => {
+    if (!preferences.length) return widgets;
+    const visibleIds = new Set(
+      preferences
+        .filter((preference) => preference.visible !== false)
+        .map((preference) => preference.id),
+    );
+    return widgets.filter((widget) => visibleIds.has(widget.id));
+  }, [preferences, widgets]);
+  const dataRequirementsKey = React.useMemo(
+    () => {
+      const effectiveWidgetGranularity = (widget: PeriodAnalysisWidget) =>
+        widget.kind === "comparison"
+          ? resolveCountingAnalysisVisualGranularity(
+              widget.granularity,
+              period,
+              periodAnalysisComparisonSeriesCount(widget, scenarios),
+            )
+          : periodAnalysisEffectiveGranularity(widget, period);
+      const needsExactHour =
+        singleDayAnalysis ||
+        queryWidgets.some(
+          (widget) =>
+              widget.kind === "hour_profile" ||
+              widget.kind === "heatmap" ||
+              widget.kind === "hourly_occupancy" ||
+              ((widget.kind === "timeline" || widget.kind === "comparison") &&
+                effectiveWidgetGranularity(widget) === "hour"),
+        );
+      const baselineKinds = new Set<PeriodAnalysisWidgetKind>([
+        "cumulative",
+        "cumulative_metric",
+        "daily_comparison",
+        "target_progress",
+      ]);
 
-    return JSON.stringify({
-      baseline: Array.from(
-        new Set(
-          widgets
-            .filter((widget) => baselineKinds.has(widget.kind))
-            .map((widget) => widget.baseline),
+      return JSON.stringify({
+        baseline: Array.from(
+          new Set(
+            queryWidgets
+              .filter((widget) => baselineKinds.has(widget.kind))
+              .map((widget) => widget.baseline),
+          ),
+        ).sort(),
+        contextHour: needsExactHour,
+        hour: needsExactHour,
+        minute: queryWidgets.some(
+          (widget) =>
+            (widget.kind === "timeline" || widget.kind === "comparison") &&
+            effectiveWidgetGranularity(widget) === "minute",
         ),
-      ).sort(),
-      // Daily totals always come from the same hourly source, regardless of
-      // which visual widgets happen to be enabled.
-      contextHour: true,
-      hour: needsExactHour,
-      minute: widgets.some(
-        (widget) =>
-          (widget.kind === "timeline" || widget.kind === "comparison") &&
-          widget.granularity === "minute",
-      ),
-      month: widgets.some(
-        (widget) =>
-          widget.kind === "year_monthly" || widget.kind === "year_accumulated",
-      ),
-    });
-  }, [singleDayAnalysis, widgets]);
+        month: queryWidgets.some(
+          (widget) =>
+            widget.kind === "year_monthly" ||
+            widget.kind === "year_accumulated",
+        ),
+      });
+    },
+    [period, queryWidgets, scenarios, singleDayAnalysis],
+  );
+  const hourlyDetailRequested = React.useMemo(() => {
+    const requirements = JSON.parse(dataRequirementsKey) as {
+      contextHour: boolean;
+      hour: boolean;
+    };
+    return requirements.contextHour || requirements.hour;
+  }, [dataRequirementsKey]);
+  const hourlyDetailDayCount = React.useMemo(
+    () => buildCountingAnalysisRangePlan(hourlyDetailRange).spanDays,
+    [hourlyDetailRange],
+  );
 
   React.useEffect(() => {
     const loadedSettings = loadPeriodAnalysisSettings(companyScopeId, user?.id);
@@ -555,6 +618,7 @@ export function PeriodAnalysisDashboard({
     };
     hasLoadedDataRef.current = false;
     clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+    dailyAggregateCacheRef.current.clear();
     setMetadataError("");
     setDataLoadError("");
     setScenarios([]);
@@ -645,6 +709,7 @@ export function PeriodAnalysisDashboard({
         );
       })
       .catch((error) => {
+        if (isAbortError(error, controller.signal)) return;
         if (cancelled) return;
         const message =
           error instanceof Error
@@ -661,7 +726,7 @@ export function PeriodAnalysisDashboard({
 
     return () => {
       cancelled = true;
-      controller.abort();
+      abortRequest(controller, "O carregamento dos filtros foi substituído.");
     };
   }, [companyScopeId, manager]);
 
@@ -677,7 +742,7 @@ export function PeriodAnalysisDashboard({
       requireCertifiedCountingRuntimeTimeZone(companyTimeZoneResolution);
       timeZoneBlockedRef.current = false;
     } catch (error) {
-      requestRef.current?.abort();
+      if (requestRef.current) abortRequest(requestRef.current);
       requestRef.current = null;
       timeZoneBlockedRef.current = true;
       hasLoadedDataRef.current = false;
@@ -692,29 +757,34 @@ export function PeriodAnalysisDashboard({
       return;
     }
     const controller = new AbortController();
-    requestRef.current?.abort();
+    if (requestRef.current) abortRequest(requestRef.current);
     requestRef.current = controller;
     const announceErrors = !hasLoadedDataRef.current;
     if (announceErrors) setLoadingData(true);
     const now = new Date();
-
-    const dayRange = {
-      from: addDays(operationalPeriod.from, -29),
-      to: operationalPeriod.to,
+    const dayCacheOptions = {
+      cache: dailyAggregateCacheRef.current,
+      cacheScope: `analysis:${companyScopeId ?? "jwt-company"}`,
+      revision: companyDateKey(now, companyTimeZone),
     };
+
     const referenceDate = new Date(period.to.getTime() - 1);
     const periodCoverageTo =
       now >= period.from && now < period.to
         ? addMinutes(startOfMinute(now), 1)
         : period.to;
+    const dayRange = {
+      from: addDays(operationalPeriod.from, -29),
+      to: periodCoverageTo,
+    };
     const monthRange = {
       from: new Date(referenceDate.getFullYear(), 0, 1),
       to: periodCoverageTo,
     };
-    const baselineRanges = requirements.baseline.map(
-      (baseline) =>
-        [baseline, periodAnalysisBaselineDataRange(period, baseline)] as const,
-    );
+    const baselineRanges = requirements.baseline.map((baseline) => [
+      baseline,
+      periodAnalysisBaselineDataRange(period, baseline),
+    ] as const);
     const baselineComparableRanges = new Map(
       requirements.baseline.map((baseline) => [
         baseline,
@@ -727,12 +797,17 @@ export function PeriodAnalysisDashboard({
         ),
       ]),
     );
-    const requiredHourRanges = [
-      ...(requirements.contextHour ? [dayRange] : []),
-      ...(requirements.month ? [monthRange] : []),
-      ...baselineRanges.map(([, range]) => range),
-      ...baselineComparableRanges.values(),
-    ];
+    const boundedHourlyRange = {
+      from: hourlyDetailRange.from,
+      to: new Date(
+        Math.min(hourlyDetailRange.to.getTime(), periodCoverageTo.getTime()),
+      ),
+    };
+    const requiredHourRanges =
+      (requirements.contextHour || requirements.hour) &&
+      boundedHourlyRange.from < boundedHourlyRange.to
+        ? [boundedHourlyRange]
+        : [];
     const canonicalHourPromise = requiredHourRanges.length
       ? fetchAnalysisHourlyDatasets(
           requiredHourRanges,
@@ -744,12 +819,10 @@ export function PeriodAnalysisDashboard({
         )
       : Promise.resolve(emptyDataset("hour"));
     const contextHourPromise = requirements.contextHour
-      ? canonicalHourPromise.then((dataset) =>
-          sliceAnalysisHourlyDataset(dataset, dayRange),
-        )
+      ? canonicalHourPromise
       : Promise.resolve(emptyDataset("hour"));
     const hourPromise = requirements.hour
-      ? contextHourPromise
+      ? canonicalHourPromise
       : Promise.resolve(emptyDataset("hour"));
     const minuteRangeWithinLimit =
       estimatedMinuteBucketCount(period) <= MAX_ANALYSIS_MINUTE_BUCKETS;
@@ -768,11 +841,20 @@ export function PeriodAnalysisDashboard({
             controller.signal,
           )
       : Promise.resolve(emptyDataset("minute"));
-    const monthPromise = requirements.month
-      ? canonicalHourPromise.then((dataset) =>
-          sliceAnalysisHourlyDataset(dataset, monthRange),
+    const dayPromise = fetchAnalysisConsolidatedDayDataset(
+      dayRange,
+      companyScopeId,
+      controller.signal,
+      dayCacheOptions,
+    );
+    const monthDayPromise = requirements.month
+      ? fetchAnalysisConsolidatedDayDataset(
+          monthRange,
+          companyScopeId,
+          controller.signal,
+          dayCacheOptions,
         )
-      : Promise.resolve(emptyDataset("hour"));
+      : Promise.resolve(emptyDataset("day"));
     const currentMinuteRange = analysisCurrentMinuteRange(
       requiredHourRanges,
       now,
@@ -787,144 +869,128 @@ export function PeriodAnalysisDashboard({
       : Promise.resolve(emptyDataset("minute"));
 
     Promise.all([
-      Promise.resolve(emptyDataset("day")),
+      dayPromise,
       hourPromise,
       contextHourPromise,
       minutePromise,
-      monthPromise,
+      monthDayPromise,
       reconciliationMinutePromise,
       Promise.all(
         baselineRanges.map(async ([baseline, baselineRange]) => {
           const comparableRange =
             baselineComparableRanges.get(baseline) ?? baselineRange;
-          const boundaryMinutePromise = Promise.all(
-            analysisPartialHourRanges(comparableRange).map(async (range) => ({
-              dataset: await fetchAnalysisDataset(
-                "minute",
-                range,
+          const datasetPromise = fetchAnalysisConsolidatedDayDataset(
+            baselineRange,
+            companyScopeId,
+            controller.signal,
+            dayCacheOptions,
+          );
+          const comparableDatasetPromise = sameAnalysisRange(
+            baselineRange,
+            comparableRange,
+          )
+            ? datasetPromise
+            : fetchAnalysisConsolidatedDayDataset(
+                comparableRange,
                 companyScopeId,
                 controller.signal,
-              ),
-              range,
-            })),
-          );
-          const dataset = sliceAnalysisHourlyDataset(
-            await canonicalHourPromise,
-            baselineRange,
-          );
-          const comparableDataset = sliceAnalysisHourlyDataset(
-            await canonicalHourPromise,
-            comparableRange,
-          );
+                dayCacheOptions,
+              );
+          const [dataset, comparableDataset] = await Promise.all([
+            datasetPromise,
+            comparableDatasetPromise,
+          ]);
           return [
             baseline,
             baselineRange,
             dataset,
             comparableRange,
-            reconcileAnalysisHourlyBoundaries(
-              comparableDataset,
-              await boundaryMinutePromise,
-            ),
+            comparableDataset,
           ] as const;
         }),
       ),
     ])
       .then(
         ([
-          day,
+          rawDay,
           hour,
           rawContextHour,
           minute,
-          rawMonthHours,
+          rawMonthDays,
           reconciliationMinute,
           rawBaselineEntries,
         ]) => {
-          if (controller.signal.aborted) return;
-          const contextHour = reconcileAnalysisHourlyDataset(
-            rawContextHour,
-            reconciliationMinute,
-            dayRange,
-            currentMinuteRange,
-          );
-          const reconciledHour = requirements.hour ? contextHour : hour;
-          const reconciledMinute = requirements.minute
-            ? reconcileAnalysisMinuteDataset(
-                minute,
-                reconciliationMinute,
-                currentMinuteRange,
-              )
-            : minute;
-          const month = requirements.month
-            ? rollupAnalysisDataset(
-                reconcileAnalysisHourlyDataset(
-                  rawMonthHours,
-                  reconciliationMinute,
-                  monthRange,
-                  currentMinuteRange,
-                ),
-                "month",
-                monthRange,
-              )
-            : emptyDataset("month");
-          const baselineEntries = rawBaselineEntries.map(
-            ([baseline, baselineRange, dataset]) =>
-              [
-                baseline,
-                reconcileAnalysisHourlyDataset(
-                  dataset,
-                  reconciliationMinute,
-                  baselineRange,
-                  currentMinuteRange,
-                ),
-              ] as const,
-          );
-          const baselineComparableEntries = rawBaselineEntries.map(
-            ([baseline, , , comparableRange, dataset]) =>
-              [
-                baseline,
-                reconcileAnalysisHourlyDataset(
-                  dataset,
-                  reconciliationMinute,
-                  comparableRange,
-                  currentMinuteRange,
-                ),
-              ] as const,
-          );
-          const reconciledDay = requirements.contextHour
-            ? contextHour.error
-              ? { ...day, error: contextHour.error }
-              : mergeExactHoursIntoDays(day, contextHour, dayRange)
-            : singleDayAnalysis && requirements.hour
-              ? mergeExactHoursIntoDays(day, reconciledHour, period)
-              : day;
-          setData({
-            baseline: Object.fromEntries(baselineEntries),
-            baselineComparable: Object.fromEntries(baselineComparableEntries),
-            contextHour,
-            day: reconciledDay,
-            hour: reconciledHour,
-            minute: reconciledMinute,
-            month,
-          });
-          setDataLoadError("");
-          hasLoadedDataRef.current = true;
-          setLastUpdated(new Date());
-          if (
-            announceErrors &&
-            (reconciledDay.error ||
-              hour.error ||
-              contextHour.error ||
-              reconciledMinute.error ||
-              month.error ||
-              baselineEntries.some(([, dataset]) => dataset.error) ||
-              baselineComparableEntries.some(([, dataset]) => dataset.error))
-          ) {
-            toast.error("Alguns dados da análise não puderam ser carregados.");
-          }
+        if (controller.signal.aborted) return;
+        const contextHour = reconcileAnalysisHourlyDataset(
+          rawContextHour,
+          reconciliationMinute,
+          boundedHourlyRange,
+          currentMinuteRange,
+        );
+        const reconciledHour = requirements.hour
+          ? contextHour
+          : hour;
+        const reconciledMinute = requirements.minute
+          ? reconcileAnalysisMinuteDataset(
+              minute,
+              reconciliationMinute,
+              currentMinuteRange,
+            )
+          : minute;
+        const day = requiredHourRanges.length
+          ? mergeExactHoursIntoDays(
+              rawDay,
+              contextHour,
+              boundedHourlyRange,
+            )
+          : rawDay;
+        const monthDays = requiredHourRanges.length
+          ? mergeExactHoursIntoDays(
+              rawMonthDays,
+              contextHour,
+              boundedHourlyRange,
+            )
+          : rawMonthDays;
+        const month = requirements.month
+          ? rollupAnalysisDataset(monthDays, "month", monthRange)
+          : emptyDataset("month");
+        const baselineEntries = rawBaselineEntries.map(
+          ([baseline, , dataset]) => [baseline, dataset] as const,
+        );
+        const baselineComparableEntries = rawBaselineEntries.map(
+          ([baseline, , , , dataset]) => [baseline, dataset] as const,
+        );
+        setData({
+          baseline: Object.fromEntries(baselineEntries),
+          baselineComparable: Object.fromEntries(
+            baselineComparableEntries,
+          ),
+          contextHour,
+          day,
+          hour: reconciledHour,
+          minute: reconciledMinute,
+          month,
+        });
+        setDataLoadError("");
+        hasLoadedDataRef.current = true;
+        setLastUpdated(new Date());
+        if (
+          announceErrors &&
+          (day.error ||
+            hour.error ||
+            contextHour.error ||
+            reconciledMinute.error ||
+            month.error ||
+            baselineEntries.some(([, dataset]) => dataset.error) ||
+            baselineComparableEntries.some(([, dataset]) => dataset.error))
+        ) {
+          toast.error("Alguns dados da análise não puderam ser carregados.");
+        }
         },
       )
       .catch((error) => {
-        if (controller.signal.aborted) return;
+        if (isAbortError(error, controller.signal)) return;
+        if (requestRef.current !== controller) return;
         const message =
           error instanceof Error
             ? error.message
@@ -941,12 +1007,15 @@ export function PeriodAnalysisDashboard({
         }
       });
 
-    return () => controller.abort();
+    return () => {
+      abortRequest(controller);
+    };
   }, [
     companyScopeId,
     companyTimeZone,
     companyTimeZoneResolution,
     dataRequirementsKey,
+    hourlyDetailRange,
     operationalPeriod,
     period,
     queryVersion,
@@ -968,7 +1037,7 @@ export function PeriodAnalysisDashboard({
     };
     const interval = window.setInterval(
       refreshWhenIdle,
-      LIVE_ANALYSIS_REFRESH_MS,
+      analysisRangePlan.refreshIntervalMs,
     );
     document.addEventListener("visibilitychange", refreshWhenIdle);
 
@@ -976,7 +1045,7 @@ export function PeriodAnalysisDashboard({
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", refreshWhenIdle);
     };
-  }, [autoRefreshEnabled, period]);
+  }, [analysisRangePlan.refreshIntervalMs, autoRefreshEnabled, period]);
 
   const analysisCertificationError =
     metadataError ||
@@ -993,11 +1062,12 @@ export function PeriodAnalysisDashboard({
   const modelByWidgetId = React.useMemo(
     () =>
       new Map(
-        widgets.map((widget) => [
+        queryWidgets.map((widget) => [
           widget.id,
           buildPeriodAnalysisWidgetModel({
             chartType: widgetChartTypeById.get(widget.id),
             color: widgetColorById.get(widget.id),
+            companyTimeZone,
             data,
             period,
             scenarios,
@@ -1008,12 +1078,13 @@ export function PeriodAnalysisDashboard({
       ),
     [
       data,
+      companyTimeZone,
       period,
       scenarios,
       scopeOptions,
       widgetChartTypeById,
       widgetColorById,
-      widgets,
+      queryWidgets,
     ],
   );
   const layoutCards = widgets.map((widget) => {
@@ -1038,8 +1109,7 @@ export function PeriodAnalysisDashboard({
         "target_progress",
         "totals_table",
       ].includes(widget.kind),
-      colorPreview:
-        widget.kind === "heatmap" ? ("gradient" as const) : undefined,
+      colorPreview: widget.kind === "heatmap" ? ("gradient" as const) : undefined,
       defaultHeight: short
         ? ("short" as const)
         : tall
@@ -1057,9 +1127,14 @@ export function PeriodAnalysisDashboard({
       node: (
         <PeriodAnalysisCard
           canConfigure={canEditVisual}
-          effectiveGranularity={periodAnalysisEffectiveGranularity(widget)}
+          effectiveGranularity={
+            modelByWidgetId.get(widget.id)?.appliedGranularity ??
+            periodAnalysisEffectiveGranularity(widget, period)
+          }
           loading={loadingData || loadingScenarios}
-          model={modelByWidgetId.get(widget.id)!}
+          model={
+            modelByWidgetId.get(widget.id) ?? deferredAnalysisWidgetModel(widget)
+          }
           monitorMode={monitorMode}
           onEdit={() => openEditWidget(widget)}
           onRemove={() => removeWidget(widget.id)}
@@ -1078,7 +1153,9 @@ export function PeriodAnalysisDashboard({
             ? "row-span-1"
             : undefined,
       zoomEnabled:
-        widget.kind !== "summary" && widget.kind !== "totals_table" && !compact,
+        widget.kind !== "summary" &&
+        widget.kind !== "totals_table" &&
+        !compact,
     };
   });
   const visibleWidgetIds = new Set(
@@ -1123,9 +1200,7 @@ export function PeriodAnalysisDashboard({
       normalizedSettings.to,
     );
     if (!nextPeriod) {
-      toast.error(
-        "Informe um período válido, com a data inicial antes da final.",
-      );
+      toast.error("Informe um período válido, com a data inicial antes da final.");
       return;
     }
 
@@ -1136,7 +1211,7 @@ export function PeriodAnalysisDashboard({
         "O período será aplicado, mas não pôde ser salvo neste navegador.",
       );
     }
-    requestRef.current?.abort();
+    if (requestRef.current) abortRequest(requestRef.current);
     requestRef.current = null;
     hasLoadedDataRef.current = false;
     setDataLoadError("");
@@ -1196,9 +1271,9 @@ export function PeriodAnalysisDashboard({
             ? "hour"
             : kind === "year_monthly" || kind === "year_accumulated"
               ? "month"
-              : kind === "timeline" || kind === "comparison"
-                ? current.granularity
-                : "day",
+            : kind === "timeline" || kind === "comparison"
+              ? current.granularity
+              : "day",
         kind,
         scopeMode: widgetSupportsScopeMode(kind)
           ? current.scopeMode
@@ -1246,7 +1321,9 @@ export function PeriodAnalysisDashboard({
   }
 
   function removeWidget(widgetId: string) {
-    setWidgets(deletePeriodAnalysisWidget(widgetId, companyScopeId, user?.id));
+    setWidgets(
+      deletePeriodAnalysisWidget(widgetId, companyScopeId, user?.id),
+    );
     toast.success("Widget removido.");
   }
 
@@ -1258,9 +1335,7 @@ export function PeriodAnalysisDashboard({
       snapshot: preset.snapshot,
     });
     if (!imported.widgets.length) {
-      toast.error(
-        "A visão escolhida não possui widgets compatíveis com Análises.",
-      );
+      toast.error("A visão escolhida não possui widgets compatíveis com Análises.");
       return false;
     }
 
@@ -1320,7 +1395,18 @@ export function PeriodAnalysisDashboard({
           <div className="flex flex-wrap items-center gap-2">
             {autoRefreshEnabled ? (
               <Badge variant="outline" className="bg-card">
-                Atualização 5 s
+                Atualização {analysisRangePlan.refreshIntervalMs / 1_000} s
+              </Badge>
+            ) : null}
+            {analysisRangePlan.mode === "consolidated" ? (
+              <Badge variant="secondary" className="bg-card">
+                Consolidação automática ativa
+              </Badge>
+            ) : null}
+            {analysisRangePlan.mode === "consolidated" &&
+            hourlyDetailRequested ? (
+              <Badge variant="outline" className="bg-card">
+                Detalhe horário · últimos {hourlyDetailDayCount} dias
               </Badge>
             ) : null}
             {lastUpdated ? (
@@ -1352,6 +1438,26 @@ export function PeriodAnalysisDashboard({
                 }}
               />
             </div>
+
+            {analysisRangePlan.mode === "consolidated" ? (
+              <Badge
+                variant="secondary"
+                className="shrink-0 whitespace-nowrap"
+                title="A resolução visual é ajustada automaticamente; os totais continuam usando todo o intervalo."
+              >
+                Consolidação automática ativa
+              </Badge>
+            ) : null}
+            {analysisRangePlan.mode === "consolidated" &&
+            hourlyDetailRequested ? (
+              <Badge
+                variant="outline"
+                className="shrink-0 whitespace-nowrap"
+                title="Somente widgets estritamente horários usam esta janela; consolidados usam todo o intervalo."
+              >
+                Detalhe horário · últimos {hourlyDetailDayCount} dias
+              </Badge>
+            ) : null}
 
             <div
               aria-label="Ações da análise de Contagem"
@@ -1482,8 +1588,8 @@ function PeriodAnalysisCard({
   return (
     <Card className="h-full min-w-0 overflow-hidden">
       <CardHeader className={cn("pb-2", compactContent && "p-3 pb-1.5")}>
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div className="min-w-0 flex-1">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1">
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <Icon className="h-4 w-4 shrink-0 text-primary" />
               <span className="min-w-0 break-words leading-5">
@@ -1491,15 +1597,13 @@ function PeriodAnalysisCard({
               </span>
             </CardTitle>
             <CardDescription
-              className={cn(
-                compactContent ? "mt-0.5 text-xs leading-4" : "mt-1",
-              )}
+              className={cn(compactContent ? "mt-0.5 text-xs leading-4" : "mt-1")}
             >
               {model.description}
             </CardDescription>
           </div>
-          <div className="flex shrink-0 items-center justify-end gap-0.5">
-            {canConfigure && !monitorMode ? (
+          {canConfigure && !monitorMode ? (
+            <WidgetCardActions label={`Ações do widget ${widget.title}`}>
               <>
                 <Button
                   type="button"
@@ -1524,75 +1628,72 @@ function PeriodAnalysisCard({
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </>
-            ) : null}
-          </div>
-        </div>
-        {!compactWidget ? (
-          <div className="min-w-0 pt-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <Badge
-                variant="outline"
-                className="max-w-full truncate"
-                title={scenarioSummary}
-              >
-                {scenarioSummary}
+            </WidgetCardActions>
+          ) : null}
+        {!compactWidget ? <div className="col-span-full min-w-0 pt-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <Badge
+              variant="outline"
+              className="max-w-full truncate"
+              title={scenarioSummary}
+            >
+              {scenarioSummary}
+            </Badge>
+            {(widget.kind === "timeline" ||
+              widget.kind === "comparison" ||
+              widget.kind === "hourly_occupancy") && (
+              <Badge variant="outline">
+                {analysisGranularityLabel(effectiveGranularity)}
               </Badge>
-              {(widget.kind === "timeline" ||
-                widget.kind === "comparison" ||
-                widget.kind === "hourly_occupancy") && (
-                <Badge variant="outline">
-                  {analysisGranularityLabel(effectiveGranularity)}
-                </Badge>
-              )}
-              {widget.kind === "hourly_occupancy" ? (
-                <Badge variant="outline">
-                  Início {formatOccupancyStartHour(widget.startHour)}
-                </Badge>
-              ) : null}
-              {widget.kind === "cumulative" ||
+            )}
+            {widget.kind === "hourly_occupancy" ? (
+              <Badge variant="outline">
+                Início {formatOccupancyStartHour(widget.startHour)}
+              </Badge>
+            ) : null}
+            {(widget.kind === "cumulative" ||
               widget.kind === "cumulative_metric" ||
               widget.kind === "daily_comparison" ||
-              widget.kind === "target_progress" ? (
-                <Badge variant="outline">
-                  {periodAnalysisBaselineLabel(widget.baseline)}
-                </Badge>
-              ) : null}
-              {model.insights?.map((insight) => (
-                <Badge
-                  key={`${insight.label}-${insight.value}`}
-                  variant={insight.tone === "primary" ? "secondary" : "outline"}
-                  className={cn(
-                    "max-w-full gap-1 tabular-nums",
-                    insight.tone === "primary" && "bg-primary/10 text-primary",
-                    insight.tone === "muted" && "text-muted-foreground",
-                    insight.tone === "positive" &&
-                      "border-emerald-600/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-                    insight.tone === "negative" &&
-                      "border-orange-600/25 bg-orange-500/10 text-orange-700 dark:text-orange-300",
-                  )}
-                  title={`${insight.label}: ${insight.value}`}
-                >
-                  <span className="font-normal opacity-75">
-                    {insight.label}
-                  </span>
-                  <span className="truncate font-semibold">
-                    {insight.value}
-                  </span>
-                </Badge>
-              ))}
-            </div>
+              widget.kind === "target_progress") ? (
+              <Badge variant="outline">
+                {periodAnalysisBaselineLabel(widget.baseline)}
+              </Badge>
+            ) : null}
+            {model.insights?.map((insight) => (
+              <Badge
+                key={`${insight.label}-${insight.value}`}
+                variant={insight.tone === "primary" ? "secondary" : "outline"}
+                className={cn(
+                  "max-w-full gap-1 tabular-nums",
+                  insight.tone === "primary" && "bg-primary/10 text-primary",
+                  insight.tone === "muted" && "text-muted-foreground",
+                  insight.tone === "positive" &&
+                    "border-emerald-600/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                  insight.tone === "negative" &&
+                    "border-orange-600/25 bg-orange-500/10 text-orange-700 dark:text-orange-300",
+                )}
+                title={`${insight.label}: ${insight.value}`}
+              >
+                <span className="font-normal opacity-75">{insight.label}</span>
+                <span className="truncate font-semibold">{insight.value}</span>
+              </Badge>
+            ))}
           </div>
-        ) : null}
+        </div> : null}
+        </div>
       </CardHeader>
       <CardContent
-        className={cn("min-h-0 min-w-0 flex-1", compactContent && "px-3 pb-3")}
+        className={cn(
+          "min-h-0 min-w-0 flex-1",
+          compactContent && "px-3 pb-3",
+        )}
       >
         {loading ? (
           <Skeleton className="h-full min-h-[160px] w-full" />
         ) : model.error ? (
           <EmptyState text={model.error} />
-        ) : model.displayTable && model.table ? (
-          <AnalysisTable table={model.table} />
+        ) : model.displayTable && (model.displayTableData || model.table) ? (
+          <AnalysisTable table={model.displayTableData ?? model.table!} />
         ) : model.metrics ? (
           <MetricGrid compact={compactContent} metrics={model.metrics} />
         ) : model.hasData && model.option ? (
@@ -1618,7 +1719,9 @@ function MetricGrid({
     <div
       className={cn(
         "grid gap-px overflow-hidden rounded-md border bg-border",
-        metrics.length === 1 ? "grid-cols-1" : "grid-cols-2 sm:grid-cols-4",
+        metrics.length === 1
+          ? "grid-cols-1"
+          : "grid-cols-2 sm:grid-cols-4",
       )}
     >
       {metrics.map((metric) => (
@@ -1688,11 +1791,7 @@ function AnalysisTable({
           {table.rows.map((row, rowIndex) => (
             <tr
               key={`${String(row[table.columns[0]?.key] ?? rowIndex)}-${rowIndex}`}
-              className={cn(
-                rowIndex === 0
-                  ? "bg-primary/5 font-semibold"
-                  : "odd:bg-muted/25",
-              )}
+              className={cn(rowIndex === 0 ? "bg-primary/5 font-semibold" : "odd:bg-muted/25")}
             >
               {table.columns.map((column) => {
                 const value = row[column.key];
@@ -1964,9 +2063,7 @@ function WidgetDialog({
                     <Button
                       type="button"
                       size="sm"
-                      variant={
-                        form.selectionMode === "all" ? "default" : "outline"
-                      }
+                      variant={form.selectionMode === "all" ? "default" : "outline"}
                       onClick={() =>
                         onFormChange((current) => ({
                           ...current,
@@ -1979,9 +2076,7 @@ function WidgetDialog({
                     <Button
                       type="button"
                       size="sm"
-                      variant={
-                        form.selectionMode === "custom" ? "default" : "outline"
-                      }
+                      variant={form.selectionMode === "custom" ? "default" : "outline"}
                       onClick={() =>
                         onFormChange((current) => ({
                           ...current,
@@ -2007,8 +2102,7 @@ function WidgetDialog({
                         ...current,
                         entryScenarioIds,
                         exitScenarioIds: current.exitScenarioIds.filter(
-                          (scenarioId) =>
-                            !entryScenarioIds.includes(scenarioId),
+                          (scenarioId) => !entryScenarioIds.includes(scenarioId),
                         ),
                       }))
                     }
@@ -2072,11 +2166,7 @@ function WidgetDialog({
         </div>
 
         <DialogFooter>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-          >
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             Cancelar
           </Button>
           <Button
@@ -2227,7 +2317,8 @@ function composePeriodAnalysisReport({
       if (title === defaultTitle) return metrics;
       return metrics.map((metric) => ({
         ...metric,
-        label: metrics.length === 1 ? title : `${title} · ${metric.label}`,
+        label:
+          metrics.length === 1 ? title : `${title} · ${metric.label}`,
       }));
     }),
     subtitle: formatPeriodAnalysisRange(period),
@@ -2245,6 +2336,16 @@ function composePeriodAnalysisReport({
   };
 }
 
+function periodAnalysisDataCompleteUntil(
+  period: PeriodAnalysisRange,
+  now: Date,
+) {
+  const inclusiveEnd = new Date(period.to.getTime() - 1);
+  return now >= period.from && now < period.to
+    ? new Date(Math.min(now.getTime(), inclusiveEnd.getTime()))
+    : inclusiveEnd;
+}
+
 async function fetchAnalysisSubLocations(
   locations: Location[],
   companyScopeId?: string | null,
@@ -2253,10 +2354,13 @@ async function fetchAnalysisSubLocations(
   const expectedCompanyId = companyScopeId?.trim() || undefined;
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<unknown>(`/locations/${location.id}/sub-locations`, {
-        companyScopeId: expectedCompanyId,
-        signal,
-      }).then((value) => requireSubLocationRows(value, expectedCompanyId)),
+      apiFetch<unknown>(
+        `/locations/${location.id}/sub-locations`,
+        {
+          companyScopeId: expectedCompanyId,
+          signal,
+        },
+      ).then((value) => requireSubLocationRows(value, expectedCompanyId)),
     ),
   );
 
@@ -2295,7 +2399,7 @@ async function fetchAnalysisDataset(
       ),
     };
   } catch (error) {
-    if (signal?.aborted) throw error;
+    if (isAbortError(error, signal)) throw error;
     return {
       error:
         error instanceof Error
@@ -2307,47 +2411,184 @@ async function fetchAnalysisDataset(
   }
 }
 
-function periodAnalysisDataCompleteUntil(
-  period: PeriodAnalysisRange,
-  now: Date,
-) {
-  const inclusiveEnd = new Date(period.to.getTime() - 1);
-  return now >= period.from && now < period.to
-    ? new Date(Math.min(now.getTime(), inclusiveEnd.getTime()))
-    : inclusiveEnd;
+async function fetchAnalysisConsolidatedDayDataset(
+  range: PeriodAnalysisRange,
+  companyScopeId?: string | null,
+  signal?: AbortSignal,
+  cacheOptions?: {
+    cache: AnalysisDayCache;
+    cacheScope: string;
+    revision: string;
+  },
+): Promise<PeriodAnalysisDataset> {
+  const { fullDays, partialDays } = splitAnalysisRangeAtDayBoundaries(range);
+  const fullDaysPromise = fullDays
+    ? fetchCachedAnalysisDayDataset(
+        fullDays,
+        companyScopeId,
+        signal,
+        cacheOptions,
+      )
+    : Promise.resolve(emptyDataset("day"));
+  const partialDayPromises = partialDays.map(async (partialRange) => {
+    const hourly = await fetchAnalysisExactHourlyDataset(
+      partialRange,
+      companyScopeId,
+      signal,
+    );
+    return rollupAnalysisDataset(hourly, "day", partialRange);
+  });
+  const [closedDays, edgeDays] = await Promise.all([
+    fullDaysPromise,
+    Promise.all(partialDayPromises),
+  ]);
+  const error =
+    closedDays.error || edgeDays.find((dataset) => dataset.error)?.error;
+
+  return {
+    ...(error ? { error } : {}),
+    granularity: "day",
+    partialBoundariesReconciled: partialDays.length > 0,
+    rows: error
+      ? []
+      : [closedDays, ...edgeDays].flatMap((dataset) => dataset.rows),
+  };
 }
 
-async function fetchAnalysisHourlyDatasets(
-  ranges: PeriodAnalysisRange[],
-  cache: HourlyAggregateCache,
-  cacheScope: string,
-  now: Date,
+async function fetchCachedAnalysisDayDataset(
+  range: PeriodAnalysisRange,
+  companyScopeId?: string | null,
+  signal?: AbortSignal,
+  cacheOptions?: {
+    cache: AnalysisDayCache;
+    cacheScope: string;
+    revision: string;
+  },
+) {
+  const key = cacheOptions
+    ? JSON.stringify([
+        cacheOptions.cacheScope,
+        range.from.toISOString(),
+        range.to.toISOString(),
+      ])
+    : "";
+  const cached = key ? cacheOptions?.cache.get(key) : undefined;
+  if (cached && cacheOptions && cached.revision === cacheOptions.revision) {
+    // Refresh insertion order so the bounded Map behaves as an LRU cache.
+    cacheOptions.cache.delete(key);
+    cacheOptions.cache.set(key, cached);
+    return cached.dataset;
+  }
+
+  const dataset = await fetchAnalysisDataset(
+    "day",
+    range,
+    companyScopeId,
+    signal,
+  );
+  signal?.throwIfAborted();
+  if (key && cacheOptions && !dataset.error) {
+    setAnalysisDayCacheEntry(cacheOptions.cache, key, {
+      dataset,
+      revision: cacheOptions.revision,
+    });
+  }
+  return dataset;
+}
+
+function setAnalysisDayCacheEntry(
+  cache: AnalysisDayCache,
+  key: string,
+  entry: AnalysisDayCacheEntry,
+) {
+  cache.delete(key);
+  cache.set(key, entry);
+
+  while (cache.size > MAX_ANALYSIS_DAY_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
+async function fetchAnalysisExactHourlyDataset(
+  range: PeriodAnalysisRange,
   companyScopeId?: string | null,
   signal?: AbortSignal,
 ): Promise<PeriodAnalysisDataset> {
-  try {
-    return {
-      granularity: "hour",
-      rows: await fetchHourlyAggregateRanges({
-        cache,
-        cacheScope,
-        companyScopeId: companyScopeId?.trim() || undefined,
-        now,
-        ranges,
+  const fullHours = alignedAnalysisHourRange(range);
+  const hourlyPromise = fullHours
+    ? fetchAnalysisDataset("hour", fullHours, companyScopeId, signal)
+    : Promise.resolve(emptyDataset("hour"));
+  const boundaryPromise = Promise.all(
+    analysisPartialHourRanges(range).map(async (partialRange) => ({
+      dataset: await fetchAnalysisDataset(
+        "minute",
+        partialRange,
+        companyScopeId,
         signal,
-      }),
-    };
-  } catch (error) {
-    if (signal?.aborted) throw error;
+      ),
+      range: partialRange,
+    })),
+  );
+
+  const [hourly, boundaries] = await Promise.all([
+    hourlyPromise,
+    boundaryPromise,
+  ]);
+  return reconcileAnalysisHourlyBoundaries(hourly, boundaries);
+}
+
+function splitAnalysisRangeAtDayBoundaries(range: PeriodAnalysisRange) {
+  const fromDay = startOfAggregateBucket(range.from, "day");
+  const toDay = startOfAggregateBucket(range.to, "day");
+  const fullFrom =
+    fromDay.getTime() === range.from.getTime()
+      ? range.from
+      : addDays(fromDay, 1);
+  const fullTo = toDay;
+
+  if (fullFrom >= fullTo) {
     return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar a base horária da análise.",
-      granularity: "hour",
-      rows: [],
+      fullDays: null,
+      partialDays: [{ from: range.from, to: range.to }],
     };
   }
+
+  const partialDays: PeriodAnalysisRange[] = [];
+  if (range.from < fullFrom) {
+    partialDays.push({ from: range.from, to: fullFrom });
+  }
+  if (fullTo < range.to) {
+    partialDays.push({ from: fullTo, to: range.to });
+  }
+
+  return {
+    fullDays: { from: fullFrom, to: fullTo },
+    partialDays,
+  };
+}
+
+function alignedAnalysisHourRange(
+  range: PeriodAnalysisRange,
+): PeriodAnalysisRange | null {
+  const fromHour = startOfHour(range.from);
+  const from =
+    fromHour.getTime() === range.from.getTime()
+      ? range.from
+      : endOfAggregateBucket(fromHour, "hour");
+  const to = startOfHour(range.to);
+  return from < to ? { from, to } : null;
+}
+
+function sameAnalysisRange(
+  left: PeriodAnalysisRange,
+  right: PeriodAnalysisRange,
+) {
+  return (
+    left.from.getTime() === right.from.getTime() &&
+    left.to.getTime() === right.to.getTime()
+  );
 }
 
 function fetchAnalysisAggregate(
@@ -2372,6 +2613,39 @@ function fetchAnalysisAggregate(
   );
 }
 
+async function fetchAnalysisHourlyDatasets(
+  ranges: PeriodAnalysisRange[],
+  cache: HourlyAggregateCache,
+  cacheScope: string,
+  now: Date,
+  companyScopeId?: string | null,
+  signal?: AbortSignal,
+): Promise<PeriodAnalysisDataset> {
+  try {
+    return {
+      granularity: "hour",
+      rows: await fetchBoundedHourlyAggregateRanges({
+        cache,
+        cacheScope,
+        companyScopeId: companyScopeId?.trim() || undefined,
+        now,
+        ranges,
+        signal,
+      }),
+    };
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
+    return {
+      error:
+        error instanceof Error
+          ? error.message
+          : "Não foi possível carregar a base horária da análise.",
+      granularity: "hour",
+      rows: [],
+    };
+  }
+}
+
 function rollupAnalysisDataset(
   hourly: PeriodAnalysisDataset,
   targetGranularity: "day" | "month",
@@ -2393,33 +2667,6 @@ function rollupAnalysisDataset(
       targetGranularity,
       range.from,
       range.to,
-    ),
-  };
-}
-
-function sliceAnalysisHourlyDataset(
-  dataset: PeriodAnalysisDataset,
-  range: PeriodAnalysisRange,
-): PeriodAnalysisDataset {
-  if (dataset.error) {
-    return {
-      error: dataset.error,
-      granularity: "hour",
-      rows: [],
-    };
-  }
-  if (dataset.granularity !== "hour") {
-    return {
-      error: "A fonte canônica da análise não possui granularidade horária.",
-      granularity: "hour",
-      rows: [],
-    };
-  }
-
-  return {
-    granularity: "hour",
-    rows: dataset.rows.filter((row) =>
-      aggregateBucketInRange(row.bucket, "hour", range.from, range.to),
     ),
   };
 }
@@ -2648,7 +2895,10 @@ function reconcileAnalysisHourlyBoundaries(
   }
 }
 
-function analysisCurrentMinuteRange(ranges: PeriodAnalysisRange[], now: Date) {
+function analysisCurrentMinuteRange(
+  ranges: PeriodAnalysisRange[],
+  now: Date,
+) {
   const from = startOfHour(now);
   const to = new Date(
     Math.min(
@@ -2678,6 +2928,17 @@ function emptyData(): PeriodAnalysisData {
   };
 }
 
+function deferredAnalysisWidgetModel(
+  widget: PeriodAnalysisWidget,
+): PeriodAnalysisWidgetModel {
+  return {
+    description: "Widget oculto; o processamento será retomado ao exibi-lo.",
+    emptyText: "Widget oculto.",
+    hasData: false,
+    height: widget.kind === "heatmap" ? 500 : 320,
+  };
+}
+
 function emptyDataset(
   granularity: AggregateGranularity,
 ): PeriodAnalysisDataset {
@@ -2685,9 +2946,7 @@ function emptyDataset(
 }
 
 function startOfMinute(date: Date) {
-  const next = new Date(date);
-  next.setSeconds(0, 0);
-  return next;
+  return startOfAggregateBucket(date, "minute");
 }
 
 function startOfHour(date: Date) {
@@ -2713,6 +2972,20 @@ function addDays(date: Date, amount: number) {
     isDayBoundary ? 0 : date.getMinutes(),
     isDayBoundary ? 0 : date.getSeconds(),
     isDayBoundary ? 0 : date.getMilliseconds(),
+  );
+}
+
+function periodAnalysisComparisonSeriesCount(
+  widget: PeriodAnalysisWidget,
+  scenarios: Scenario[],
+) {
+  if (widget.scopeMode !== "scenario") return 1;
+  if (widget.selectionMode === "all") return Math.max(1, scenarios.length);
+
+  const availableIds = new Set(scenarios.map((scenario) => scenario.id));
+  return Math.max(
+    1,
+    new Set(widget.scenarioIds.filter((id) => availableIds.has(id))).size,
   );
 }
 

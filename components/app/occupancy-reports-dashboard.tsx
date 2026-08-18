@@ -64,15 +64,20 @@ import {
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
-  listClosedOccupancyBucketsWithinRange,
   loadOccupancyAnalysisDateRange,
   normalizeOccupancyAnalysisDateRangeInput,
-  occupancyAnalysisClosedBucketCutoff,
   occupancyAnalysisDatasetKey,
   resolveOccupancyAnalysisRange,
   saveOccupancyAnalysisDateRange,
   type ResolvedOccupancyAnalysisRange,
 } from "@/lib/occupancy-analysis-window";
+import {
+  buildOccupancyAnalysisResolutionPlan,
+  occupancyAnalysisClosedSegmentRevision,
+  type OccupancyAnalysisResolutionGranularity,
+  type OccupancyAnalysisResolutionPlan,
+  type OccupancyAnalysisResolutionSegment,
+} from "@/lib/occupancy-analysis-resolution";
 import {
   CAMERA_GROUPS_UPDATED_EVENT,
   type CameraGroup,
@@ -94,8 +99,11 @@ import {
 } from "@/lib/master-company-scope";
 import {
   companyDateKey,
+  endOfCompanyTimeZoneHour,
   requireCertifiedRuntimeCompanyTimeZone,
   requireRuntimeCompanyTimeZone,
+  startOfCompanyTimeZoneDay,
+  startOfCompanyTimeZoneHour,
 } from "@/lib/company-time-zone";
 import {
   aggregateOccupancyRowsForRequestedBuckets,
@@ -168,6 +176,16 @@ type OccupancyReportDefinition = {
   >;
   from: Date;
   openBucket?: Date;
+  querySegments?: OccupancyReportQuerySegment[];
+  resolutionLabel?: string;
+  to: Date;
+};
+
+type OccupancyReportQuerySegment = {
+  bucketStarts: Date[];
+  from: Date;
+  granularity: OccupancyReportDefinition["granularity"];
+  openBucket?: Date;
   to: Date;
 };
 
@@ -225,6 +243,7 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 const BUCKET_CONCURRENCY = 8;
+const MAX_CLOSED_SEGMENT_CACHE_ENTRIES = 256;
 const REPORT_REFRESH_MS = 60_000;
 const DEFAULT_OBJECT_CLASS = "person";
 const EMPTY_OCCUPANCY_REPORT_DATA: Record<string, OccupancyReportState> = {};
@@ -315,6 +334,9 @@ export function OccupancyReportsDashboard({
   const metadataRequestSequenceRef = React.useRef(0);
   const chartRequestSequenceRef = React.useRef(0);
   const chartAbortControllerRef = React.useRef<AbortController | null>(null);
+  const closedSegmentCacheRef = React.useRef(
+    new Map<string, OccupancyReportState>(),
+  );
 
   const companyTodayInput = React.useMemo(
     () => companyDateKey(clock, companyTimeZone),
@@ -339,8 +361,9 @@ export function OccupancyReportsDashboard({
         analysisIncludesToday ? clock : undefined,
         analysis,
         analysis ? reportRange : undefined,
+        companyTimeZone,
       ),
-    [analysis, analysisIncludesToday, clock, reportRange],
+    [analysis, analysisIncludesToday, clock, companyTimeZone, reportRange],
   );
   const availableModes = React.useMemo(
     () => buildAvailableScopeModes(scenarios),
@@ -503,6 +526,7 @@ export function OccupancyReportsDashboard({
     async (
       scope: OccupancyReportScope,
       silent = false,
+      forceClosedRefresh = false,
     ): Promise<void> => {
       const requestScopeKey = occupancyAnalysisDatasetKey({
         analysis,
@@ -515,6 +539,8 @@ export function OccupancyReportsDashboard({
         timeZone: companyTimeZone,
       });
       if (requestScopeKey !== requestedChartScopeKeyRef.current) return;
+
+      if (forceClosedRefresh) closedSegmentCacheRef.current.clear();
 
       if (silent) setRefreshing(true);
       else setLoadingCharts(true);
@@ -539,6 +565,7 @@ export function OccupancyReportsDashboard({
           usesLiveDay ? now : undefined,
           analysis,
           analysis ? currentRange : undefined,
+          companyTimeZone,
         );
         const definitionsWindowKey = occupancyReportDefinitionsWindowKey(
           currentDefinitions,
@@ -564,6 +591,7 @@ export function OccupancyReportsDashboard({
                       now,
                       companyTimeZoneResolution.warning,
                       controller.signal,
+                      closedSegmentCacheRef.current,
                     );
                     return [definition.id, state] as const;
                   } catch (error) {
@@ -635,6 +663,7 @@ export function OccupancyReportsDashboard({
                 latestUsesLiveDay ? latestNow : undefined,
                 analysis,
                 analysis ? latestRange : undefined,
+                companyTimeZone,
               ),
             );
           if (definitionsWindowKey !== latestDefinitionsWindowKey) {
@@ -717,7 +746,7 @@ export function OccupancyReportsDashboard({
   const retryOccupancyData = React.useCallback(() => {
     void loadScopes();
     if (selectedScope) {
-      void loadCharts(selectedScope, true);
+      void loadCharts(selectedScope, true, true);
     }
   }, [loadCharts, loadScopes, selectedScope]);
 
@@ -729,6 +758,7 @@ export function OccupancyReportsDashboard({
     chartRequestSequenceRef.current += 1;
     chartAbortControllerRef.current?.abort();
     chartAbortControllerRef.current = null;
+    closedSegmentCacheRef.current.clear();
     const settings = loadLiveDashboardSettings(companyScopeId);
     setMetadataError("");
     setChartLoadError("");
@@ -1548,7 +1578,7 @@ export function OccupancyReportsDashboard({
                 size={analysis ? "icon" : "default"}
                 className={cn(analysis && "h-8 w-8")}
                 onClick={() => {
-                  if (selectedScope) loadCharts(selectedScope, true);
+                  if (selectedScope) loadCharts(selectedScope, true, true);
                   loadScopes();
                 }}
                 disabled={refreshing || chartsPending}
@@ -1813,9 +1843,16 @@ function OccupancyReportChartCard({
               {definition.description}
             </CardDescription>
           </div>
-          <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
-            {scopeName}
-          </Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            {definition.resolutionLabel ? (
+              <Badge variant="secondary" className="w-fit">
+                {definition.resolutionLabel}
+              </Badge>
+            ) : null}
+            <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
+              {scopeName}
+            </Badge>
+          </div>
         </div>
         {showPreviousPeriod && !previousState?.error && !previousState?.warning ? (
           <div className="rounded-md border border-primary/20 bg-primary/10 px-3 py-2 text-xs text-primary">
@@ -1987,34 +2024,25 @@ function buildOccupancyReportDefinitions(
   openAt: Date | undefined = reference,
   analysis = false,
   analysisRange?: ResolvedOccupancyAnalysisRange,
+  companyTimeZone = "America/Sao_Paulo",
 ): OccupancyReportDefinition[] {
-  const todayStart = startOfDay(reference);
+  const todayStart = startOfCompanyTimeZoneDay(reference, companyTimeZone);
   const dayEnd = addDays(todayStart, 1);
   const minuteEnd = openAt
     ? addMinutes(startOfMinute(reference), 1)
     : dayEnd;
   const hourEnd = openAt
-    ? endOfAggregateBucket(startOfHour(reference), "hour")
+    ? endOfCompanyTimeZoneHour(reference, companyTimeZone)
     : dayEnd;
   const currentWeekStart = startOfWeek(reference);
   const currentMonthStart = startOfMonth(reference);
   const rangeFrom = analysisRange?.from ?? todayStart;
   const rangeTo = analysisRange?.to ?? dayEnd;
-  const closedRangeTo = analysisRange
-    ? occupancyAnalysisClosedBucketCutoff(analysisRange)
-    : rangeTo;
-  const closedWeekStarts = analysisRange
-    ? listClosedOccupancyBucketsWithinRange(
+  const analysisResolutionPlan = analysisRange
+    ? buildOccupancyAnalysisResolutionPlan(
         rangeFrom,
-        closedRangeTo,
-        "week",
-      )
-    : null;
-  const closedMonthStarts = analysisRange
-    ? listClosedOccupancyBucketsWithinRange(
-        rangeFrom,
-        closedRangeTo,
-        "month",
+        rangeTo,
+        analysisRange.dayCount,
       )
     : null;
 
@@ -2027,9 +2055,21 @@ function buildOccupancyReportDefinitions(
 
     return {
       ...definition,
-      openBucket: alignToGranularity(openAt, definition.granularity),
+      openBucket:
+        definition.granularity === "hour"
+          ? startOfCompanyTimeZoneHour(openAt, companyTimeZone)
+          : alignToGranularity(openAt, definition.granularity),
     };
   };
+
+  const analysisQuerySegments = analysisResolutionPlan
+    ? analysisResolutionPlan.segments.flatMap((segment) =>
+        occupancyReportQuerySegments(segment, openAt),
+      )
+    : undefined;
+  const analysisResolutionLabel = analysisResolutionPlan
+    ? occupancyAnalysisResolutionLabel(analysisResolutionPlan)
+    : undefined;
 
   const definitions: Array<OccupancyReportDefinition | null> = [
     withOpenBucket({
@@ -2058,26 +2098,34 @@ function buildOccupancyReportDefinitions(
       from: todayStart,
       to: hourEnd,
     }),
-    withOpenBucket({
-      id: "occupancy_report_day",
-      label: "Dia a dia",
-      description: analysis
-        ? `Intervalo selecionado completo (${analysisRange?.dayCount ?? 1} ${
-            (analysisRange?.dayCount ?? 1) === 1 ? "dia" : "dias"
-          }); somente hoje pode permanecer parcial.`
-        : "Últimos 7 dias.",
-      granularity: "day",
-      from: analysisRange?.from ?? addDays(todayStart, -6),
-      to: analysisRange?.to ?? addDays(todayStart, 1),
-    }),
+    analysisRange && analysisResolutionPlan && analysisQuerySegments
+      ? {
+          id: "occupancy_report_day",
+          label:
+            analysisResolutionPlan.primaryGranularity === "day"
+              ? "Dia a dia"
+              : "Evolução consolidada",
+          description: `${analysisResolutionDescription(
+            analysisResolutionPlan.primaryGranularity,
+          )} O intervalo contém ${analysisRange.dayCount} ${
+            analysisRange.dayCount === 1 ? "dia" : "dias"
+          }; somente o dia atual pode permanecer parcial.`,
+          granularity: analysisResolutionPlan.primaryGranularity,
+          from: analysisRange.from,
+          querySegments: analysisQuerySegments,
+          resolutionLabel: analysisResolutionLabel,
+          to: analysisRange.to,
+        }
+      : withOpenBucket({
+          id: "occupancy_report_day",
+          label: "Dia a dia",
+          description: "Últimos 7 dias.",
+          granularity: "day",
+          from: addDays(todayStart, -6),
+          to: addDays(todayStart, 1),
+        }),
     analysisRange
-      ? buildClosedRangeDefinition(
-          "occupancy_report_week",
-          "Semana a semana",
-          "Semanas civis completas integralmente contidas no intervalo; semanas parciais são excluídas, não zeradas.",
-          "week",
-          closedWeekStarts ?? [],
-        )
+      ? null
       : withOpenBucket({
           id: "occupancy_report_week",
           label: "Semana a semana",
@@ -2087,13 +2135,7 @@ function buildOccupancyReportDefinitions(
           to: addDays(currentWeekStart, 7),
         }),
     analysisRange
-      ? buildClosedRangeDefinition(
-          "occupancy_report_month",
-          "Mês a mês",
-          "Meses civis completos integralmente contidos no intervalo; meses parciais são excluídos, não zerados.",
-          "month",
-          closedMonthStarts ?? [],
-        )
+      ? null
       : withOpenBucket({
           id: "occupancy_report_month",
           label: "Mês a mês",
@@ -2112,31 +2154,6 @@ function buildOccupancyReportDefinitions(
   );
 }
 
-function buildClosedRangeDefinition(
-  id: string,
-  label: string,
-  description: string,
-  granularity: "week" | "month",
-  bucketStarts: Date[],
-): OccupancyReportDefinition | null {
-  const first = bucketStarts[0];
-  const last = bucketStarts.at(-1);
-  if (!first || !last) return null;
-
-  return {
-    bucketStarts,
-    description,
-    from: new Date(first),
-    granularity,
-    id,
-    label,
-    to:
-      granularity === "week"
-        ? addDays(last, 7)
-        : addMonths(last, 1),
-  };
-}
-
 function occupancyReportDefinitionsWindowKey(
   definitions: OccupancyReportDefinition[],
 ) {
@@ -2146,9 +2163,58 @@ function occupancyReportDefinitionsWindowKey(
       definition.granularity,
       definition.from.getTime(),
       definition.openBucket?.getTime() ?? null,
+      definition.querySegments?.map((segment) => [
+        segment.granularity,
+        segment.from.getTime(),
+        segment.openBucket?.getTime() ?? null,
+        segment.to.getTime(),
+      ]) ?? null,
       definition.to.getTime(),
     ]),
   );
+}
+
+function occupancyReportQuerySegments(
+  segment: OccupancyAnalysisResolutionSegment,
+  openAt?: Date,
+): OccupancyReportQuerySegment[] {
+  const openBucket =
+    openAt && openAt >= segment.from && openAt < segment.to
+      ? alignToGranularity(openAt, segment.granularity)
+      : undefined;
+
+  return splitOpenQuerySegment({
+    bucketStarts: segment.bucketStarts.map((bucket) => new Date(bucket)),
+    from: new Date(segment.from),
+    granularity: segment.granularity,
+    openBucket,
+    to: new Date(segment.to),
+  });
+}
+
+function occupancyAnalysisResolutionLabel(
+  plan: OccupancyAnalysisResolutionPlan,
+) {
+  const unit = plan.pointCount === 1 ? "ponto" : "pontos";
+  if (plan.primaryGranularity === "day") {
+    return `Resolução diária · ${plan.pointCount} ${unit}`;
+  }
+  if (plan.primaryGranularity === "week") {
+    return `Semanas + bordas diárias · ${plan.pointCount} ${unit}`;
+  }
+  return `Meses + bordas diárias · ${plan.pointCount} ${unit}`;
+}
+
+function analysisResolutionDescription(
+  granularity: OccupancyAnalysisResolutionGranularity,
+) {
+  if (granularity === "day") {
+    return "Resolução diária automática, sem consolidação adicional.";
+  }
+  if (granularity === "week") {
+    return "Semanas civis completas são consolidadas pela API; as bordas do filtro permanecem diárias.";
+  }
+  return "Meses civis completos são consolidados pela API; as bordas do filtro permanecem diárias.";
 }
 
 function occupancyReportRefreshDelay(refreshMs: number) {
@@ -2171,93 +2237,149 @@ async function loadOccupancyReportState(
   requestedAt?: Date,
   companyTimeZoneWarning?: string,
   signal?: AbortSignal,
+  closedSegmentCache?: Map<string, OccupancyReportState>,
 ): Promise<OccupancyReportState> {
   const expectedTimeZone = requireRuntimeCompanyTimeZone(
     companyTimeZone ?? "America/Sao_Paulo",
   );
   if (scope.scenario) {
-    const response = await apiFetch<OccupancyScenarioAggregateResponse>(
-      occupancyScenarioAggregatePath(scope.scenario.id, definition),
-      { companyScopeId: companyScopeId ?? undefined, signal },
-    );
-    const rows = requireOccupancyAggregateRows(
-      response,
-      definition.granularity,
-      scope.scenario.id,
-      expectedTimeZone,
-      {
-        allowLegacyUncertifiedInstantBuckets: true,
-        openBucket: definition.openBucket,
-        requestedAt: definition.openBucket ? requestedAt : undefined,
-        requireCertification: true,
-      },
+    const segmentStates = await Promise.all(
+      listDefinitionQuerySegments(definition).map(async (segment) => {
+        const cacheKey = occupancyClosedSegmentCacheKey({
+          companyScopeId,
+          companyTimeZone: expectedTimeZone,
+          requestedAt: requestedAt ?? new Date(),
+          scope,
+          segment,
+        });
+        const cached = segment.openBucket
+          ? undefined
+          : closedSegmentCache?.get(cacheKey);
+        if (cached) return cached;
+
+        const segmentDefinition = definitionForQuerySegment(
+          definition,
+          segment,
+        );
+        const response = await apiFetch<OccupancyScenarioAggregateResponse>(
+          occupancyScenarioAggregatePath(scope.scenario!.id, segmentDefinition),
+          { companyScopeId: companyScopeId ?? undefined, signal },
+        );
+        const rows = requireOccupancyAggregateRows(
+          response,
+          segment.granularity,
+          scope.scenario!.id,
+          expectedTimeZone,
+          {
+            allowLegacyUncertifiedInstantBuckets: true,
+            openBucket: segment.openBucket,
+            requestedAt: segment.openBucket ? requestedAt : undefined,
+            requireCertification: true,
+          },
+        );
+
+        const state = {
+          ...buildScenarioPoints(
+            segmentDefinition,
+            rows,
+            joinOccupancyWarnings(
+              occupancyAggregateMetadataWarning(
+                response,
+                segment.granularity,
+              ),
+              companyTimeZoneWarning,
+            ),
+          ),
+          asOf: response.as_of!,
+        };
+        cacheCertifiedClosedSegment(
+          closedSegmentCache,
+          cacheKey,
+          segment,
+          state,
+        );
+        return state;
+      }),
     );
 
-    return {
-      ...buildScenarioPoints(
-      definition,
-      rows,
-      joinOccupancyWarnings(
-        occupancyAggregateMetadataWarning(response, definition.granularity),
-        companyTimeZoneWarning,
-      ),
-      ),
-      asOf: response.as_of!,
-    };
+    return mergeOccupancyReportSegmentStates(definition, segmentStates);
   }
 
-  const buckets = listBucketStarts(definition);
-  const pointsWithSource = await mapWithConcurrency(
-    buckets,
-    BUCKET_CONCURRENCY,
-    async (bucketStart) => {
-      const bucketEnd = addGranularity(bucketStart, definition.granularity);
-      const response = await apiFetch<unknown>(
-        occupancyPath(bucketStart, bucketEnd > definition.to ? definition.to : bucketEnd),
-        { companyScopeId: companyScopeId ?? undefined, signal },
-      );
-      const rows = requireOccupancySnapshotRows(response, {
-        expectedCameraIds: scope.cameraIds,
-        expectedObjectClass: DEFAULT_OBJECT_CLASS,
-        from: bucketStart,
-        to: bucketEnd > definition.to ? definition.to : bucketEnd,
+  const segmentStates = await Promise.all(
+    listDefinitionQuerySegments(definition).map(async (segment) => {
+      const cacheKey = occupancyClosedSegmentCacheKey({
+        companyScopeId,
+        companyTimeZone: expectedTimeZone,
+        requestedAt: requestedAt ?? new Date(),
+        scope,
+        segment,
       });
-      const metric = buildRowsMetric(rows);
-      const sourceAsOf = rows.reduce<string | undefined>((latest, row) => {
-        if (!row.current_at) return latest;
-        if (!latest) return row.current_at;
-        return Date.parse(row.current_at) > Date.parse(latest)
-          ? row.current_at
-          : latest;
-      }, undefined);
+      const cached = segment.openBucket
+        ? undefined
+        : closedSegmentCache?.get(cacheKey);
+      if (cached) return cached;
 
-      return {
-        point: {
-          bucket: bucketStart.toISOString(),
-          label: bucketLabel(bucketStart, definition.granularity),
-          ...metric,
+      const pointsWithSource = await mapWithConcurrency(
+        segment.bucketStarts,
+        BUCKET_CONCURRENCY,
+        async (bucketStart) => {
+          const bucketEnd = addGranularity(bucketStart, segment.granularity);
+          const requestTo = bucketEnd > segment.to ? segment.to : bucketEnd;
+          const response = await apiFetch<unknown>(
+            occupancyPath(bucketStart, requestTo),
+            { companyScopeId: companyScopeId ?? undefined, signal },
+          );
+          const rows = requireOccupancySnapshotRows(response, {
+            expectedCameraIds: scope.cameraIds,
+            expectedObjectClass: DEFAULT_OBJECT_CLASS,
+            from: bucketStart,
+            to: requestTo,
+          });
+          const metric = buildRowsMetric(rows);
+          const sourceAsOf = rows.reduce<string | undefined>((latest, row) => {
+            if (!row.current_at) return latest;
+            if (!latest) return row.current_at;
+            return Date.parse(row.current_at) > Date.parse(latest)
+              ? row.current_at
+              : latest;
+          }, undefined);
+
+          return {
+            point: {
+              bucket: bucketStart.toISOString(),
+              label: bucketLabel(bucketStart, segment.granularity),
+              ...metric,
+            },
+            sourceAsOf,
+          };
         },
-        sourceAsOf,
+      );
+      const asOf = pointsWithSource.reduce<string | undefined>(
+        (latest, point) => {
+          if (!point.sourceAsOf) return latest;
+          if (!latest) return point.sourceAsOf;
+          return Date.parse(point.sourceAsOf) > Date.parse(latest)
+            ? point.sourceAsOf
+            : latest;
+        },
+        undefined,
+      );
+      const state: OccupancyReportState = {
+        asOf,
+        points: pointsWithSource.map(({ point }) => point),
+        warning: companyTimeZoneWarning,
       };
-    },
+      cacheCertifiedClosedSegment(
+        closedSegmentCache,
+        cacheKey,
+        segment,
+        state,
+      );
+      return state;
+    }),
   );
-  const asOf = pointsWithSource.reduce<string | undefined>(
-    (latest, point) => {
-      if (!point.sourceAsOf) return latest;
-      if (!latest) return point.sourceAsOf;
-      return Date.parse(point.sourceAsOf) > Date.parse(latest)
-        ? point.sourceAsOf
-        : latest;
-    },
-    undefined,
-  );
-  const points = pointsWithSource.map(({ point }) => point);
 
-  return {
-    asOf,
-    points: occupancyReportDisplayPoints(definition, points),
-    warning: companyTimeZoneWarning,
-  };
+  return mergeOccupancyReportSegmentStates(definition, segmentStates);
 }
 
 function buildScenarioPoints(
@@ -2302,7 +2424,10 @@ function buildScenarioPoints(
   });
 
   return {
-    points: occupancyReportDisplayPoints(definition, points),
+    // Os segmentos fechado e aberto são unidos antes da normalização visual.
+    // Normalizar cada segmento isoladamente criaria dois eixos de 24 horas e
+    // faria um ponto vazio apagar o ponto real ao consolidá-los.
+    points,
     warning: joinOccupancyWarnings(
       metadataWarning,
       occupancyAggregateCoverageWarning(
@@ -2313,8 +2438,90 @@ function buildScenarioPoints(
   };
 }
 
+function mergeOccupancyReportSegmentStates(
+  definition: OccupancyReportDefinition,
+  states: OccupancyReportState[],
+): OccupancyReportState {
+  const asOf = states.reduce<string | undefined>((latest, state) => {
+    if (!state.asOf) return latest;
+    if (!latest) return state.asOf;
+    return Date.parse(state.asOf) > Date.parse(latest) ? state.asOf : latest;
+  }, undefined);
+
+  return {
+    asOf,
+    points: occupancyReportDisplayPoints(
+      definition,
+      states.flatMap((state) => state.points),
+    ),
+    warning: joinOccupancyWarnings(...states.map((state) => state.warning)),
+  };
+}
+
+function occupancyClosedSegmentCacheKey({
+  companyScopeId,
+  companyTimeZone,
+  requestedAt,
+  scope,
+  segment,
+}: {
+  companyScopeId?: string | null;
+  companyTimeZone: string;
+  requestedAt: Date;
+  scope: OccupancyReportScope;
+  segment: OccupancyReportQuerySegment;
+}) {
+  const source = scope.scenario
+    ? ["scenario", scope.scenario.id]
+    : ["cameras", ...scope.cameraIds.slice().sort()];
+  return JSON.stringify([
+    companyScopeId?.trim() ?? "",
+    companyTimeZone,
+    source,
+    segment.granularity,
+    segment.from.getTime(),
+    segment.to.getTime(),
+    occupancyAnalysisClosedSegmentRevision(segment.to, requestedAt),
+    DEFAULT_OBJECT_CLASS,
+  ]);
+}
+
+function cacheCertifiedClosedSegment(
+  cache: Map<string, OccupancyReportState> | undefined,
+  key: string,
+  segment: OccupancyReportQuerySegment,
+  state: OccupancyReportState,
+) {
+  if (
+    !cache ||
+    segment.openBucket ||
+    state.error ||
+    state.warning ||
+    state.points.length !== segment.bucketStarts.length ||
+    !state.points.every(
+      (point) =>
+        isCertifiedMetricValue(point.average) &&
+        isCertifiedMetricValue(point.current) &&
+        isCertifiedMetricValue(point.minimum) &&
+        isCertifiedMetricValue(point.peak),
+    )
+  ) {
+    return;
+  }
+
+  if (!cache.has(key) && cache.size >= MAX_CLOSED_SEGMENT_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey) cache.delete(oldestKey);
+  }
+  cache.delete(key);
+  cache.set(key, state);
+}
+
 function joinOccupancyWarnings(...warnings: Array<string | undefined>) {
-  return warnings.filter((warning): warning is string => Boolean(warning)).join(" ") || undefined;
+  const unique = Array.from(
+    new Set(warnings.filter((warning): warning is string => Boolean(warning))),
+  );
+  return unique.join(" ") || undefined;
 }
 
 function buildRowsMetric(rows: CertifiedOccupancyRow[]): OccupancyReportMetric {
@@ -2489,6 +2696,7 @@ function buildOccupancyReportChartOption(
           previousPoints,
           metricVisibility,
           limits,
+          definition.resolutionLabel,
         ),
       padding: [10, 12],
       textStyle: {
@@ -2699,6 +2907,7 @@ function formatOccupancyReportTooltip(
     maximum?: number;
     minimum?: number;
   },
+  resolutionLabel?: string,
 ) {
   const dataIndex = tooltipDataIndex(params);
   if (dataIndex === undefined) return "";
@@ -2709,6 +2918,9 @@ function formatOccupancyReportTooltip(
   const previous = previousPoints[dataIndex];
   const rows = [
     `<strong>${escapeHtml(point.label)}</strong>`,
+    resolutionLabel
+      ? `<span>Resolução: ${escapeHtml(resolutionLabel)}</span>`
+      : undefined,
     point.current === null
       ? undefined
       : `Atual: ${formatOccupancyValue(point.current)}`,
@@ -2721,7 +2933,9 @@ function formatOccupancyReportTooltip(
     metricVisibility.peak
       ? `Máximo: ${formatOccupancyValue(point.peak)}`
       : undefined,
-    previous ? "<br/><strong>Base comparativa</strong>" : undefined,
+    previous
+      ? `<br/><strong>Base comparativa (${escapeHtml(previous.label)})</strong>`
+      : undefined,
     previous &&
     metricVisibility.average &&
     point.average !== null &&
@@ -2868,25 +3082,45 @@ function buildComparisonDefinition(
   definition: OccupancyReportDefinition,
   intradayComparison: IntradayComparisonMode,
 ): OccupancyReportDefinition {
-  const comparisonStarts = occupancyComparisonBucketStarts({
-    bucketStarts: listBucketStarts(definition),
-    granularity: definition.granularity,
-    intradayComparison,
-  });
+  const comparisonSegments = listDefinitionQuerySegments(definition).map(
+    (segment): OccupancyReportQuerySegment => {
+      const bucketStarts = occupancyComparisonBucketStarts({
+        bucketStarts: segment.bucketStarts,
+        granularity: segment.granularity,
+        intradayComparison,
+      });
+      const first = bucketStarts[0];
+      const last = bucketStarts.at(-1);
+      if (!first || !last) {
+        throw new Error(
+          "O comparativo de ocupação não possui buckets certificados.",
+        );
+      }
+      return {
+        bucketStarts,
+        from: new Date(first),
+        granularity: segment.granularity,
+        to: addGranularity(last, segment.granularity),
+      };
+    },
+  );
+  const comparisonStarts = comparisonSegments.flatMap(
+    (segment) => segment.bucketStarts,
+  );
   const from = comparisonStarts.length
     ? new Date(Math.min(...comparisonStarts.map((date) => date.getTime())))
-    : definition.from;
-  const lastStart = comparisonStarts.length
-    ? new Date(Math.max(...comparisonStarts.map((date) => date.getTime())))
     : definition.from;
 
   return {
     ...definition,
-    bucketStarts: comparisonStarts,
+    bucketStarts: undefined,
     id: previousId(definition.id),
     from,
     openBucket: undefined,
-    to: addGranularity(lastStart, definition.granularity),
+    querySegments: comparisonSegments,
+    to: new Date(
+      Math.max(...comparisonSegments.map((segment) => segment.to.getTime())),
+    ),
   };
 }
 
@@ -2895,7 +3129,24 @@ function comparisonDescription(
   intradayComparison: IntradayComparisonMode,
 ) {
   let description: string;
-  if (definition.granularity === "minute" || definition.granularity === "hour") {
+  const segmentGranularities = new Set(
+    listDefinitionQuerySegments(definition).map(
+      (segment) => segment.granularity,
+    ),
+  );
+  if (
+    segmentGranularities.has("month") &&
+    segmentGranularities.has("day")
+  ) {
+    description =
+      "Meses completos usam o mesmo mês do ano anterior; bordas diárias usam os mesmos dias da semana anterior.";
+  } else if (
+    segmentGranularities.has("week") &&
+    segmentGranularities.has("day")
+  ) {
+    description =
+      "Semanas completas usam quatro semanas antes; bordas diárias usam os mesmos dias da semana anterior.";
+  } else if (definition.granularity === "minute" || definition.granularity === "hour") {
     description = intradayComparison === "last_week"
       ? "Comparando com a semana passada."
       : "Comparando com ontem.";
@@ -2921,19 +3172,19 @@ function maskOpenBucketComparisons(
   now: Date,
 ) {
   currentDefinitions.forEach((definition) => {
-    const openBucket = listBucketStarts(definition).find((bucketStart) => {
-      const bucketEnd = addGranularity(
-        bucketStart,
-        definition.granularity,
-      );
-      return bucketStart <= now && now < bucketEnd;
-    });
+    const bucketDescriptors = listDefinitionBucketDescriptors(definition);
+    const openDescriptorIndex = bucketDescriptors.findIndex(
+      ({ bucketStart, granularity, segmentTo }) => {
+        const bucketEnd = addGranularity(bucketStart, granularity);
+        const certifiedEnd = bucketEnd > segmentTo ? segmentTo : bucketEnd;
+        return bucketStart <= now && now < certifiedEnd;
+      },
+    );
+    const openBucket = bucketDescriptors[openDescriptorIndex]?.bucketStart;
     const openIndex = openBucket
       ? definition.granularity === "hour"
         ? openBucket.getHours()
-        : listBucketStarts(definition).findIndex(
-            (bucketStart) => bucketStart.getTime() === openBucket.getTime(),
-          )
+        : openDescriptorIndex
       : -1;
     if (openIndex < 0) return;
 
@@ -2988,19 +3239,141 @@ function previousId(id: string) {
 }
 
 function listBucketStarts(definition: OccupancyReportDefinition) {
-  if (definition.bucketStarts) {
-    return definition.bucketStarts.map((bucketStart) => new Date(bucketStart));
+  return listDefinitionQuerySegments(definition).flatMap((segment) =>
+    segment.bucketStarts.map((bucketStart) => new Date(bucketStart)),
+  );
+}
+
+function listDefinitionQuerySegments(
+  definition: OccupancyReportDefinition,
+): OccupancyReportQuerySegment[] {
+  if (definition.querySegments?.length) {
+    return definition.querySegments.flatMap((segment) =>
+      splitOpenQuerySegment({
+        ...segment,
+        bucketStarts: segment.bucketStarts.map((bucket) => new Date(bucket)),
+        from: new Date(segment.from),
+        openBucket: segment.openBucket
+          ? new Date(segment.openBucket)
+          : undefined,
+        to: new Date(segment.to),
+      }),
+    );
   }
 
+  return splitOpenQuerySegment({
+    bucketStarts:
+      definition.bucketStarts?.map((bucket) => new Date(bucket)) ??
+      listWindowBucketStarts(
+        definition.from,
+        definition.to,
+        definition.granularity,
+      ),
+    from: new Date(definition.from),
+    granularity: definition.granularity,
+    openBucket: definition.openBucket
+      ? new Date(definition.openBucket)
+      : undefined,
+    to: new Date(definition.to),
+  });
+}
+
+function splitOpenQuerySegment(
+  segment: OccupancyReportQuerySegment,
+): OccupancyReportQuerySegment[] {
+  if (!segment.openBucket) return [segment];
+
+  const openStart = segment.openBucket;
+  const openEnd = new Date(
+    Math.min(
+      addGranularity(openStart, segment.granularity).getTime(),
+      segment.to.getTime(),
+    ),
+  );
+  const beforeBuckets = segment.bucketStarts.filter(
+    (bucket) => bucket < openStart,
+  );
+  const openBuckets = segment.bucketStarts.filter(
+    (bucket) => bucket >= openStart && bucket < openEnd,
+  );
+  const afterBuckets = segment.bucketStarts.filter(
+    (bucket) => bucket >= openEnd,
+  );
+  const result: OccupancyReportQuerySegment[] = [];
+
+  if (beforeBuckets.length) {
+    result.push({
+      bucketStarts: beforeBuckets,
+      from: segment.from,
+      granularity: segment.granularity,
+      to: new Date(openStart),
+    });
+  }
+  if (openBuckets.length) {
+    result.push({
+      bucketStarts: openBuckets,
+      from: new Date(openStart),
+      granularity: segment.granularity,
+      openBucket: new Date(openStart),
+      to: openEnd,
+    });
+  }
+  if (afterBuckets.length) {
+    result.push({
+      bucketStarts: afterBuckets,
+      from: openEnd,
+      granularity: segment.granularity,
+      to: segment.to,
+    });
+  }
+
+  if (!result.length) {
+    throw new Error("O bucket aberto de ocupação não pertence ao segmento.");
+  }
+  return result;
+}
+
+function definitionForQuerySegment(
+  definition: OccupancyReportDefinition,
+  segment: OccupancyReportQuerySegment,
+): OccupancyReportDefinition {
+  return {
+    ...definition,
+    bucketStarts: segment.bucketStarts,
+    from: segment.from,
+    granularity: segment.granularity,
+    openBucket: segment.openBucket,
+    querySegments: undefined,
+    to: segment.to,
+  };
+}
+
+function listDefinitionBucketDescriptors(
+  definition: OccupancyReportDefinition,
+) {
+  return listDefinitionQuerySegments(definition).flatMap((segment) =>
+    segment.bucketStarts.map((bucketStart) => ({
+      bucketStart: new Date(bucketStart),
+      granularity: segment.granularity,
+      segmentTo: new Date(segment.to),
+    })),
+  );
+}
+
+function listWindowBucketStarts(
+  from: Date,
+  to: Date,
+  granularity: OccupancyReportDefinition["granularity"],
+) {
   const starts: Date[] = [];
-  let cursor = alignToGranularity(definition.from, definition.granularity);
-  const end = alignEndToGranularity(definition.to, definition.granularity);
+  let cursor = alignToGranularity(from, granularity);
+  const end = alignEndToGranularity(to, granularity);
   let guard = 0;
 
   while (cursor < end && guard < 500) {
     const bucketStart = new Date(cursor);
     starts.push(bucketStart);
-    cursor = addGranularity(bucketStart, definition.granularity);
+    cursor = addGranularity(bucketStart, granularity);
     guard += 1;
   }
 
@@ -3014,11 +3387,13 @@ function listBucketStarts(definition: OccupancyReportDefinition) {
 }
 
 function buildEmptyPoints(definition: OccupancyReportDefinition) {
-  const points = listBucketStarts(definition).map((bucketStart) => ({
-    bucket: bucketStart.toISOString(),
-    label: bucketLabel(bucketStart, definition.granularity),
-    ...emptyOccupancyMetric(),
-  }));
+  const points = listDefinitionBucketDescriptors(definition).map(
+    ({ bucketStart, granularity }) => ({
+      bucket: bucketStart.toISOString(),
+      label: bucketLabel(bucketStart, granularity),
+      ...emptyOccupancyMetric(),
+    }),
+  );
   return occupancyReportDisplayPoints(definition, points);
 }
 
@@ -3030,14 +3405,22 @@ function summarizeOccupancyRangeMetrics(
 
   const minimumValues = points.map((point) => point.minimum);
   const peakValues = points.map((point) => point.peak);
+  const averageValues = points.map((point) => point.average);
+  const currentValues = points.map((point) => point.current);
   const completeMinimum = minimumValues.every(isCertifiedMetricValue);
   const completePeak = peakValues.every(isCertifiedMetricValue);
+  const completeCoverage =
+    completeMinimum &&
+    completePeak &&
+    averageValues.every(isCertifiedMetricValue) &&
+    currentValues.every(isCertifiedMetricValue);
 
   return {
     // A API não fornece peso/duração para compor médias de vários dias.
-    // Portanto a média e o fechamento permanecem explicitamente do último dia.
-    average: latest.average,
-    current: latest.current,
+    // Portanto a média e o fechamento permanecem explicitamente do último
+    // bucket e só são publicados quando todo o intervalo está certificado.
+    average: completeCoverage ? latest.average : null,
+    current: completeCoverage ? latest.current : null,
     minimum: completeMinimum
       ? Math.min(...minimumValues)
       : null,
@@ -3160,9 +3543,7 @@ function weekdayShortName(date: Date) {
 }
 
 function startOfMinute(date: Date) {
-  const next = new Date(date);
-  next.setSeconds(0, 0);
-  return next;
+  return startOfAggregateBucket(date, "minute");
 }
 
 function startOfHour(date: Date) {
