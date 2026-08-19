@@ -13,7 +13,7 @@ const Card = React.forwardRef<HTMLDivElement, CardProps>(
       data-premium-card
       data-premium-hover={interactive ? "true" : undefined}
       className={cn(
-        "rounded-md border border-border bg-card text-card-foreground shadow-soft",
+        "min-w-0 max-w-full rounded-md border border-border bg-card text-card-foreground shadow-soft",
         className,
       )}
       {...props}
@@ -73,7 +73,10 @@ const CardContent = React.forwardRef<
   <div
     ref={ref}
     data-card-content
-    className={cn("min-w-0 max-w-full p-4 pt-0", className)}
+    className={cn(
+      "min-w-0 max-w-full break-words p-4 pt-0 [overflow-wrap:anywhere]",
+      className,
+    )}
     {...props}
   />
 ));

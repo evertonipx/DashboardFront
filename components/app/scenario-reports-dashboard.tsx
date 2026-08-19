@@ -2562,9 +2562,9 @@ function ScenarioAggregateChartCard({
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              <WidgetTitleText fallback={definition.label} />
+            <CardTitle className="flex min-w-0 items-start gap-2">
+              <BarChart3 className="mt-1 h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={definition.label} className="leading-6" />
             </CardTitle>
             <CardDescription className="mt-1">
               {definition.description}
@@ -2609,9 +2609,12 @@ function MissingReportCustomWidgetCard({
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              <WidgetTitleText fallback={title || "Widget personalizado"} />
+            <CardTitle className="flex min-w-0 items-start gap-2">
+              <BarChart3 className="mt-1 h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText
+                fallback={title || "Widget personalizado"}
+                className="leading-6"
+              />
             </CardTitle>
             <CardDescription>
               A visão vinculada a este widget não está mais disponível.

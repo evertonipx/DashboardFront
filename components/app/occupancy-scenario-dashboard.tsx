@@ -7,6 +7,8 @@ import {
   AlertTriangle,
   BarChart3,
   Bell,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Gauge,
   MapPinned,
@@ -1212,6 +1214,7 @@ export function OccupancyScenarioDashboard() {
   return (
     <section
       className={cn(
+        "min-w-0 [&_[data-card-description]]:[overflow-wrap:anywhere] [&_[data-card-header]_h3]:[overflow-wrap:anywhere] [&_[data-card-header]_h3_svg]:shrink-0",
         monitorMode
           ? "fixed inset-0 z-[100] h-[100dvh] overflow-y-auto bg-background p-3 text-foreground lg:p-4"
           : "space-y-4",
@@ -1236,11 +1239,11 @@ export function OccupancyScenarioDashboard() {
             <div className="text-xs font-medium uppercase text-muted-foreground">
               Ocupação ao vivo
             </div>
-            <div className="truncate text-lg font-semibold">
+            <div className="break-words text-lg font-semibold [overflow-wrap:anywhere]">
               {selectedScenario?.name ?? "Cenário selecionado"}
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <Badge
               variant="outline"
               className="gap-1 border-primary/30 bg-primary/10 text-primary"
@@ -1257,31 +1260,30 @@ export function OccupancyScenarioDashboard() {
           </div>
         </div>
       ) : (
-      <div className="rounded-md border border-border bg-card px-3 py-2 shadow-soft">
+      <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
         {occupancyCertificationError && !initialLoading ? (
           <OccupancyBlockingState
             onRetry={retryOccupancyData}
             retrying={loadingScenarios || loadingData || refreshing}
           />
         ) : loadingScenarios ? (
-          <div className="grid gap-3 lg:grid-cols-[1fr_auto_auto]">
+          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(180px,220px)_116px_minmax(0,1fr)]">
             <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-32" />
-            <Skeleton className="h-10 w-32" />
+            <Skeleton className="h-10 w-full @4xl:w-[116px]" />
+            <Skeleton className="h-10 w-full @xl:col-span-2 @4xl:col-span-1 @4xl:w-48 @4xl:justify-self-end" />
           </div>
         ) : visibleScenarios.length ? (
           <div className="space-y-3">
             <div
               aria-label="Controles da visão de ocupação"
-              className="enterprise-horizontal-scroll flex min-w-0 items-center gap-2 overflow-x-auto pb-1"
+              className="grid min-w-0 gap-2 @xl:grid-cols-[minmax(180px,220px)_116px] @4xl:grid-cols-[minmax(180px,220px)_116px_minmax(0,1fr)] @4xl:items-center"
               role="group"
-              tabIndex={0}
             >
-              <div className="w-[220px] min-w-[190px] shrink-0">
+              <div className="min-w-0">
                 <Select value={selectedId} onValueChange={setSelectedId}>
                   <SelectTrigger
                     aria-label="Cenário de ocupação em foco"
-                    className="h-8 w-full bg-card"
+                    className="h-8 w-full min-w-0 bg-card"
                   >
                     <SelectValue placeholder="Selecione um cenário" />
                   </SelectTrigger>
@@ -1297,7 +1299,7 @@ export function OccupancyScenarioDashboard() {
 
               <div
                 aria-label="Aparência dos comparativos desta visão"
-                className="flex shrink-0 items-center gap-2"
+                className="flex min-w-0 items-center gap-2"
                 role="group"
               >
                 <OccupancyPaletteSelect
@@ -1311,7 +1313,7 @@ export function OccupancyScenarioDashboard() {
 
               <div
                 aria-label="Ações da visão de ocupação"
-                className="ml-auto flex shrink-0 items-center gap-2"
+                className="flex min-w-0 flex-wrap items-center gap-2 @xl:col-span-2 @xl:justify-end @4xl:col-span-1 @4xl:flex-nowrap @4xl:justify-self-end"
                 role="group"
               >
                   <ReportExportActions
@@ -1385,7 +1387,7 @@ export function OccupancyScenarioDashboard() {
                   {lastUpdated ? (
                     <span
                       aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                      className="inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
+                      className="inline-flex h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
                       title={`Última atualização às ${formatTime(lastUpdated)}`}
                     >
                       <Clock3 className="h-3.5 w-3.5" />
@@ -1561,20 +1563,26 @@ function MetricCard({
   const widgetColor = useWidgetColor(toneColor);
 
   return (
-    <Card className="h-full overflow-hidden">
+    <Card className="@container h-full min-w-0 overflow-hidden">
       <CardContent className="grid h-full min-h-[116px] grid-cols-[minmax(0,1fr)_auto] items-start gap-3 p-4">
         <div className="min-w-0">
-          <div className="text-xs font-medium uppercase text-muted-foreground">
+          <div
+            className="line-clamp-2 break-words text-xs font-medium uppercase text-muted-foreground [overflow-wrap:anywhere]"
+            title={resolvedTitle}
+          >
             {resolvedTitle}
           </div>
           {loading ? (
             <Skeleton className="mt-3 h-8 w-24" />
           ) : (
-            <div className="mt-2 text-2xl font-semibold">
+            <div className="mt-2 max-w-full break-all text-[clamp(1.25rem,12cqi,1.5rem)] font-semibold leading-tight tabular-nums">
               {typeof value === "string" ? value : formatOccupancyValue(value)}
             </div>
           )}
-          <div className="mt-1 truncate text-xs text-muted-foreground">
+          <div
+            className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]"
+            title={description}
+          >
             {description}
           </div>
         </div>
@@ -1664,21 +1672,26 @@ function OccupancyChartCard({
   ) || hasReferenceLimit;
 
   return (
-    <Card className="flex h-full min-w-0 flex-col overflow-hidden">
+    <Card className="@container flex h-full min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex min-w-0 items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              <span className="min-w-0 break-words">{resolvedTitle}</span>
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
+              <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                {resolvedTitle}
+              </span>
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {definition.description}
             </CardDescription>
           </div>
           {action}
           <div className="col-span-full flex min-w-0 flex-wrap items-center gap-1.5">
-            <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-words bg-primary/10 text-left leading-5 text-primary [overflow-wrap:anywhere]"
+            >
               {scenario.name}
             </Badge>
           </div>
@@ -1692,15 +1705,15 @@ function OccupancyChartCard({
           </p>
         ) : null}
         {loading ? (
-          <Skeleton className="min-h-[190px] flex-1 sm:min-h-[260px]" />
+          <Skeleton className="min-h-[190px] flex-1 @sm:min-h-[260px]" />
         ) : state?.error ? (
           <EmptyChartState text="Dados temporariamente indisponíveis para este gráfico." />
         ) : hasData ? (
-          <div className="min-h-[190px] flex-1 sm:min-h-[260px]">
+          <div className="min-h-[190px] flex-1 @sm:min-h-[260px]">
             <EChart
               option={option}
               themeMode="explicit"
-              className="h-full min-h-[190px] sm:min-h-[260px]"
+              className="h-full min-h-[190px] @sm:min-h-[260px]"
             />
           </div>
         ) : (
@@ -2001,20 +2014,37 @@ function OccupancyScenarioDetailCard({
 }) {
   const widgetColor = useWidgetColor();
   const resolvedTitle = useWidgetTitle(scenario.name);
+  const areas = scenario.areas ?? [];
+  const pageSize = 2;
+  const pageCount = Math.max(1, Math.ceil(areas.length / pageSize));
+  const [page, setPage] = React.useState(0);
+
+  React.useEffect(() => {
+    setPage(0);
+  }, [scenario.id]);
+
+  React.useEffect(() => {
+    setPage((current) => Math.min(current, pageCount - 1));
+  }, [pageCount]);
+
+  const visibleAreas = areas.slice(page * pageSize, (page + 1) * pageSize);
   return (
-    <Card className="h-full overflow-hidden">
+    <Card className="@container h-full min-w-0 overflow-hidden">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <MapPinned className="h-4 w-4" style={{ color: widgetColor }} />
+        <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+          <MapPinned
+            className="h-4 w-4 shrink-0"
+            style={{ color: widgetColor }}
+          />
           {resolvedTitle}
         </CardTitle>
-        <CardDescription>
+        <CardDescription className="[overflow-wrap:anywhere]">
           Classe {scenario.object_class || "person"} com limites de alerta do
           cenário.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-3 @sm:grid-cols-3">
           <SmallInfo label="Áreas" value={formatNumber(scenario.areas?.length ?? 0)} />
           <SmallInfo
             label="Mínimo"
@@ -2025,9 +2055,9 @@ function OccupancyScenarioDetailCard({
             value={thresholdLabel(scenario.max_total)}
           />
         </div>
-        <div className="max-h-[220px] space-y-2 overflow-y-auto pr-1">
-          {scenario.areas?.length ? (
-            scenario.areas.map((area, index) => {
+        <div className="min-w-0 space-y-2">
+          {areas.length ? (
+            visibleAreas.map((area, index) => {
               const currentArea = history?.areas?.find(
                 (item) =>
                   item.area_id === area.area_id && item.camera_id === area.camera_id,
@@ -2035,19 +2065,19 @@ function OccupancyScenarioDetailCard({
 
               return (
                 <div
-                  key={`${area.camera_id}-${area.area_id}-${index}`}
-                  className="grid gap-3 rounded-md border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_90px]"
+                  key={`${area.camera_id}-${area.area_id}-${page * pageSize + index}`}
+                  className="grid min-w-0 gap-3 rounded-md border bg-muted/20 p-3 @sm:grid-cols-[minmax(0,1fr)_90px]"
                 >
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">
+                    <div className="break-words text-sm font-medium [overflow-wrap:anywhere]">
                       {area.label || area.area_id}
                     </div>
-                    <div className="mt-1 truncate text-xs text-muted-foreground">
+                    <div className="mt-1 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
                       {area.camera_id} / {area.area_id}
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-lg font-semibold">
+                  <div className="min-w-0 text-left @sm:text-right">
+                    <div className="break-all text-lg font-semibold tabular-nums">
                       {formatOccupancyValue(currentArea?.value)}
                     </div>
                     <div className="text-xs text-muted-foreground">agora</div>
@@ -2061,6 +2091,14 @@ function OccupancyScenarioDetailCard({
             </div>
           )}
         </div>
+        {pageCount > 1 ? (
+          <CardPagination
+            label="Áreas do cenário"
+            page={page}
+            pageCount={pageCount}
+            onPageChange={setPage}
+          />
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -2077,14 +2115,23 @@ function OccupancyAlertsCard({
 }) {
   const widgetColor = useWidgetColor();
   const resolvedTitle = useWidgetTitle("Histórico de alertas");
+  const pageSize = 2;
+  const pageCount = Math.max(1, Math.ceil(alerts.length / pageSize));
+  const [page, setPage] = React.useState(0);
+
+  React.useEffect(() => {
+    setPage((current) => Math.min(current, pageCount - 1));
+  }, [pageCount]);
+
+  const visibleAlerts = alerts.slice(page * pageSize, (page + 1) * pageSize);
   return (
-    <Card className="h-full overflow-hidden">
+    <Card className="@container h-full min-w-0 overflow-hidden">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Bell className="h-4 w-4" style={{ color: widgetColor }} />
+        <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+          <Bell className="h-4 w-4 shrink-0" style={{ color: widgetColor }} />
           {resolvedTitle}
         </CardTitle>
-        <CardDescription>
+        <CardDescription className="[overflow-wrap:anywhere]">
           Alertas gerados pelos limites mínimo e máximo do cenário.
         </CardDescription>
       </CardHeader>
@@ -2100,11 +2147,11 @@ function OccupancyAlertsCard({
             Alertas temporariamente indisponíveis.
           </div>
         ) : alerts.length ? (
-          <div className="max-h-[260px] space-y-2 overflow-y-auto pr-1">
-            {alerts.map((alert) => (
+          <div className="min-w-0 space-y-2">
+            {visibleAlerts.map((alert) => (
               <div
                 key={alert.id}
-                className="flex items-center justify-between gap-4 rounded-md border bg-muted/20 p-3"
+                className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-md border bg-muted/20 p-3"
               >
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
@@ -2113,10 +2160,10 @@ function OccupancyAlertsCard({
                     >
                       {alert.threshold_kind === "min" ? "Mínimo" : "Máximo"}
                     </Badge>
-                    <span className="text-sm font-medium">
+                    <span className="max-w-full break-all text-sm font-medium tabular-nums">
                       {formatOccupancyValue(alert.total_value)}
                     </span>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
                       limite {formatOccupancyValue(alert.threshold_value)}
                     </span>
                   </div>
@@ -2133,8 +2180,63 @@ function OccupancyAlertsCard({
             Sem alertas registrados para este cenário.
           </div>
         )}
+        {!loading && !error && alerts.length && pageCount > 1 ? (
+          <CardPagination
+            label="Histórico de alertas"
+            page={page}
+            pageCount={pageCount}
+            onPageChange={setPage}
+          />
+        ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+function CardPagination({
+  label,
+  onPageChange,
+  page,
+  pageCount,
+}: {
+  label: string;
+  onPageChange: (page: number) => void;
+  page: number;
+  pageCount: number;
+}) {
+  return (
+    <nav
+      aria-label={`Paginação de ${label}`}
+      className="mt-2 flex min-w-0 items-center justify-between gap-2 border-t pt-2"
+    >
+      <span className="text-xs tabular-nums text-muted-foreground">
+        {page + 1} de {pageCount}
+      </span>
+      <div className="flex shrink-0 items-center gap-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          disabled={page === 0}
+          onClick={() => onPageChange(Math.max(0, page - 1))}
+          aria-label={`Página anterior de ${label}`}
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          disabled={page >= pageCount - 1}
+          onClick={() => onPageChange(Math.min(pageCount - 1, page + 1))}
+          aria-label={`Próxima página de ${label}`}
+        >
+          <ChevronRight className="h-4 w-4" />
+        </Button>
+      </div>
+    </nav>
   );
 }
 
@@ -2144,7 +2246,9 @@ function SmallInfo({ label, value }: { label: string; value: string }) {
       <div className="text-xs font-medium uppercase text-muted-foreground">
         {label}
       </div>
-      <div className="mt-1 truncate text-sm font-semibold">{value}</div>
+      <div className="mt-1 break-all text-sm font-semibold tabular-nums">
+        {value}
+      </div>
     </div>
   );
 }
@@ -2159,12 +2263,14 @@ function EmptyOccupancyCard({
   const resolvedTitle = useWidgetTitle(title);
 
   return (
-    <Card>
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader>
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1">
-          <CardTitle className="min-w-0 break-words">{resolvedTitle}</CardTitle>
+          <CardTitle className="min-w-0 break-words [overflow-wrap:anywhere]">
+            {resolvedTitle}
+          </CardTitle>
           {action}
-          <CardDescription className="col-span-full">
+          <CardDescription className="col-span-full [overflow-wrap:anywhere]">
             Selecione um cenário de ocupação.
           </CardDescription>
         </div>
@@ -2178,7 +2284,7 @@ function EmptyOccupancyCard({
 
 function EmptyChartState({ text }: { text: string }) {
   return (
-    <div className="flex h-[190px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground sm:h-[330px]">
+    <div className="flex h-[190px] min-w-0 items-center justify-center break-words rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground [overflow-wrap:anywhere] @sm:h-[330px]">
       {text}
     </div>
   );

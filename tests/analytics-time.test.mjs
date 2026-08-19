@@ -1753,8 +1753,13 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     compactToolbarSource,
-    /className="[^"]*flex min-w-0 items-center gap-2 overflow-x-auto pb-1"/,
-    "a barra superior deve permanecer compacta em uma única linha",
+    /className="grid min-w-0 gap-2 [^"]*@4xl:grid-cols-/,
+    "a barra superior deve empilhar no mobile e usar uma linha quando houver largura",
+  );
+  assert.doesNotMatch(
+    compactToolbarSource,
+    /enterprise-horizontal-scroll|overflow-x-auto/,
+    "a barra superior não deve exigir rolagem horizontal",
   );
   assert.doesNotMatch(
     compactToolbarSource,
@@ -1823,7 +1828,7 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     comparisonSource,
-    /grid min-w-0 gap-3 xl:grid-cols-\[minmax\(220px,0\.8fr\)_minmax\(0,1\.2fr\)\][\s\S]*?<Hexagon[\s\S]*?flex min-w-0 flex-wrap items-center gap-2 xl:justify-end/,
+    /grid min-w-0 gap-3 @xl:grid-cols-\[minmax\(220px,0\.8fr\)_minmax\(0,1\.2fr\)\][\s\S]*?<Hexagon[\s\S]*?flex min-w-0 flex-wrap items-center gap-2 @xl:justify-end/,
     "o cabeçalho do Hex deve distribuir título e controles sem criar uma faixa vazia",
   );
   const heatmapCardsSource = comparisonSource.slice(
@@ -1859,8 +1864,9 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     liveToolbar,
-    /className="[^"]*flex min-w-0 items-center gap-2 overflow-x-auto pb-1"/,
+    /className="grid min-w-0 gap-2 [^"]*@4xl:grid-cols-/,
   );
+  assert.doesNotMatch(liveToolbar, /enterprise-horizontal-scroll|overflow-x-auto/);
   assert.match(liveToolbar, /<ReportExportActions[\s\S]*?compact/);
   assert.match(liveToolbar, /<MonitorModeButton[\s\S]*?compact/);
   assert.match(liveToolbar, /aria-label="Bases de comparação"/);
@@ -1972,9 +1978,14 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
   );
   assert.match(
     reports,
-    /analysis[\s\S]*?"[^"]*flex min-w-0 items-center gap-2 overflow-x-auto pb-1"/,
-    "a barra compacta deve permanecer em uma linha sem comprimir os controles",
+    /analysis[\s\S]*?"grid min-w-0 gap-2 sm:grid-cols-2 lg:grid-cols-/,
+    "a barra deve reorganizar os controles sem criar rolagem em telas estreitas",
   );
+  const analysisToolbar = reports.slice(
+    reports.indexOf('aria-label={analysis ? "Controles da análise de Ocupação"'),
+    reports.indexOf('id="occupancy-analysis-settings"'),
+  );
+  assert.doesNotMatch(analysisToolbar, /overflow-x-auto|enterprise-horizontal-scroll/);
   assert.match(reports, /aria-label=\{analysis \? "Tipo de visão da análise de Ocupação"/);
   assert.match(
     reports,
@@ -9716,6 +9727,100 @@ test("séries individuais em uma passagem equivalem ao cálculo por cenário", (
   });
 });
 
+test("Resumo do período permanece legível com 37 cenários e valores extensos", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-07-01",
+    "2026-07-31",
+  );
+  assert.ok(period);
+  const scenarios = Array.from({ length: 37 }, (_, index) =>
+    scenario(
+      `scenario-${index}`,
+      `Cenario_operacional_com_nome_extenso_${index}`,
+      `line-${index}`,
+      1,
+    ),
+  );
+  const unit = 9_007_199_000;
+  const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data: analysisData({
+      dayRows: Array.from({ length: scenarios.length }, (_, index) =>
+        aggregateRow("2026-07-22", `line-${index}`, (index + 1) * unit),
+      ),
+    }),
+    period,
+    scenarios,
+    widget: analysisWidget("summary"),
+  });
+  const expectedTotal =
+    unit * ((scenarios.length * (scenarios.length + 1)) / 2);
+
+  assert.equal(model.metrics?.length, 4);
+  assert.equal(model.metrics?.[0]?.value, expectedTotal);
+  assert.equal(
+    model.metrics?.[3]?.value,
+    "Cenario_operacional_com_nome_extenso_36",
+  );
+  assert.equal(
+    scenarioAnalytics.scenarioSelectionSummary(scenarios, "all", []),
+    "Todos os cenários (37)",
+  );
+
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const cardLayoutSource = readFileSync(
+    resolve(projectRoot, "components/app/card-layout.tsx"),
+    "utf8",
+  );
+  const cardSection = source.slice(
+    source.indexOf("function PeriodAnalysisCard"),
+    source.indexOf("function WidgetDialog"),
+  );
+
+  assert.match(cardSection, /data-period-analysis-card/);
+  assert.match(cardSection, /data-analysis-card-header/);
+  assert.match(cardSection, /data-analysis-card-badges/);
+  assert.match(cardSection, /data-analysis-metric-grid/);
+  assert.match(
+    source,
+    /widget\.kind === "summary"[\s\S]*?\? \("standard" as const\)[\s\S]*?minHeight:[\s\S]*?widget\.kind === "summary"[\s\S]*?\? \("standard" as const\)/,
+    "o Resumo precisa de altura standard mesmo quando uma preferência antiga pediu short",
+  );
+  assert.match(
+    cardSection,
+    /grid-cols-\[repeat\(auto-fit,minmax\(min\(100%,8rem\),1fr\)\)\]/,
+  );
+  assert.match(cardSection, /flex-1 !overflow-hidden/);
+  assert.match(cardSection, /self-stretch overflow-hidden rounded-md/);
+  assert.doesNotMatch(
+    cardSection.slice(
+      cardSection.indexOf("function MetricGrid"),
+      cardSection.indexOf("function AnalysisTable"),
+    ),
+    /overflow-(?:auto|scroll|x-auto|y-auto)/,
+    "KPIs e resumos devem reflow sem barras de rolagem internas",
+  );
+  assert.match(cardSection, /\[font-size:clamp\(1rem,6cqi,1\.5rem\)\]/);
+  assert.match(cardSection, /compactSummary && "!line-clamp-2"/);
+  assert.match(cardSection, /compactWidget && "!line-clamp-1"/);
+  assert.match(cardSection, /data-analysis-table/);
+  assert.match(cardSection, /role="region"/);
+  assert.match(cardSection, /table-auto/);
+  assert.match(cardSection, /\[overflow-wrap:anywhere\]/);
+  assert.match(
+    cardLayoutSource,
+    /const compactingWideWidget =[\s\S]*?card\.minHeight === "short"[\s\S]*?currentSize === "compact"[\s\S]*?card\.defaultSize !== "compact"[\s\S]*?return compactingWideWidget \? "standard"/,
+    "um Resumo redimensionado de full para compact precisa ganhar altura standard",
+  );
+  assert.doesNotMatch(
+    cardSection,
+    /\btruncate\b/,
+    "valores e badges essenciais não podem usar truncamento de uma linha",
+  );
+});
+
 test("ações individuais dos widgets permanecem no topo direito em qualquer largura", () => {
   const actionSource = readFileSync(
     resolve(projectRoot, "components/app/widget-card-actions.tsx"),
@@ -9764,4 +9869,368 @@ test("ações individuais dos widgets permanecem no topo direito em qualquer lar
   );
   assert.match(comparisonSource, /col-span-full flex min-w-0 flex-wrap/);
   assert.match(reportsSource, /<WidgetCardActions label=\{`Ações do widget/);
+});
+
+test("widgets do Ao Vivo respondem à largura real sem ocultar texto essencial", () => {
+  const realtimeSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancySource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancyComparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const scenarioComparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+  const section = (source, from, to) =>
+    source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+
+  const countingMetric = section(
+    realtimeSource,
+    "function MetricCard",
+    "function metricComparisonClassName",
+  );
+  const countingTable = section(
+    realtimeSource,
+    "function ScenarioTotalsTableCard",
+    "function LiveAnnualComparisonCard",
+  );
+  const hourlyOccupancy = section(
+    realtimeSource,
+    "function HourlyOccupancyCard",
+    "function ScenarioCumulativeTotalsCard",
+  );
+  const occupancyMetric = section(
+    occupancySource,
+    "function MetricCard",
+    "function OccupancyChartCard",
+  );
+  const occupancyDetail = section(
+    occupancySource,
+    "function OccupancyScenarioDetailCard",
+    "function OccupancyAlertsCard",
+  );
+  const occupancyAlerts = section(
+    occupancySource,
+    "function OccupancyAlertsCard",
+    "function CardPagination",
+  );
+  const currentComparison = section(
+    occupancyComparisonSource,
+    "function OccupancyHalfDonutCard",
+    "export function OccupancyStatusColorsDialog",
+  );
+  const maximumComparison = section(
+    occupancyComparisonSource,
+    "function OccupancyScenarioMaximumLineCard",
+    "function OccupancyHexLayoutCard",
+  );
+  const heatmapShell = section(
+    occupancyComparisonSource,
+    "function OccupancyHeatmapCardShell",
+    "function ScenarioScopeDialog",
+  );
+  const scenarioPicker = section(
+    occupancyComparisonSource,
+    "function ScenarioScopeDialog",
+    "function MetricSelect",
+  );
+
+  for (const source of [realtimeSource, occupancySource]) {
+    assert.match(
+      source,
+      /\[&_\[data-card-description\]\]:\[overflow-wrap:anywhere\]/,
+    );
+    assert.match(
+      source,
+      /\[&_\[data-card-header\]_h3\]:\[overflow-wrap:anywhere\]/,
+    );
+  }
+
+  for (const metric of [countingMetric, occupancyMetric]) {
+    assert.match(metric, /@container/);
+    assert.match(metric, /12cqi/);
+    assert.match(metric, /break-all/);
+    assert.match(metric, /line-clamp-[12]/);
+    assert.doesNotMatch(metric, /\btruncate\b|overflow-(?:auto|scroll|x-auto|y-auto)/);
+  }
+
+  assert.match(countingTable, /scrollRegionLabel=/);
+  assert.match(countingTable, /className="min-w-\[640px\]"/);
+  assert.match(countingTable, /\[overflow-wrap:anywhere\]/);
+  assert.doesNotMatch(countingTable, /block truncate/);
+
+  assert.match(hourlyOccupancy, /@container/);
+  assert.match(hourlyOccupancy, /@sm:w-\[240px\]/);
+  assert.doesNotMatch(hourlyOccupancy, /(?:^|\s)sm:w-\[240px\]/);
+
+  assert.match(occupancyDetail, /@container/);
+  assert.match(occupancyDetail, /@sm:grid-cols-/);
+  assert.match(occupancyDetail, /visibleAreas/);
+  assert.match(occupancySource, /function CardPagination/);
+  assert.doesNotMatch(occupancyDetail, /overflow-y-auto/);
+  assert.doesNotMatch(occupancyDetail, /\btruncate\b/);
+  assert.match(occupancyAlerts, /visibleAlerts/);
+  assert.doesNotMatch(occupancyAlerts, /overflow-y-auto/);
+
+  assert.match(currentComparison, /@2xl:grid-cols-/);
+  assert.match(currentComparison, /@sm:w-\[180px\]/);
+  assert.match(
+    currentComparison,
+    /grid-cols-\[repeat\(auto-fit,minmax\(min\(100%,8\.5rem\),1fr\)\)\]/,
+  );
+  assert.match(currentComparison, /line-clamp-2 min-w-0 break-words/);
+  assert.doesNotMatch(
+    currentComparison,
+    /overflow-[xy]-auto|min-w-max|whitespace-nowrap/,
+  );
+  assert.doesNotMatch(currentComparison, /\btruncate\b/);
+  assert.match(maximumComparison, /@container/);
+  assert.match(maximumComparison, /@xl:grid-cols-/);
+  assert.match(heatmapShell, /@container/);
+  assert.match(heatmapShell, /@xl:grid-cols-/);
+  assert.doesNotMatch(scenarioPicker, /\btruncate\b/);
+
+  assert.match(scenarioComparisonSource, /@container min-w-0 overflow-hidden/);
+  assert.match(
+    scenarioComparisonSource,
+    /CardTitle className="flex min-w-0 items-start gap-2 \[overflow-wrap:anywhere\]"/,
+  );
+});
+
+test("widgets ECharts se adaptam ao card sem barras de rolagem permanentes", () => {
+  const globalsSource = readFileSync(
+    resolve(projectRoot, "app/globals.css"),
+    "utf8",
+  );
+  const realtimeSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const intelligenceSource = readFileSync(
+    resolve(projectRoot, "components/app/counting-intelligence-report.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+  const occupancySource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const section = (source, from, to) => {
+    const start = source.indexOf(from);
+    return source.slice(start, source.indexOf(to, start));
+  };
+
+  const hourly = section(
+    realtimeSource,
+    "function HourlyOccupancyCard",
+    "function ScenarioCumulativeTotalsCard",
+  );
+  const ranking = section(
+    intelligenceSource,
+    "function AccessRankingCard",
+    "function YearOverYearMatrixCard",
+  );
+  const comparison = section(
+    comparisonSource,
+    "export function ScenarioComparisonCard",
+    "export function ScenarioComparisonConfigurator",
+  );
+  const currentComparison = section(
+    occupancySource,
+    "function OccupancyHalfDonutCard",
+    "export function OccupancyStatusColorsDialog",
+  );
+  const hex = section(
+    occupancySource,
+    "function OccupancyHexLayoutCard",
+    "function OccupancyDayHourHeatmapCard",
+  );
+
+  assert.match(
+    globalsSource,
+    /\[data-card-content\]:not\(\[data-echart-layout="natural"\]\)/,
+  );
+  for (const widget of [hourly, ranking, comparison, currentComparison, hex]) {
+    assert.match(widget, /data-echart-layout="natural"/);
+  }
+
+  assert.match(hourly, /<DialogTitle>Configurar ocupação hora a hora<\/DialogTitle>/);
+  assert.match(ranking, /<DialogTitle>Selecionar cenários do ranking<\/DialogTitle>/);
+  assert.match(comparison, /<DialogTitle>Configurar comparação por cenário<\/DialogTitle>/);
+  assert.doesNotMatch(comparison, /enterprise-horizontal-scroll|min-w-\[720px\]/);
+  assert.doesNotMatch(ranking, /max-h-\[640px\]|chartHeight/);
+
+  assert.match(currentComparison, /flex min-h-0 flex-1 flex-col overflow-hidden/);
+  assert.match(currentComparison, /const pageSize = 8/);
+  assert.doesNotMatch(
+    currentComparison,
+    /overflow-[xy]-auto|min-w-max|whitespace-nowrap/,
+  );
+  assert.match(
+    hex,
+    /grid-rows-\[minmax\(0,1fr\)_auto_auto\][^\"]*overflow-hidden/,
+  );
+  assert.doesNotMatch(hex, /max-h-\[520px\] overflow-auto|minWidth:/);
+});
+
+test("widgets de Relatórios preservam títulos, métricas e contexto dentro do card", () => {
+  const globalsSource = readFileSync(
+    resolve(projectRoot, "app/globals.css"),
+    "utf8",
+  );
+  const appearanceSource = readFileSync(
+    resolve(projectRoot, "components/app/widget-appearance.tsx"),
+    "utf8",
+  );
+  const cardSource = readFileSync(
+    resolve(projectRoot, "components/ui/card.tsx"),
+    "utf8",
+  );
+  const intelligenceSource = readFileSync(
+    resolve(projectRoot, "components/app/counting-intelligence-report.tsx"),
+    "utf8",
+  );
+  const occupancyReportsSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const scenarioReportsSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const section = (source, from, to) =>
+    source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+
+  const executiveMetric = section(
+    intelligenceSource,
+    "function ExecutiveMetricCard",
+    "function AnnualComparisonCard",
+  );
+  const executiveCharts = section(
+    intelligenceSource,
+    "function ExecutiveChartCard",
+    "function YearComparisonValueRow",
+  );
+  const occupancyMetric = section(
+    occupancyReportsSource,
+    "function MetricCard",
+    "function OccupancyReportChartCard",
+  );
+  const occupancyChart = section(
+    occupancyReportsSource,
+    "function OccupancyReportChartCard",
+    "function EmptyChartState",
+  );
+
+  assert.match(appearanceSource, /title=\{title\}/);
+  assert.match(appearanceSource, /line-clamp-2/);
+  assert.match(appearanceSource, /\[overflow-wrap:anywhere\]/);
+  assert.match(cardSource, /data-card-content[\s\S]*?\[overflow-wrap:anywhere\]/);
+  assert.match(
+    globalsSource,
+    /\[data-layout-card-id\] \[data-card-content\] \{[\s\S]*?overflow: hidden;/,
+  );
+
+  assert.match(executiveMetric, /grid-cols-\[minmax\(0,1fr\)_auto\]/);
+  assert.match(executiveMetric, /text-\[clamp\(1\.25rem,9cqi,1\.5rem\)\]/);
+  assert.match(executiveMetric, /line-clamp-1/);
+  assert.doesNotMatch(executiveMetric, /\btruncate\b/);
+
+  assert.match(executiveCharts, /whitespace-normal break-words/);
+  assert.match(executiveCharts, /enterprise-horizontal-scroll/);
+  assert.match(executiveCharts, /grid-cols-\[minmax\(0,1fr\)_auto\]/);
+
+  assert.match(occupancyMetric, /grid-cols-\[minmax\(0,1fr\)_auto\]/);
+  assert.match(occupancyMetric, /text-\[clamp\(1\.25rem,9cqi,1\.5rem\)\]/);
+  assert.doesNotMatch(occupancyMetric, /\btruncate\b/);
+  assert.match(occupancyChart, /grid-cols-\[minmax\(0,1fr\)\]/);
+  assert.match(occupancyChart, /whitespace-normal break-words/);
+  assert.match(
+    scenarioReportsSource,
+    /CardTitle className="flex min-w-0 items-start gap-2"/,
+  );
+});
+
+test("réguas principais reorganizam controles sem rolagem horizontal", () => {
+  const globalsSource = readFileSync(
+    resolve(projectRoot, "app/globals.css"),
+    "utf8",
+  );
+  const analysisSource = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const realtimeSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancySource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+
+  const toolbarSection = (source, label, endMarker) => {
+    const labelIndex = source.indexOf(`aria-label="${label}"`);
+    assert.notEqual(labelIndex, -1, `régua ausente: ${label}`);
+    const start = source.lastIndexOf('<div className="@container', labelIndex);
+    const end = source.indexOf(endMarker, labelIndex);
+    assert.notEqual(start, -1, `container ausente: ${label}`);
+    assert.notEqual(end, -1, `limite ausente: ${label}`);
+    return source.slice(start, end);
+  };
+
+  const analysisToolbar = toolbarSection(
+    analysisSource,
+    "Controles da análise de Contagem",
+    "{loadingScenarios && !scopeOptions.length",
+  );
+  const realtimeToolbar = toolbarSection(
+    realtimeSource,
+    "Controles da visão ao vivo de Contagem",
+    "{operationalSettingsOpen ? (",
+  );
+  const occupancyToolbar = toolbarSection(
+    occupancySource,
+    "Controles da visão de ocupação",
+    "{operationalSettingsOpen ? (",
+  );
+
+  for (const toolbar of [analysisToolbar, realtimeToolbar, occupancyToolbar]) {
+    assert.match(toolbar, /@container/);
+    assert.match(toolbar, /className="grid min-w-0 gap-2/);
+    assert.match(toolbar, /@4xl:grid-cols-/);
+    assert.match(toolbar, /flex min-w-0 flex-wrap items-center gap-2/);
+    assert.doesNotMatch(
+      toolbar,
+      /enterprise-horizontal-scroll|overflow-x-auto|tabIndex=\{0\}/,
+    );
+  }
+
+  for (const toolbar of [realtimeToolbar, occupancyToolbar]) {
+    assert.match(toolbar, /className="h-8 w-full min-w-0 bg-card"/);
+  }
+  assert.match(analysisToolbar, /@2xl:grid-cols-/);
+  assert.match(
+    analysisSource,
+    /ANALYSIS_READABLE_BADGE_CLASS_NAME\s*=\s*[\s\S]*?whitespace-normal/,
+  );
+
+  assert.match(
+    globalsSource,
+    /\[data-card-header\] > div\.flex \{/,
+  );
+  assert.doesNotMatch(
+    globalsSource,
+    /\[data-card-header\] > \.flex \{/,
+  );
 });

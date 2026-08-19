@@ -28,6 +28,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   buildAnnualAccumulatedComparisonChartOption,
@@ -258,11 +266,11 @@ function ExecutiveMetricCard({
   return (
     <Card className="h-full min-w-0 overflow-hidden">
       <CardHeader className="space-y-0 px-4 pb-1 pt-3">
-        <div className="flex min-w-0 items-center justify-between gap-2">
-          <CardTitle className="truncate text-xs font-semibold uppercase text-muted-foreground">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
+          <CardTitle className="min-w-0 text-xs font-semibold uppercase leading-4 text-muted-foreground">
             <WidgetTitleText fallback={label} />
           </CardTitle>
-          <span className="shrink-0" style={{ color: widgetColor }}>
+          <span className="shrink-0 self-start justify-self-end" style={{ color: widgetColor }}>
             <Icon className="h-4 w-4" />
           </span>
         </div>
@@ -273,21 +281,20 @@ function ExecutiveMetricCard({
         ) : (
           <div
             className={cn(
-              "truncate font-semibold text-foreground",
-              textValue ? "text-lg" : "text-2xl tabular-nums",
+              "min-w-0 break-words font-semibold leading-tight text-foreground [overflow-wrap:anywhere]",
+              textValue
+                ? "text-[clamp(1rem,7cqi,1.125rem)]"
+                : "text-[clamp(1.25rem,9cqi,1.5rem)] tabular-nums",
             )}
             title={value}
           >
             {value}
           </div>
         )}
-        <div
-          className="mt-1 truncate text-[11px] text-muted-foreground"
-          title={period}
-        >
+        <div className="mt-1 line-clamp-1 break-words text-[11px] leading-4 text-muted-foreground [overflow-wrap:anywhere]" title={period}>
           {period}
         </div>
-        <div className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+        <div className="mt-1 flex min-w-0 items-start gap-1 text-[11px] leading-4 text-muted-foreground">
           {trend !== undefined && trend !== null ? (
             <TrendIcon
               className={cn(
@@ -300,7 +307,7 @@ function ExecutiveMetricCard({
               )}
             />
           ) : null}
-          <span className="truncate" title={description}>
+          <span className="line-clamp-1 min-w-0 break-words [overflow-wrap:anywhere]" title={description}>
             {description}
           </span>
         </div>
@@ -398,7 +405,7 @@ function ExecutiveChartCard({
   return (
     <Card className="h-full min-w-0 overflow-hidden">
       <CardHeader className="border-b px-4 py-3">
-        <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] items-start gap-2">
           <div className="min-w-0">
             <CardTitle className="text-sm">
               <WidgetTitleText fallback={title} />
@@ -409,7 +416,7 @@ function ExecutiveChartCard({
           </div>
           <Badge
             variant="outline"
-            className="max-w-full truncate text-[11px]"
+            className="w-fit max-w-full whitespace-normal break-words text-left text-[11px] leading-4 [overflow-wrap:anywhere]"
             title={badge}
           >
             {badge}
@@ -458,13 +465,11 @@ function AccessRankingCard({
     () => buildAccessShareChartOption(model, widgetColor),
     [model, widgetColor],
   );
-  const chartHeight = Math.max(260, model.accesses.length * 34 + 24);
-
   return (
     <Card className="h-full min-w-0 overflow-hidden">
       <CardHeader className="border-b px-4 py-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="min-w-[min(100%,16rem)] flex-1">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
             <CardTitle className="text-sm">
               <WidgetTitleText fallback="Ranking dos acessos" />
             </CardTitle>
@@ -473,18 +478,8 @@ function AccessRankingCard({
               o período selecionado.
             </CardDescription>
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-            <Badge
-              variant="outline"
-              className="max-w-[180px] truncate text-[11px]"
-              title={formatCountingIntelligencePeriod(model)}
-            >
-              {formatCountingIntelligencePeriod(model)}
-            </Badge>
-            <Badge variant="outline" className="text-[11px]">
-              {model.accesses.length} acessos · 100%
-            </Badge>
-            <div className="inline-flex overflow-hidden rounded-md border bg-card">
+          <div className="flex shrink-0 flex-nowrap items-center justify-self-end gap-1.5">
+            <div className="inline-flex shrink-0 overflow-hidden rounded-md border bg-card">
               <Button
                 type="button"
                 variant={order === "desc" ? "secondary" : "ghost"}
@@ -512,45 +507,37 @@ function AccessRankingCard({
               type="button"
               variant={settingsOpen ? "default" : "outline"}
               size="icon"
-              className="h-8 w-8"
-              onClick={() => setSettingsOpen((current) => !current)}
+              className="h-8 w-8 shrink-0"
+              onClick={() => setSettingsOpen(true)}
               aria-label="Selecionar cenários do ranking"
               title="Selecionar cenários"
             >
               <Settings2 className="h-3.5 w-3.5" />
             </Button>
           </div>
+          <div className="col-span-full flex min-w-0 flex-wrap items-center gap-1.5">
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-words text-[11px] leading-4 [overflow-wrap:anywhere]"
+              title={formatCountingIntelligencePeriod(model)}
+            >
+              {formatCountingIntelligencePeriod(model)}
+            </Badge>
+            <Badge variant="outline" className="text-[11px]">
+              {model.accesses.length} acessos · 100%
+            </Badge>
+          </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-3 p-3">
-        {settingsOpen ? (
-          <div className="rounded-md border bg-muted/20 p-3">
-            <ScenarioPicker
-              mode={selectionMode}
-              onModeChange={onSelectionModeChange}
-              onSelectedIdsChange={onScenarioIdsChange}
-              scenarios={scenarios}
-              selectedIds={scenarioIds}
-            />
-            <div className="mt-3 flex justify-end">
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => setSettingsOpen(false)}
-              >
-                Concluir
-              </Button>
-            </div>
-          </div>
-        ) : null}
+      <CardContent
+        className="min-h-0 flex-1 overflow-hidden p-3"
+        data-echart-layout="natural"
+      >
         {loading ? (
           <Skeleton className="h-[300px] w-full" />
         ) : model.accesses.length ? (
-          <div className="max-h-[640px] min-w-0 overflow-y-auto">
-            <div style={{ height: chartHeight }}>
-              <EChart option={option} />
-            </div>
+          <div className="h-[360px] min-h-0 min-w-0 flex-1 overflow-hidden">
+            <EChart option={option} />
           </div>
         ) : (
           <div className="flex h-[180px] items-center justify-center px-4 text-center text-xs text-muted-foreground">
@@ -559,6 +546,31 @@ function AccessRankingCard({
           </div>
         )}
       </CardContent>
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Selecionar cenários do ranking</DialogTitle>
+            <DialogDescription>
+              Escolha quais acessos participam do ranking. O gráfico permanece
+              responsivo ao tamanho do widget.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 overflow-y-auto pr-1">
+            <ScenarioPicker
+              mode={selectionMode}
+              onModeChange={onSelectionModeChange}
+              onSelectedIdsChange={onScenarioIdsChange}
+              scenarios={scenarios}
+              selectedIds={scenarioIds}
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" onClick={() => setSettingsOpen(false)}>
+              Concluir
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
@@ -578,7 +590,7 @@ function YearOverYearMatrixCard({
   return (
     <Card className="h-full min-w-0 max-w-full overflow-hidden">
       <CardHeader className="border-b px-4 py-3 sm:px-5">
-        <div className="flex flex-wrap items-end justify-between gap-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] items-start gap-2">
           <div className="min-w-0">
             <CardTitle className="text-sm">
               <WidgetTitleText fallback="Tabela mensal comparativa" />
@@ -588,8 +600,8 @@ function YearOverYearMatrixCard({
               recente contra o anterior.
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline" className="gap-1 bg-card text-[11px]">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Badge variant="outline" className="max-w-full gap-1 whitespace-normal break-words bg-card text-[11px] leading-4 [overflow-wrap:anywhere]">
               <CalendarRange className="h-3.5 w-3.5" />
               {formatCountingIntelligencePeriod(model)}
             </Badge>

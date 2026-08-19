@@ -1371,11 +1371,10 @@ export function OccupancyReportsDashboard({
             {analysis ? (
               <div
                 aria-label="Período da análise de Ocupação"
-                className="enterprise-horizontal-scroll mb-2 flex min-w-0 overflow-x-auto pb-1"
+                className="mb-2 min-w-0"
                 role="region"
-                tabIndex={0}
               >
-                <div className="shrink-0">{analysisDateRangeControl}</div>
+                {analysisDateRangeControl}
               </div>
             ) : null}
             <OccupancyBlockingState
@@ -1387,19 +1386,18 @@ export function OccupancyReportsDashboard({
           <div
             className={cn(
               analysis
-                ? "enterprise-horizontal-scroll flex min-w-0 items-center gap-2 overflow-x-auto pb-1"
+                ? "grid min-w-0 gap-2 sm:grid-cols-2"
                 : "grid gap-4 md:grid-cols-[180px_1fr_auto]",
             )}
             aria-label={analysis ? "Carregando controles da análise de Ocupação" : undefined}
             role={analysis ? "region" : undefined}
-            tabIndex={analysis ? 0 : undefined}
           >
             {analysis ? (
-              <div className="shrink-0">{analysisDateRangeControl}</div>
+              <div className="min-w-0 sm:col-span-2">{analysisDateRangeControl}</div>
             ) : null}
-            <Skeleton className={cn("h-10", analysis ? "w-[170px] shrink-0" : "w-full")} />
-            <Skeleton className={cn("h-10", analysis ? "w-[220px] shrink-0" : "w-full")} />
-            <Skeleton className="h-10 w-32 shrink-0" />
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className={cn("h-10 w-full", analysis && "sm:col-span-2")} />
           </div>
         ) : scopeOptions.length ? (
           <div className={cn(analysis && "space-y-2")}>
@@ -1407,14 +1405,13 @@ export function OccupancyReportsDashboard({
               aria-label={analysis ? "Controles da análise de Ocupação" : undefined}
               className={cn(
                 analysis
-                  ? "enterprise-horizontal-scroll flex min-w-0 items-center gap-2 overflow-x-auto pb-1"
+                  ? "grid min-w-0 gap-2 sm:grid-cols-2 lg:grid-cols-[minmax(240px,auto)_minmax(140px,170px)_minmax(180px,220px)_auto] lg:items-center"
                   : "flex flex-col gap-3 2xl:flex-row 2xl:items-end 2xl:justify-between",
               )}
               role={analysis ? "group" : undefined}
-              tabIndex={analysis ? 0 : undefined}
             >
             {analysis ? (
-              <div className="shrink-0">
+              <div className="min-w-0 sm:col-span-2 lg:col-span-1">
                 {analysisDateRangeControl}
               </div>
             ) : null}
@@ -1426,7 +1423,7 @@ export function OccupancyReportsDashboard({
                   : "grid min-w-0 flex-1 gap-3 md:grid-cols-[180px_minmax(0,1fr)]",
               )}
             >
-              <div className={cn(analysis ? "shrink-0" : "space-y-2")}>
+              <div className={cn(analysis ? "min-w-0" : "space-y-2")}>
                 {!analysis ? (
                   <Label className="block" htmlFor={scopeModeSelectId}>
                     Visão
@@ -1443,7 +1440,7 @@ export function OccupancyReportsDashboard({
                   <SelectTrigger
                     id={scopeModeSelectId}
                     aria-label={analysis ? "Tipo de visão da análise de Ocupação" : undefined}
-                    className={cn("bg-card", analysis && "h-8 w-[170px]")}
+                    className={cn("bg-card", analysis && "h-8 w-full min-w-0")}
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -1456,7 +1453,7 @@ export function OccupancyReportsDashboard({
                   </SelectContent>
                 </Select>
               </div>
-              <div className={cn(analysis ? "shrink-0" : "min-w-0 space-y-2")}>
+              <div className="min-w-0 space-y-2">
                 {!analysis ? (
                   <Label className="block" htmlFor={scopeSelectId}>
                     {scopeModeLabel(scopeMode)}
@@ -1466,7 +1463,7 @@ export function OccupancyReportsDashboard({
                   <SelectTrigger
                     id={scopeSelectId}
                     aria-label={analysis ? `${scopeModeLabel(scopeMode)} da análise de Ocupação` : undefined}
-                    className={cn("bg-card", analysis && "h-8 w-[220px]")}
+                    className={cn("bg-card", analysis && "h-8 w-full min-w-0")}
                   >
                     <SelectValue placeholder="Selecione uma visão" />
                   </SelectTrigger>
@@ -1483,7 +1480,7 @@ export function OccupancyReportsDashboard({
             <div
               className={cn(
                 analysis
-                  ? "ml-auto flex shrink-0 items-center gap-2"
+                  ? "flex min-w-0 flex-wrap items-center gap-2 sm:col-span-2 lg:col-span-1 lg:ml-auto lg:flex-nowrap"
                   : "flex flex-wrap items-center gap-2",
               )}
             >
@@ -1650,11 +1647,10 @@ export function OccupancyReportsDashboard({
             {analysis ? (
               <div
                 aria-label="Período da análise de Ocupação"
-                className="enterprise-horizontal-scroll mb-2 flex min-w-0 overflow-x-auto pb-1"
+                className="mb-2 min-w-0"
                 role="region"
-                tabIndex={0}
               >
-                <div className="shrink-0">{analysisDateRangeControl}</div>
+                {analysisDateRangeControl}
               </div>
             ) : null}
             <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
@@ -1722,26 +1718,26 @@ function MetricCard({
   }[tone];
 
   return (
-    <Card>
-      <CardContent className="flex min-h-[116px] items-center justify-between gap-4 p-4">
+    <Card className="h-full min-w-0 overflow-hidden">
+      <CardContent className="grid min-h-[116px] min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3 p-4">
         <div className="min-w-0">
-          <div className="text-xs font-medium uppercase text-muted-foreground">
+          <div className="min-w-0 break-words text-xs font-medium uppercase leading-4 text-muted-foreground [overflow-wrap:anywhere]">
             <WidgetTitleText fallback={label} />
           </div>
           {loading ? (
             <Skeleton className="mt-3 h-8 w-24" />
           ) : (
-            <div className="mt-2 text-2xl font-semibold">
+            <div className="mt-2 min-w-0 break-words text-[clamp(1.25rem,9cqi,1.5rem)] font-semibold leading-tight tabular-nums [overflow-wrap:anywhere]">
               {formatOccupancyValue(value)}
             </div>
           )}
-          <div className="mt-1 truncate text-xs text-muted-foreground">
+          <div className="mt-1 line-clamp-2 min-w-0 break-words text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]" title={description}>
             {description}
           </div>
         </div>
         <div
           className={cn(
-            "flex h-11 w-11 shrink-0 items-center justify-center rounded-md ring-1",
+            "flex h-10 w-10 shrink-0 items-center justify-center self-start justify-self-end rounded-md ring-1",
             toneClass,
           )}
         >
@@ -1831,25 +1827,25 @@ function OccupancyReportChartCard({
     hasReferenceLimit;
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              <WidgetTitleText fallback={definition.label} />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] items-start gap-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2">
+              <BarChart3 className="mt-1 h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={definition.label} className="leading-6" />
             </CardTitle>
             <CardDescription className="mt-1">
               {definition.description}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {definition.resolutionLabel ? (
-              <Badge variant="secondary" className="w-fit">
+              <Badge variant="secondary" className="w-fit max-w-full whitespace-normal break-words text-left leading-4 [overflow-wrap:anywhere]">
                 {definition.resolutionLabel}
               </Badge>
             ) : null}
-            <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
+            <Badge variant="outline" className="w-fit max-w-full whitespace-normal break-words bg-primary/10 text-left leading-4 text-primary [overflow-wrap:anywhere]">
               {scopeName}
             </Badge>
           </div>
@@ -2005,7 +2001,7 @@ function ComparisonModeSelect({
       <SelectTrigger
         aria-label="Base temporal da comparação"
         className={cn(
-          "w-full min-w-[190px] bg-card text-xs sm:w-[190px]",
+          "w-full min-w-0 bg-card text-xs sm:w-[190px]",
           compact ? "h-8" : "h-9",
         )}
       >

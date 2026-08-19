@@ -140,7 +140,7 @@
     min-width: 0;
     flex: 1 1 0%;
     flex-direction: column;
-    overflow: auto;
+    overflow: hidden;
   }
 
   [data-layout-card-id] [data-card-content]:has([data-echart]) {
@@ -149,11 +149,17 @@
 
   [data-layout-card-id] [data-card-content] > * {
     min-height: 0;
+    min-width: 0;
     max-height: 100%;
+    max-width: 100%;
   }
 
-  [data-layout-card-id] [data-card-content] > :has([data-echart]),
-  [data-layout-card-id] [data-card-content] :has(> [data-echart]) {
+  [data-layout-card-id]
+    [data-card-content]:not([data-echart-layout="natural"])
+    > :has([data-echart]),
+  [data-layout-card-id]
+    [data-card-content]:not([data-echart-layout="natural"])
+    :has(> [data-echart]) {
     min-height: 0 !important;
     min-width: 0 !important;
     height: 100% !important;
@@ -292,12 +298,12 @@
 }
 
 @container (max-width: 480px) {
-  [data-layout-card-id] [data-card-header] > .flex {
+  [data-layout-card-id] [data-card-header] > div.flex {
     flex-direction: column !important;
     align-items: stretch !important;
   }
 
-  [data-layout-card-id] [data-card-header] > .flex > .flex:last-child {
+  [data-layout-card-id] [data-card-header] > div.flex > .flex:last-child {
     width: 100%;
     justify-content: flex-start !important;
   }

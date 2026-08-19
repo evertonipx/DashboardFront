@@ -19,6 +19,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -479,19 +487,19 @@ export function ScenarioComparisonCard({
   return (
     <Card
       className={cn(
-        "min-w-0 overflow-hidden",
+        "@container min-w-0 overflow-hidden",
         monitorMode && "h-full shadow-none",
       )}
     >
       <CardHeader className={cn("pb-3", monitorMode && "pb-2")}>
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-3">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
               {resolvedTitle}
             </CardTitle>
-            <CardDescription className="mt-1">
-              {settingsOpen && !monitorMode ? description : configurationSummary}
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
+              {configurationSummary}
             </CardDescription>
           </div>
           {!monitorMode ? action : null}
@@ -507,49 +515,28 @@ export function ScenarioComparisonCard({
                 type="button"
                 variant={settingsOpen ? "default" : "outline"}
                 size="sm"
-                onClick={() => setSettingsOpen((current) => !current)}
+                onClick={() => setSettingsOpen(true)}
               >
                 <Settings2 className="h-3.5 w-3.5" />
-                {settingsOpen ? "Ocultar" : "Configurar"}
+                Configurar
               </Button>
             )}
           </div>
         </div>
       </CardHeader>
-      <CardContent className={cn("space-y-4", monitorMode && "space-y-2")}>
-        {!monitorMode && settingsOpen ? (
-          <div className="rounded-md border bg-muted/20 p-3">
-            <div className="space-y-3">
-              <ScenarioComparisonConfigurator
-                fixedPeriodLabel={periodOverride?.label}
-                onChange={updateSettings}
-                scenarios={scenarios}
-                settings={settings}
-              />
-              <div className="flex justify-end lg:col-span-3">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setSettingsOpen(false)}
-                >
-                  Concluir
-                </Button>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
+      <CardContent
+        className={cn("min-h-0 flex-1 overflow-hidden", monitorMode && "pt-2")}
+        data-echart-layout="natural"
+      >
         <div
-          aria-label="Gráfico comparativo; role horizontalmente quando necessário"
+          aria-label="Gráfico comparativo responsivo"
           className={cn(
-            "enterprise-horizontal-scroll w-full overflow-x-auto",
+            "h-[360px] min-h-0 w-full flex-1 overflow-hidden",
             monitorMode
               ? "h-[clamp(320px,42vh,620px)]"
               : "h-[360px]",
           )}
           role="region"
-          tabIndex={0}
         >
           {loading && !rows.length ? (
             <Skeleton className="h-full w-full" />
@@ -561,17 +548,33 @@ export function ScenarioComparisonCard({
           ) : !selectedScenarios.length ? (
             <ChartState text="Nenhum cenário disponível para comparar." />
           ) : hasData ? (
-            <EChart
-              option={option}
-              className={cn(
-                definition.granularity === "day" && "min-w-[720px]",
-              )}
-            />
+            <EChart option={option} />
           ) : (
             <ChartState text="Sem eventos nos cenários selecionados para este período." />
           )}
         </div>
       </CardContent>
+      <Dialog open={settingsOpen && !monitorMode} onOpenChange={setSettingsOpen}>
+        <DialogContent className="grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Configurar comparação por cenário</DialogTitle>
+            <DialogDescription>{description}</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 overflow-y-auto pr-1">
+            <ScenarioComparisonConfigurator
+              fixedPeriodLabel={periodOverride?.label}
+              onChange={updateSettings}
+              scenarios={scenarios}
+              settings={settings}
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" onClick={() => setSettingsOpen(false)}>
+              Concluir
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

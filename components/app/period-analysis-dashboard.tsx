@@ -177,6 +177,8 @@ const MAX_ANALYSIS_MINUTE_BUCKETS = 20_000;
 const MAX_ANALYSIS_DAY_CACHE_ENTRIES = 64;
 const DEFAULT_METRIC_TYPE = "count";
 const OCCUPANCY_START_HOURS = Array.from({ length: 24 }, (_, hour) => hour);
+const ANALYSIS_READABLE_BADGE_CLASS_NAME =
+  "h-auto max-w-full flex-wrap whitespace-normal text-left leading-4 [overflow-wrap:anywhere]";
 
 type AnalysisDayCacheEntry = Readonly<{
   dataset: PeriodAnalysisDataset;
@@ -1110,11 +1112,14 @@ export function PeriodAnalysisDashboard({
         "totals_table",
       ].includes(widget.kind),
       colorPreview: widget.kind === "heatmap" ? ("gradient" as const) : undefined,
-      defaultHeight: short
-        ? ("short" as const)
-        : tall
-          ? ("tall" as const)
-          : ("standard" as const),
+      defaultHeight:
+        widget.kind === "summary"
+          ? ("standard" as const)
+          : short
+            ? ("short" as const)
+            : tall
+              ? ("tall" as const)
+              : ("standard" as const),
       defaultSize: compact
         ? ("compact" as const)
         : fullWidth
@@ -1122,7 +1127,12 @@ export function PeriodAnalysisDashboard({
           : ("wide" as const),
       id: widget.id,
       label: widget.title,
-      minHeight: short ? ("short" as const) : undefined,
+      minHeight:
+        widget.kind === "summary"
+          ? ("standard" as const)
+          : short
+            ? ("short" as const)
+            : undefined,
       titleEditable: true,
       node: (
         <PeriodAnalysisCard
@@ -1146,12 +1156,7 @@ export function PeriodAnalysisDashboard({
           widget={widget}
         />
       ),
-      shortHeightClassName:
-        widget.kind === "summary"
-          ? "row-span-2 sm:row-span-1"
-          : compact
-            ? "row-span-1"
-            : undefined,
+      shortHeightClassName: compact ? "row-span-1" : undefined,
       zoomEnabled:
         widget.kind !== "summary" &&
         widget.kind !== "totals_table" &&
@@ -1377,40 +1382,55 @@ export function PeriodAnalysisDashboard({
     >
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
       {analysisCertificationError ? (
-        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive [overflow-wrap:anywhere]">
           Consulta bloqueada: {analysisCertificationError}
         </div>
       ) : null}
 
       {monitorMode ? (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
-          <div className="min-w-0">
+          <div className="min-w-0 flex-[1_1_16rem]">
             <div className="text-xs font-medium uppercase text-muted-foreground">
               {singleDayAnalysis ? "Análise do dia" : "Análise consolidada"}
             </div>
-            <div className="truncate text-lg font-semibold">
+            <div className="break-words text-lg font-semibold leading-tight [overflow-wrap:anywhere]">
               {formatPeriodAnalysisRange(period)}
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {autoRefreshEnabled ? (
-              <Badge variant="outline" className="bg-card">
+              <Badge
+                variant="outline"
+                className={cn(ANALYSIS_READABLE_BADGE_CLASS_NAME, "bg-card")}
+              >
                 Atualização {analysisRangePlan.refreshIntervalMs / 1_000} s
               </Badge>
             ) : null}
             {analysisRangePlan.mode === "consolidated" ? (
-              <Badge variant="secondary" className="bg-card">
+              <Badge
+                variant="secondary"
+                className={cn(ANALYSIS_READABLE_BADGE_CLASS_NAME, "bg-card")}
+              >
                 Consolidação automática ativa
               </Badge>
             ) : null}
             {analysisRangePlan.mode === "consolidated" &&
             hourlyDetailRequested ? (
-              <Badge variant="outline" className="bg-card">
+              <Badge
+                variant="outline"
+                className={cn(ANALYSIS_READABLE_BADGE_CLASS_NAME, "bg-card")}
+              >
                 Detalhe horário · últimos {hourlyDetailDayCount} dias
               </Badge>
             ) : null}
             {lastUpdated ? (
-              <Badge variant="outline" className="gap-1 bg-card">
+              <Badge
+                variant="outline"
+                className={cn(
+                  ANALYSIS_READABLE_BADGE_CLASS_NAME,
+                  "gap-1 bg-card",
+                )}
+              >
                 <Clock3 className="h-3.5 w-3.5" />
                 {formatTime(lastUpdated)}
               </Badge>
@@ -1418,14 +1438,13 @@ export function PeriodAnalysisDashboard({
           </div>
         </div>
       ) : (
-        <div className="rounded-md border bg-card px-3 py-2 shadow-soft">
+        <div className="@container rounded-md border bg-card px-3 py-2 shadow-soft">
           <div
             aria-label="Controles da análise de Contagem"
-            className="enterprise-horizontal-scroll flex min-w-0 items-center gap-2 overflow-x-auto pb-1"
+            className="grid min-w-0 gap-2 @2xl:grid-cols-[minmax(260px,1fr)_auto] @2xl:items-start @4xl:grid-cols-[minmax(260px,auto)_minmax(0,1fr)_auto] @4xl:items-center"
             role="group"
-            tabIndex={0}
           >
-            <div className="shrink-0">
+            <div className="min-w-0 @2xl:col-start-1 @2xl:row-start-1">
               <AnalysisDateRangePicker
                 key={`${companyScopeId ?? ""}|${user?.id ?? ""}`}
                 contextLabel="análise de Contagem"
@@ -1440,28 +1459,32 @@ export function PeriodAnalysisDashboard({
             </div>
 
             {analysisRangePlan.mode === "consolidated" ? (
-              <Badge
-                variant="secondary"
-                className="shrink-0 whitespace-nowrap"
-                title="A resolução visual é ajustada automaticamente; os totais continuam usando todo o intervalo."
+              <div
+                className="flex min-w-0 flex-wrap items-center gap-2 @2xl:col-span-2 @2xl:row-start-2 @4xl:col-span-1 @4xl:col-start-2 @4xl:row-start-1"
+                aria-label="Estado da consolidação da análise"
               >
-                Consolidação automática ativa
-              </Badge>
-            ) : null}
-            {analysisRangePlan.mode === "consolidated" &&
-            hourlyDetailRequested ? (
-              <Badge
-                variant="outline"
-                className="shrink-0 whitespace-nowrap"
-                title="Somente widgets estritamente horários usam esta janela; consolidados usam todo o intervalo."
-              >
-                Detalhe horário · últimos {hourlyDetailDayCount} dias
-              </Badge>
+                <Badge
+                  variant="secondary"
+                  className={cn(ANALYSIS_READABLE_BADGE_CLASS_NAME, "w-fit")}
+                  title="A resolução visual é ajustada automaticamente; os totais continuam usando todo o intervalo."
+                >
+                  Consolidação automática ativa
+                </Badge>
+                {hourlyDetailRequested ? (
+                  <Badge
+                    variant="outline"
+                    className={cn(ANALYSIS_READABLE_BADGE_CLASS_NAME, "w-fit")}
+                    title="Somente widgets estritamente horários usam esta janela; consolidados usam todo o intervalo."
+                  >
+                    Detalhe horário · últimos {hourlyDetailDayCount} dias
+                  </Badge>
+                ) : null}
+              </div>
             ) : null}
 
             <div
               aria-label="Ações da análise de Contagem"
-              className="ml-auto flex shrink-0 items-center gap-2"
+              className="flex min-w-0 flex-wrap items-center gap-2 @2xl:col-start-2 @2xl:row-start-1 @2xl:justify-end @4xl:col-start-3 @4xl:flex-nowrap"
               role="group"
             >
               {canEditVisual ? (
@@ -1497,7 +1520,7 @@ export function PeriodAnalysisDashboard({
               {lastUpdated ? (
                 <span
                   aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                  className="inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
+                  className="inline-flex h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
                   title={`Última atualização às ${formatTime(lastUpdated)}`}
                 >
                   <Clock3 className="h-3.5 w-3.5" />
@@ -1586,18 +1609,30 @@ function PeriodAnalysisCard({
   const compactContent = compactSummary || compactWidget;
 
   return (
-    <Card className="h-full min-w-0 overflow-hidden">
+    <Card
+      className="h-full min-w-0 overflow-hidden"
+      data-period-analysis-card={widget.kind}
+    >
       <CardHeader className={cn("pb-2", compactContent && "p-3 pb-1.5")}>
-        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1">
+        <div
+          className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1"
+          data-analysis-card-header
+        >
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
+            <CardTitle className="flex min-w-0 items-start gap-2">
               <Icon className="h-4 w-4 shrink-0 text-primary" />
-              <span className="min-w-0 break-words leading-5">
+              <span className="min-w-0 break-words leading-5 [overflow-wrap:anywhere]">
                 <WidgetTitleText fallback={widget.title} />
               </span>
             </CardTitle>
             <CardDescription
-              className={cn(compactContent ? "mt-0.5 text-xs leading-4" : "mt-1")}
+              className={cn(
+                "whitespace-normal break-words [overflow-wrap:anywhere]",
+                compactSummary && "!line-clamp-2",
+                compactWidget && "!line-clamp-1",
+                compactContent ? "mt-0.5 text-xs leading-4" : "mt-1",
+              )}
+              title={model.description}
             >
               {model.description}
             </CardDescription>
@@ -1630,61 +1665,83 @@ function PeriodAnalysisCard({
               </>
             </WidgetCardActions>
           ) : null}
-        {!compactWidget ? <div className="col-span-full min-w-0 pt-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-            <Badge
-              variant="outline"
-              className="max-w-full truncate"
-              title={scenarioSummary}
-            >
-              {scenarioSummary}
-            </Badge>
-            {(widget.kind === "timeline" ||
-              widget.kind === "comparison" ||
-              widget.kind === "hourly_occupancy") && (
-              <Badge variant="outline">
-                {analysisGranularityLabel(effectiveGranularity)}
-              </Badge>
-            )}
-            {widget.kind === "hourly_occupancy" ? (
-              <Badge variant="outline">
-                Início {formatOccupancyStartHour(widget.startHour)}
-              </Badge>
-            ) : null}
-            {(widget.kind === "cumulative" ||
-              widget.kind === "cumulative_metric" ||
-              widget.kind === "daily_comparison" ||
-              widget.kind === "target_progress") ? (
-              <Badge variant="outline">
-                {periodAnalysisBaselineLabel(widget.baseline)}
-              </Badge>
-            ) : null}
-            {model.insights?.map((insight) => (
-              <Badge
-                key={`${insight.label}-${insight.value}`}
-                variant={insight.tone === "primary" ? "secondary" : "outline"}
-                className={cn(
-                  "max-w-full gap-1 tabular-nums",
-                  insight.tone === "primary" && "bg-primary/10 text-primary",
-                  insight.tone === "muted" && "text-muted-foreground",
-                  insight.tone === "positive" &&
-                    "border-emerald-600/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-                  insight.tone === "negative" &&
-                    "border-orange-600/25 bg-orange-500/10 text-orange-700 dark:text-orange-300",
-                )}
-                title={`${insight.label}: ${insight.value}`}
+          {!compactWidget ? (
+            <div className="col-span-full min-w-0 pt-1">
+              <div
+                className="flex min-w-0 flex-wrap items-center gap-1.5"
+                data-analysis-card-badges
               >
-                <span className="font-normal opacity-75">{insight.label}</span>
-                <span className="truncate font-semibold">{insight.value}</span>
-              </Badge>
-            ))}
-          </div>
-        </div> : null}
+                <Badge
+                  variant="outline"
+                  className={ANALYSIS_READABLE_BADGE_CLASS_NAME}
+                  title={scenarioSummary}
+                >
+                  {scenarioSummary}
+                </Badge>
+                {(widget.kind === "timeline" ||
+                  widget.kind === "comparison" ||
+                  widget.kind === "hourly_occupancy") && (
+                  <Badge
+                    variant="outline"
+                    className={ANALYSIS_READABLE_BADGE_CLASS_NAME}
+                  >
+                    {analysisGranularityLabel(effectiveGranularity)}
+                  </Badge>
+                )}
+                {widget.kind === "hourly_occupancy" ? (
+                  <Badge
+                    variant="outline"
+                    className={ANALYSIS_READABLE_BADGE_CLASS_NAME}
+                  >
+                    Início {formatOccupancyStartHour(widget.startHour)}
+                  </Badge>
+                ) : null}
+                {(widget.kind === "cumulative" ||
+                  widget.kind === "cumulative_metric" ||
+                  widget.kind === "daily_comparison" ||
+                  widget.kind === "target_progress") ? (
+                  <Badge
+                    variant="outline"
+                    className={ANALYSIS_READABLE_BADGE_CLASS_NAME}
+                  >
+                    {periodAnalysisBaselineLabel(widget.baseline)}
+                  </Badge>
+                ) : null}
+                {model.insights?.map((insight) => (
+                  <Badge
+                    key={`${insight.label}-${insight.value}`}
+                    variant={
+                      insight.tone === "primary" ? "secondary" : "outline"
+                    }
+                    className={cn(
+                      ANALYSIS_READABLE_BADGE_CLASS_NAME,
+                      "gap-x-1 gap-y-0 tabular-nums",
+                      insight.tone === "primary" &&
+                        "bg-primary/10 text-primary",
+                      insight.tone === "muted" && "text-muted-foreground",
+                      insight.tone === "positive" &&
+                        "border-emerald-600/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                      insight.tone === "negative" &&
+                        "border-orange-600/25 bg-orange-500/10 text-orange-700 dark:text-orange-300",
+                    )}
+                    title={`${insight.label}: ${insight.value}`}
+                  >
+                    <span className="min-w-0 font-normal opacity-75 [overflow-wrap:anywhere]">
+                      {insight.label}
+                    </span>
+                    <span className="min-w-0 max-w-full font-semibold [overflow-wrap:anywhere]">
+                      {insight.value}
+                    </span>
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
       </CardHeader>
       <CardContent
         className={cn(
-          "min-h-0 min-w-0 flex-1",
+          "min-h-0 min-w-0 flex-1 !overflow-hidden",
           compactContent && "px-3 pb-3",
         )}
       >
@@ -1718,20 +1775,24 @@ function MetricGrid({
   return (
     <div
       className={cn(
-        "grid gap-px overflow-hidden rounded-md border bg-border",
+        "grid w-full min-w-0 self-stretch overflow-hidden rounded-md border bg-border",
         metrics.length === 1
           ? "grid-cols-1"
-          : "grid-cols-2 sm:grid-cols-4",
+          : "grid-cols-[repeat(auto-fit,minmax(min(100%,8rem),1fr))] gap-px",
       )}
+      data-analysis-metric-grid
     >
       {metrics.map((metric) => (
         <div
           key={metric.label}
-          className={cn("min-w-0 bg-card", compact ? "p-2.5" : "p-4")}
+          className={cn(
+            "min-w-0 overflow-visible bg-card",
+            compact ? "p-2.5" : "p-4",
+          )}
         >
           <div
             className={cn(
-              "font-medium uppercase text-muted-foreground",
+              "break-words font-medium uppercase text-muted-foreground [overflow-wrap:anywhere]",
               compact ? "text-[10px] leading-3" : "text-xs",
             )}
           >
@@ -1739,9 +1800,10 @@ function MetricGrid({
           </div>
           <div
             className={cn(
-              "truncate font-semibold tabular-nums",
-              compact ? "mt-1 text-xl leading-6" : "mt-2 text-2xl",
+              "max-w-full break-words font-semibold leading-tight tabular-nums [font-size:clamp(1rem,6cqi,1.5rem)] [overflow-wrap:anywhere]",
+              compact ? "mt-1" : "mt-2",
             )}
+            data-analysis-metric-value
           >
             {typeof metric.value === "number"
               ? formatNumber(metric.value)
@@ -1750,7 +1812,7 @@ function MetricGrid({
           {metric.description ? (
             <div
               className={cn(
-                "truncate text-muted-foreground",
+                "line-clamp-2 break-words text-muted-foreground [overflow-wrap:anywhere]",
                 compact ? "mt-0.5 text-[10px] leading-3" : "mt-1 text-xs",
               )}
               title={metric.description}
@@ -1770,16 +1832,33 @@ function AnalysisTable({
   table: NonNullable<PeriodAnalysisWidgetModel["table"]>;
 }) {
   return (
-    <div className="h-full min-h-0 overflow-auto rounded-md border">
-      <table className="w-full border-collapse text-sm">
+    <div
+      className="enterprise-horizontal-scroll h-full min-h-0 min-w-0 overflow-auto rounded-md border"
+      data-analysis-table
+      role="region"
+      aria-label={table.title}
+      tabIndex={0}
+    >
+      <table
+        className="w-full table-auto border-collapse text-sm"
+        style={{ minWidth: `${Math.max(32, table.columns.length * 9)}rem` }}
+      >
+        <colgroup>
+          {table.columns.map((column) => (
+            <col
+              key={column.key}
+              style={column.width ? { width: `${column.width}%` } : undefined}
+            />
+          ))}
+        </colgroup>
         <thead className="sticky top-0 z-10 bg-muted/95 backdrop-blur">
           <tr>
             {table.columns.map((column) => (
               <th
                 key={column.key}
                 className={cn(
-                  "border-b px-3 py-2 text-left text-xs font-semibold text-muted-foreground",
-                  column.numeric && "text-right",
+                  "border-b px-3 py-2 text-left text-xs font-semibold text-muted-foreground [overflow-wrap:anywhere]",
+                  column.numeric && "whitespace-nowrap text-right",
                 )}
               >
                 {column.label}
@@ -1799,9 +1878,10 @@ function AnalysisTable({
                   <td
                     key={column.key}
                     className={cn(
-                      "border-b px-3 py-2 last:border-b-0",
-                      column.numeric && "text-right tabular-nums",
+                      "border-b px-3 py-2 align-top whitespace-normal [overflow-wrap:anywhere] last:border-b-0",
+                      column.numeric && "whitespace-nowrap text-right tabular-nums",
                     )}
+                    title={String(value ?? "-")}
                   >
                     {column.numeric && typeof value === "number"
                       ? formatNumber(value)
@@ -2201,7 +2281,7 @@ function Field({
 
 function EmptyState({ text }: { text: string }) {
   return (
-    <div className="flex h-full min-h-[160px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+    <div className="flex h-full min-h-[160px] min-w-0 items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground [overflow-wrap:anywhere]">
       {text}
     </div>
   );

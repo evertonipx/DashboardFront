@@ -3470,6 +3470,7 @@ export function RealtimeDashboard({
     <section
       id="ao-vivo"
       className={cn(
+        "min-w-0 [&_[data-card-description]]:[overflow-wrap:anywhere] [&_[data-card-header]_h3]:[overflow-wrap:anywhere] [&_[data-card-header]_h3_svg]:shrink-0",
         monitorMode
           ? "fixed inset-0 z-[100] h-[100dvh] overflow-y-auto bg-background p-3 text-foreground lg:p-4"
           : "scroll-mt-6 space-y-4",
@@ -3488,11 +3489,11 @@ export function RealtimeDashboard({
             <div className="text-xs font-medium uppercase text-muted-foreground">
               Ao vivo
             </div>
-            <div className="truncate text-lg font-semibold">
+            <div className="break-words text-lg font-semibold [overflow-wrap:anywhere]">
               {selectedScope?.name ?? "Visão selecionada"}
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <Badge
               variant="outline"
               className="gap-1 border-primary/30 bg-primary/10 text-primary"
@@ -3513,22 +3514,21 @@ export function RealtimeDashboard({
           </div>
         </div>
       ) : (
-      <div className="rounded-md border border-border bg-card px-3 py-2 shadow-soft">
+      <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
         {loadingScenarios ? (
-          <div className="flex items-center gap-2 overflow-hidden">
-            <Skeleton className="h-8 w-[170px] shrink-0" />
-            <Skeleton className="h-8 w-[220px] shrink-0" />
-            <Skeleton className="ml-auto h-8 w-48 shrink-0" />
+          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(140px,170px)_minmax(180px,220px)_minmax(0,1fr)]">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full @xl:col-span-2 @4xl:col-span-1 @4xl:w-48 @4xl:justify-self-end" />
           </div>
         ) : scopeOptions.length ? (
           <div className="space-y-3">
             <div
               aria-label="Controles da visão ao vivo de Contagem"
-              className="enterprise-horizontal-scroll flex min-w-0 items-center gap-2 overflow-x-auto pb-1"
+              className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(140px,170px)_minmax(180px,220px)_minmax(0,1fr)] @4xl:items-center"
               role="group"
-              tabIndex={0}
             >
-              <div className="w-[170px] shrink-0">
+              <div className="min-w-0">
                 <Select
                   value={scopeMode}
                   onValueChange={(value) => {
@@ -3538,7 +3538,7 @@ export function RealtimeDashboard({
                 >
                   <SelectTrigger
                     aria-label="Tipo da visão de Contagem"
-                    className="h-8 bg-card"
+                    className="h-8 w-full min-w-0 bg-card"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -3551,11 +3551,11 @@ export function RealtimeDashboard({
                   </SelectContent>
                 </Select>
               </div>
-              <div className="w-[220px] shrink-0">
+              <div className="min-w-0">
                 <Select value={selectedId} onValueChange={setSelectedId}>
                   <SelectTrigger
                     aria-label={`${scopeModeLabel(scopeMode)} em foco`}
-                    className="h-8 bg-card"
+                    className="h-8 w-full min-w-0 bg-card"
                   >
                     <SelectValue placeholder="Selecione uma visão" />
                   </SelectTrigger>
@@ -3570,7 +3570,7 @@ export function RealtimeDashboard({
               </div>
               <div
                 aria-label="Ações da visão ao vivo de Contagem"
-                className="ml-auto flex shrink-0 items-center gap-2"
+                className="flex min-w-0 flex-wrap items-center gap-2 @xl:col-span-2 @xl:justify-end @4xl:col-span-1 @4xl:flex-nowrap @4xl:justify-self-end"
                 role="group"
               >
                 <ReportExportActions
@@ -3621,7 +3621,7 @@ export function RealtimeDashboard({
                 {lastUpdated ? (
                   <span
                     aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                    className="inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
+                    className="inline-flex h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
                     title={`Última atualização às ${formatTime(lastUpdated)}`}
                   >
                     <Clock3 className="h-3.5 w-3.5" />
@@ -3988,10 +3988,10 @@ function MetricCard({
   }[tone];
 
   return (
-    <Card className="h-full overflow-hidden">
+    <Card className="@container h-full min-w-0 overflow-hidden">
       <CardContent className="h-full min-h-0 p-4">
         <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium uppercase text-muted-foreground">
+          <div className="flex min-w-0 items-start gap-1.5 break-words text-xs font-medium uppercase text-muted-foreground [overflow-wrap:anywhere]">
             <Icon
               className={cn("h-3.5 w-3.5 shrink-0", iconToneClass)}
               style={
@@ -4009,14 +4009,14 @@ function MetricCard({
               Não certificado
             </div>
           ) : (
-            <div className="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <div className="text-3xl font-semibold leading-none tabular-nums">
+            <div className="mt-1.5 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+              <div className="max-w-full break-all text-[clamp(1.35rem,12cqi,1.875rem)] font-semibold leading-none tabular-nums">
                 {typeof value === "number" ? formatNumber(value) : value}
               </div>
               {comparison ? (
                 <div
                   className={cn(
-                    "text-sm font-semibold tabular-nums",
+                    "max-w-full break-all text-sm font-semibold tabular-nums",
                     metricComparisonClassName(comparison),
                   )}
                 >
@@ -4025,7 +4025,10 @@ function MetricCard({
               ) : null}
             </div>
           )}
-          <div className="mt-1 line-clamp-2 text-xs leading-4 text-muted-foreground">
+          <div
+            className="mt-1 line-clamp-1 break-words text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
+            title={description}
+          >
             {description}
           </div>
         </div>
@@ -4078,8 +4081,8 @@ function RealtimeChartCard({
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback={definition.label} />
             </CardTitle>
             <CardDescription className="mt-1">
@@ -4167,19 +4170,22 @@ function OperationalHourlyChartCard({
   );
 
   return (
-    <Card>
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
+        <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback="Hora a Hora" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               Base histórica à esquerda e hoje à direita. Linha tracejada: {averageDescription.toLowerCase()} convertida em média horária.
             </CardDescription>
           </div>
-          <Badge variant="outline" className="bg-primary/10 text-primary">
+          <Badge
+            variant="outline"
+            className="max-w-full whitespace-normal break-words bg-primary/10 text-left leading-5 text-primary [overflow-wrap:anywhere] @sm:justify-self-end"
+          >
             {scope.name}
           </Badge>
         </div>
@@ -4527,8 +4533,8 @@ function OperationalHeatmapCard({
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <Grid3X3 className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Grid3X3 className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
@@ -4538,7 +4544,10 @@ function OperationalHeatmapCard({
           </div>
           {action}
           <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
-            <Badge variant="outline" className="max-w-full truncate">
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere]"
+            >
               {selectionLabel}
             </Badge>
             {canConfigure && !monitorMode ? (
@@ -4642,21 +4651,21 @@ function HourlyOccupancyCard({
   }, [monitorMode]);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <DoorOpen className="h-4 w-4 text-primary" />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <DoorOpen className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback="Ocupação hora a hora" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               Saldo acumulado diariamente a partir de
               {` ${formatOccupancyStartHour(startHour)}`}: entradas menos saídas.
               Antes desse horário, o saldo permanece zerado.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               E {entryScenarios.length} · S {exitScenarios.length}
             </Badge>
@@ -4682,7 +4691,7 @@ function HourlyOccupancyCard({
                 variant={settingsOpen ? "default" : "outline"}
                 size="icon"
                 className="h-8 w-8"
-                onClick={() => setSettingsOpen((current) => !current)}
+                onClick={() => setSettingsOpen(true)}
                 aria-label="Configurar ocupação"
                 title="Configurar ocupação"
               >
@@ -4692,85 +4701,10 @@ function HourlyOccupancyCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 space-y-3">
-        {settingsOpen && !monitorMode ? (
-          <div className="space-y-3 rounded-md border bg-muted/10 p-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <div className="text-xs font-medium uppercase text-muted-foreground">
-                  Associação direcional
-                </div>
-                <div className="text-sm font-semibold">
-                  {selectionMode === "auto"
-                    ? "Detectada pelos nomes e linhas"
-                    : "Seleção manual por cenário"}
-                </div>
-              </div>
-              <div
-                aria-label="Modo de associação direcional"
-                className="grid grid-cols-2 gap-2 sm:w-[240px]"
-                role="group"
-              >
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={selectionMode === "auto" ? "default" : "outline"}
-                  onClick={() => onSelectionModeChange("auto")}
-                >
-                  Automático
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={selectionMode === "custom" ? "default" : "outline"}
-                  onClick={() => onSelectionModeChange("custom")}
-                >
-                  Manual
-                </Button>
-              </div>
-            </div>
-            <div className="max-w-[220px] space-y-1.5">
-              <Label htmlFor={startHourSelectId}>Início da contagem</Label>
-              <Select
-                value={String(startHour)}
-                onValueChange={(value) => onStartHourChange(Number(value))}
-              >
-                <SelectTrigger id={startHourSelectId}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {OCCUPANCY_START_HOURS.map((hour) => (
-                    <SelectItem key={hour} value={String(hour)}>
-                      {formatOccupancyStartHour(hour)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {selectionMode === "custom" ? (
-              <div className="grid gap-3 xl:grid-cols-2">
-                <ScenarioPicker
-                  allowAll={false}
-                  label="Cenários de entrada"
-                  mode="custom"
-                  onModeChange={() => undefined}
-                  onSelectedIdsChange={onEntryScenarioIdsChange}
-                  scenarios={scenarios}
-                  selectedIds={entryScenarioIds}
-                />
-                <ScenarioPicker
-                  allowAll={false}
-                  label="Cenários de saída"
-                  mode="custom"
-                  onModeChange={() => undefined}
-                  onSelectedIdsChange={onExitScenarioIdsChange}
-                  scenarios={scenarios}
-                  selectedIds={exitScenarioIds}
-                />
-              </div>
-            ) : null}
-          </div>
-        ) : null}
+      <CardContent
+        className="min-h-0 min-w-0 flex-1 overflow-hidden"
+        data-echart-layout="natural"
+      >
         {!hasSelection ? (
           <EmptyChartState
             className="h-[220px]"
@@ -4781,7 +4715,7 @@ function HourlyOccupancyCard({
         ) : error ? (
           <EmptyChartState className="h-[220px]" text={error} />
         ) : hasData ? (
-          <EChart option={option} className="h-[320px]" />
+          <EChart option={option} className="h-[320px] min-h-0 flex-1" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -4789,6 +4723,100 @@ function HourlyOccupancyCard({
           />
         )}
       </CardContent>
+      <Dialog open={settingsOpen && !monitorMode} onOpenChange={setSettingsOpen}>
+        <DialogContent className="@container grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Configurar ocupação hora a hora</DialogTitle>
+            <DialogDescription>
+              Defina a associação direcional e o início da contagem sem reduzir a
+              área útil do gráfico.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+            <div className="space-y-3 rounded-md border bg-muted/10 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium uppercase text-muted-foreground">
+                    Associação direcional
+                  </div>
+                  <div className="break-words text-sm font-semibold [overflow-wrap:anywhere]">
+                    {selectionMode === "auto"
+                      ? "Detectada pelos nomes e linhas"
+                      : "Seleção manual por cenário"}
+                  </div>
+                </div>
+                <div
+                  aria-label="Modo de associação direcional"
+                  className="grid w-full grid-cols-2 gap-2 @sm:w-[240px]"
+                  role="group"
+                >
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={selectionMode === "auto" ? "default" : "outline"}
+                    onClick={() => onSelectionModeChange("auto")}
+                  >
+                    Automático
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={selectionMode === "custom" ? "default" : "outline"}
+                    onClick={() => onSelectionModeChange("custom")}
+                  >
+                    Manual
+                  </Button>
+                </div>
+              </div>
+              <div className="w-full space-y-1.5 @sm:max-w-[220px]">
+                <Label htmlFor={startHourSelectId}>Início da contagem</Label>
+                <Select
+                  value={String(startHour)}
+                  onValueChange={(value) => onStartHourChange(Number(value))}
+                >
+                  <SelectTrigger id={startHourSelectId}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {OCCUPANCY_START_HOURS.map((hour) => (
+                      <SelectItem key={hour} value={String(hour)}>
+                        {formatOccupancyStartHour(hour)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {selectionMode === "custom" ? (
+                <div className="grid min-w-0 gap-3 @xl:grid-cols-2">
+                  <ScenarioPicker
+                    allowAll={false}
+                    label="Cenários de entrada"
+                    mode="custom"
+                    onModeChange={() => undefined}
+                    onSelectedIdsChange={onEntryScenarioIdsChange}
+                    scenarios={scenarios}
+                    selectedIds={entryScenarioIds}
+                  />
+                  <ScenarioPicker
+                    allowAll={false}
+                    label="Cenários de saída"
+                    mode="custom"
+                    onModeChange={() => undefined}
+                    onSelectedIdsChange={onExitScenarioIdsChange}
+                    scenarios={scenarios}
+                    selectedIds={exitScenarioIds}
+                  />
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button type="button" onClick={() => setSettingsOpen(false)}>
+              Concluir
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
@@ -4854,8 +4882,8 @@ function ScenarioCumulativeTotalsCard({
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <Sigma className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Sigma className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
@@ -4960,8 +4988,8 @@ function ScenarioTotalsTableCard({
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <Table2 className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Table2 className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
@@ -5030,8 +5058,11 @@ function ScenarioTotalsTableCard({
               <TableBody>
                 {rows.map((row) => (
                   <TableRow key={row.id}>
-                    <TableCell className="max-w-[360px] font-medium">
-                      <span className="block truncate" title={row.name}>
+                    <TableCell className="min-w-[12rem] max-w-[360px] font-medium">
+                      <span
+                        className="block break-words [overflow-wrap:anywhere]"
+                        title={row.name}
+                      >
                         {row.name}
                       </span>
                     </TableCell>
@@ -5104,17 +5135,17 @@ function LiveAnnualComparisonCard({
   return (
     <Card className="h-full min-w-0 overflow-hidden">
       <CardHeader className="border-b px-4 py-3">
-        <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] items-start gap-2">
           <div className="min-w-0 flex-1">
-            <CardTitle className="flex items-center gap-2">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
               {accumulated ? (
-                <TrendingUp className="h-4 w-4 text-primary" />
+                <TrendingUp className="h-4 w-4 shrink-0 text-primary" />
               ) : (
-                <BarChart3 className="h-4 w-4 text-primary" />
+                <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
               )}
               <WidgetTitleText fallback={title} />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {accumulated
                 ? "Soma progressiva mês a mês para comparar a trajetória acumulada de cada ano e identificar avanço ou atraso."
                 : `Anos lado a lado. Linha tracejada: média mensal de ${
@@ -5127,12 +5158,16 @@ function LiveAnnualComparisonCard({
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             <Badge
               variant="outline"
-              className="max-w-full truncate"
+              className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere]"
               title={scopeName}
             >
               {scopeName}
             </Badge>
-            <Badge variant="outline" title={periodLabel}>
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere]"
+              title={periodLabel}
+            >
               {periodLabel}
             </Badge>
             {model ? (
@@ -5142,7 +5177,7 @@ function LiveAnnualComparisonCard({
                 title={`${insightLabel}: ${formatNumber(insightValue)}`}
               >
                 <span className="font-normal opacity-75">{insightLabel}</span>
-                <span className="truncate font-semibold">
+                <span className="max-w-full break-all font-semibold">
                   {formatNumber(insightValue)}
                 </span>
               </Badge>
@@ -5201,19 +5236,22 @@ function OperationalMonthComparisonCard({
   );
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <CalendarDays className="h-4 w-4 text-primary" />
+        <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <CalendarDays className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback="Dias x meses" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
-          <Badge variant="outline" className="max-w-full truncate">
+          <Badge
+            variant="outline"
+            className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere] @sm:justify-self-end"
+          >
             {scopeName}
           </Badge>
         </div>
@@ -5257,19 +5295,22 @@ function OperationalMonthCumulativeCard({
   );
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <TrendingUp className="h-4 w-4 text-primary" />
+        <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <TrendingUp className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback="Acumulado diário x mês-base" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
-          <Badge variant="outline" className="max-w-full truncate">
+          <Badge
+            variant="outline"
+            className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere] @sm:justify-self-end"
+          >
             {scopeName}
           </Badge>
         </div>
@@ -5320,22 +5361,25 @@ function OperationalTrendCard({
   const hasData = points.some((point) => point.average7 !== null);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <TrendingUp className="h-4 w-4 text-primary" />
+        <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <TrendingUp className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback="Tendência 7 x 30 dias" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               Dia atual parcial incluído e atualizado a cada 5 segundos. Eixo de 1 a 31; fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 @sm:justify-end">
             <TrendBadge label="MM7" trend={trend7} />
             <TrendBadge label="MM30" trend={trend30} />
-            <Badge variant="outline" className="max-w-full truncate">
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere]"
+            >
               {scopeName}
             </Badge>
           </div>
@@ -5445,8 +5489,8 @@ function ScenarioRoseCard({
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <ChartPie className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <ChartPie className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
@@ -5557,8 +5601,8 @@ function MonthlyAccessRankingCard({
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
@@ -5662,8 +5706,8 @@ function PeakDaysRankingCard({
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <Trophy className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Trophy className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
@@ -5737,12 +5781,12 @@ function MissingCustomWidgetCard({
   title: string;
 }) {
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText
                 fallback={title || "Widget personalizado"}
               />
@@ -5787,13 +5831,15 @@ function TodayComparisonCard({
   );
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2">
-          <BarChart3 className="h-4 w-4 text-primary" />
+        <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+          <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
           <WidgetTitleText fallback={title} />
         </CardTitle>
-        <CardDescription>{description}</CardDescription>
+        <CardDescription className="[overflow-wrap:anywhere]">
+          {description}
+        </CardDescription>
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -5812,12 +5858,14 @@ function TodayComparisonCard({
 
 function EmptyRealtimeCard({ title }: { title: string }) {
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader>
-        <CardTitle>
+        <CardTitle className="[overflow-wrap:anywhere]">
           <WidgetTitleText fallback={title} />
         </CardTitle>
-        <CardDescription>Selecione um cenário para ver o ao vivo.</CardDescription>
+        <CardDescription className="[overflow-wrap:anywhere]">
+          Selecione um cenário para ver o ao vivo.
+        </CardDescription>
       </CardHeader>
       <CardContent>
         <EmptyChartState text="Nenhum cenário selecionado." />

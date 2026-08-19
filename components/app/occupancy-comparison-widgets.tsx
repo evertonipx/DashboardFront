@@ -2127,8 +2127,6 @@ function OccupancyHalfDonutCard({
     chartType === "half_donut" ? entries.length > 0 : barEntries.length > 0;
   const showCompactDonutFallback =
     chartType === "half_donut" && entries.length > 8;
-  const barChartMinimumHeight = Math.max(300, barEntries.length * 36 + 48);
-  const verticalBarChartMinimumHeight = chartContainerWidth < 440 ? 360 : 390;
   const statusColorPresetLabel =
     OCCUPANCY_STATUS_COLOR_PRESETS.find(
       (candidate) => candidate.id === statusColors.preset,
@@ -2159,12 +2157,12 @@ function OccupancyHalfDonutCard({
   return (
     <Card className="@container flex h-full min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="grid min-w-0 items-start gap-2 @2xl:grid-cols-[minmax(0,1fr)_auto]">
           <div className="min-w-0">
-            <CardTitle>
+            <CardTitle className="[overflow-wrap:anywhere]">
               <WidgetTitleText fallback="Comparação atual por cenário" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {chartType === "vertical_bars"
                 ? mode === "status"
                   ? "Uma coluna por cenário, da esquerda para a direita na ordem configurada, distinguindo ocupado, desocupado e ausência de dados."
@@ -2178,7 +2176,7 @@ function OccupancyHalfDonutCard({
                   : "A área de cada fatia representa a ocupação real; o callout identifica cenário e participação percentual."}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="col-span-full flex min-w-0 flex-wrap items-center gap-2 @2xl:col-auto @2xl:justify-end">
             {!monitorMode ? (
               <>
                 <Select
@@ -2191,7 +2189,7 @@ function OccupancyHalfDonutCard({
                 >
                   <SelectTrigger
                     aria-label="Tipo do gráfico da comparação atual por cenário"
-                    className="h-8 w-[180px]"
+                    className="h-8 w-full min-w-0 @sm:w-[180px]"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -2209,7 +2207,7 @@ function OccupancyHalfDonutCard({
                 >
                   <SelectTrigger
                     aria-label="Modo da comparação atual por cenário"
-                    className="h-8 w-[190px]"
+                    className="h-8 w-full min-w-0 @sm:w-[190px]"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -2228,7 +2226,10 @@ function OccupancyHalfDonutCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <CardContent
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        data-echart-layout="natural"
+      >
         {mode === "status" && entries.length ? (
           <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
             <OccupancyStatusLegendBadge
@@ -2250,40 +2251,24 @@ function OccupancyHalfDonutCard({
         ) : hasChartEntries ? (
           <div
             ref={chartContainerRef}
-            className={cn(
-              "relative flex min-w-0 flex-1",
-              chartType === "half_donut" &&
-                "min-h-[300px] sm:min-h-[340px] lg:min-h-[380px]",
-            )}
-            style={
-              chartType === "bars"
-                ? { minHeight: `${barChartMinimumHeight}px` }
-                : chartType === "vertical_bars"
-                  ? { minHeight: `${verticalBarChartMinimumHeight}px` }
-                : undefined
-            }
+            className="flex min-h-0 min-w-0 flex-1 flex-col"
           >
-            <EChart
-              ariaLabel="Comparação atual por cenário"
-              option={option}
-              themeMode="explicit"
-              className={cn(
-                "h-full w-full flex-1",
-                chartType === "half_donut" &&
-                  "min-h-[300px] sm:min-h-[340px] lg:min-h-[380px]",
-              )}
-            />
-            {allCertifiedAreZero ? (
-              <div
-                className={cn(
-                  "pointer-events-none absolute inset-x-0 text-center text-xs font-semibold",
-                  showCompactDonutFallback ? "bottom-14" : "bottom-8",
-                )}
-                style={{ color: displayStatusColors.unoccupied }}
-              >
-                Todos desocupados · 0
-              </div>
-            ) : null}
+            <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+              <EChart
+                ariaLabel="Comparação atual por cenário"
+                option={option}
+                themeMode="explicit"
+                className="h-full min-h-0 w-full"
+              />
+              {allCertifiedAreZero ? (
+                <div
+                  className="pointer-events-none absolute inset-x-0 bottom-8 text-center text-xs font-semibold"
+                  style={{ color: displayStatusColors.unoccupied }}
+                >
+                  Todos desocupados · 0
+                </div>
+              ) : null}
+            </div>
             {showCompactDonutFallback ? (
               <OccupancyHalfDonutCompactFallback
                 colorPalette={colorPalette}
@@ -2326,6 +2311,8 @@ function OccupancyHalfDonutCompactFallback({
   theme: "dark" | "light";
   widgetColor: string;
 }) {
+  const [page, setPage] = React.useState(0);
+  const pageSize = 8;
   const highestIndex = Math.max(0, ...scenarioIndexes.values());
   const indexWidth = Math.max(2, String(highestIndex).length);
   const totalOccupancy = entries.reduce((sum, entry) => sum + entry.total, 0);
@@ -2369,19 +2356,25 @@ function OccupancyHalfDonutCompactFallback({
     return { accessibleLabel, color, entry, indexLabel, metric };
   });
 
+  const pageCount = Math.max(1, Math.ceil(compactEntries.length / pageSize));
+  const safePage = Math.min(page, pageCount - 1);
+  const visibleEntries = compactEntries.slice(
+    safePage * pageSize,
+    (safePage + 1) * pageSize,
+  );
+
   return (
-    <div
-      aria-label="Identificação compacta das fatias da meia rosca"
-      className="absolute inset-x-2 bottom-2 z-10 overflow-x-auto overscroll-x-contain rounded-lg border border-border/80 bg-background/95 px-1.5 py-1 shadow-sm backdrop-blur-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      role="list"
-      tabIndex={0}
-    >
-      <div className="flex min-w-max items-center gap-1.5">
-        {compactEntries.map(({ accessibleLabel, color, entry, indexLabel, metric }) => (
+    <div className="z-10 mt-2 min-w-0 rounded-lg border border-border/80 bg-background/95 p-1.5 shadow-sm backdrop-blur-sm">
+      <div
+        aria-label="Identificação compacta das fatias da meia rosca"
+        className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,8.5rem),1fr))] gap-1.5"
+        role="list"
+      >
+        {visibleEntries.map(({ accessibleLabel, color, entry, indexLabel, metric }) => (
           <div
             key={entry.scenarioId}
             aria-label={accessibleLabel}
-            className="inline-flex h-7 max-w-[15rem] shrink-0 items-center gap-1.5 rounded-md border border-border/70 bg-card px-1.5 text-[10px] text-foreground shadow-sm"
+            className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-1.5 gap-y-0.5 rounded-md border border-border/70 bg-card px-1.5 py-1 text-[10px] text-foreground shadow-sm"
             role="listitem"
             title={accessibleLabel}
           >
@@ -2402,18 +2395,51 @@ function OccupancyHalfDonutCompactFallback({
             >
               {indexLabel}
             </span>
-            <span aria-hidden="true" className="max-w-28 truncate font-medium">
+            <span
+              aria-hidden="true"
+              className="line-clamp-2 min-w-0 break-words font-medium leading-3 [overflow-wrap:anywhere]"
+              title={entry.name}
+            >
               {entry.name}
             </span>
             <span
               aria-hidden="true"
-              className="shrink-0 font-semibold text-muted-foreground"
+              className="col-span-full min-w-0 break-words font-semibold leading-3 text-muted-foreground [overflow-wrap:anywhere]"
             >
               {metric}
             </span>
           </div>
         ))}
       </div>
+      {pageCount > 1 ? (
+        <div className="mt-1.5 flex min-w-0 flex-wrap items-center justify-between gap-1.5 border-t border-border/60 pt-1.5 text-[10px] text-muted-foreground">
+          <span className="tabular-nums">
+            {safePage + 1} de {pageCount}
+          </span>
+          <div className="flex items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-[10px]"
+              disabled={safePage === 0}
+              onClick={() => setPage(Math.max(0, safePage - 1))}
+            >
+              Anterior
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-[10px]"
+              disabled={safePage >= pageCount - 1}
+              onClick={() => setPage(Math.min(pageCount - 1, safePage + 1))}
+            >
+              Próxima
+            </Button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2769,20 +2795,20 @@ function OccupancyBarRaceCard({
   );
 
   return (
-    <Card className="flex h-full min-w-0 flex-col overflow-hidden">
+    <Card className="@container flex h-full min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Trophy className="h-4 w-4 text-primary" />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Trophy className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback="Bar race ao vivo por cenário" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               Ranking da ocupação total neste instante, atualizado pelos snapshots
               certificados do ao vivo a cada {refreshSeconds} segundos.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
             {!monitorMode ? (
               <ScenarioScopeDialog
                 allScenarios={allScenarios}
@@ -2898,25 +2924,25 @@ function OccupancyScenarioMaximumLineCard({
   const title = maximumLineTitle(granularity);
 
   return (
-    <Card className="flex h-full min-w-0 flex-col overflow-hidden">
+    <Card className="@container flex h-full min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="grid min-w-0 items-start gap-2 @xl:grid-cols-[minmax(0,1fr)_auto]">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
               {granularity === "hour" ? (
-                <Clock3 className="h-4 w-4 text-primary" />
+                <Clock3 className="h-4 w-4 shrink-0 text-primary" />
               ) : granularity === "month" ? (
-                <CalendarDays className="h-4 w-4 text-primary" />
+                <CalendarDays className="h-4 w-4 shrink-0 text-primary" />
               ) : (
-                <LineChart className="h-4 w-4 text-primary" />
+                <LineChart className="h-4 w-4 shrink-0 text-primary" />
               )}
               <WidgetTitleText fallback={title} />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {maximumLineDescription(granularity)}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="col-span-full flex min-w-0 flex-wrap items-center gap-2 @xl:col-auto @xl:justify-end">
             <Badge variant="secondary">Somente máximo</Badge>
             {granularity === "hour" && refreshSeconds ? (
               <Badge variant="outline">Hora aberta: {refreshSeconds}s</Badge>
@@ -3089,21 +3115,21 @@ function OccupancyHexLayoutCard({
   );
 
   return (
-    <Card className="flex h-full min-w-0 flex-col overflow-hidden">
+    <Card className="@container flex h-full min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.2fr)] xl:items-start">
+        <div className="grid min-w-0 gap-3 @xl:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.2fr)] @xl:items-start">
           <div className="min-w-0">
-            <CardTitle className="flex items-center gap-2">
-              <Hexagon className="h-4 w-4 text-primary" />
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Hexagon className="h-4 w-4 shrink-0 text-primary" />
               <WidgetTitleText fallback="Simulador operacional hexagonal" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {displayMode === "actual"
                 ? "Valor real: o hexágono interno cresce com a ocupação e percorre uma escala contínua de cor."
                 : "Estado operacional: cada posição mostra ocupado (> 0) ou desocupado (= 0) com o mesmo peso visual."}
             </CardDescription>
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-2 xl:justify-end">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 @xl:justify-end">
             <Badge variant="outline">
               {stateCounts.occupied} ocupados (&gt; 0)
             </Badge>
@@ -3126,7 +3152,7 @@ function OccupancyHexLayoutCard({
                 >
                   <SelectTrigger
                     aria-label="Modo de visualização do simulador hexagonal"
-                    className="h-8 w-full sm:w-[190px]"
+                    className="h-8 w-full @sm:w-[190px]"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -3174,30 +3200,25 @@ function OccupancyHexLayoutCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-h-0 flex-1 overflow-y-auto">
+      <CardContent
+        className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto_auto] gap-y-2 overflow-hidden"
+        data-echart-layout="natural"
+      >
         {loading ? (
           <ChartSkeleton tall />
         ) : positions.length ? (
           <>
             <div
-              className="max-h-[520px] overflow-auto rounded-lg border"
+              className="h-full min-h-0 min-w-0 max-w-full overflow-hidden rounded-lg border"
               style={{ backgroundColor: hexPalette.canvas }}
             >
-              <div
-                className={cn(singleRenderedRow && "mx-auto w-full")}
-                style={{
-                  height: `${viewport.height}px`,
-                  minWidth: `${viewport.minimumWidth}px`,
-                }}
-              >
-                <EChart
-                  ariaLabel="Simulador operacional hexagonal"
-                  option={option}
-                  mergeUpdates
-                  themeMode="explicit"
-                  className="h-full"
-                />
-              </div>
+              <EChart
+                ariaLabel="Simulador operacional hexagonal"
+                option={option}
+                mergeUpdates
+                themeMode="explicit"
+                className={cn("h-full", singleRenderedRow && "mx-auto")}
+              />
             </div>
             <ul
               className="sr-only"
@@ -3215,7 +3236,7 @@ function OccupancyHexLayoutCard({
                 </li>
               ))}
             </ul>
-            <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+            <div className="flex min-w-0 flex-wrap gap-3 text-[11px] text-muted-foreground">
               <LegendDot
                 color={hexPalette.surfaces.unknown.fill}
                 label="Sem dados"
@@ -3316,7 +3337,7 @@ function OccupancyDayHourHeatmapCard({
       allScenarios={allScenarios}
       description={`Últimos ${dayCount} dias do cenário escolhido; zero certificado permanece visível e ausência fica cinza.`}
       fallbackColor={colorPalette[0]}
-      icon={<Grid3X3 className="h-4 w-4 text-primary" />}
+      icon={<Grid3X3 className="h-4 w-4 shrink-0 text-primary" />}
       loading={loading}
       metric={metric}
       monitorMode={monitorMode}
@@ -3448,7 +3469,7 @@ function OccupancyScenarioHourHeatmapCard({
       allScenarios={allScenarios}
       description="Compara cada cenário nas 24 horas da data escolhida, sem somar cenários nem preencher lacunas com zero."
       fallbackColor={colorPalette[0]}
-      icon={<Grid3X3 className="h-4 w-4 text-primary" />}
+      icon={<Grid3X3 className="h-4 w-4 shrink-0 text-primary" />}
       loading={loading}
       metric={metric}
       monitorMode={monitorMode}
@@ -3526,17 +3547,19 @@ function OccupancyHeatmapCardShell({
   );
   const missingColor = effectiveTheme === "dark" ? "#273244" : "#E2E8F0";
   return (
-    <Card className="flex h-full min-w-0 flex-col overflow-hidden">
+    <Card className="@container flex h-full min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
+        <div className="grid min-w-0 items-start gap-2 @xl:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
               {icon}
               <WidgetTitleText fallback={title} />
             </CardTitle>
-            <CardDescription className="mt-1">{description}</CardDescription>
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
+              {description}
+            </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="col-span-full flex min-w-0 flex-wrap items-center gap-2 @xl:col-auto @xl:justify-end">
             {!monitorMode ? (
               <>
                 {controls}
@@ -3655,7 +3678,9 @@ function ScenarioScopeDialog({
                     : "border-border bg-background text-muted-foreground",
                 )}
               >
-                <span className="min-w-0 truncate">{scenario.name}</span>
+                <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                  {scenario.name}
+                </span>
                 <span className="flex shrink-0 items-center gap-2">
                   {!scenario.active ? (
                     <Badge variant="outline">inativo</Badge>
@@ -3762,14 +3787,18 @@ function HexVisualScaleLegend({
 }) {
   if (displayMode === "status") {
     return (
-      <div className="mt-2 grid gap-2 rounded-md border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground sm:grid-cols-2">
-        <div className="flex items-center gap-2">
+      <div className="mt-2 grid gap-2 rounded-md border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground @sm:grid-cols-2">
+        <div className="flex min-w-0 items-start gap-2">
           <LegendDot color={palette.occupied} label="Ocupado > 0" />
-          <span>hexágono preenchido com peso visual uniforme</span>
+          <span className="break-words [overflow-wrap:anywhere]">
+            hexágono preenchido com peso visual uniforme
+          </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-start gap-2">
           <LegendDot color={palette.zero} label="Desocupado = 0" />
-          <span>zero certificado continua visível e distinto</span>
+          <span className="break-words [overflow-wrap:anywhere]">
+            zero certificado continua visível e distinto
+          </span>
         </div>
       </div>
     );
@@ -3780,7 +3809,7 @@ function HexVisualScaleLegend({
       aria-label={`Escala do simulador: ocupação de zero a ${formatChartNumber(
         domainMaximum,
       )}`}
-      className="mt-2 grid gap-2 rounded-md border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground sm:grid-cols-2"
+      className="mt-2 grid gap-2 rounded-md border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground @sm:grid-cols-2"
     >
       <div className="flex min-w-0 items-center gap-2">
         <span className="relative block h-6 w-7 shrink-0">
@@ -3801,7 +3830,7 @@ function HexVisualScaleLegend({
             }}
           />
         </span>
-        <span>
+        <span className="break-words [overflow-wrap:anywhere]">
           <strong className="font-medium text-foreground">Tamanho:</strong>{" "}
           ocupação certificada, de 0 a {formatChartNumber(domainMaximum)}. O
           zero permanece visível.
@@ -3820,7 +3849,7 @@ function HexVisualScaleLegend({
             <span>{formatChartNumber(domainMaximum)}</span>
           </span>
         </span>
-        <span>
+        <span className="break-words [overflow-wrap:anywhere]">
           <strong className="font-medium text-foreground">Cor:</strong> escala
           gradual do valor real, de 0 a {formatChartNumber(domainMaximum)}.
           Sobrecapacidade permanece indicada pelo contorno vermelho.
@@ -3836,7 +3865,7 @@ function ChartSkeleton({ tall = false }: { tall?: boolean }) {
 
 function EmptyComparisonState({ text }: { text: string }) {
   return (
-    <div className="flex h-[210px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+    <div className="flex h-[210px] min-w-0 items-center justify-center break-words rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground [overflow-wrap:anywhere]">
       {text}
     </div>
   );
