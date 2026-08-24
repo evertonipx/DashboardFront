@@ -85,6 +85,10 @@ export function buildCountingIntelligenceWidgetCards({
       id: COUNTING_INTELLIGENCE_CARD_IDS.periodTotal,
       label: "Total do período",
       defaultSize: "compact" as const,
+      maxHeightLevel: 2 as const,
+      maxWidthLevel: 3 as const,
+      minHeightLevel: 1 as const,
+      minWidthLevel: 1 as const,
       node: (
         <ExecutiveMetricCard
           description={
@@ -106,6 +110,10 @@ export function buildCountingIntelligenceWidgetCards({
       id: COUNTING_INTELLIGENCE_CARD_IDS.endMonth,
       label: "Mês final do período",
       defaultSize: "compact" as const,
+      maxHeightLevel: 2 as const,
+      maxWidthLevel: 3 as const,
+      minHeightLevel: 1 as const,
+      minWidthLevel: 1 as const,
       node: (
         <ExecutiveMetricCard
           description={
@@ -127,6 +135,10 @@ export function buildCountingIntelligenceWidgetCards({
       id: COUNTING_INTELLIGENCE_CARD_IDS.monthlyAverage,
       label: "Média mensal",
       defaultSize: "compact" as const,
+      maxHeightLevel: 2 as const,
+      maxWidthLevel: 3 as const,
+      minHeightLevel: 1 as const,
+      minWidthLevel: 1 as const,
       node: (
         <ExecutiveMetricCard
           description={
@@ -151,6 +163,10 @@ export function buildCountingIntelligenceWidgetCards({
       id: COUNTING_INTELLIGENCE_CARD_IDS.accessLeader,
       label: "Acesso líder",
       defaultSize: "compact" as const,
+      maxHeightLevel: 2 as const,
+      maxWidthLevel: 3 as const,
+      minHeightLevel: 1 as const,
+      minWidthLevel: 1 as const,
       node: (
         <ExecutiveMetricCard
           description={
@@ -171,8 +187,13 @@ export function buildCountingIntelligenceWidgetCards({
       id: COUNTING_INTELLIGENCE_CARD_IDS.annualComparison,
       chartTypeEnabled: true,
       label: "Comparativo mensal por ano",
+      defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 4 as const,
       node: (
         <AnnualComparisonCard loading={loading} model={model} period={periodLabel} />
       ),
@@ -181,8 +202,13 @@ export function buildCountingIntelligenceWidgetCards({
       id: COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison,
       chartTypeEnabled: true,
       label: "Comparativo acumulado por ano",
+      defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 4 as const,
       node: (
         <AnnualAccumulatedComparisonCard
           loading={loading}
@@ -195,8 +221,14 @@ export function buildCountingIntelligenceWidgetCards({
       id: COUNTING_INTELLIGENCE_CARD_IDS.yearOverYearMonth,
       label: "Tabela mensal comparativa",
       colorEditable: false,
+      defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 6 as const,
+      narrowMinHeightLevel: 5 as const,
       node: <YearOverYearMatrixCard loading={loading} model={model} />,
     },
     {
@@ -205,6 +237,10 @@ export function buildCountingIntelligenceWidgetCards({
       label: "Fluxo direcional por hora",
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
       node: (
         <ExecutiveChartCard
           badge={formatCountingIntelligencePeriod(model)}
@@ -219,8 +255,14 @@ export function buildCountingIntelligenceWidgetCards({
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.accessRanking,
       label: "Ranking dos acessos",
+      defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 5 as const,
+      minWidthLevel: 4 as const,
+      narrowMinHeightLevel: 5 as const,
       node: (
         <AccessRankingCard
           loading={loading}
@@ -334,7 +376,7 @@ function AnnualComparisonCard({
   return (
     <ExecutiveChartCard
       badge={period}
-      chartClassName="h-[320px]"
+      chartClassName="h-full min-h-0"
       description={`Anos lado a lado. Linha tracejada: média mensal de ${
         model.currentYear - 1
       } como média-base, quando houver dados.`}
@@ -364,7 +406,7 @@ function AnnualAccumulatedComparisonCard({
   return (
     <ExecutiveChartCard
       badge={period}
-      chartClassName="h-[320px]"
+      chartClassName="h-full min-h-0"
       description="Soma progressiva mês a mês para comparar a trajetória acumulada de cada ano e identificar avanço ou atraso."
       loading={loading}
       option={option}
@@ -534,9 +576,9 @@ function AccessRankingCard({
         data-echart-layout="natural"
       >
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : model.accesses.length ? (
-          <div className="h-[360px] min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div className="h-full min-h-0 min-w-0 flex-1 overflow-hidden">
             <EChart option={option} />
           </div>
         ) : (

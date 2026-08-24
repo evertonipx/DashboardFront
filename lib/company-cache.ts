@@ -1,8 +1,20 @@
 "use client";
 
+import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
 import type { CurrentUserCompany } from "@/lib/types";
 
 const COMPANY_CACHE_KEY = "ipxdata-company-cache-v1";
+export const COMPANY_CACHE_EVENT = "ipxdata:company-cache";
+
+const COMPANY_TIME_ZONE_FIELDS = [
+  "timezone",
+  "company_timezone",
+  "companyTimezone",
+  "company_time_zone",
+  "companyTimeZone",
+  "tenant_timezone",
+  "tenantTimezone",
+] as const;
 
 type CompanyCache = Record<string, CurrentUserCompany>;
 
@@ -10,6 +22,29 @@ export function readCachedCompany(companyId: string | undefined) {
   if (!companyId || typeof window === "undefined") return null;
 
   return readCompanyCache()[companyId] ?? null;
+}
+
+export function resolveCompanyRecordTimeZone(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { declared: false, timeZone: null } as const;
+  }
+
+  const record = value as Record<string, unknown>;
+  let declared = false;
+  for (const field of COMPANY_TIME_ZONE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(record, field)) continue;
+    declared = true;
+    const timeZone = canonicalCompanyTimeZone(record[field]);
+    if (timeZone) return { declared: true, timeZone } as const;
+  }
+
+  return { declared, timeZone: null } as const;
+}
+
+export function normalizeCompanyRecord<T extends CurrentUserCompany>(company: T) {
+  const resolution = resolveCompanyRecordTimeZone(company);
+  if (!resolution.declared) return company;
+  return { ...company, timezone: resolution.timeZone };
 }
 
 export function writeCompanyCache(companies: CurrentUserCompany[]) {
@@ -24,10 +59,10 @@ export function writeCompanyCache(companies: CurrentUserCompany[]) {
 
   for (const company of validCompanies) {
     const cached = cache[company.id];
-    const timezone =
-      company.timezone === undefined
-        ? cached?.timezone
-        : normalizeOptionalString(company.timezone);
+    const timeZoneResolution = resolveCompanyRecordTimeZone(company);
+    const timezone = timeZoneResolution.declared
+      ? timeZoneResolution.timeZone
+      : cached?.timezone;
     cache[company.id] = {
       id: company.id,
       name: company.name,
@@ -36,11 +71,10 @@ export function writeCompanyCache(companies: CurrentUserCompany[]) {
     };
   }
 
-  window.localStorage.setItem(COMPANY_CACHE_KEY, JSON.stringify(cache));
-}
-
-function normalizeOptionalString(value: unknown) {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
+  const serializedCache = JSON.stringify(cache);
+  if (window.localStorage.getItem(COMPANY_CACHE_KEY) === serializedCache) return;
+  window.localStorage.setItem(COMPANY_CACHE_KEY, serializedCache);
+  window.dispatchEvent(new Event(COMPANY_CACHE_EVENT));
 }
 
 function readCompanyCache(): CompanyCache {

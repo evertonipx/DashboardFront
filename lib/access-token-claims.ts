@@ -14,8 +14,13 @@ type AccessTokenClaims = Record<string, unknown> & {
   sub?: unknown;
   tenantId?: unknown;
   tenant_id?: unknown;
+  companyTimeZone?: unknown;
   companyTimezone?: unknown;
+  company_time_zone?: unknown;
   company_timezone?: unknown;
+  tenantTimezone?: unknown;
+  tenant_timezone?: unknown;
+  time_zone?: unknown;
   timezone?: unknown;
   tz?: unknown;
   userId?: unknown;
@@ -40,8 +45,10 @@ export type AccessTokenContext = {
  * same token on every request.
  *
  * The snake_case names are the contract currently emitted by IPXData. A small
- * allowlist of aliases is accepted for rolling backend migrations, but
- * conflicting aliases invalidate the whole context instead of guessing.
+ * allowlist of aliases is accepted for rolling backend migrations. Conflicts
+ * in identity/authorization claims invalidate the context. Timezone is only
+ * operational metadata, so an invalid or transitional conflict leaves that
+ * field unresolved without invalidating the authenticated identity.
  */
 export function resolveAccessTokenContext(
   accessToken: string,
@@ -58,12 +65,7 @@ export function resolveAccessTokenContext(
   ]);
   const user = resolveStringAliases(claims, ["user_id", "userId", "sub"]);
   const roleClaim = resolveStringAliases(claims, ["role"]);
-  const timeZone = resolveStringAliases(claims, [
-    "company_timezone",
-    "companyTimezone",
-    "timezone",
-    "tz",
-  ]);
+  const timeZone = resolveCompanyTimeZoneClaims(claims);
   const master = resolveBooleanAliases(claims, ["is_master", "isMaster"]);
   const expiresAt = numericDateClaim(claims, "exp");
   const issuedAt = numericDateClaim(claims, "iat");
@@ -73,7 +75,6 @@ export function resolveAccessTokenContext(
     company.conflict ||
     user.conflict ||
     roleClaim.conflict ||
-    timeZone.conflict ||
     master.conflict ||
     expiresAt.invalid ||
     issuedAt.invalid ||
@@ -83,10 +84,6 @@ export function resolveAccessTokenContext(
   }
 
   const role = normalizeRole(roleClaim.value) ?? roleClaim.value;
-  const canonicalTimeZone = timeZone.value
-    ? canonicalCompanyTimeZone(timeZone.value)
-    : "";
-  if (timeZone.value && !canonicalTimeZone) return null;
   return {
     companyId: company.value,
     expiresAt: expiresAt.value,
@@ -94,7 +91,7 @@ export function resolveAccessTokenContext(
     isMaster: master.value === true || role === "super-admin",
     notBefore: notBefore.value,
     role,
-    timeZone: canonicalTimeZone ?? "",
+    timeZone,
     userId: user.value,
   };
 }
@@ -298,6 +295,51 @@ function resolveStringAliases(
     conflict: values.size > 1,
     value: values.size === 1 ? [...values][0] : "",
   };
+}
+
+/**
+ * Timezone is operational metadata, not part of the authenticated identity.
+ * A token can temporarily carry stale aliases while a company's IANA setting
+ * is being changed. In that case the frontend must neither choose one value
+ * nor reject an otherwise valid session: it leaves the timezone unresolved so
+ * the company record returned by the API remains authoritative.
+ */
+function resolveCompanyTimeZoneClaims(claims: AccessTokenClaims) {
+  for (const keys of [
+    [
+      "company_timezone",
+      "companyTimezone",
+      "company_time_zone",
+      "companyTimeZone",
+    ],
+    ["tenant_timezone", "tenantTimezone"],
+    ["timezone", "time_zone", "tz"],
+  ] as const) {
+    const resolution = resolveCompanyTimeZoneClaimGroup(claims, keys);
+    if (resolution.declared) return resolution.timeZone;
+  }
+  return "";
+}
+
+function resolveCompanyTimeZoneClaimGroup(
+  claims: AccessTokenClaims,
+  keys: readonly string[],
+) {
+  const values = new Set<string>();
+  let declared = false;
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(claims, key)) continue;
+    const raw = claims[key];
+    declared = true;
+    if (raw === undefined || raw === null) continue;
+    const timeZone = canonicalCompanyTimeZone(raw);
+    if (!timeZone) return { declared: true, timeZone: "" } as const;
+    values.add(timeZone);
+  }
+  return {
+    declared,
+    timeZone: values.size === 1 ? [...values][0] : "",
+  } as const;
 }
 
 function resolveBooleanAliases(

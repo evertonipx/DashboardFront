@@ -1,5 +1,6 @@
 "use client";
 
+import { normalizeCardLayoutLevel } from "@/lib/card-layout-sizing";
 import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
 import {
   CARD_ZOOM_LEVELS,
@@ -720,6 +721,7 @@ function normalizeSnapshot(
               item.height === "tall"
                 ? item.height
                 : undefined,
+            heightLevel: normalizeCardLayoutLevel(item.heightLevel),
             id: item.id,
             size:
               item.size === "compact" ||
@@ -733,6 +735,7 @@ function normalizeSnapshot(
                 ? item.title.trim().slice(0, 120)
                 : undefined,
             visible: item.visible !== false,
+            widthLevel: normalizeCardLayoutLevel(item.widthLevel),
             zoom: CARD_ZOOM_LEVELS.find((level) => level === item.zoom),
           } satisfies CardPreference,
         ];

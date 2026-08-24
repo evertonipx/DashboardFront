@@ -1,7 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { readCachedCompany } from "@/lib/company-cache";
+import {
+  COMPANY_CACHE_EVENT,
+  readCachedCompany,
+} from "@/lib/company-cache";
 import {
   resolveCompanyTimeZone,
   type CompanyTimeZoneResolution,
@@ -99,6 +102,20 @@ export function getCompanyTimeZoneResolutionForScope(
   return resolveCompanyTimeZone(
     master
       ? [
+          {
+            source: "current-user-company",
+            value:
+              userCompanyId === cleanCompanyScopeId
+                ? user?.company?.timezone
+                : undefined,
+          },
+          {
+            source: "current-user-company",
+            value:
+              userCompanyId === cleanCompanyScopeId
+                ? user?.company_timezone
+                : undefined,
+          },
           {
             source: "selected-company",
             value:
@@ -218,10 +235,12 @@ export function useEffectiveCompanyTimeZoneResolution(
 
     syncTimeZone();
     window.addEventListener(MASTER_COMPANY_SCOPE_EVENT, syncTimeZone);
+    window.addEventListener(COMPANY_CACHE_EVENT, syncTimeZone);
     window.addEventListener("storage", syncTimeZone);
 
     return () => {
       window.removeEventListener(MASTER_COMPANY_SCOPE_EVENT, syncTimeZone);
+      window.removeEventListener(COMPANY_CACHE_EVENT, syncTimeZone);
       window.removeEventListener("storage", syncTimeZone);
     };
   }, [user]);

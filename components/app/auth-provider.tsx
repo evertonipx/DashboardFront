@@ -13,15 +13,26 @@ import {
   getStoredSession,
   loginRequest,
   SESSION_EXPIRED_EVENT,
+  SESSION_UPDATED_EVENT,
   setAuthenticatedMasterAccess,
 } from "@/lib/api";
-import { reconcileCurrentUserWithAccessToken } from "@/lib/access-token-claims";
+import {
+  accessTokenMatchesUserIdentity,
+  reconcileCurrentUserWithAccessToken,
+} from "@/lib/access-token-claims";
 import { hasDeclaredManagerAccess, hasMasterAccess } from "@/lib/access";
-import { readCachedCompany, writeCompanyCache } from "@/lib/company-cache";
+import {
+  normalizeCompanyRecord,
+  readCachedCompany,
+  resolveCompanyRecordTimeZone,
+  writeCompanyCache,
+} from "@/lib/company-cache";
+import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
 import { migrateLegacyLiveDefault } from "@/lib/legacy-dashboard-view-migration";
 import {
   clearStoredCurrentCompanyScope,
   clearStoredMasterCompanyScope,
+  getCompanyTimeZoneResolutionForScope,
   getCurrentUserCompanyId,
   getEffectiveCompanyScopeId,
   getStoredMasterCompanyScope,
@@ -162,6 +173,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [router]);
 
+  React.useEffect(() => {
+    let reconciling = false;
+
+    function handleSessionUpdated() {
+      const currentUser = userRef.current;
+      const accessToken = getStoredSession()?.access_token ?? "";
+      if (
+        reconciling ||
+        !currentUser ||
+        !accessTokenMatchesUserIdentity(accessToken, currentUser)
+      ) {
+        return;
+      }
+
+      reconciling = true;
+      void refreshUser().finally(() => {
+        reconciling = false;
+      });
+    }
+
+    window.addEventListener(SESSION_UPDATED_EVENT, handleSessionUpdated);
+    return () => {
+      window.removeEventListener(SESSION_UPDATED_EVENT, handleSessionUpdated);
+    };
+  }, [refreshUser]);
+
   const login = React.useCallback(async (email: string, password: string) => {
     await loginRequest(email, password);
     const currentUser = await hydrateAuthenticatedUser(
@@ -222,9 +259,7 @@ async function hydrateCurrentUser(
   const preliminaryCompanyScope = getUserCompanyScope(user);
   if (hasMasterAccess(user)) {
     clearStoredCurrentCompanyScope();
-    if (preliminaryCompanyScope && !getStoredMasterCompanyScope()) {
-      setStoredMasterCompanyScope(preliminaryCompanyScope);
-    }
+    synchronizeMasterCompanyScope(preliminaryCompanyScope);
   } else {
     clearStoredMasterCompanyScope();
     if (preliminaryCompanyScope) {
@@ -254,12 +289,8 @@ async function hydrateCurrentUser(
 
   if (hasMasterAccess(hydratedUser)) {
     clearStoredCurrentCompanyScope();
-    if (!getStoredMasterCompanyScope()) {
-      const companyScope = getUserCompanyScope(hydratedUser);
-      if (companyScope) {
-        setStoredMasterCompanyScope(companyScope);
-      }
-    }
+    synchronizeMasterCompanyScope(getUserCompanyScope(hydratedUser));
+    await hydrateStoredMasterCompanyScope(hydratedUser);
   } else {
     clearStoredMasterCompanyScope();
     const companyScope = getUserCompanyScope(hydratedUser);
@@ -320,37 +351,51 @@ async function hydrateUserPermissions(
 }
 
 async function hydrateUserCompany(user: CurrentUser) {
-  const declaredCompany = getDeclaredCompany(user);
-  if (declaredCompany) {
-    writeCompanyCache([declaredCompany]);
-    return declaredCompany;
-  }
-
-  if (hasMasterAccess(user)) return null;
   const companyId = getCurrentUserCompanyId(user);
-  if (!companyId) return null;
-
+  const declaredCompany = getDeclaredCompany(user);
   const cachedCompany = readCachedCompany(companyId);
-  if (!hasDeclaredManagerAccess(user)) return cachedCompany;
+  const fallbackCompany = mergeCurrentUserCompanies(
+    companyId,
+    cachedCompany,
+    declaredCompany,
+  );
+  if (canonicalCompanyTimeZone(fallbackCompany?.timezone)) {
+    writeCompanyCache([fallbackCompany!]);
+    return fallbackCompany;
+  }
+  if (!companyId) return fallbackCompany;
 
   try {
-    const company = await apiFetch<CurrentUserCompany>(
+    const response = await apiFetch<CurrentUserCompany>(
       `/companies/${companyId}`,
+      { jwtCompanyScopeOnly: hasMasterAccess(user) },
     );
+    if (response.id?.trim() !== companyId) {
+      throw new Error("A API retornou o cadastro de outra empresa.");
+    }
+    const company = mergeCurrentUserCompanies(
+      companyId,
+      fallbackCompany,
+      normalizeCompanyRecord(response),
+    );
+    if (!company) return fallbackCompany;
     writeCompanyCache([company]);
     return company;
   } catch {
-    return cachedCompany;
+    return fallbackCompany;
   }
 }
 
 function getDeclaredCompany(user: CurrentUser) {
   const companyId = getCurrentUserCompanyId(user);
+  const declaredTimeZone =
+    resolveCompanyRecordTimeZone(user.company).timeZone ??
+    resolveCompanyRecordTimeZone(user).timeZone;
   if (user.company?.name) {
     return {
       ...user.company,
       id: user.company.id || companyId,
-      timezone: user.company.timezone ?? user.company_timezone ?? null,
+      timezone: declaredTimeZone,
     };
   }
   if (!companyId || !user.company_name) return null;
@@ -358,7 +403,7 @@ function getDeclaredCompany(user: CurrentUser) {
   return {
     id: companyId,
     name: user.company_name,
-    timezone: user.company_timezone ?? null,
+    timezone: declaredTimeZone,
     trade_name: user.company_trade_name ?? null,
   } satisfies CurrentUserCompany;
 }
@@ -366,6 +411,10 @@ function getDeclaredCompany(user: CurrentUser) {
 function getUserCompanyScope(user: CurrentUser) {
   const id = getCurrentUserCompanyId(user);
   if (!id) return null;
+
+  const timeZone =
+    resolveCompanyRecordTimeZone(user.company).timeZone ??
+    resolveCompanyRecordTimeZone(user).timeZone;
 
   return {
     id,
@@ -375,7 +424,86 @@ function getUserCompanyScope(user: CurrentUser) {
       user.company?.trade_name ||
       user.company_trade_name ||
       id,
-    timezone: user.company?.timezone ?? user.company_timezone ?? null,
+    timezone: timeZone,
     trade_name: user.company?.trade_name ?? user.company_trade_name ?? null,
   };
+}
+
+function mergeCurrentUserCompanies(
+  companyId: string,
+  ...sources: Array<CurrentUserCompany | null | undefined>
+) {
+  const companies = sources.filter(
+    (company): company is CurrentUserCompany => Boolean(company),
+  );
+  if (!companyId || !companies.length) return null;
+
+  const merged = Object.assign({}, ...companies) as CurrentUserCompany;
+  const timeZone = companies.reduce<string | null>((current, company) => {
+    return canonicalCompanyTimeZone(company.timezone) ?? current;
+  }, null);
+  return {
+    ...merged,
+    id: companyId,
+    name: merged.name || companyId,
+    timezone: timeZone,
+  };
+}
+
+function synchronizeMasterCompanyScope(
+  companyScope: ReturnType<typeof getUserCompanyScope>,
+) {
+  if (!companyScope) return;
+  const storedScope = getStoredMasterCompanyScope();
+  if (!storedScope) {
+    setStoredMasterCompanyScope(companyScope);
+    return;
+  }
+  if (storedScope.id !== companyScope.id) return;
+
+  const timeZone = canonicalCompanyTimeZone(companyScope.timezone);
+  if (!timeZone || canonicalCompanyTimeZone(storedScope.timezone) === timeZone) {
+    return;
+  }
+  setStoredMasterCompanyScope({
+    ...storedScope,
+    name: companyScope.name || storedScope.name,
+    timezone: timeZone,
+    trade_name: companyScope.trade_name ?? storedScope.trade_name,
+  });
+}
+
+async function hydrateStoredMasterCompanyScope(user: CurrentUser) {
+  const storedScope = getStoredMasterCompanyScope();
+  if (!storedScope) return;
+  const resolution = getCompanyTimeZoneResolutionForScope(user, storedScope.id);
+  if (!resolution.fallback && resolution.source === "current-user-company") {
+    if (canonicalCompanyTimeZone(storedScope.timezone) !== resolution.timeZone) {
+      setStoredMasterCompanyScope({
+        ...storedScope,
+        timezone: resolution.timeZone,
+      });
+    }
+    return;
+  }
+
+  try {
+    const response = await apiFetch<CurrentUserCompany>(
+      `/companies/${storedScope.id}`,
+      { companyScopeId: storedScope.id },
+    );
+    if (response.id?.trim() !== storedScope.id) return;
+    const company = normalizeCompanyRecord(response);
+    const timeZone = canonicalCompanyTimeZone(company.timezone);
+    if (!timeZone) return;
+    writeCompanyCache([{ ...company, timezone: timeZone }]);
+    setStoredMasterCompanyScope({
+      ...storedScope,
+      name: company.name || storedScope.name,
+      timezone: timeZone,
+      trade_name: company.trade_name ?? storedScope.trade_name,
+    });
+  } catch {
+    // The dashboards remain fail-closed and surface the certification message.
+  }
 }

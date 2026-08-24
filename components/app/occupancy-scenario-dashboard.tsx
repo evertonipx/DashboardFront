@@ -1020,7 +1020,16 @@ export function OccupancyScenarioDashboard() {
         />
       ),
     },
-  ];
+  ].map((card) => ({
+    ...card,
+    defaultHeight: "short" as const,
+    maxHeight: "short" as const,
+    maxHeightLevel: 1 as const,
+    maxWidthLevel: 3 as const,
+    minHeight: "short" as const,
+    minHeightLevel: 1 as const,
+    minWidthLevel: 1 as const,
+  }));
 
   const chartCards = chartDefinitions.map((definition) => ({
     chartTypeEnabled: true,
@@ -1028,6 +1037,11 @@ export function OccupancyScenarioDashboard() {
     label: definition.label,
     defaultSize: "wide" as const,
     className: "sm:col-span-2 xl:col-span-2",
+    maxHeightLevel: 6 as const,
+    maxWidthLevel: 6 as const,
+    minHeightLevel: 4 as const,
+    minWidthLevel: 3 as const,
+    narrowMinHeightLevel: 5 as const,
     titleEditable: true,
     zoomEnabled: true,
     node: selectedScenario ? (
@@ -1064,9 +1078,16 @@ export function OccupancyScenarioDashboard() {
         utilization,
       });
       return {
+        defaultHeight: "short" as const,
         defaultSize: "compact" as const,
         id: `occupancy_custom_${widget.id}`,
         label: widget.title,
+        maxHeight: "short" as const,
+        maxHeightLevel: 1 as const,
+        maxWidthLevel: 3 as const,
+        minHeight: "short" as const,
+        minHeightLevel: 1 as const,
+        minWidthLevel: 1 as const,
         titleEditable: true,
         node: (
           <MetricCard
@@ -1094,6 +1115,11 @@ export function OccupancyScenarioDashboard() {
       defaultSize: "wide" as const,
       id: `occupancy_custom_${widget.id}`,
       label: widget.title,
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
+      narrowMinHeightLevel: 5 as const,
       titleEditable: true,
       zoomEnabled: true,
       node:
@@ -1120,7 +1146,11 @@ export function OccupancyScenarioDashboard() {
           label: "Cenário de ocupação",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
-          standardHeightClassName: "row-span-3 sm:row-span-2",
+          maxHeightLevel: 5 as const,
+          maxWidthLevel: 6 as const,
+          minHeightLevel: 4 as const,
+          minWidthLevel: 3 as const,
+          narrowMinHeightLevel: 5 as const,
           titleEditable: true,
           node: (
             <OccupancyScenarioDetailCard
@@ -1135,6 +1165,11 @@ export function OccupancyScenarioDashboard() {
           label: "Histórico de alertas",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
+          maxHeightLevel: 5 as const,
+          maxWidthLevel: 6 as const,
+          minHeightLevel: 4 as const,
+          minWidthLevel: 3 as const,
+          narrowMinHeightLevel: 4 as const,
           titleEditable: true,
             node: (
               <OccupancyAlertsCard
@@ -1267,18 +1302,22 @@ export function OccupancyScenarioDashboard() {
             retrying={loadingScenarios || loadingData || refreshing}
           />
         ) : loadingScenarios ? (
-          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(180px,220px)_116px_minmax(0,1fr)]">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full @4xl:w-[116px]" />
-            <Skeleton className="h-10 w-full @xl:col-span-2 @4xl:col-span-1 @4xl:w-48 @4xl:justify-self-end" />
+          <div className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(212px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(212px,1fr)] @md:gap-2">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+              <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @md:block @lg:w-10 @xl:w-24" />
+              <Skeleton className="h-8 w-[212px] max-w-full shrink-0" />
+            </div>
           </div>
         ) : visibleScenarios.length ? (
           <div className="space-y-3">
-            <div
-              aria-label="Controles da visão de ocupação"
-              className="grid min-w-0 gap-2 @xl:grid-cols-[minmax(180px,220px)_116px] @4xl:grid-cols-[minmax(180px,220px)_116px_minmax(0,1fr)] @4xl:items-center"
-              role="group"
-            >
+            <div className="space-y-1">
+              <div
+                aria-label="Controles da visão de ocupação"
+                className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(212px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(212px,1fr)] @md:gap-2"
+                role="group"
+              >
               <div className="min-w-0">
                 <Select value={selectedId} onValueChange={setSelectedId}>
                   <SelectTrigger
@@ -1304,6 +1343,8 @@ export function OccupancyScenarioDashboard() {
               >
                 <OccupancyPaletteSelect
                   ariaLabel="Paleta dos comparativos desta visão"
+                  compact
+                  fluid
                   value={occupancyComparisonSettings.colorPaletteId}
                   onValueChange={(colorPaletteId) =>
                     updateOccupancyComparisonSettings({ colorPaletteId })
@@ -1311,99 +1352,111 @@ export function OccupancyScenarioDashboard() {
                 />
               </div>
 
-              <div
-                aria-label="Ações da visão de ocupação"
-                className="flex min-w-0 flex-wrap items-center gap-2 @xl:col-span-2 @xl:justify-end @4xl:col-span-1 @4xl:flex-nowrap @4xl:justify-self-end"
-                role="group"
-              >
-                  <ReportExportActions
-                    compact
-                    disabled={
-                      initialLoading ||
-                      !selectedScenario ||
-                      Boolean(occupancyCertificationError) ||
-                      hasIncompleteOccupancyCoverage
-                    }
-                    payload={occupancyReportPayload}
-                  />
-                  {canEditVisual ? (
-                    <>
-                      <ReorderModeButton
-                        className="h-8 w-8"
-                        enabled={layoutReorderMode}
-                        onChange={setLayoutReorderMode}
-                      />
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        className="h-8 w-8"
-                        onClick={() => setLayoutOrganizerOpen(true)}
-                        aria-label="Configurar widgets de ocupação"
-                        title="Configurar widgets"
-                      >
-                        <Settings2 className="h-4 w-4" />
-                      </Button>
-                    </>
-                  ) : null}
-                  <Button
-                    type="button"
-                    size="icon"
-                    className="h-8 w-8"
-                    variant={operationalSettingsOpen ? "default" : "outline"}
-                    onClick={() =>
-                      setOperationalSettingsOpen((current) => !current)
-                    }
-                    aria-label="Configurações operacionais"
-                    title="Configurações operacionais"
+              <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+                {lastUpdated ? (
+                  <span
+                    aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
+                    className="hidden min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @md:inline-flex"
+                    title={`Última atualização às ${formatTime(lastUpdated)}`}
                   >
-                    <SlidersHorizontal className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    type="button"
-                    size="icon"
-                    className="h-8 w-8"
-                    variant="outline"
-                    onClick={() => {
-                      if (selectedScenario) {
-                        loadScenarioData(selectedScenario, {
-                          force: true,
-                          silent: true,
-                        });
-                      }
-                      loadScenarios();
-                    }}
-                    disabled={refreshing || loadingData}
-                    aria-label="Atualizar dados de ocupação"
-                    title="Atualizar dados de ocupação"
-                  >
-                    <RefreshCw
-                      className={cn(
-                        "h-4 w-4",
-                        (refreshing || loadingData) && "animate-spin",
-                      )}
-                    />
-                  </Button>
-                  {lastUpdated ? (
-                    <span
-                      aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                      className="inline-flex h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
-                      title={`Última atualização às ${formatTime(lastUpdated)}`}
-                    >
-                      <Clock3 className="h-3.5 w-3.5" />
+                    <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                    <span className="hidden @lg:inline @xl:hidden">
                       {formatTime(lastUpdated)}
                     </span>
-                  ) : null}
+                    <span className="hidden @xl:inline">
+                      Atualizado às {formatTime(lastUpdated)}
+                    </span>
+                  </span>
+                ) : null}
+                <div
+                  aria-label="Ações da visão de ocupação"
+                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [&_[data-monitor-mode-trigger]]:shrink-0 [&_[data-premium-control]]:shrink-0"
+                  role="group"
+                >
+                  <ReportExportActions
+                  compact
+                  disabled={
+                    initialLoading ||
+                    !selectedScenario ||
+                    Boolean(occupancyCertificationError) ||
+                    hasIncompleteOccupancyCoverage
+                  }
+                  payload={occupancyReportPayload}
+                />
+                {canEditVisual ? (
+                  <>
+                    <ReorderModeButton
+                      className="h-8 w-8 shrink-0"
+                      enabled={layoutReorderMode}
+                      onChange={setLayoutReorderMode}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      onClick={() => setLayoutOrganizerOpen(true)}
+                      aria-label="Configurar widgets de ocupação"
+                      aria-haspopup="dialog"
+                      title="Configurar widgets de ocupação"
+                    >
+                      <Settings2 className="h-4 w-4" />
+                    </Button>
+                  </>
+                ) : null}
+                <Button
+                  type="button"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  variant={operationalSettingsOpen ? "default" : "outline"}
+                  onClick={() =>
+                    setOperationalSettingsOpen((current) => !current)
+                  }
+                  aria-controls="occupancy-operational-settings"
+                  aria-expanded={operationalSettingsOpen}
+                  aria-label="Configurações operacionais"
+                  title="Configurações operacionais"
+                >
+                  <SlidersHorizontal className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  variant="outline"
+                  onClick={() => {
+                    if (selectedScenario) {
+                      loadScenarioData(selectedScenario, {
+                        force: true,
+                        silent: true,
+                      });
+                    }
+                    loadScenarios();
+                  }}
+                  disabled={refreshing || loadingData}
+                  aria-label="Atualizar dados de ocupação"
+                  title="Atualizar dados de ocupação"
+                >
+                  <RefreshCw
+                    className={cn(
+                      "h-4 w-4",
+                      (refreshing || loadingData) && "animate-spin",
+                    )}
+                  />
+                </Button>
                   <MonitorModeButton
                     compact
                     onClick={enterMonitorMode}
                     disabled={!visibleScenarios.length}
                   />
+                </div>
+              </div>
               </div>
             </div>
 
             {operationalSettingsOpen ? (
               <div
+                id="occupancy-operational-settings"
                 aria-label="Configurações operacionais da ocupação"
                 className="rounded-xl border bg-muted/15 p-3 shadow-sm"
                 role="group"
@@ -1564,8 +1617,8 @@ function MetricCard({
 
   return (
     <Card className="@container h-full min-w-0 overflow-hidden">
-      <CardContent className="grid h-full min-h-[116px] grid-cols-[minmax(0,1fr)_auto] items-start gap-3 p-4">
-        <div className="min-w-0">
+      <CardContent className="grid h-full min-h-[116px] grid-cols-[minmax(0,1fr)_auto] items-stretch gap-3 p-4">
+        <div className="flex h-full min-h-0 min-w-0 flex-col">
           <div
             className="line-clamp-2 break-words text-xs font-medium uppercase text-muted-foreground [overflow-wrap:anywhere]"
             title={resolvedTitle}
@@ -1580,13 +1633,18 @@ function MetricCard({
             </div>
           )}
           <div
-            className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]"
+            className="mt-auto line-clamp-2 break-words pt-1 text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
             title={description}
           >
             {description}
           </div>
         </div>
-        <div className="flex h-full shrink-0 flex-col items-end gap-2">
+        <div
+          className={cn(
+            "flex h-full min-h-0 shrink-0 flex-col items-end gap-2",
+            action ? "justify-between" : "justify-center",
+          )}
+        >
           {action}
           <div
             className={cn(

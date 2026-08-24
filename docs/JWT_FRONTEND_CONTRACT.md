@@ -9,15 +9,19 @@ backend.
 O frontend reconhece, de forma estrita, os claims canônicos emitidos pelo
 IPXData: `sub`, `user_id`, `company_id`, `role`, `exp`, `iat` e `nbf`. Durante
 uma migração também aceita aliases explicitamente permitidos, mas rejeita o
-contexto inteiro se dois aliases declararem valores diferentes.
+contexto inteiro se dois aliases de identidade ou autorização declararem
+valores diferentes.
 
 - `sub` e `user_id` identificam o usuário autenticado e devem coincidir.
 - `company_id` é a empresa obrigatória de um usuário comum.
 - `role` complementa os campos omitidos por `/auth/me`.
 - `exp` e `nbf` limitam a validade local da sessão; o frontend nunca estende a
   validade além de `exp`.
-- timezone, quando futuramente presente no token, só é aceito se for um nome
-  IANA válido. Hoje a fonte autoritativa continua sendo o cadastro da empresa.
+- `company_timezone` (e aliases compatíveis) já pode completar o cadastro
+  omitido por `/auth/me`, desde que seja um nome IANA válido e o `company_id`
+  do token corresponda ao tenant efetivo. Claims específicos da empresa têm
+  precedência sobre `timezone`/`tz` genéricos durante migrações do backend; um
+  valor inválido deixa apenas o fuso sem resolução, sem derrubar a sessão.
 
 O navegador apenas decodifica o payload para compor contexto e UX. Ele não
 consegue certificar a assinatura. Todos os requests continuam enviando
@@ -42,7 +46,9 @@ O endpoint `/users/me/permissions` não existe no backend atual.
   `company_id`/`user_id` redundantes no body.
 - Superadmin: o JWT e `/auth/me` confirmam o papel; a empresa escolhida na UI é
   enviada por `X-Company-ID` apenas para endpoints tenant-aware. Cada operação
-  congela esse escopo e descarta respostas tardias de outra seleção.
+  congela esse escopo e descarta respostas tardias de outra seleção. O fuso do
+  JWT só certifica essa seleção quando o `company_id` também coincide; para
+  outro tenant, o frontend consulta `/companies/{id}` antes de navegar.
 - Rotas administrativas com `/companies/{id}` devem usar o mesmo ID no path e
   no escopo selecionado; divergências são bloqueadas no cliente e devem também
   ser rejeitadas no servidor.

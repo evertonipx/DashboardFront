@@ -13,13 +13,20 @@ import {
   OCCUPANCY_COLOR_PALETTES,
   type OccupancyColorPaletteId,
 } from "@/lib/occupancy-color-palettes";
+import { cn } from "@/lib/utils";
 
 export function OccupancyPaletteSelect({
   ariaLabel = "Paleta dos comparativos desta visão",
+  className,
+  compact = false,
+  fluid = false,
   onValueChange,
   value,
 }: {
   ariaLabel?: string;
+  className?: string;
+  compact?: boolean;
+  fluid?: boolean;
   onValueChange: (value: OccupancyColorPaletteId) => void;
   value: OccupancyColorPaletteId;
 }) {
@@ -34,10 +41,14 @@ export function OccupancyPaletteSelect({
     >
       <SelectTrigger
         aria-label={`${ariaLabel}: ${palette.label}`}
-        className="h-8 w-[116px] shrink-0 bg-card px-2"
+        className={cn(
+          "h-8 shrink-0 bg-card px-2",
+          fluid ? "w-full min-w-0" : "w-[64px] @sm:w-[116px]",
+          className,
+        )}
         title={`${palette.label} — ${palette.description}`}
       >
-        <PaletteSwatches colors={palette.colors} selected />
+        <PaletteSwatches colors={palette.colors} compact={compact} selected />
       </SelectTrigger>
       <SelectContent className="max-h-[360px] sm:min-w-[340px]">
         {OCCUPANCY_COLOR_PALETTES.map((option) => (
@@ -66,9 +77,11 @@ export function OccupancyPaletteSelect({
 
 function PaletteSwatches({
   colors,
+  compact = false,
   selected = false,
 }: {
   colors: readonly string[];
+  compact?: boolean;
   selected?: boolean;
 }) {
   return (
@@ -77,10 +90,18 @@ function PaletteSwatches({
       className="shrink-0 overflow-hidden rounded-sm bg-background ring-1 ring-border/80 shadow-sm"
       style={{ display: "inline-flex" }}
     >
-      {colors.slice(0, selected ? 10 : 5).map((color, index) => (
+      {colors.slice(0, selected && !compact ? 10 : 5).map((color, index) => (
         <span
           key={`${color}-${index}`}
-          className={selected ? "block h-3.5 w-1.5 shrink-0" : "block h-3 w-2.5 shrink-0"}
+          className={
+            selected && !compact
+              ? index >= 5
+                ? "hidden h-3.5 w-1.5 shrink-0 @sm:block"
+                : "block h-3.5 w-1.5 shrink-0"
+              : selected
+                ? "block h-3.5 w-1.5 shrink-0"
+                : "block h-3 w-2.5 shrink-0"
+          }
           style={{ backgroundColor: color }}
         />
       ))}

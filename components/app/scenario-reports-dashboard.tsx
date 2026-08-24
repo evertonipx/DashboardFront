@@ -7,6 +7,7 @@ import {
   Plus,
   RefreshCw,
   Settings2,
+  SlidersHorizontal,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -264,6 +265,7 @@ export function ScenarioReportsDashboard({
   const customScopeSelectId = React.useId();
   const reportScopeModeSelectId = React.useId();
   const reportScopeSelectId = React.useId();
+  const reportSettingsPanelId = React.useId();
   const canEditVisual = hasVisualAdminAccess(user);
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
   const [cameras, setCameras] = React.useState<Camera[]>([]);
@@ -302,6 +304,7 @@ export function ScenarioReportsDashboard({
   >([]);
   const [customWidgetDialogOpen, setCustomWidgetDialogOpen] =
     React.useState(false);
+  const [reportSettingsOpen, setReportSettingsOpen] = React.useState(false);
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
   const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
   const metadataRequestSequenceRef = React.useRef(0);
@@ -1524,8 +1527,14 @@ export function ScenarioReportsDashboard({
           id: "report_scenario_period_comparison",
           chartTypeEnabled: true,
           label: "Cenários por período",
+          defaultHeight: "tall" as const,
           defaultSize: "full" as const,
           className: "sm:col-span-2 xl:col-span-4",
+          maxHeightLevel: 6 as const,
+          maxWidthLevel: 6 as const,
+          minHeightLevel: 5 as const,
+          minWidthLevel: 4 as const,
+          narrowMinHeightLevel: 5 as const,
           node: (
             <ScenarioComparisonCard
               companyId={companyScopeId}
@@ -1551,8 +1560,14 @@ export function ScenarioReportsDashboard({
         id: `report_custom_${widget.id}`,
         chartTypeEnabled: true,
         label: widget.title,
+        defaultHeight: "tall" as const,
         defaultSize: "full" as const,
         className: "sm:col-span-2 xl:col-span-4",
+        maxHeightLevel: 6 as const,
+        maxWidthLevel: 6 as const,
+        minHeightLevel: 5 as const,
+        minWidthLevel: 4 as const,
+        narrowMinHeightLevel: 5 as const,
         node: (
           <ScenarioComparisonCard
             action={
@@ -1610,6 +1625,11 @@ export function ScenarioReportsDashboard({
       label: widget.title,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
+      narrowMinHeightLevel: 4 as const,
       node: scope ? (
         <ScenarioAggregateChartCard
           action={
@@ -2139,15 +2159,29 @@ export function ScenarioReportsDashboard({
           </div>
         </div>
       ) : (
-        <div className="rounded-md border border-border bg-card p-4 shadow-soft">
+        <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
           {loadingScenarios ? (
-            <div className="grid gap-4 md:grid-cols-[1fr_auto_auto]">
-              <Skeleton className="h-10 w-full" />
-              <Skeleton className="h-10 w-32" />
-              <Skeleton className="h-10 w-32" />
+            <div className="space-y-3">
+              <CountingReportPeriodControl
+                disabled
+                includeOpenPeriod={countingViewSettings.includeOpenPeriod}
+                value={countingPeriod}
+                onChange={updateCountingPeriod}
+                onIncludeOpenPeriodChange={(includeOpenPeriod) =>
+                  updateCountingViewSettings({ includeOpenPeriod })
+                }
+              />
+              <div className="grid min-w-0 grid-cols-[minmax(0,80px)_minmax(0,104px)_minmax(0,1fr)_212px] items-center gap-1.5 border-t pt-3 @lg:grid-cols-[88px_120px_minmax(54px,1fr)_212px] @xl:grid-cols-[104px_144px_minmax(70px,1fr)_212px] @2xl:grid-cols-[120px_180px_minmax(100px,1fr)_212px] @3xl:grid-cols-[132px_220px_minmax(150px,1fr)_212px]">
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-full" />
+                <div className="contents">
+                  <Skeleton className="col-start-3 row-start-1 h-8 w-8 shrink-0 justify-self-end @lg:w-[54px]" />
+                  <Skeleton className="col-start-4 row-start-1 h-8 w-[212px] shrink-0" />
+                </div>
+              </div>
             </div>
           ) : scopeOptions.length ? (
-            <div className="space-y-4">
+            <div className="space-y-3">
               <CountingReportPeriodControl
                 disabled={loadingCharts}
                 includeOpenPeriod={countingViewSettings.includeOpenPeriod}
@@ -2157,83 +2191,112 @@ export function ScenarioReportsDashboard({
                   updateCountingViewSettings({ includeOpenPeriod })
                 }
               />
-              <div className="grid gap-4 border-t pt-4 2xl:grid-cols-[minmax(340px,1.25fr)_minmax(420px,1fr)]">
-                <div className="grid min-w-0 gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
-                <div className="space-y-2">
-                  <Label htmlFor={reportScopeModeSelectId}>Visão</Label>
+              <div
+                aria-label="Controles dos relatórios de Contagem"
+                className="grid min-w-0 grid-cols-[minmax(0,80px)_minmax(0,104px)_minmax(0,1fr)_212px] items-center gap-1.5 border-t pt-3 @lg:grid-cols-[88px_120px_minmax(54px,1fr)_212px] @xl:grid-cols-[104px_144px_minmax(70px,1fr)_212px] @2xl:grid-cols-[120px_180px_minmax(100px,1fr)_212px] @3xl:grid-cols-[132px_220px_minmax(150px,1fr)_212px]"
+                role="group"
+              >
+                <div className="min-w-0">
+                  <Label className="sr-only" htmlFor={reportScopeModeSelectId}>
+                    Visão
+                  </Label>
                   <Select
-                      value={scopeMode}
-                      onValueChange={(value) => {
-                        setScopeMode(value as ReportScopeMode);
-                        setSelectedId("");
-                      }}
-                    >
+                    value={scopeMode}
+                    onValueChange={(value) => {
+                      setScopeMode(value as ReportScopeMode);
+                      setSelectedId("");
+                    }}
+                  >
                     <SelectTrigger
                       id={reportScopeModeSelectId}
-                      className="bg-card"
+                      aria-label="Tipo da visão dos relatórios de Contagem"
+                      className="h-8 w-full min-w-0 bg-card"
                     >
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableModes.map((mode) => (
-                          <SelectItem key={mode.value} value={mode.value}>
-                            {mode.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                <div className="min-w-0 space-y-2">
-                  <Label htmlFor={reportScopeSelectId}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableModes.map((mode) => (
+                        <SelectItem key={mode.value} value={mode.value}>
+                          {mode.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="min-w-0">
+                  <Label className="sr-only" htmlFor={reportScopeSelectId}>
                     {scopeModeLabel(scopeMode)}
                   </Label>
                   <Select value={selectedId} onValueChange={setSelectedId}>
                     <SelectTrigger
                       id={reportScopeSelectId}
-                      className="bg-card"
+                      aria-label={`${scopeModeLabel(scopeMode)} dos relatórios em foco`}
+                      className="h-8 w-full min-w-0 bg-card"
                     >
-                        <SelectValue placeholder="Selecione uma visão" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {scopeOptions.map((scope) => (
-                          <SelectItem key={scope.id} value={scope.id}>
-                            {scope.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
+                      <SelectValue placeholder="Selecione uma visão" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {scopeOptions.map((scope) => (
+                        <SelectItem key={scope.id} value={scope.id}>
+                          {scope.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
 
-                <div className="space-y-3 2xl:border-l 2xl:pl-4">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="outline" className="gap-1 bg-card">
-                      <BarChart3 className="h-3.5 w-3.5" />
-                      {scopeModeLabel(scopeMode)}
-                    </Badge>
-                    <PreviousPeriodToggle
-                      checked={showPreviousPeriod}
-                      onCheckedChange={updateShowPreviousPeriod}
-                    />
-                    {showPreviousPeriod ? (
-                      <ComparisonModeSelect
-                        value={intradayComparison}
-                        onValueChange={updateIntradayComparison}
-                      />
-                    ) : null}
+                <div className="contents">
+                  <div className="col-start-3 row-start-1 flex h-8 min-w-0 items-center justify-end">
                     {lastUpdated ? (
-                      <Badge variant="outline" className="gap-1 bg-card">
-                        <Clock3 className="h-3.5 w-3.5" />
-                        {formatTime(lastUpdated)}
-                      </Badge>
+                      <span
+                        aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center gap-1 whitespace-nowrap px-0 text-xs tabular-nums text-muted-foreground @lg:w-auto @lg:justify-start @lg:px-1.5"
+                        title={`Última atualização às ${formatTime(lastUpdated)}`}
+                      >
+                        <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                        <span className="sr-only @lg:not-sr-only">
+                          {formatTime(lastUpdated)}
+                        </span>
+                      </span>
                     ) : null}
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div
+                    aria-label="Ações dos relatórios de Contagem"
+                    className="col-start-4 row-start-1 flex w-[212px] min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1"
+                    role="group"
+                  >
+                    <Button
+                      type="button"
+                      variant={reportSettingsOpen ? "default" : "outline"}
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      onClick={() => setReportSettingsOpen((current) => !current)}
+                      aria-controls={reportSettingsPanelId}
+                      aria-expanded={reportSettingsOpen}
+                      aria-label="Configurações do relatório"
+                      title="Configurações do relatório"
+                    >
+                      <SlidersHorizontal className="h-4 w-4" />
+                    </Button>
+                    <ReportExportActions
+                      compact
+                      payload={scenarioReportPayload}
+                      getPayload={buildConfiguredScenarioReportPayload}
+                      disabled={
+                        countingPeriodPending ||
+                        loadingCharts ||
+                        loadingScenarios ||
+                        !selectedScope ||
+                        Boolean(reportComparisonDisabledReason)
+                      }
+                    />
                     <Button
                       type="button"
                       variant="outline"
                       size="icon"
+                      className="h-8 w-8 shrink-0"
                       disabled={loadingCharts || !selectedScope}
                       onClick={() => {
                         if (selectedScope) void loadCharts(selectedScope);
@@ -2251,6 +2314,7 @@ export function ScenarioReportsDashboard({
                     {canEditVisual ? (
                       <>
                         <ReorderModeButton
+                          className="h-8 w-8 shrink-0"
                           enabled={layoutReorderMode}
                           onChange={setLayoutReorderMode}
                         />
@@ -2258,6 +2322,7 @@ export function ScenarioReportsDashboard({
                           type="button"
                           variant="outline"
                           size="icon"
+                          className="h-8 w-8 shrink-0"
                           onClick={() => setLayoutOrganizerOpen(true)}
                           aria-label="Configurar widgets"
                           title="Configurar widgets"
@@ -2266,24 +2331,44 @@ export function ScenarioReportsDashboard({
                         </Button>
                       </>
                     ) : null}
-                    <ReportExportActions
-                      payload={scenarioReportPayload}
-                      getPayload={buildConfiguredScenarioReportPayload}
-                      disabled={
-                        countingPeriodPending ||
-                        loadingCharts ||
-                        loadingScenarios ||
-                        !selectedScope ||
-                        Boolean(reportComparisonDisabledReason)
-                      }
-                    />
                     <MonitorModeButton
+                      compact
                       onClick={enterMonitorMode}
                       disabled={!scopeOptions.length}
                     />
                   </div>
                 </div>
               </div>
+
+              {reportSettingsOpen ? (
+                <div
+                  id={reportSettingsPanelId}
+                  aria-label="Configurações dos relatórios de Contagem"
+                  className="grid min-w-0 gap-2 rounded-md border bg-muted/15 p-3 @lg:grid-cols-[minmax(180px,1fr)_auto] @lg:items-center"
+                  role="region"
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold">
+                      Comparação do relatório
+                    </div>
+                    <div className="truncate text-[11px] text-muted-foreground">
+                      Configure o período anterior sem ocupar a régua principal.
+                    </div>
+                  </div>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2 @lg:justify-end">
+                    <PreviousPeriodToggle
+                      checked={showPreviousPeriod}
+                      onCheckedChange={updateShowPreviousPeriod}
+                    />
+                    {showPreviousPeriod ? (
+                      <ComparisonModeSelect
+                        value={intradayComparison}
+                        onValueChange={updateIntradayComparison}
+                      />
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
@@ -2580,13 +2665,13 @@ function ScenarioAggregateChartCard({
       </CardHeader>
       <CardContent>
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : error || state?.error ? (
           <EmptyChartState
             text={error || state?.error || "Dados não certificados."}
           />
         ) : hasData ? (
-          <div className="h-[300px] w-full">
+          <div className="h-full min-h-0 w-full">
             <EChart option={option} />
           </div>
         ) : (
@@ -2646,7 +2731,7 @@ function MissingReportCustomWidgetCard({
 
 function EmptyChartState({ text }: { text: string }) {
   return (
-    <div className="flex h-[300px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+    <div className="flex h-full min-h-0 items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
       {text}
     </div>
   );
@@ -2666,7 +2751,7 @@ function PreviousPeriodToggle({
       aria-checked={checked}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        "inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+        "inline-flex h-8 shrink-0 items-center gap-2 rounded-md border px-2.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
         checked
           ? "border-primary/30 bg-primary/10 text-primary"
           : "border-border bg-card text-muted-foreground",
@@ -2706,7 +2791,7 @@ function ComparisonModeSelect({
     >
       <SelectTrigger
         aria-label="Base de comparação do período anterior"
-        className="h-9 w-full min-w-[190px] bg-card text-xs sm:w-[190px]"
+        className="h-8 w-[190px] min-w-0 max-w-full bg-card text-xs"
       >
         <SelectValue />
       </SelectTrigger>

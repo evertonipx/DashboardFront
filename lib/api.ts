@@ -27,6 +27,7 @@ const EXPIRES_AT_KEY = "expires_at";
 const REFRESH_SKEW_MS = 60_000;
 
 export const SESSION_EXPIRED_EVENT = "ipxdata:session-expired";
+export const SESSION_UPDATED_EVENT = "ipxdata:session-updated";
 
 type RefreshAttempt = {
   promise: Promise<Session | TokenResponse | null>;
@@ -89,7 +90,9 @@ export function getStoredRefreshToken() {
 export function setStoredSession(tokens: TokenResponse | Session) {
   if (!isBrowser()) return;
 
-  if (window.localStorage.getItem(ACCESS_KEY) !== tokens.access_token) {
+  const previousAccessToken = window.localStorage.getItem(ACCESS_KEY) ?? "";
+  const accessTokenChanged = previousAccessToken !== tokens.access_token;
+  if (accessTokenChanged) {
     authenticatedMasterAccessToken = "";
   }
 
@@ -125,6 +128,9 @@ export function setStoredSession(tokens: TokenResponse | Session) {
     );
   } else {
     window.localStorage.removeItem(EXPIRES_AT_KEY);
+  }
+  if (accessTokenChanged && previousAccessToken) {
+    window.dispatchEvent(new Event(SESSION_UPDATED_EVENT));
   }
 }
 

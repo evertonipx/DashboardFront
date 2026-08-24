@@ -30,6 +30,7 @@ const scenarioComparisonScope = loadTypeScriptModule(
 const masterCompanyScope = loadTypeScriptModule(
   "lib/master-company-scope.ts",
 );
+const metadataValidation = loadTypeScriptModule("lib/metadata-validation.ts");
 const workerScope = loadTypeScriptModule("lib/worker-scope.ts");
 
 test("papel de admin da empresa não dispara atualização do perfil", () => {
@@ -243,6 +244,18 @@ test("cache de empresa preserva timezone quando atualização parcial o omite", 
       timezone: "America/Fortaleza",
       trade_name: null,
     });
+    companyCache.writeCompanyCache([
+      {
+        company_timezone: "America/Recife",
+        id: "company-alias",
+        name: "Empresa com alias",
+      },
+    ]);
+    assert.equal(
+      companyCache.readCachedCompany("company-alias")?.timezone,
+      "America/Recife",
+      "o cache deve normalizar o alias realmente retornado pela API",
+    );
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
@@ -669,12 +682,94 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
     ),
     null,
   );
-  assert.equal(
+  const contextWithInvalidTimeZone =
     accessTokenClaims.resolveAccessTokenContext(
       accessToken({ ...claims, timezone: "Invalid/Timezone" }),
       now,
-    ),
-    null,
+    );
+  assert.equal(contextWithInvalidTimeZone?.userId, "user-jwt");
+  assert.equal(
+    contextWithInvalidTimeZone?.timeZone,
+    "",
+    "timezone opcional inválido não pode derrubar a identidade autenticada",
+  );
+
+  const contextDuringTimeZoneMigration =
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({
+        ...claims,
+        company_timezone: "America/Manaus",
+        timezone: "America/Sao_Paulo",
+      }),
+      now,
+    );
+  assert.equal(contextDuringTimeZoneMigration?.userId, "user-jwt");
+  assert.equal(
+    contextDuringTimeZoneMigration?.timeZone,
+    "America/Manaus",
+    "o claim específico da empresa deve vencer o alias genérico transitório",
+  );
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({
+        ...claims,
+        company_timezone: "America/Manaus",
+        companyTimezone: "America/Sao_Paulo",
+      }),
+      now,
+    )?.timeZone,
+    "",
+    "claims específicos divergentes continuam sem certificação",
+  );
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({
+        ...claims,
+        company_timezone: null,
+        timezone: "America/Sao_Paulo",
+      }),
+      now,
+    )?.timeZone,
+    "",
+    "claim específico nulo não pode herdar um timezone genérico",
+  );
+
+  const contextWithEquivalentIanaAliases =
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({
+        ...claims,
+        company_timezone: "US/Eastern",
+        timezone: "America/New_York",
+      }),
+      now,
+    );
+  assert.equal(
+    contextWithEquivalentIanaAliases?.timeZone,
+    "America/New_York",
+    "aliases equivalentes devem ser comparados após canonicalização IANA",
+  );
+
+  const explicitCompanyTimeZone =
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      {
+        company_id: "company-jwt",
+        company_timezone: "America/Fortaleza",
+        email: "jwt@example.com",
+        id: "user-jwt",
+        is_master: true,
+        name: "JWT",
+      },
+      accessToken({
+        ...claims,
+        company_timezone: "America/Manaus",
+        timezone: "America/Sao_Paulo",
+      }),
+      now,
+    );
+  assert.equal(
+    explicitCompanyTimeZone?.company_timezone,
+    "America/Fortaleza",
+    "o cadastro explícito da empresa deve vencer metadados transitórios do JWT",
   );
   assert.equal(
     accessTokenClaims.reconcileCurrentUserWithAccessToken(
@@ -1322,6 +1417,255 @@ test("worker sem company id só é aceito quando a resposta escopada não mistur
   );
 });
 
+test("superadmin usa timezone do JWT apenas quando o tenant do claim é o selecionado", () => {
+  const originalWindow = globalThis.window;
+  const storage = memoryStorage();
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  const now = Date.UTC(2026, 7, 24, 12, 0, 0);
+
+  try {
+    const master = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      {
+        email: "master@example.com",
+        id: "master-jwt",
+        is_master: true,
+        name: "Master",
+      },
+      accessToken({
+        company_id: "company-jwt",
+        company_timezone: "America/Manaus",
+        exp: now / 1000 + 900,
+        role: "super-admin",
+        sub: "master-jwt",
+      }),
+      now,
+    );
+    assert.ok(master);
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-jwt",
+      name: "Empresa JWT",
+    });
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
+      {
+        fallback: false,
+        source: "current-user-company",
+        timeZone: "America/Manaus",
+      },
+    );
+
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-other",
+      name: "Outra empresa",
+    });
+    assert.equal(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master).fallback,
+      true,
+      "o fuso do JWT não pode atravessar para outro tenant selecionado",
+    );
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("worker legado herda o tenant do JWT próprio, mas não atravessa override master", () => {
+  const legacyPayload = {
+    workers: [
+      {
+        active: true,
+        id: "worker-legacy",
+        name: "Worker legado",
+      },
+    ],
+  };
+  const regularRows = metadataValidation.requireWorkerRows(
+    legacyPayload,
+    "company-jwt",
+  );
+
+  assert.equal(regularRows[0].company_id, "company-jwt");
+  assert.throws(
+    () => metadataValidation.requireWorkerRows(legacyPayload),
+    /company_id do worker na posição 0.*inválido ou ausente/,
+  );
+
+  const foreignRows = metadataValidation.requireWorkerRows({
+    workers: [
+      {
+        active: true,
+        company_id: "company-jwt",
+        id: "worker-jwt",
+        name: "Worker do JWT",
+      },
+    ],
+  });
+  const crossTenantPartition = workerScope.partitionWorkersByCompanyScope(
+    foreignRows,
+    "company-selected",
+  );
+
+  assert.deepEqual(crossTenantPartition.scopedRows, []);
+  assert.deepEqual(
+    crossTenantPartition.foreignRows.map((worker) => worker.id),
+    ["worker-jwt"],
+  );
+});
+
+test("super-admin valida workers sem rebatizar a empresa declarada e oculta linhas estrangeiras", () => {
+  const rows = metadataValidation.requireWorkerRows({
+    workers: [
+      {
+        active: true,
+        company_id: "company-selected",
+        id: "worker-selected",
+        name: "Worker selecionado",
+      },
+      {
+        active: true,
+        company_id: "company-jwt",
+        id: "worker-jwt",
+        name: "Worker do JWT",
+      },
+    ],
+  });
+  const partition = workerScope.partitionWorkersByCompanyScope(
+    rows,
+    "company-selected",
+  );
+
+  assert.deepEqual(
+    workerScope
+      .workersFromExplicitCompanyScope(partition)
+      .map((worker) => worker.id),
+    ["worker-selected"],
+  );
+  assert.equal(partition.foreignRows.length, 1);
+  assert.equal(partition.foreignRows[0].company_id, "company-jwt");
+});
+
+test("super-admin publica usuários e módulos de forma independente antes dos recursos operacionais", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const administrativeSettlement = source.indexOf(
+    "const [userResult, moduleResult] = await Promise.allSettled([",
+  );
+  const administrativePublish = source.indexOf("setUsers(nextUsers);");
+  const operationalSettlement = source.indexOf(
+    "workerResult,",
+    administrativePublish,
+  );
+
+  assert.ok(administrativeSettlement >= 0);
+  assert.ok(administrativePublish > administrativeSettlement);
+  assert.ok(administrativePublish >= 0);
+  assert.ok(operationalSettlement > administrativePublish);
+  assert.match(
+    source,
+    /userResult\.status === "fulfilled"[\s\S]*?moduleResult\.status === "fulfilled"/,
+  );
+  assert.match(
+    source,
+    /setUsers\(nextUsers\);[\s\S]*?setCompanyModules\(moduleRows\);[\s\S]*?setCompanyAdministrativeIssues\(administrativeIssues\);[\s\S]*?setLoadedCompanyId\(companyId\);[\s\S]*?setLoadingDetails\(false\);/,
+  );
+  assert.match(
+    source,
+    /workerResult\.status === "fulfilled"[\s\S]*?locationResult\.status === "fulfilled"[\s\S]*?cameraResult\.status === "fulfilled"[\s\S]*?scenarioResult\.status === "fulfilled"[\s\S]*?occupancyScenarioResult\.status === "fulfilled"/,
+  );
+  assert.match(
+    source,
+    /fetchScopedWorkers\(companyScopeId: string\)[\s\S]*?apiFetch<unknown>\("\/workers", \{ companyScopeId \}\)[\s\S]*?requireWorkerRows\(value\)/,
+  );
+});
+
+test("super-admin mantém a contagem de usuários certificada nos estados de carga, erro e vazio válido", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /const \[companyUsersCount, setCompanyUsersCount\] = React\.useState<number \| null>/,
+  );
+  assert.match(
+    source,
+    /foreignUserRows\.length[\s\S]*?nextUsersCount = nextUsers\.length/,
+  );
+  assert.match(
+    source,
+    /label="Usuários da empresa"[\s\S]*?loadingDetails[\s\S]*?\? "\.\.\."[\s\S]*?formatCertifiedCount\([\s\S]*?companyUsersCount/,
+  );
+  assert.match(
+    source,
+    /userAdministrativeIssue \? \([\s\S]*?Não foi possível certificar os usuários desta empresa\.[\s\S]*?: \([\s\S]*?Nenhum usuário para a empresa selecionada\./,
+  );
+  assert.match(source, /users: companyUsersCount,/);
+  assert.doesNotMatch(
+    source,
+    /label="Usuários da empresa"[\s\S]{0,250}?formatNumber\(users\.length\)/,
+  );
+});
+
+test("troca de empresa invalida e limpa dados antigos antes de publicar o novo escopo", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const selectStart = source.indexOf(
+    "const selectCompanyId = React.useCallback(",
+  );
+  const clearBeforeSelection = source.indexOf(
+    "clearCompanyDetailsState(Boolean(nextCompanyId));",
+    selectStart,
+  );
+  const publishSelection = source.indexOf(
+    "setSelectedCompanyId(nextCompanyId);",
+    selectStart,
+  );
+
+  assert.ok(selectStart >= 0);
+  assert.ok(clearBeforeSelection > selectStart);
+  assert.ok(publishSelection > clearBeforeSelection);
+  assert.match(
+    source,
+    /clearCompanyDetailsState[\s\S]*?setLoadedCompanyId\(""\);[\s\S]*?setUsers\(\[\]\);[\s\S]*?setCompanyModules\(\[\]\);[\s\S]*?setWorkers\(\[\]\);/,
+  );
+  assert.match(
+    source,
+    /selectedCompanyId && loadedCompanyId === selectedCompanyId/,
+  );
+  assert.match(source, /hasCurrentCompanyDetails && companyStats/);
+});
+
+test("super-admin não apresenta falha operacional como contagem zero", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /type CompanyOperationalStats = \{[\s\S]*?workers: number \| null;[\s\S]*?countingScenarios: number \| null;/,
+  );
+  assert.match(
+    source,
+    /workerScopePartition\.foreignRows\.length[\s\S]*?\? null[\s\S]*?: nextWorkers\.length/,
+  );
+  assert.match(source, /function formatCertifiedCount[\s\S]*?"—"/);
+  assert.match(source, /Dados operacionais parciais/);
+  assert.match(source, /disabled = !company;/);
+  assert.doesNotMatch(
+    source,
+    /catch \(error\) \{[\s\S]{0,500}setUsers\(\[\]\);[\s\S]{0,500}buildCompanyOperationalIssue/,
+  );
+});
+
 test("gestores operacionais encaminham explicitamente a empresa efetiva", () => {
   const workerSource = readFileSync(
     resolve(projectRoot, "components/app/worker-manager.tsx"),
@@ -1425,6 +1769,53 @@ test("atualização automática só executa para catálogo habilitado e visível
     resourceAutoRefresh.PROVISIONED_RESOURCE_REFRESH_INTERVAL_MS <
       resourceAutoRefresh.RESOURCE_METADATA_REFRESH_INTERVAL_MS,
   );
+});
+
+test("timezone ausente é hidratado antes da navegação e acompanha a rotação do JWT", () => {
+  const superAdminSource = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const authSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-provider.tsx"),
+    "utf8",
+  );
+  const apiSource = readFileSync(resolve(projectRoot, "lib/api.ts"), "utf8");
+  const ensureStart = superAdminSource.indexOf("const ensureCompanyTimeZone");
+  const detailFetch = superAdminSource.indexOf(
+    "`/companies/${company.id}`",
+    ensureStart,
+  );
+  const navigationStart = superAdminSource.indexOf(
+    "async function openCompanyDashboard",
+  );
+  const certificationBeforeNavigation = superAdminSource.indexOf(
+    "await ensureCompanyTimeZone(company, true)",
+    navigationStart,
+  );
+  const navigation = superAdminSource.indexOf(
+    'router.push("/dashboard/live")',
+    navigationStart,
+  );
+
+  assert.ok(ensureStart >= 0 && detailFetch > ensureStart);
+  assert.ok(
+    navigationStart >= 0 &&
+      certificationBeforeNavigation > navigationStart &&
+      navigation > certificationBeforeNavigation,
+  );
+  assert.match(
+    authSource,
+    /async function hydrateUserCompany[\s\S]*?`\/companies\/\$\{companyId\}`/,
+    "/auth/me parcial deve tentar hidratar o detalhe da própria empresa",
+  );
+  assert.match(
+    authSource,
+    /await hydrateStoredMasterCompanyScope\(hydratedUser\)[\s\S]*?async function hydrateStoredMasterCompanyScope[\s\S]*?`\/companies\/\$\{storedScope\.id\}`/,
+    "uma recarga direta do superadmin deve reparar o tenant salvo antes do dashboard",
+  );
+  assert.match(apiSource, /SESSION_UPDATED_EVENT/);
+  assert.match(authSource, /SESSION_UPDATED_EVENT/);
 });
 
 test("proxy exige destino fixo em produção", () => {

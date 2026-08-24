@@ -49,6 +49,7 @@ import {
 import {
   certifyCompanyScopeTimeZoneOverride,
   filterScopedApiRows,
+  getCurrentUserCompanyId,
   useEffectiveCompanyScopeId,
   useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
@@ -153,6 +154,15 @@ type EmbeddedMetadataSnapshot = {
   subLocationOptions: ScopeComparisonOption[];
 };
 
+type OptionalWorkerMetadata = {
+  rows: Worker[];
+  warning: string;
+};
+
+type WorkerMetadataValidationOptions = {
+  requireExplicitCompanyId: boolean;
+};
+
 const chartLabels: Record<ViewChart, string> = {
   "scenario-hour": "Cenários por período",
   "today-location": "Hoje por local",
@@ -170,6 +180,10 @@ export function EmbeddedLiveView() {
   const chart = normalizeChart(searchParams.get("chart"));
   const queryCompanyId = searchParams.get("company_id")?.trim() ?? "";
   const companyScopeId = queryCompanyId || storedCompanyScopeId;
+  const requireExplicitWorkerCompanyId =
+    hasMasterAccess(user) &&
+    Boolean(companyScopeId) &&
+    getCurrentUserCompanyId(user) !== companyScopeId;
   const companyScopeCertification = React.useMemo(() => {
     try {
       if (queryCompanyId) {
@@ -257,6 +271,7 @@ export function EmbeddedLiveView() {
   const [loadedViewIdentityKey, setLoadedViewIdentityKey] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
+  const [metadataWarning, setMetadataWarning] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
   const viewIdentityKeyRef = React.useRef(viewIdentityKey);
   const metadataSnapshotRef = React.useRef<EmbeddedMetadataSnapshot | null>(null);
@@ -404,6 +419,7 @@ export function EmbeddedLiveView() {
       dataRequestControllerRef.current?.abort();
       metadataSnapshotRef.current = null;
       setError(companyScopeCertification.error);
+      setMetadataWarning("");
       setLoading(false);
       return;
     }
@@ -412,6 +428,7 @@ export function EmbeddedLiveView() {
       dataRequestControllerRef.current?.abort();
       metadataSnapshotRef.current = null;
       setError("Empresa não definida para esta visão.");
+      setMetadataWarning("");
       setLoading(false);
       return;
     }
@@ -427,6 +444,7 @@ export function EmbeddedLiveView() {
     metadataRequestRunningRef.current = true;
     if (!silent) {
       setError("");
+      setMetadataWarning("");
       setLoading(true);
     }
 
@@ -447,25 +465,42 @@ export function EmbeddedLiveView() {
         (widget) => widget.chart === "today-sub-location",
       );
       const needsInfrastructure = needsLocation || needsSubLocation;
-      const [scenarioRows, cameraRows, locationRows, workerRows] =
-        await Promise.all([
+      const [scenarioResult, cameraResult, locationResult, workerResult] =
+        await Promise.allSettled([
           needsScenarios ? request<unknown>("/scenarios") : Promise.resolve([]),
           needsInfrastructure ? request<unknown>("/cameras") : Promise.resolve([]),
           needsInfrastructure ? request<unknown>("/locations") : Promise.resolve([]),
           needsLocation
-            ? fetchEmbeddedWorkers(companyScopeId, request)
-            : Promise.resolve([]),
+            ? fetchEmbeddedWorkers(
+                companyScopeId,
+                {
+                  requireExplicitCompanyId: requireExplicitWorkerCompanyId,
+                },
+                request,
+              )
+            : Promise.resolve({
+                rows: [],
+                warning: "",
+              } satisfies OptionalWorkerMetadata),
         ]);
+      if (scenarioResult.status === "rejected") throw scenarioResult.reason;
+      if (cameraResult.status === "rejected") throw cameraResult.reason;
+      if (locationResult.status === "rejected") throw locationResult.reason;
+
+      const workerMetadata =
+        workerResult.status === "fulfilled"
+          ? workerResult.value
+          : unavailableWorkerMetadata(workerResult.reason);
       const scopedScenarios = filterScopedApiRows(
-        requireScenarioRows(scenarioRows, companyScopeId),
+        requireScenarioRows(scenarioResult.value, companyScopeId),
         companyScopeId,
       ).filter((scenario) => scenario.active !== false);
       const scopedCameras = filterScopedApiRows(
-        requireCameraRows(cameraRows, companyScopeId),
+        requireCameraRows(cameraResult.value, companyScopeId),
         companyScopeId,
       );
       const scopedLocations = filterScopedApiRows(
-        requireLocationRows(locationRows, companyScopeId),
+        requireLocationRows(locationResult.value, companyScopeId),
         companyScopeId,
       );
       const scopedSubLocations = needsSubLocation
@@ -489,7 +524,7 @@ export function EmbeddedLiveView() {
               cameras: scopedCameras,
               locations: scopedLocations,
               manager: false,
-              workers: workerRows,
+              workers: workerMetadata.rows,
             })
           : [],
         scenarios: scopedScenarios,
@@ -511,6 +546,7 @@ export function EmbeddedLiveView() {
         return;
       }
 
+      setMetadataWarning(workerMetadata.warning);
       metadataSnapshotRef.current = nextMetadata;
       metadataLoadedAtRef.current = Date.now();
       await loadData(nextMetadata, { force: true, silent });
@@ -539,6 +575,7 @@ export function EmbeddedLiveView() {
     companyScopeCertification.error,
     companyScopeId,
     loadData,
+    requireExplicitWorkerCompanyId,
     user,
     viewIdentityKey,
     widgetConfigs,
@@ -561,6 +598,7 @@ export function EmbeddedLiveView() {
     setLoadedViewIdentityKey("");
     setLastUpdated(null);
     setError("");
+    setMetadataWarning("");
     setLoading(true);
     void loadMetadata({ force: true });
 
@@ -675,6 +713,16 @@ export function EmbeddedLiveView() {
               : "Atualizando a cada 5 segundos"}
           </div>
         </header>
+      ) : null}
+
+      {metadataWarning ? (
+        <div
+          aria-live="polite"
+          className="mx-3 mb-2 shrink-0 rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-center text-xs text-amber-800 [overflow-wrap:anywhere] dark:text-amber-200"
+          role="status"
+        >
+          {metadataWarning}
+        </div>
       ) : null}
 
       <div className="min-h-0 flex-1 p-3 pt-1">
@@ -1119,14 +1167,36 @@ function embeddedPartialHourRanges(
 }
 
 async function fetchEmbeddedWorkers(
-  companyId?: string | null,
+  companyId: string | null | undefined,
+  { requireExplicitCompanyId }: WorkerMetadataValidationOptions,
   request: EmbeddedApiRequest = apiFetch,
-): Promise<Worker[]> {
+): Promise<OptionalWorkerMetadata> {
   const rows = await request<unknown>("/workers").then((value) =>
-    requireWorkerRows(value, companyId),
+    requireWorkerRows(value, requireExplicitCompanyId ? undefined : companyId),
   );
-  const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
-  return sortWorkersByActivity(scopedRows);
+  const { foreignRows, scopedRows } = partitionWorkersByCompanyScope(
+    rows,
+    companyId,
+  );
+
+  return {
+    rows: sortWorkersByActivity(scopedRows),
+    warning: foreignRows.length
+      ? `${formatNumber(foreignRows.length)} worker(s) fora da empresa selecionada foram ocultados. Os locais continuam disponíveis sem esses vínculos.`
+      : "",
+  };
+}
+
+function unavailableWorkerMetadata(error: unknown): OptionalWorkerMetadata {
+  const detail =
+    error instanceof Error
+      ? error.message
+      : "A API não certificou os workers desta empresa.";
+
+  return {
+    rows: [],
+    warning: `Vínculos de workers indisponíveis: ${detail}`,
+  };
 }
 
 async function fetchSubLocations(

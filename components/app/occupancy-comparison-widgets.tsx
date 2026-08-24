@@ -154,7 +154,12 @@ type ComparisonLayoutCard = {
   defaultSize?: "compact" | "wide" | "large" | "full";
   id: string;
   label: string;
+  maxHeightLevel?: 1 | 2 | 3 | 4 | 5 | 6;
+  maxWidthLevel?: 1 | 2 | 3 | 4 | 5 | 6;
   minHeight?: "short" | "standard" | "tall";
+  minHeightLevel?: 1 | 2 | 3 | 4 | 5 | 6;
+  minWidthLevel?: 1 | 2 | 3 | 4 | 5 | 6;
+  narrowMinHeightLevel?: 1 | 2 | 3 | 4 | 5 | 6;
   node: React.ReactNode;
   titleEditable?: boolean;
   zoomEnabled?: boolean;
@@ -1269,7 +1274,12 @@ export function useOccupancyComparisonCards({
       defaultSize: "large",
       id: "occupancy_scenario_half_donut",
       label: "Comparação atual por cenário",
+      maxHeightLevel: 6,
+      maxWidthLevel: 6,
       minHeight: "tall",
+      minHeightLevel: 5,
+      minWidthLevel: 5,
+      narrowMinHeightLevel: 5,
       node: (
         <OccupancyHalfDonutCard
           {...commonScopeProps}
@@ -1297,7 +1307,12 @@ export function useOccupancyComparisonCards({
       defaultSize: "wide",
       id: "occupancy_scenario_bar_race",
       label: "Bar race ao vivo por cenário",
+      maxHeightLevel: 6,
+      maxWidthLevel: 6,
       minHeight: "standard",
+      minHeightLevel: 4,
+      minWidthLevel: 3,
+      narrowMinHeightLevel: 5,
       node: (
         <OccupancyBarRaceCard
           {...commonScopeProps}
@@ -1317,7 +1332,12 @@ export function useOccupancyComparisonCards({
       defaultSize: "wide",
       id: "occupancy_scenario_max_hour",
       label: "Máximo por hora por cenário",
+      maxHeightLevel: 6,
+      maxWidthLevel: 6,
       minHeight: "standard",
+      minHeightLevel: 4,
+      minWidthLevel: 3,
+      narrowMinHeightLevel: 5,
       node: (
         <OccupancyScenarioMaximumLineCard
           {...commonScopeProps}
@@ -1341,7 +1361,12 @@ export function useOccupancyComparisonCards({
       defaultSize: "wide",
       id: "occupancy_scenario_max_month",
       label: "Máximo por mês por cenário",
+      maxHeightLevel: 6,
+      maxWidthLevel: 6,
       minHeight: "standard",
+      minHeightLevel: 4,
+      minWidthLevel: 3,
+      narrowMinHeightLevel: 5,
       node: (
         <OccupancyScenarioMaximumLineCard
           {...commonScopeProps}
@@ -1361,7 +1386,12 @@ export function useOccupancyComparisonCards({
       defaultSize: "wide",
       id: "occupancy_scenario_max_year",
       label: "Máximo por ano por cenário",
+      maxHeightLevel: 6,
+      maxWidthLevel: 6,
       minHeight: "standard",
+      minHeightLevel: 4,
+      minWidthLevel: 3,
+      narrowMinHeightLevel: 5,
       node: (
         <OccupancyScenarioMaximumLineCard
           {...commonScopeProps}
@@ -1387,7 +1417,12 @@ export function useOccupancyComparisonCards({
       defaultSize: "full",
       id: "occupancy_hex_layout",
       label: "Simulador operacional hexagonal",
+      maxHeightLevel: 6,
+      maxWidthLevel: 6,
       minHeight: "standard",
+      minHeightLevel: 5,
+      minWidthLevel: 5,
+      narrowMinHeightLevel: 6,
       node: (
         <OccupancyHexLayoutCard
           allScenarios={scopedScenarios}
@@ -1416,7 +1451,12 @@ export function useOccupancyComparisonCards({
       defaultSize: "full",
       id: "occupancy_day_hour_heatmap",
       label: "Ocupação por dias x horários",
+      maxHeightLevel: 6,
+      maxWidthLevel: 6,
       minHeight: "standard",
+      minHeightLevel: 5,
+      minWidthLevel: 4,
+      narrowMinHeightLevel: 6,
       node: (
         <OccupancyDayHourHeatmapCard
           {...commonScopeProps}
@@ -1447,7 +1487,12 @@ export function useOccupancyComparisonCards({
       defaultSize: "full",
       id: "occupancy_scenario_hour_heatmap",
       label: "Ocupação por cenários x horários",
+      maxHeightLevel: 6,
+      maxWidthLevel: 6,
       minHeight: "standard",
+      minHeightLevel: 5,
+      minWidthLevel: 4,
+      narrowMinHeightLevel: 6,
       node: (
         <OccupancyScenarioHourHeatmapCard
           {...commonScopeProps}

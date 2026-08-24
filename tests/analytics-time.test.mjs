@@ -15,6 +15,9 @@ const aggregateTime = loadTypeScriptModule("lib/aggregate-time.ts");
 const aggregateHourQuery = loadTypeScriptModule(
   "lib/aggregate-hour-query.ts",
 );
+const aggregateMinuteDayQuery = loadTypeScriptModule(
+  "lib/aggregate-minute-day-query.ts",
+);
 const aggregateReconciliation = loadTypeScriptModule(
   "lib/aggregate-reconciliation.ts",
 );
@@ -22,6 +25,7 @@ const aggregateQueryPlan = loadTypeScriptModule(
   "lib/aggregate-query-plan.ts",
 );
 const chartPalette = loadTypeScriptModule("lib/chart-palette.ts");
+const cardLayoutSizing = loadTypeScriptModule("lib/card-layout-sizing.ts");
 const companyTimeZone = loadTypeScriptModule("lib/company-time-zone.ts");
 const countingTimeZone = loadTypeScriptModule("lib/counting-time-zone.ts");
 const occupancyChartPalette = loadTypeScriptModule(
@@ -37,9 +41,11 @@ const liveAnnualComparison = loadTypeScriptModule(
   "lib/live-annual-comparison.ts",
 );
 const hourlyAxis = loadTypeScriptModule("lib/hourly-axis.ts");
+const minuteAxis = loadTypeScriptModule("lib/minute-axis.ts");
 const metadataValidation = loadTypeScriptModule(
   "lib/metadata-validation.ts",
 );
+const workerScope = loadTypeScriptModule("lib/worker-scope.ts");
 const occupancyAggregateValidation = loadTypeScriptModule(
   "lib/occupancy-aggregate-validation.ts",
 );
@@ -1718,10 +1724,32 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
     paletteSelectSource,
     /aria-label=\{`\$\{ariaLabel\}: \$\{palette\.label\}`\}/,
   );
-  assert.match(paletteSelectSource, /className="h-8 w-\[116px\]/);
-  assert.match(paletteSelectSource, /<PaletteSwatches colors=\{palette\.colors\} selected \/>/);
+  assert.match(
+    paletteSelectSource,
+    /fluid \? "w-full min-w-0" : "w-\[64px\] @sm:w-\[116px\]"/,
+    "o trigger deve mostrar a paleta escolhida sem consumir largura excessiva no mobile",
+  );
+  assert.match(
+    dashboardSource,
+    /<OccupancyPaletteSelect[\s\S]*?compact[\s\S]*?fluid/,
+    "a paleta ao vivo deve preencher sua trilha compacta sem ocultar a seleção",
+  );
+  assert.match(
+    paletteSelectSource,
+    /<PaletteSwatches colors=\{palette\.colors\} compact=\{compact\} selected \/>/,
+  );
   assert.doesNotMatch(paletteSelectSource, /<SelectValue/);
-  assert.match(paletteSelectSource, /selected \? 10 : 5/);
+  assert.match(paletteSelectSource, /selected && !compact \? 10 : 5/);
+  assert.match(
+    paletteSelectSource,
+    /index >= 5[\s\S]*?hidden h-3\.5 w-1\.5 shrink-0 @sm:block/,
+    "a variante ampla deve preservar cinco cores e revelar a régua completa quando houver espaço",
+  );
+  assert.match(
+    paletteSelectSource,
+    /: selected[\s\S]*?"block h-3\.5 w-1\.5 shrink-0"/,
+    "a variante compacta deve manter cinco amostras legíveis em 64px",
+  );
   assert.match(
     paletteSelectSource,
     /style=\{\{ display: "inline-flex" \}\}/,
@@ -1753,8 +1781,13 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     compactToolbarSource,
-    /className="grid min-w-0 gap-2 [^"]*@4xl:grid-cols-/,
-    "a barra superior deve empilhar no mobile e usar uma linha quando houver largura",
+    /className="grid min-w-0 grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(212px,1fr\)\] items-center gap-1[^"]*@sm:grid-cols-\[minmax\(96px,112px\)_64px_minmax\(212px,1fr\)\][^"]*@md:grid-cols-\[minmax\(120px,160px\)_64px_minmax\(212px,1fr\)\] @md:gap-2/,
+    "cenário, paleta compacta e seis ações devem permanecer na primeira linha",
+  );
+  assert.match(
+    compactToolbarSource,
+    /className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2"[\s\S]*?Última atualização às[\s\S]*?aria-label="Ações da visão de ocupação"\s+className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [^"]*"/,
+    "horário e seis ações devem compartilhar o terceiro track, com os ícones fixos à direita",
   );
   assert.doesNotMatch(
     compactToolbarSource,
@@ -1767,6 +1800,37 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
     "a barra compacta não deve reintroduzir as segmentações removidas",
   );
   assert.match(compactToolbarSource, /<ReportExportActions[\s\S]*?compact/);
+  assert.doesNotMatch(
+    compactToolbarSource,
+    /<CompactActionMenu/,
+    "o Ao Vivo de Ocupação deve manter botões individuais em qualquer largura",
+  );
+  assert.match(
+    compactToolbarSource,
+    /<ReportExportActions[\s\S]*?<ReorderModeButton[\s\S]*?aria-label="Configurar widgets de ocupação"[\s\S]*?aria-label="Configurações operacionais"[\s\S]*?aria-label="Atualizar dados de ocupação"[\s\S]*?<MonitorModeButton[\s\S]*?compact/,
+    "exportar, reordenar, widgets, operação, atualizar e monitor devem permanecer visíveis individualmente",
+  );
+  for (const label of [
+    "Configurar widgets de ocupação",
+    "Configurações operacionais",
+    "Atualizar dados de ocupação",
+  ]) {
+    assert.match(
+      compactToolbarSource,
+      new RegExp(`aria-label="${label}"[\\s\\S]*?title="${label}"`),
+      `${label} deve expor rótulo e tooltip`,
+    );
+  }
+  assert.match(
+    compactToolbarSource,
+    /disabled=\{refreshing \|\| loadingData\}/,
+    "atualizar deve preservar o estado desabilitado durante a consulta",
+  );
+  assert.match(
+    compactToolbarSource,
+    /aria-controls="occupancy-operational-settings"[\s\S]*?aria-expanded=\{operationalSettingsOpen\}/,
+    "configurações operacionais devem anunciar o painel controlado",
+  );
   assert.doesNotMatch(
     compactToolbarSource,
     /OccupancyStatusColorsDialog|Cores da comparação|Configurar cenários|manager\/scenarios/,
@@ -1864,12 +1928,39 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     liveToolbar,
-    /className="grid min-w-0 gap-2 [^"]*@4xl:grid-cols-/,
+    /className="grid w-full min-w-0 grid-cols-\[80px_minmax\(0,104px\)_minmax\(176px,1fr\)\][^"]*@sm:grid-cols-\[80px_104px_minmax\(176px,1fr\)\][^"]*@md:grid-cols-\[104px_144px_minmax\(176px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(176px,1fr\)\]/,
+  );
+  assert.match(
+    liveSource,
+    /<div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">[\s\S]*?<Skeleton className="hidden h-3\.5 w-4 shrink-0 @lg:block @xl:w-12 @2xl:w-24" \/>[\s\S]*?<Skeleton className="h-8 w-\[176px\] shrink-0" \/>/,
+    "o skeleton deve reservar filtros, horário e rail na mesma linha",
   );
   assert.doesNotMatch(liveToolbar, /enterprise-horizontal-scroll|overflow-x-auto/);
+  assert.match(
+    liveToolbar,
+    /className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2"/,
+    "horário e ações devem permanecer na terceira coluna da primeira linha",
+  );
+  assert.doesNotMatch(liveToolbar, /row-start-2/);
   assert.match(liveToolbar, /<ReportExportActions[\s\S]*?compact/);
+  assert.doesNotMatch(liveToolbar, /<CompactActionMenu/);
+  assert.match(
+    liveToolbar,
+    /aria-label="Ações da visão ao vivo de Contagem"[\s\S]*?<ReportExportActions[\s\S]*?<ReorderModeButton[\s\S]*?aria-label="Configurar widgets"[\s\S]*?<Target[\s\S]*?<MonitorModeButton/,
+    "as cinco ações devem continuar visíveis como ícones individuais",
+  );
   assert.match(liveToolbar, /<MonitorModeButton[\s\S]*?compact/);
-  assert.match(liveToolbar, /aria-label="Bases de comparação"/);
+  assert.match(
+    liveToolbar,
+    /aria-controls="counting-live-comparison-settings"[\s\S]*?aria-expanded=\{operationalSettingsOpen\}/,
+    "bases de comparação devem ser expostas como painel expansível",
+  );
+  assert.match(liveToolbar, /Exibir bases de comparação/);
+  assert.match(
+    liveToolbar,
+    /aria-label=\{`Última atualização às \$\{formatTime\(lastUpdated\)\}`\}[\s\S]*?Atualizado às \{formatTime\(lastUpdated\)\}[\s\S]*?aria-label="Ações da visão ao vivo de Contagem"/,
+    "o horário deve anteceder o rail na mesma linha sem integrar o grupo de ações",
+  );
   assert.doesNotMatch(liveToolbar, />\s*5 segundos\s*</);
   assert.match(
     liveSource,
@@ -1973,20 +2064,29 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
   assert.match(reports, /<OccupancyDateRangePicker[\s\S]*?onApply=\{updateAnalysisRangeInput\}/);
   assert.match(
     reports,
-    /aria-label=\{analysis \? "Controles da análise de Ocupação" : undefined\}/,
+    /analysis\s*\? "Controles da análise de Ocupação"\s*: "Controles dos relatórios de Ocupação"/,
     "a análise de Ocupação deve reunir os filtros em uma única barra acessível",
   );
   assert.match(
     reports,
-    /analysis[\s\S]*?"grid min-w-0 gap-2 sm:grid-cols-2 lg:grid-cols-/,
-    "a barra deve reorganizar os controles sem criar rolagem em telas estreitas",
+    /analysis[\s\S]*?"grid min-w-0 grid-cols-\[minmax\(0,32px\)_minmax\(0,64px\)_minmax\(0,96px\)_minmax\(212px,1fr\)\] items-center gap-1 @4xl:grid-cols-\[300px_minmax\(140px,170px\)_minmax\(180px,220px\)_minmax\(212px,1fr\)\] @4xl:gap-2"/,
+    "calendário, filtros, contexto e ações devem compartilhar a primeira linha",
   );
   const analysisToolbar = reports.slice(
-    reports.indexOf('aria-label={analysis ? "Controles da análise de Ocupação"'),
-    reports.indexOf('id="occupancy-analysis-settings"'),
+    reports.indexOf('"Controles da análise de Ocupação"'),
+    reports.indexOf("{(analysis && analysisSettingsOpen) ||"),
   );
   assert.doesNotMatch(analysisToolbar, /overflow-x-auto|enterprise-horizontal-scroll/);
-  assert.match(reports, /aria-label=\{analysis \? "Tipo de visão da análise de Ocupação"/);
+  assert.doesNotMatch(analysisToolbar, /row-start-2/);
+  assert.match(
+    reports,
+    /analysis\s*\?\s*"Tipo de visão da análise de Ocupação"\s*:\s*"Tipo de visão dos relatórios de Ocupação"/,
+  );
+  assert.match(
+    reports,
+    /analysis\s*\?\s*`\$\{scopeModeLabel\(scopeMode\)\} da análise de Ocupação`\s*:\s*`\$\{scopeModeLabel\(scopeMode\)\} dos relatórios em foco`/,
+    "os comboboxes devem manter nomes acessíveis mesmo sem labels visuais",
+  );
   assert.match(
     reports,
     /aria-label="Configurações da análise de Ocupação"[\s\S]*?<SlidersHorizontal/,
@@ -1994,11 +2094,11 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
   );
   assert.match(
     reports,
-    /id="occupancy-analysis-settings"[\s\S]*?Comparação temporal[\s\S]*?<PreviousPeriodToggle[\s\S]*?compact[\s\S]*?<ComparisonModeSelect[\s\S]*?compact[\s\S]*?Séries históricas[\s\S]*?<MetricVisibilityControls[\s\S]*?compact/,
+    /\? "occupancy-analysis-settings"\s*: "occupancy-report-settings"[\s\S]*?Comparação temporal[\s\S]*?<PreviousPeriodToggle[\s\S]*?compact[\s\S]*?<ComparisonModeSelect[\s\S]*?compact[\s\S]*?Séries históricas[\s\S]*?<MetricVisibilityControls[\s\S]*?compact/,
     "a otimização não pode remover os algoritmos de comparação nem as séries históricas",
   );
   assert.match(reports, /<ReportExportActions[\s\S]*?compact/);
-  assert.match(reports, /<MonitorModeButton[\s\S]*?compact=\{analysis\}/);
+  assert.match(reports, /<MonitorModeButton[\s\S]*?compact/);
   assert.match(
     reports,
     /loadingScopes && !scopeOptions\.length/,
@@ -2016,6 +2116,141 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
   assert.match(picker, /Início[\s\S]*?type="date"[\s\S]*?Fim[\s\S]*?type="date"/);
   assert.match(picker, /Cancelar[\s\S]*?Aplicar período/);
   assert.match(picker, /Últimos 7 dias[\s\S]*?Semana passada[\s\S]*?Mês anterior/);
+});
+
+test("Relatórios de Ocupação limita cada filtro à largura útil do container", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const reportControlsStart = source.indexOf('"Controles dos relatórios de Ocupação"');
+  const reportControls = source.slice(
+    reportControlsStart,
+    source.indexOf("{(analysis && analysisSettingsOpen) ||", reportControlsStart),
+  );
+  const comparisonSelect = source.slice(
+    source.indexOf("function ComparisonModeSelect("),
+    source.indexOf("function buildOccupancyReportDefinitions"),
+  );
+
+  assert.match(
+    source,
+    /: "grid min-w-0 grid-cols-\[minmax\(0,64px\)_minmax\(0,96px\)_minmax\(212px,1fr\)\] items-center gap-1[^"]*@2xl:grid-cols-\[132px_220px_minmax\(212px,1fr\)\]"/,
+    "filtros, horário e ações devem compartilhar a primeira linha em qualquer largura",
+  );
+  assert.match(
+    reportControls,
+    /: "contents"/,
+    "os selects devem ocupar somente os dois tracks primários da barra",
+  );
+  assert.ok(
+    reportControls.match(/className="h-8 w-full min-w-0 bg-card"/g)?.length >= 2,
+    "visão e escopo devem manter altura e trilhas compactas",
+  );
+  assert.match(
+    reportControls,
+    /<Label\s+className="sr-only"[\s\S]*?>\s*Visão\s*<\/Label>[\s\S]*?<Label\s+className="sr-only"/,
+    "labels visuais devem ser compactados sem perder semântica acessível",
+  );
+  assert.match(
+    source,
+    /aria-controls="occupancy-report-settings"[\s\S]*?aria-label="Configurações dos relatórios de Ocupação"[\s\S]*?"occupancy-report-settings"[\s\S]*?<PreviousPeriodToggle[\s\S]*?compact[\s\S]*?<ComparisonModeSelect[\s\S]*?compact[\s\S]*?fit[\s\S]*?<MetricVisibilityControls[\s\S]*?compact/,
+    "configurações secundárias devem permanecer acessíveis em painel compacto",
+  );
+  assert.match(
+    reportControls,
+    /aria-label="Ações dos relatórios de Ocupação"\s+className="ml-auto flex shrink-0 flex-nowrap/,
+  );
+  assert.doesNotMatch(
+    reportControls,
+    /overflow-x-auto|overflow-x-scroll|enterprise-horizontal-scroll/,
+  );
+  assert.match(
+    reportControls,
+    /\) : \(\s*<div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">/,
+    "o rail dos relatórios deve permanecer na terceira coluna da primeira linha",
+  );
+  assert.match(comparisonSelect, /fit\?: boolean;/);
+  assert.match(
+    comparisonSelect,
+    /fit \? "w-\[190px\]" : "w-full sm:w-\[190px\]"/,
+    "o combobox de comparação do relatório não deve ocupar uma linha inteira",
+  );
+});
+
+test("Relatórios de Contagem mantém filtros compactos em qualquer container", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const periodSource = readFileSync(
+    resolve(projectRoot, "components/app/counting-report-period-control.tsx"),
+    "utf8",
+  );
+  const toolbarStart = source.indexOf(
+    'aria-label="Controles dos relatórios de Contagem"',
+  );
+  const toolbar = source.slice(
+    toolbarStart,
+    source.indexOf("{scopeOptions.length ? (", toolbarStart),
+  );
+  const comparisonSelect = source.slice(
+    source.indexOf("function ComparisonModeSelect("),
+    source.indexOf("function buildScenarioAggregateDefinitions"),
+  );
+
+  assert.notEqual(toolbarStart, -1);
+  assert.match(
+    toolbar,
+    /grid-cols-\[minmax\(0,80px\)_minmax\(0,104px\)_minmax\(0,1fr\)_212px\][^"\n]*@3xl:grid-cols-\[132px_220px_minmax\(150px,1fr\)_212px\]/,
+    "visão, escopo, horário e ações devem ocupar quatro tracks na mesma linha",
+  );
+  assert.equal(
+    toolbar.match(/className="h-8 w-full min-w-0 bg-card"/g)?.length,
+    2,
+    "os selects de escopo devem preencher apenas seus tracks limitados",
+  );
+  assert.match(
+    toolbar,
+    /aria-label="Ações dos relatórios de Contagem"\s+className="col-start-4 row-start-1 flex w-\[212px\] min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1"[\s\S]*?<ReportExportActions[\s\S]*?compact[\s\S]*?<ReorderModeButton[\s\S]*?<MonitorModeButton[\s\S]*?compact/,
+    "as ações primárias devem permanecer individuais e fixas à direita",
+  );
+  assert.match(
+    toolbar,
+    /aria-controls=\{reportSettingsPanelId\}[\s\S]*?aria-expanded=\{reportSettingsOpen\}[\s\S]*?aria-label="Configurações do relatório"[\s\S]*?aria-label="Atualizar dados do relatório"/,
+    "configuração e atualização devem permanecer ações diretas e nomeadas",
+  );
+  assert.doesNotMatch(toolbar, /<CompactActionMenu/);
+  assert.match(
+    source,
+    /\{reportSettingsOpen \? \([\s\S]*?id=\{reportSettingsPanelId\}[\s\S]*?<PreviousPeriodToggle[\s\S]*?<ComparisonModeSelect/,
+    "comparação deve permanecer disponível no painel secundário",
+  );
+  assert.doesNotMatch(
+    toolbar,
+    /row-start-2|overflow-x-auto|overflow-x-scroll|enterprise-horizontal-scroll/,
+  );
+  assert.match(
+    comparisonSelect,
+    /className="h-8 w-\[190px\] min-w-0 max-w-full bg-card text-xs"/,
+    "a base condicional deve ter largura própria sem dominar a linha",
+  );
+  assert.match(
+    periodSource,
+    /grid-cols-2[^"\n]*@lg:grid-cols-\[144px_120px_minmax\(0,120px\)\][^"\n]*@2xl:grid-cols-\[144px_120px_120px_150px_minmax\(72px,1fr\)\]/,
+    "atalho, meses, switch e total devem ocupar tracks compactos",
+  );
+  assert.match(
+    periodSource,
+    /col-span-2 min-w-0 space-y-1 @lg:col-span-1 @lg:col-start-1 @lg:row-start-1[\s\S]*?col-start-1 row-start-2 min-w-0 space-y-1 @lg:col-start-2 @lg:row-start-1[\s\S]*?col-start-2 row-start-2 min-w-0 space-y-1 @lg:col-start-3 @lg:row-start-1/,
+    "atalho deve ocupar a linha própria no estreito e De/Até devem permanecer juntos",
+  );
+  assert.match(
+    source,
+    /loadingScenarios \? \([\s\S]*?<CountingReportPeriodControl[\s\S]*?disabled[\s\S]*?border-t pt-3/,
+    "o carregamento deve reservar a mesma estrutura do controle de período",
+  );
+  assert.doesNotMatch(periodSource, /overflow-x-auto|overflow-x-scroll/);
 });
 
 test("ocupação histórica usa somente semanas e meses civis já fechados", () => {
@@ -5848,6 +6083,119 @@ test("eixo horário mantém 24 posições e não projeta horas futuras", () => {
   assert.equal(values[23], null);
 });
 
+test("eixo minuto a minuto mantém 00h–23h, zero certificado e futuro vazio", () => {
+  const slots = minuteAxis.buildFixedMinuteDayAxis({
+    day: new Date("2026-08-24T12:00:00.000Z"),
+    points: [
+      { bucket: "2026-08-24T03:00:00.000Z", total: 5 },
+      { bucket: "2026-08-24T13:42:00.000Z", total: 7 },
+      { bucket: "2026-08-24T13:43:00.000Z", total: 999 },
+    ],
+    referenceTime: new Date("2026-08-24T13:42:30.000Z"),
+    timeZone: "America/Sao_Paulo",
+  });
+
+  assert.equal(minuteAxis.MINUTE_OF_DAY_LABELS.length, 1_440);
+  assert.equal(minuteAxis.MINUTE_OF_DAY_LABELS[0], "00:00");
+  assert.equal(minuteAxis.MINUTE_OF_DAY_LABELS[1_439], "23:59");
+  assert.equal(minuteAxis.minuteDayHourAxisLabel(0), "00h");
+  assert.equal(minuteAxis.minuteDayHourAxisLabel(1_380), "23h");
+  assert.equal(slots.length, 1_440);
+  assert.equal(slots[0].value, 5);
+  assert.equal(slots[1].value, 0);
+  assert.equal(slots[642].status, "current");
+  assert.equal(slots[642].value, 7);
+  assert.equal(slots[643].status, "future");
+  assert.equal(slots[643].value, null);
+  assert.equal(slots[1_439].value, null);
+});
+
+test("eixo minuto a minuto trata avanço e repetição DST sem perder totais", () => {
+  const spring = minuteAxis.buildFixedMinuteDayAxis({
+    day: new Date("2026-03-08T12:00:00.000Z"),
+    points: [],
+    referenceTime: new Date("2026-03-08T12:00:00.000Z"),
+    timeZone: "America/New_York",
+  });
+  assert.equal(spring[119].value, 0);
+  assert.equal(spring[120].status, "unavailable");
+  assert.equal(spring[120].value, null);
+  assert.equal(spring[179].status, "unavailable");
+  assert.equal(spring[180].value, 0);
+
+  const fall = minuteAxis.buildFixedMinuteDayAxis({
+    day: new Date("2026-11-01T12:00:00.000Z"),
+    points: [
+      { bucket: "2026-11-01T05:30:00.000Z", total: 3 },
+      { bucket: "2026-11-01T06:30:00.000Z", total: 4 },
+    ],
+    referenceTime: new Date("2026-11-01T12:00:00.000Z"),
+    timeZone: "America/New_York",
+  });
+  assert.equal(fall[90].label, "01:30");
+  assert.equal(fall[90].value, 7);
+});
+
+test("comparativo horário de hoje mantém o dia civil fixo e o futuro vazio", () => {
+  const from = new Date(2026, 7, 24, 0, 0, 0, 0);
+  const to = new Date(2026, 7, 25, 0, 0, 0, 0);
+  const now = new Date(2026, 7, 24, 10, 42, 0, 0);
+  const window = hourlyAxis.resolveFixedHourlyDayWindow(from, to, now);
+
+  assert.deepEqual(window, { fromHour: 0, throughHour: 10 });
+
+  const points = Array.from({ length: 11 }, (_, hour) => ({
+    bucket: new Date(2026, 7, 24, hour).toISOString(),
+    total: hour === 10 ? 7 : 0,
+  }));
+  points.push({
+    bucket: new Date(2026, 7, 24, 14).toISOString(),
+    total: 99,
+  });
+  const values = hourlyAxis.buildFixedHourlyAxisValues(
+    points,
+    window.throughHour,
+    {
+      fromHour: window.fromHour,
+      missingHourValue: null,
+    },
+  );
+
+  assert.equal(values.length, 24);
+  assert.deepEqual(values.slice(0, 11), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+  assert.deepEqual(values.slice(11), Array.from({ length: 13 }, () => null));
+  assert.deepEqual(
+    hourlyAxis.resolveFixedHourlyDayWindow(
+      new Date(2026, 7, 23, 0),
+      new Date(2026, 7, 24, 0),
+      now,
+    ),
+    { fromHour: 0, throughHour: 23 },
+  );
+  assert.equal(
+    hourlyAxis.resolveFixedHourlyDayWindow(
+      new Date(2026, 7, 23, 12),
+      new Date(2026, 7, 24, 12),
+      now,
+    ),
+    null,
+  );
+
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+  assert.match(comparisonSource, /resolveFixedHourlyDayWindow\(\s*definition\.currentFrom,\s*definition\.currentTo,\s*referenceTime/);
+  assert.match(comparisonSource, /fixedHourlyAxis[\s\S]*?interval: 1,[\s\S]*?rotate: 0/);
+  assert.match(comparisonSource, /bottom: fixedHourlyAxis \? 6/);
+  assert.match(comparisonSource, /missingHourValue: null/);
+  assert.match(
+    comparisonSource,
+    /definition\.granularity === "hour"[\s\S]*?item\.points\.length > 0/,
+  );
+  assert.doesNotMatch(comparisonSource, /pointsShareOneCalendarDay/);
+});
+
 test("preferência do widget preserva título personalizado com limite seguro", () => {
   const [preference] = viewPreferences.normalizeCardPreferences(
     "live",
@@ -5871,6 +6219,216 @@ test("preferência do widget preserva título personalizado com limite seguro", 
     ["live_chart_hour"],
   );
   assert.equal(invalidZoom.zoom, undefined);
+});
+
+test("altura efetiva do widget respeita simultaneamente mínimo e máximo", () => {
+  assert.equal(
+    viewPreferences.clampCardHeightToRange("standard", "short", "short"),
+    "short",
+    "uma preferência antiga standard deve ser normalizada para o máximo short",
+  );
+  assert.equal(
+    viewPreferences.clampCardHeightToRange("tall", "short", "short"),
+    "short",
+    "uma preferência antiga tall deve ser normalizada para o máximo short",
+  );
+  assert.equal(
+    viewPreferences.clampCardHeightToRange("short", "standard", "tall"),
+    "standard",
+    "o limite mínimo dos gráficos deve continuar protegido",
+  );
+  assert.equal(
+    viewPreferences.clampCardHeightToRange("tall", "standard", "short"),
+    "standard",
+    "uma faixa inválida deve preservar o mínimo seguro",
+  );
+});
+
+test("grade Bento oferece seis níveis por eixo sem alterar dimensões legadas", () => {
+  assert.deepEqual(cardLayoutSizing.CARD_LAYOUT_LEVELS, [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(
+    cardLayoutSizing.CARD_LAYOUT_DESKTOP_WIDTH_SPANS,
+    [3, 4, 6, 8, 9, 12],
+  );
+  assert.deepEqual(
+    cardLayoutSizing.CARD_LAYOUT_HEIGHT_ROW_SPANS,
+    [2, 3, 4, 5, 6, 8],
+  );
+  assert.deepEqual(
+    cardLayoutSizing.CARD_LAYOUT_LEVELS.map((level) =>
+      cardLayoutSizing.resolveCardLayoutHeightPixels(level),
+    ),
+    [164, 254, 344, 434, 524, 704],
+  );
+
+  const legacy = viewPreferences.normalizeCardPreferences(
+    "live",
+    [
+      {
+        height: "short",
+        id: "a",
+        size: "compact",
+        visible: true,
+      },
+      {
+        height: "standard",
+        id: "b",
+        size: "wide",
+        visible: true,
+      },
+      {
+        height: "tall",
+        id: "c",
+        size: "large",
+        visible: true,
+      },
+      { id: "d", size: "full", visible: true },
+    ],
+    ["a", "b", "c", "d"],
+  );
+  assert.deepEqual(
+    legacy.map((item) => [item.widthLevel, item.heightLevel]),
+    [
+      [1, 1],
+      [3, 3],
+      [5, 5],
+      [6, undefined],
+    ],
+  );
+
+  const [fine] = viewPreferences.normalizeCardPreferences(
+    "live",
+    [
+      {
+        height: "short",
+        heightLevel: 4,
+        id: "fine",
+        size: "compact",
+        visible: true,
+        widthLevel: 2,
+      },
+    ],
+    ["fine"],
+  );
+  assert.equal(fine.widthLevel, 2, "o nível novo vence o espelho legado");
+  assert.equal(fine.heightLevel, 4);
+  assert.equal(fine.size, "compact", "o espelho continua legível por versões antigas");
+  assert.equal(fine.height, "tall");
+
+  const [invalid] = viewPreferences.normalizeCardPreferences(
+    "live",
+    [{ heightLevel: 0, id: "invalid", visible: true, widthLevel: 7 }],
+    ["invalid"],
+  );
+  assert.equal(invalid.widthLevel, undefined);
+  assert.equal(invalid.heightLevel, undefined);
+});
+
+test("resolver Bento preserva breakpoints, constraints e altura ligada à largura", () => {
+  const expectedSpans = new Map([
+    [639, [1, 1, 1, 1, 1, 1]],
+    [640, [6, 6, 12, 12, 12, 12]],
+    [959, [6, 6, 12, 12, 12, 12]],
+    [960, [4, 4, 8, 8, 12, 12]],
+    [1199, [4, 4, 8, 8, 12, 12]],
+    [1200, [3, 4, 6, 8, 9, 12]],
+  ]);
+
+  for (const [containerWidth, spans] of expectedSpans) {
+    assert.deepEqual(
+      cardLayoutSizing.CARD_LAYOUT_LEVELS.map(
+        (widthLevel) =>
+          cardLayoutSizing.resolveCardLayoutDimensions({
+            containerWidth,
+            heightLevel: 3,
+            widthLevel,
+          }).columnSpan,
+      ),
+      spans,
+      `spans incorretos no limite ${containerWidth}px`,
+    );
+  }
+
+  const compactSummary = cardLayoutSizing.resolveCardLayoutDimensions({
+    constraints: {
+      minHeightByWidthLevel: { 3: 5, 4: 4, 5: 3, 6: 3 },
+      minHeightLevel: 3,
+      minWidthLevel: 3,
+    },
+    containerWidth: 1_440,
+    heightLevel: 1,
+    widthLevel: 3,
+  });
+  const fullSummary = cardLayoutSizing.resolveCardLayoutDimensions({
+    constraints: {
+      minHeightByWidthLevel: { 3: 5, 4: 4, 5: 3, 6: 3 },
+      minHeightLevel: 3,
+      minWidthLevel: 3,
+    },
+    containerWidth: 1_440,
+    heightLevel: 1,
+    widthLevel: 6,
+  });
+  assert.equal(compactSummary.heightLevel, 5);
+  assert.equal(fullSummary.heightLevel, 3);
+
+  const narrowTable = cardLayoutSizing.resolveCardLayoutDimensions({
+    constraints: { minHeightLevel: 4, narrowMinHeightLevel: 6 },
+    containerWidth: 360,
+    heightLevel: 4,
+    widthLevel: 6,
+  });
+  assert.equal(narrowTable.heightLevel, 6);
+});
+
+test("organizador separa ativos e ocultos e usa a mesma resolução da grade real", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/card-layout.tsx"),
+    "utf8",
+  );
+  const previewSource = readFileSync(
+    resolve(projectRoot, "components/app/widget-bento-preview.tsx"),
+    "utf8",
+  );
+  const globalSource = readFileSync(
+    resolve(projectRoot, "app/globals.css"),
+    "utf8",
+  );
+
+  assert.match(source, /const activeCards = cards\.filter\(/);
+  assert.match(source, /const hiddenCards = cards\.filter\(/);
+  assert.match(source, /<WidgetBentoPreview[\s\S]*?items=\{previewItems\}/);
+  assert.match(source, /data-hidden-widget-section/);
+  assert.match(source, /function mergeVisibleOrder\([\s\S]*?visibleIndex\+\+/);
+  assert.match(
+    source,
+    /nextVisibleCards[\s\S]*?persistFullOrder\(mergeVisibleOrder\(next\)\)/,
+    "subir, descer e arrastar devem reorganizar somente os widgets ativos",
+  );
+  assert.match(source, /\.\.\.preference,[\s\S]*?visible: preference\?\.visible/);
+  assert.match(source, /CARD_WIDTH_LEVEL_OPTIONS[\s\S]*?CARD_HEIGHT_LEVEL_OPTIONS/);
+  assert.match(
+    source,
+    /function resizeCard\([\s\S]*?resolveCardPreferenceDimensions\([\s\S]*?function resizeCardHeight\([\s\S]*?resolveCardPreferenceDimensions\(/,
+    "a adaptação de altura do celular não pode contaminar a preferência persistida",
+  );
+  assert.match(
+    source,
+    /function resolveCardPreferenceDimensions\([\s\S]*?tier: "desktop"/,
+  );
+  assert.match(source, /grid-flow-row auto-rows-\[74px\]/);
+  assert.match(previewSource, /grid-flow-row gap-1/);
+  assert.match(previewSource, /gridAutoRows: "1\.25rem"/);
+  assert.doesNotMatch(
+    `${source}\n${previewSource}`,
+    /grid-flow-row-dense/,
+    "a ordem visual do Bento precisa coincidir com a ordem persistida e de teclado",
+  );
+  assert.match(previewSource, /gridColumn: `span \$\{columnSpan\}/);
+  assert.match(previewSource, /gridRow: `span \$\{rowSpan\}/);
+  assert.match(globalSource, /repeat\(12, minmax\(0, 1fr\)\)/);
+  assert.match(globalSource, /--widget-column-span-desktop/);
+  assert.match(globalSource, /--widget-row-span-multi/);
 });
 
 test("ocupação ignora completamente eventos anteriores ao início configurado", () => {
@@ -7248,6 +7806,10 @@ test("todo widget fixo do Ao Vivo possui conversão para Análises", () => {
     resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
     "utf8",
   );
+  const preferenceSource = readFileSync(
+    resolve(projectRoot, "lib/view-preferences.ts"),
+    "utf8",
+  );
   const importSource = readFileSync(
     resolve(projectRoot, "lib/live-analysis-import.ts"),
     "utf8",
@@ -7270,6 +7832,17 @@ test("todo widget fixo do Ao Vivo possui conversão para Análises", () => {
 
   assert.deepEqual(unmapped, []);
   assert.ok(fixedLiveIds.size >= 24);
+  assert.match(
+    liveSource,
+    /LIVE_DAY_MINUTES_ID = "live_chart_minute_day"/,
+  );
+  assert.match(
+    liveSource,
+    /fetchMinuteDayAggregateBootstrap\([\s\S]*?refreshMinuteDayAggregateCache/,
+  );
+  assert.match(liveSource, /dataZoom: \[\][\s\S]*?sampling: "lttb"/);
+  assert.match(preferenceSource, /card\("live_chart_minute_day"/);
+  assert.match(importSource, /case "live_chart_minute_day"/);
 });
 
 test("ocupação histórica do modelo respeita o início configurado até 23h", () => {
@@ -7482,6 +8055,129 @@ test("visão embutida separa metadados do polling ao vivo e aborta escopos antig
     source,
     /companyScopeCertification\.timeZone[\s\S]*?widgetConfigs/,
     "a identidade embutida deve mudar quando o fuso certificado mudar",
+  );
+});
+
+test("workers estrangeiros não derrubam metadados válidos do Ao vivo", () => {
+  const selectedCompanyId = "company-selected";
+  const rows = metadataValidation.requireWorkerRows({
+    workers: [
+      {
+        active: true,
+        company_id: selectedCompanyId,
+        id: "worker-selected",
+        name: "Worker selecionado",
+      },
+      {
+        active: true,
+        company_id: "company-jwt",
+        id: "worker-jwt",
+        name: "Worker do JWT",
+      },
+    ],
+  });
+  const mixedPartition = workerScope.partitionWorkersByCompanyScope(
+    rows,
+    selectedCompanyId,
+  );
+  const foreignOnlyPartition = workerScope.partitionWorkersByCompanyScope(
+    [rows[1]],
+    selectedCompanyId,
+  );
+
+  assert.deepEqual(
+    mixedPartition.scopedRows.map((worker) => worker.id),
+    ["worker-selected"],
+  );
+  assert.deepEqual(
+    mixedPartition.foreignRows.map((worker) => worker.id),
+    ["worker-jwt"],
+  );
+  assert.equal(mixedPartition.foreignRows[0].company_id, "company-jwt");
+  assert.deepEqual(foreignOnlyPartition.scopedRows, []);
+  assert.deepEqual(
+    foreignOnlyPartition.foreignRows.map((worker) => worker.id),
+    ["worker-jwt"],
+  );
+
+  const realtimeSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const realtimeLoader = realtimeSource.slice(
+    realtimeSource.indexOf("  const loadScenarios = React.useCallback"),
+    realtimeSource.indexOf("  const loadCharts = React.useCallback"),
+  );
+  const realtimeWorkerHelper = realtimeSource.slice(
+    realtimeSource.indexOf("async function fetchRealtimeWorkers"),
+    realtimeSource.indexOf("function buildRealtimeScopeOptions"),
+  );
+
+  assert.match(realtimeLoader, /Promise\.allSettled\(/);
+  assert.match(
+    realtimeLoader,
+    /workerResult\.status === "fulfilled"[\s\S]*?unavailableWorkerMetadata/,
+  );
+  assert.match(realtimeLoader, /setScenarios\(visible\)/);
+  assert.match(realtimeLoader, /setCameras\(scopedCameras\)/);
+  assert.match(realtimeLoader, /setLocations\(scopedLocations\)/);
+  assert.match(realtimeLoader, /setWorkerMetadataWarning\(workerMetadata\.warning\)/);
+  assert.match(
+    realtimeSource,
+    /hasMasterAccess\(user\)[\s\S]*?getCurrentUserCompanyId\(user\) !== companyScopeId/,
+  );
+  assert.match(
+    realtimeLoader,
+    /fetchRealtimeWorkers\(\s*companyScopeId,\s*\{[\s\S]*?requireExplicitCompanyId: requireExplicitWorkerCompanyId/,
+  );
+  assert.match(
+    realtimeWorkerHelper,
+    /requireWorkerRows\([\s\S]*?value,[\s\S]*?requireExplicitCompanyId \? undefined : companyScopeId/,
+  );
+  assert.match(
+    realtimeWorkerHelper,
+    /const \{ foreignRows, scopedRows \} = partitionWorkersByCompanyScope\(/,
+  );
+
+  const embeddedSource = readFileSync(
+    resolve(projectRoot, "components/app/embedded-live-view.tsx"),
+    "utf8",
+  );
+  const embeddedLoader = embeddedSource.slice(
+    embeddedSource.indexOf("  const loadMetadata = React.useCallback"),
+    embeddedSource.indexOf(
+      "  React.useEffect(() => {",
+      embeddedSource.indexOf("  const loadMetadata = React.useCallback"),
+    ),
+  );
+  const embeddedWorkerHelper = embeddedSource.slice(
+    embeddedSource.indexOf("async function fetchEmbeddedWorkers"),
+    embeddedSource.indexOf("async function fetchSubLocations"),
+  );
+
+  assert.match(embeddedLoader, /Promise\.allSettled\(/);
+  assert.match(
+    embeddedLoader,
+    /workerResult\.status === "fulfilled"[\s\S]*?unavailableWorkerMetadata/,
+  );
+  assert.match(embeddedLoader, /workers: workerMetadata\.rows/);
+  assert.match(embeddedLoader, /setMetadataWarning\(workerMetadata\.warning\)/);
+  assert.match(embeddedLoader, /await loadData\(nextMetadata/);
+  assert.match(
+    embeddedSource,
+    /hasMasterAccess\(user\)[\s\S]*?getCurrentUserCompanyId\(user\) !== companyScopeId/,
+  );
+  assert.match(
+    embeddedLoader,
+    /fetchEmbeddedWorkers\(\s*companyScopeId,\s*\{[\s\S]*?requireExplicitCompanyId: requireExplicitWorkerCompanyId/,
+  );
+  assert.match(
+    embeddedWorkerHelper,
+    /requireWorkerRows\([\s\S]*?value,[\s\S]*?requireExplicitCompanyId \? undefined : companyId/,
+  );
+  assert.match(
+    embeddedWorkerHelper,
+    /const \{ foreignRows, scopedRows \} = partitionWorkersByCompanyScope\(/,
   );
 });
 
@@ -9507,6 +10203,85 @@ test("Análises longas consultam dia integral e limitam o detalhe horário", () 
   assert.match(source, /Detalhe horário · últimos \{hourlyDetailDayCount\} dias/);
 });
 
+test("cache minuto a minuto baixa o dia uma vez e recupera somente lacunas", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (input) => {
+    requests.push(String(input));
+    const catchUp = requests.length > 1;
+    return new Response(
+      JSON.stringify({
+        data: [
+          aggregateRow(
+            catchUp
+              ? "2026-08-24T14:10:00.000Z"
+              : "2026-08-24T13:40:00.000Z",
+            "line-entry",
+            catchUp ? 6 : 4,
+          ),
+        ],
+        granularity: "minute",
+      }),
+      { headers: { "content-type": "application/json" }, status: 200 },
+    );
+  };
+
+  try {
+    const cache = new Map();
+    const from = new Date("2026-08-24T03:00:00.000Z");
+    const first = await aggregateMinuteDayQuery.fetchMinuteDayAggregateBootstrap({
+      cache,
+      cacheScope: "company-a:America/Sao_Paulo",
+      from,
+      now: new Date("2026-08-24T13:42:30.000Z"),
+      to: new Date("2026-08-24T13:43:00.000Z"),
+    });
+    const second = await aggregateMinuteDayQuery.fetchMinuteDayAggregateBootstrap({
+      cache,
+      cacheScope: "company-a:America/Sao_Paulo",
+      from,
+      now: new Date("2026-08-24T13:43:30.000Z"),
+      to: new Date("2026-08-24T13:44:00.000Z"),
+    });
+    assert.equal(requests.length, 1);
+    assert.deepEqual(first, second);
+
+    const reconciled =
+      await aggregateMinuteDayQuery.refreshMinuteDayAggregateCache({
+        cache,
+        cacheScope: "company-a:America/Sao_Paulo",
+        from,
+        sourceFrom: new Date("2026-08-24T13:40:00.000Z"),
+        sourceRows: [
+          aggregateRow("2026-08-24T13:40:00.000Z", "line-entry", 9),
+        ],
+        sourceTo: new Date("2026-08-24T13:41:00.000Z"),
+      });
+    assert.deepEqual(reconciled.map((row) => row.total), [9]);
+    assert.equal(requests.length, 1);
+
+    const caughtUp =
+      await aggregateMinuteDayQuery.refreshMinuteDayAggregateCache({
+        cache,
+        cacheScope: "company-a:America/Sao_Paulo",
+        from,
+        now: new Date("2026-08-24T14:40:30.000Z"),
+        sourceFrom: new Date("2026-08-24T14:40:00.000Z"),
+        sourceRows: [
+          aggregateRow("2026-08-24T14:40:00.000Z", "line-entry", 2),
+        ],
+        sourceTo: new Date("2026-08-24T14:41:00.000Z"),
+      });
+    assert.equal(requests.length, 2);
+    assert.deepEqual(
+      caughtUp.map((row) => row.total).sort((left, right) => left - right),
+      [2, 6, 9],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("loader horário limitado recorta os meses de borda na própria API", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];
@@ -9727,6 +10502,78 @@ test("séries individuais em uma passagem equivalem ao cálculo por cenário", (
   });
 });
 
+test("KPIs do Ao Vivo permanecem baixos e distribuem o conteúdo sem vazio no rodapé", () => {
+  const cardLayoutSource = readFileSync(
+    resolve(projectRoot, "components/app/card-layout.tsx"),
+    "utf8",
+  );
+  const realtimeSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancySource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const realtimeMetrics = realtimeSource.slice(
+    realtimeSource.indexOf("const metricCards = ["),
+    realtimeSource.indexOf("const operationalComparisonDefinition"),
+  );
+  const realtimeMetricCard = realtimeSource.slice(
+    realtimeSource.indexOf("function MetricCard("),
+    realtimeSource.indexOf("function metricComparisonClassName"),
+  );
+  const occupancyMetrics = occupancySource.slice(
+    occupancySource.indexOf("const metricCards = ["),
+    occupancySource.indexOf("const chartCards ="),
+  );
+  const occupancyCustomMetric = occupancySource.slice(
+    occupancySource.indexOf('if (widget.kind === "metric")'),
+    occupancySource.indexOf(
+      "const sourceDefinition",
+      occupancySource.indexOf('if (widget.kind === "metric")'),
+    ),
+  );
+  const occupancyMetricCard = occupancySource.slice(
+    occupancySource.indexOf("function MetricCard("),
+    occupancySource.indexOf("function OccupancyChartCard"),
+  );
+
+  for (const metricDefinitions of [realtimeMetrics, occupancyMetrics]) {
+    assert.match(metricDefinitions, /defaultHeight: "short" as const/);
+    assert.match(metricDefinitions, /minHeight: "short" as const/);
+    assert.match(metricDefinitions, /maxHeight: "short" as const/);
+  }
+  assert.match(occupancyCustomMetric, /defaultHeight: "short" as const/);
+  assert.match(occupancyCustomMetric, /minHeight: "short" as const/);
+  assert.match(occupancyCustomMetric, /maxHeight: "short" as const/);
+
+  assert.match(
+    cardLayoutSource,
+    /maxHeightLevel\?: CardLayoutLevel;[\s\S]*?data-layout-card-max-height-level=\{resolveMaximumHeightLevel\(card\)\}/,
+  );
+  assert.match(
+    cardLayoutSource,
+    /resolveCardLayoutDimensions\(\{[\s\S]*?constraints: cardDimensionConstraints\(card\)/,
+    "largura e altura precisam ser limitadas por uma única fonte antes da grade",
+  );
+  assert.match(
+    cardLayoutSource,
+    /CARD_HEIGHT_LEVEL_OPTIONS\.map[\s\S]*?candidate\.heightLevel !== option\.level/,
+    "o organizador não pode oferecer nenhum dos seis níveis fora da faixa do widget",
+  );
+
+  assert.match(realtimeMetricCard, /flex h-full min-h-0 min-w-0 flex-col/);
+  assert.match(realtimeMetricCard, /mt-auto line-clamp-2/);
+  assert.doesNotMatch(realtimeMetricCard, /line-clamp-1/);
+  assert.match(occupancyMetricCard, /flex h-full min-h-0 min-w-0 flex-col/);
+  assert.match(occupancyMetricCard, /mt-auto line-clamp-2/);
+  assert.match(
+    occupancyMetricCard,
+    /action \? "justify-between" : "justify-center"/,
+  );
+});
+
 test("Resumo do período permanece legível com 37 cenários e valores extensos", () => {
   const period = periodAnalysisModel.resolvePeriodAnalysisRange(
     "2026-07-01",
@@ -9789,6 +10636,11 @@ test("Resumo do período permanece legível com 37 cenários e valores extensos"
     "o Resumo precisa de altura standard mesmo quando uma preferência antiga pediu short",
   );
   assert.match(
+    source,
+    /minHeightByWidthLevel:[\s\S]*?widget\.kind === "summary"[\s\S]*?\{ 3: 3, 4: 3, 5: 3, 6: 3 \}/,
+    "o Resumo não deve voltar a criar espaço vazio ao ser estreitado",
+  );
+  assert.match(
     cardSection,
     /grid-cols-\[repeat\(auto-fit,minmax\(min\(100%,8rem\),1fr\)\)\]/,
   );
@@ -9811,8 +10663,8 @@ test("Resumo do período permanece legível com 37 cenários e valores extensos"
   assert.match(cardSection, /\[overflow-wrap:anywhere\]/);
   assert.match(
     cardLayoutSource,
-    /const compactingWideWidget =[\s\S]*?card\.minHeight === "short"[\s\S]*?currentSize === "compact"[\s\S]*?card\.defaultSize !== "compact"[\s\S]*?return compactingWideWidget \? "standard"/,
-    "um Resumo redimensionado de full para compact precisa ganhar altura standard",
+    /minHeightByWidthLevel: card\.minHeightByWidthLevel/,
+    "a altura mínima acoplada à largura precisa chegar ao resolvedor central",
   );
   assert.doesNotMatch(
     cardSection,
@@ -10178,7 +11030,22 @@ test("réguas principais reorganizam controles sem rolagem horizontal", () => {
     resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
     "utf8",
   );
-
+  const occupancyReportsSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const reportsSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const datePickerSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-date-range-picker.tsx"),
+    "utf8",
+  );
+  const countingPeriodSource = readFileSync(
+    resolve(projectRoot, "components/app/counting-report-period-control.tsx"),
+    "utf8",
+  );
   const toolbarSection = (source, label, endMarker) => {
     const labelIndex = source.indexOf(`aria-label="${label}"`);
     assert.notEqual(labelIndex, -1, `régua ausente: ${label}`);
@@ -10207,19 +11074,157 @@ test("réguas principais reorganizam controles sem rolagem horizontal", () => {
 
   for (const toolbar of [analysisToolbar, realtimeToolbar, occupancyToolbar]) {
     assert.match(toolbar, /@container/);
-    assert.match(toolbar, /className="grid min-w-0 gap-2/);
-    assert.match(toolbar, /@4xl:grid-cols-/);
-    assert.match(toolbar, /flex min-w-0 flex-wrap items-center gap-2/);
+    assert.match(toolbar, /className="grid (?:w-full )?min-w-0 [^"]*gap-[12]/);
     assert.doesNotMatch(
       toolbar,
       /enterprise-horizontal-scroll|overflow-x-auto|tabIndex=\{0\}/,
     );
   }
+  assert.match(
+    realtimeToolbar,
+    /grid-cols-\[80px_minmax\(0,104px\)_minmax\(176px,1fr\)\][^"]*@sm:grid-cols-\[80px_104px_minmax\(176px,1fr\)\][^"]*@md:grid-cols-\[104px_144px_minmax\(176px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(176px,1fr\)\]/,
+    "os comboboxes devem ficar limitados à esquerda e o rail deve permanecer na mesma linha à direita",
+  );
+  assert.match(
+    analysisToolbar,
+    /grid-cols-\[32px_minmax\(32px,1fr\)_140px\][^"]*@sm:grid-cols-\[160px_minmax\(32px,1fr\)_140px\][^"]*@2xl:grid-cols-\[300px_minmax\(32px,1fr\)_140px\]/,
+    "calendário, metadados e ações da análise devem compartilhar três tracks em qualquer largura",
+  );
+  assert.match(analysisToolbar, /aria-label="Metadados da análise de Contagem"/);
+  assert.match(
+    occupancyToolbar,
+    /grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(212px,1fr\)\][^"]*@sm:grid-cols-\[minmax\(96px,112px\)_64px_minmax\(212px,1fr\)\][^"]*@md:grid-cols-\[minmax\(120px,160px\)_64px_minmax\(212px,1fr\)\]/,
+  );
+
+  assert.match(
+    realtimeToolbar,
+    /aria-label="Ações da visão ao vivo de Contagem"\s+className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1"/,
+    "as ações do Ao Vivo devem permanecer fixas à direita da terceira coluna",
+  );
+  assert.match(
+    analysisToolbar,
+    /aria-label="Ações da análise de Contagem"\s+className="col-start-3 row-start-1 flex w-\[140px\] min-w-0 flex-nowrap items-center justify-end gap-1 justify-self-end"/,
+    "as ações de Análises devem permanecer fixas à direita em uma única linha",
+  );
+  assert.match(
+    reportsSource,
+    /aria-label="Ações dos relatórios de Contagem"\s+className="col-start-4 row-start-1 flex w-\[212px\] min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1"[\s\S]*?<ReportExportActions[\s\S]*?compact[\s\S]*?<ReorderModeButton[\s\S]*?<MonitorModeButton[\s\S]*?compact/,
+    "Relatórios deve manter todas as ações individuais no rail direito",
+  );
+  assert.match(
+    occupancyToolbar,
+    /aria-label="Ações da visão de ocupação"\s+className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [^"]*"/,
+    "as ações de Ocupação devem permanecer individuais e fixas à direita",
+  );
+  const occupancyLiveActionsStart = occupancyToolbar.indexOf(
+    'aria-label="Ações da visão de ocupação"',
+  );
+  const occupancyLiveActionsEnd = occupancyToolbar.indexOf(
+    "</div>",
+    occupancyLiveActionsStart,
+  );
+  const occupancyLiveActions = occupancyToolbar.slice(
+    occupancyLiveActionsStart,
+    occupancyLiveActionsEnd,
+  );
+  assert.match(occupancyLiveActions, /<MonitorModeButton[\s\S]*?compact/);
+  assert.doesNotMatch(
+    occupancyLiveActions,
+    /lastUpdated|<Clock3/,
+    "o horário deve permanecer fora do rail de ícones do Ao Vivo",
+  );
+  const realtimeLiveActionsStart = realtimeToolbar.indexOf(
+    'aria-label="Ações da visão ao vivo de Contagem"',
+  );
+  const realtimeLiveActionsEnd = realtimeToolbar.indexOf(
+    "</div>",
+    realtimeLiveActionsStart,
+  );
+  const realtimeLiveActions = realtimeToolbar.slice(
+    realtimeLiveActionsStart,
+    realtimeLiveActionsEnd,
+  );
+  assert.doesNotMatch(realtimeToolbar, /<CompactActionMenu/);
+  assert.match(realtimeLiveActions, /<ReportExportActions[\s\S]*?compact/);
+  assert.match(realtimeLiveActions, /<ReorderModeButton/);
+  assert.match(realtimeLiveActions, /aria-label="Configurar widgets"/);
+  assert.match(
+    realtimeLiveActions,
+    /aria-controls="counting-live-comparison-settings"[\s\S]*?aria-expanded=\{operationalSettingsOpen\}/,
+  );
+  assert.match(realtimeLiveActions, /<MonitorModeButton[\s\S]*?compact/);
+  assert.doesNotMatch(
+    realtimeLiveActions,
+    /lastUpdated|<Clock3/,
+    "o horário deve permanecer fora do rail de ícones da Contagem",
+  );
+  assert.doesNotMatch(
+    `${realtimeToolbar}\n${occupancyToolbar}\n${reportsSource}`,
+    /<CompactActionMenu/,
+    "as barras principais devem preservar ações individuais, sem menu agrupador",
+  );
+  assert.match(
+    occupancyReportsSource,
+    /className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft"/,
+    "Análises e Relatórios de Ocupação devem responder à largura real do painel",
+  );
+  assert.match(
+    occupancyReportsSource,
+    /aria-label="Ações da análise de Ocupação"\s+className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [^"]*"/,
+    "Análises de Ocupação deve manter todos os ícones na mesma linha",
+  );
+  assert.match(
+    occupancyReportsSource,
+    /aria-label="Ações dos relatórios de Ocupação"\s+className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [^"]*"/,
+    "Relatórios de Ocupação deve separar filtros e manter um rail compacto",
+  );
+  const occupancySharedActions = occupancyReportsSource.slice(
+    occupancyReportsSource.indexOf("const compactViewActions = ("),
+    occupancyReportsSource.indexOf("return (", occupancyReportsSource.indexOf("const compactViewActions = (")),
+  );
+  assert.match(occupancySharedActions, /<ReportExportActions[\s\S]*?compact/);
+  assert.match(occupancySharedActions, /<MonitorModeButton[\s\S]*?compact/);
+  assert.doesNotMatch(
+    occupancySharedActions,
+    /visibleLastUpdated|<Clock3/,
+    "o horário deve ficar na faixa de metadados, sem consumir largura dos ícones",
+  );
 
   for (const toolbar of [realtimeToolbar, occupancyToolbar]) {
     assert.match(toolbar, /className="h-8 w-full min-w-0 bg-card"/);
   }
-  assert.match(analysisToolbar, /@2xl:grid-cols-/);
+  assert.match(analysisToolbar, /grid-cols-\[32px_minmax\(32px,1fr\)_140px\]/);
+  assert.match(
+    datePickerSource,
+    /className="h-8 w-8 min-w-0 max-w-full shrink-0 justify-center [^"]*@sm:w-\[300px\]/,
+    "o calendário deve ser um ícone no painel estreito e expandir sem sair da linha quando houver espaço",
+  );
+  assert.match(datePickerSource, /sr-only font-medium @sm:not-sr-only/);
+  assert.doesNotMatch(datePickerSource, /h-auto min-h-10/);
+  assert.match(
+    occupancyReportsSource,
+    /grid-cols-\[minmax\(0,64px\)_minmax\(0,96px\)_minmax\(212px,1fr\)\][^"]*@xl:grid-cols-\[120px_200px_minmax\(212px,1fr\)\]/,
+    "os comboboxes de Relatórios de Ocupação devem manter larguras profissionais",
+  );
+  assert.match(
+    reportsSource,
+    /@container rounded-md border border-border bg-card px-3 py-2 shadow-soft/,
+  );
+  assert.match(
+    reportsSource,
+    /aria-label="Controles dos relatórios de Contagem"[\s\S]*?grid-cols-\[minmax\(0,80px\)_minmax\(0,104px\)_minmax\(0,1fr\)_212px\]/,
+    "os comboboxes de Relatórios de Contagem não devem crescer até a largura total no desktop",
+  );
+  assert.match(countingPeriodSource, /@container min-w-0 rounded-md/);
+  assert.match(
+    countingPeriodSource,
+    /grid-cols-2[^"\n]*@lg:grid-cols-\[144px_120px_minmax\(0,120px\)\][^"\n]*@2xl:grid-cols-\[144px_120px_120px_150px_minmax\(72px,1fr\)\]/,
+    "os cinco filtros do período devem progredir de duas para cinco tracks compactos",
+  );
+  assert.doesNotMatch(
+    countingPeriodSource,
+    /sm:grid-cols-2 2xl:grid-cols-/,
+  );
   assert.match(
     analysisSource,
     /ANALYSIS_READABLE_BADGE_CLASS_NAME\s*=\s*[\s\S]*?whitespace-normal/,

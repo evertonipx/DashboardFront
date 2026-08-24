@@ -1127,12 +1127,48 @@ export function PeriodAnalysisDashboard({
           : ("wide" as const),
       id: widget.id,
       label: widget.title,
+      maxHeightLevel: compact ? (2 as const) : (6 as const),
+      maxWidthLevel: compact ? (3 as const) : (6 as const),
       minHeight:
         widget.kind === "summary"
           ? ("standard" as const)
           : short
             ? ("short" as const)
             : undefined,
+      minHeightByWidthLevel:
+        widget.kind === "summary"
+          ? ({ 3: 3, 4: 3, 5: 3, 6: 3 } as const)
+          : undefined,
+      minHeightLevel:
+        widget.kind === "summary"
+          ? (3 as const)
+          : compact
+            ? (1 as const)
+            : widget.kind === "heatmap"
+              ? (5 as const)
+              : widget.kind === "totals_table" ||
+                  widget.kind === "hourly_occupancy" ||
+                  tall
+                ? (4 as const)
+                : (3 as const),
+      minWidthLevel: compact
+        ? (1 as const)
+        : widget.kind === "summary"
+          ? (3 as const)
+          : fullWidth
+            ? (4 as const)
+            : (3 as const),
+      narrowMinHeightLevel:
+        widget.kind === "summary"
+          ? (3 as const)
+          : widget.kind === "heatmap" ||
+              widget.kind === "totals_table" ||
+              widget.kind === "hourly_occupancy" ||
+              tall
+            ? (5 as const)
+            : compact
+              ? (1 as const)
+              : (4 as const),
       titleEditable: true,
       node: (
         <PeriodAnalysisCard
@@ -1156,7 +1192,6 @@ export function PeriodAnalysisDashboard({
           widget={widget}
         />
       ),
-      shortHeightClassName: compact ? "row-span-1" : undefined,
       zoomEnabled:
         widget.kind !== "summary" &&
         widget.kind !== "totals_table" &&
@@ -1441,10 +1476,10 @@ export function PeriodAnalysisDashboard({
         <div className="@container rounded-md border bg-card px-3 py-2 shadow-soft">
           <div
             aria-label="Controles da análise de Contagem"
-            className="grid min-w-0 gap-2 @2xl:grid-cols-[minmax(260px,1fr)_auto] @2xl:items-start @4xl:grid-cols-[minmax(260px,auto)_minmax(0,1fr)_auto] @4xl:items-center"
+            className="grid min-w-0 grid-cols-[32px_minmax(32px,1fr)_140px] items-center gap-2 @sm:grid-cols-[160px_minmax(32px,1fr)_140px] @lg:grid-cols-[220px_minmax(32px,1fr)_140px] @2xl:grid-cols-[300px_minmax(32px,1fr)_140px]"
             role="group"
           >
-            <div className="min-w-0 @2xl:col-start-1 @2xl:row-start-1">
+            <div className="col-start-1 row-start-1 min-w-0">
               <AnalysisDateRangePicker
                 key={`${companyScopeId ?? ""}|${user?.id ?? ""}`}
                 contextLabel="análise de Contagem"
@@ -1458,39 +1493,57 @@ export function PeriodAnalysisDashboard({
               />
             </div>
 
-            {analysisRangePlan.mode === "consolidated" ? (
-              <div
-                className="flex min-w-0 flex-wrap items-center gap-2 @2xl:col-span-2 @2xl:row-start-2 @4xl:col-span-1 @4xl:col-start-2 @4xl:row-start-1"
-                aria-label="Estado da consolidação da análise"
-              >
+            <div
+              className="col-start-2 row-start-1 flex min-w-0 flex-nowrap items-center justify-end gap-1 overflow-hidden"
+              aria-label="Metadados da análise de Contagem"
+            >
+              {analysisRangePlan.mode === "consolidated" ? (
                 <Badge
                   variant="secondary"
-                  className={cn(ANALYSIS_READABLE_BADGE_CLASS_NAME, "w-fit")}
+                  className="hidden h-8 min-w-0 max-w-full overflow-hidden whitespace-nowrap @xl:inline-flex"
                   title="A resolução visual é ajustada automaticamente; os totais continuam usando todo o intervalo."
                 >
-                  Consolidação automática ativa
+                  <span className="truncate @4xl:hidden">Consolidada</span>
+                  <span className="hidden truncate @4xl:inline">
+                    Consolidação automática ativa
+                  </span>
                 </Badge>
-                {hourlyDetailRequested ? (
-                  <Badge
-                    variant="outline"
-                    className={cn(ANALYSIS_READABLE_BADGE_CLASS_NAME, "w-fit")}
-                    title="Somente widgets estritamente horários usam esta janela; consolidados usam todo o intervalo."
-                  >
-                    Detalhe horário · últimos {hourlyDetailDayCount} dias
-                  </Badge>
-                ) : null}
-              </div>
-            ) : null}
+              ) : null}
+              {analysisRangePlan.mode === "consolidated" &&
+              hourlyDetailRequested ? (
+                <Badge
+                  variant="outline"
+                  className="hidden h-8 min-w-0 max-w-full overflow-hidden whitespace-nowrap @4xl:inline-flex"
+                  title="Somente widgets estritamente horários usam esta janela; consolidados usam todo o intervalo."
+                >
+                  <span className="truncate">
+                    Detalhe horário · {hourlyDetailDayCount} dias
+                  </span>
+                </Badge>
+              ) : null}
+              {lastUpdated ? (
+                <span
+                  aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center gap-1 whitespace-nowrap px-0 text-xs tabular-nums text-muted-foreground @md:w-auto @md:justify-start @md:px-1.5"
+                  title={`Última atualização às ${formatTime(lastUpdated)}`}
+                >
+                  <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                  <span className="sr-only @md:not-sr-only">
+                    {formatTime(lastUpdated)}
+                  </span>
+                </span>
+              ) : null}
+            </div>
 
             <div
               aria-label="Ações da análise de Contagem"
-              className="flex min-w-0 flex-wrap items-center gap-2 @2xl:col-start-2 @2xl:row-start-1 @2xl:justify-end @4xl:col-start-3 @4xl:flex-nowrap"
+              className="col-start-3 row-start-1 flex w-[140px] min-w-0 flex-nowrap items-center justify-end gap-1 justify-self-end"
               role="group"
             >
               {canEditVisual ? (
                 <>
                   <ReorderModeButton
-                    className="h-8 w-8"
+                    className="h-8 w-8 shrink-0"
                     enabled={layoutReorderMode}
                     onChange={setLayoutReorderMode}
                   />
@@ -1498,7 +1551,7 @@ export function PeriodAnalysisDashboard({
                     type="button"
                     variant="outline"
                     size="icon"
-                    className="h-8 w-8"
+                    className="h-8 w-8 shrink-0"
                     onClick={() => setLayoutOrganizerOpen(true)}
                     aria-label="Configurar widgets"
                     title="Configurar widgets"
@@ -1517,16 +1570,6 @@ export function PeriodAnalysisDashboard({
                 }
                 payload={reportPayload}
               />
-              {lastUpdated ? (
-                <span
-                  aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                  className="inline-flex h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
-                  title={`Última atualização às ${formatTime(lastUpdated)}`}
-                >
-                  <Clock3 className="h-3.5 w-3.5" />
-                  {formatTime(lastUpdated)}
-                </span>
-              ) : null}
               <MonitorModeButton
                 compact
                 disabled={!widgets.length}

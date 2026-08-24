@@ -63,9 +63,14 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApiError, apiFetch } from "@/lib/api";
 import { buildCompanyUserProfileUpdate } from "@/lib/company-user-profile-update";
-import { writeCompanyCache } from "@/lib/company-cache";
+import {
+  normalizeCompanyRecord,
+  writeCompanyCache,
+} from "@/lib/company-cache";
+import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
 import {
   clearStoredMasterCompanyScope,
+  getCompanyTimeZoneResolutionForScope,
   getCurrentUserCompanyId,
   getScopedRowCompanyId,
   getStoredMasterCompanyScope,
@@ -85,8 +90,10 @@ import {
 } from "@/lib/permissions";
 import { requireScenarioRows } from "@/lib/scenario-validation";
 import type {
+  Camera,
   Location,
   Permission,
+  SubLocation,
   UserPermission,
   Worker,
 } from "@/lib/types";
@@ -189,13 +196,37 @@ type WorkerRow = WorkerScopeRow;
 
 type CompanyTab = "users" | "workers" | "modules" | "masters";
 
+type CompanyAdministrativeResource = "users" | "modules";
+
+type CompanyAdministrativeIssue = {
+  resource: CompanyAdministrativeResource;
+  label: string;
+  message: string;
+};
+
+type CompanyOperationalResource =
+  | "workers"
+  | "locations"
+  | "subLocations"
+  | "cameras"
+  | "countingScenarios"
+  | "occupancyScenarios"
+  | "infrastructure";
+
+type CompanyOperationalIssue = {
+  resource: CompanyOperationalResource;
+  label: string;
+  message: string;
+};
+
 type CompanyOperationalStats = {
-  algorithms: number;
-  cameras: number;
-  locations: number;
-  subLocations: number;
-  countingScenarios: number;
-  occupancyScenarios: number;
+  algorithms: number | null;
+  workers: number | null;
+  cameras: number | null;
+  locations: number | null;
+  subLocations: number | null;
+  countingScenarios: number | null;
+  occupancyScenarios: number | null;
 };
 
 const emptyCompanyForm: CompanyFormState = {
@@ -277,9 +308,18 @@ export function SuperAdminDashboard() {
   const [masterUserQuery, setMasterUserQuery] = React.useState("");
   const [companyStats, setCompanyStats] =
     React.useState<CompanyOperationalStats | null>(null);
-  const [companyDetailsError, setCompanyDetailsError] = React.useState("");
+  const [companyUsersCount, setCompanyUsersCount] = React.useState<number | null>(
+    null,
+  );
+  const [companyAdministrativeIssues, setCompanyAdministrativeIssues] =
+    React.useState<CompanyAdministrativeIssue[]>([]);
+  const [companyOperationalIssues, setCompanyOperationalIssues] = React.useState<
+    CompanyOperationalIssue[]
+  >([]);
   const [loading, setLoading] = React.useState(true);
   const [loadingDetails, setLoadingDetails] = React.useState(false);
+  const [loadingOperationalDetails, setLoadingOperationalDetails] =
+    React.useState(false);
   const [companyDialog, setCompanyDialog] = React.useState(false);
   const [userDialog, setUserDialog] = React.useState(false);
   const [masterUserDialog, setMasterUserDialog] = React.useState(false);
@@ -303,6 +343,7 @@ export function SuperAdminDashboard() {
   const [deletingUserId, setDeletingUserId] = React.useState("");
   const [updatingModuleId, setUpdatingModuleId] = React.useState("");
   const [workerScopeWarning, setWorkerScopeWarning] = React.useState("");
+  const [loadedCompanyId, setLoadedCompanyId] = React.useState("");
   const companyDetailsRequestSequenceRef = React.useRef(0);
   const selectedCompanyIdRef = React.useRef(selectedCompanyId);
   const userPermissionRequestSequenceRef = React.useRef(0);
@@ -330,6 +371,23 @@ export function SuperAdminDashboard() {
     invalidateUserPermissionRequest({ closeDialog: true });
   }, [invalidateUserPermissionRequest]);
 
+  const clearCompanyDetailsState = React.useCallback(
+    (loadingCompanyDetails = false) => {
+      setLoadedCompanyId("");
+      setUsers([]);
+      setCompanyUsersCount(null);
+      setCompanyModules([]);
+      setWorkers([]);
+      setCompanyStats(null);
+      setCompanyAdministrativeIssues([]);
+      setCompanyOperationalIssues([]);
+      setWorkerScopeWarning("");
+      setLoadingDetails(loadingCompanyDetails);
+      setLoadingOperationalDetails(loadingCompanyDetails);
+    },
+    [],
+  );
+
   const handleUserDialogOpenChange = React.useCallback(
     (open: boolean) => {
       if (open) {
@@ -350,9 +408,10 @@ export function SuperAdminDashboard() {
       selectedCompanyIdRef.current = nextCompanyId;
       companyDetailsRequestSequenceRef.current += 1;
       invalidateUserPermissionRequest({ closeDialog: true });
+      clearCompanyDetailsState(Boolean(nextCompanyId));
       setSelectedCompanyId(nextCompanyId);
     },
-    [invalidateUserPermissionRequest],
+    [clearCompanyDetailsState, invalidateUserPermissionRequest],
   );
 
   const canPublishCompanyDetails = React.useCallback(
@@ -445,11 +504,12 @@ export function SuperAdminDashboard() {
   const loadCompanies = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [companyRows, moduleRows, permissionRows] = await Promise.all([
+      const [companyPayload, moduleRows, permissionRows] = await Promise.all([
         apiFetch<Company[]>("/companies"),
         apiFetch<IpxModule[]>("/modules").catch(() => []),
         apiFetch<Permission[]>("/permissions").catch(() => []),
       ]);
+      const companyRows = companyPayload.map(normalizeCompanyRecord);
       const companyUserRows = await Promise.all(
         companyRows.map((company) =>
           apiFetch<ManagedUser[]>(`/companies/${company.id}/users`, {
@@ -483,6 +543,7 @@ export function SuperAdminDashboard() {
     } catch (error) {
       setWorkers([]);
       setWorkerScopeWarning("");
+      setCompanyOperationalIssues([]);
       toast.error(
         error instanceof Error
           ? error.message
@@ -499,101 +560,169 @@ export function SuperAdminDashboard() {
 
     const requestSequence = ++companyDetailsRequestSequenceRef.current;
     if (!companyId) {
-      setUsers([]);
-      setCompanyModules([]);
-      setWorkers([]);
-      setWorkerScopeWarning("");
-      setCompanyStats(null);
-      setCompanyDetailsError("");
-      setLoadingDetails(false);
+      clearCompanyDetailsState();
       return;
     }
 
-    setLoadingDetails(true);
-    setCompanyStats(null);
-    setCompanyDetailsError("");
-    setWorkerScopeWarning("");
+    clearCompanyDetailsState(true);
+
+    const [userResult, moduleResult] = await Promise.allSettled([
+      apiFetch<ManagedUser[]>(`/companies/${companyId}/users`, {
+        companyScopeId: companyId,
+      }),
+      apiFetch<CompanyModule[]>(
+        `/companies/${companyId}/modules`,
+        { companyScopeId: companyId },
+      ),
+    ]);
+
+    if (!canPublishCompanyDetails(requestSequence, companyId)) return;
+
+    const companyScopeIds = uniqueScopeIds(companyId);
+    const administrativeIssues: CompanyAdministrativeIssue[] = [];
+    let moduleRows: CompanyModule[] = [];
+    let nextUsers: ManagedUser[] = [];
+    let nextUsersCount: number | null = null;
+    let nextAlgorithmsCount: number | null = null;
+
+    if (userResult.status === "fulfilled") {
+      try {
+        if (!Array.isArray(userResult.value)) {
+          throw new Error("A API não retornou uma lista de usuários.");
+        }
+        const companyUserRows = userResult.value.filter((user) => !user.is_master);
+        const foreignUserRows = companyUserRows.filter((user) => {
+          const userCompanyId = getScopedRowCompanyId(user);
+          return Boolean(userCompanyId && !companyScopeIds.includes(userCompanyId));
+        });
+        nextUsers = companyUserRows.filter((user) => {
+          const userCompanyId = getScopedRowCompanyId(user);
+          return !userCompanyId || companyScopeIds.includes(userCompanyId);
+        });
+
+        if (foreignUserRows.length) {
+          administrativeIssues.push({
+            resource: "users",
+            label: "Usuários",
+            message: "resposta fora do escopo da empresa selecionada",
+          });
+        } else {
+          nextUsersCount = nextUsers.length;
+        }
+      } catch (error) {
+        administrativeIssues.push(
+          buildCompanyAdministrativeIssue("users", error),
+        );
+      }
+    } else {
+      administrativeIssues.push(
+        buildCompanyAdministrativeIssue("users", userResult.reason),
+      );
+    }
+
+    if (moduleResult.status === "fulfilled") {
+      try {
+        if (!Array.isArray(moduleResult.value)) {
+          throw new Error("A API não retornou uma lista de algoritmos.");
+        }
+        const foreignModuleRows = moduleResult.value.filter(
+          (row) => row.company_id !== companyId,
+        );
+        moduleRows = moduleResult.value.filter(
+          (row) => row.company_id === companyId,
+        );
+
+        if (foreignModuleRows.length) {
+          administrativeIssues.push({
+            resource: "modules",
+            label: "Algoritmos",
+            message: "resposta fora do escopo da empresa selecionada",
+          });
+        } else {
+          nextAlgorithmsCount = enabledOperationalModuleCount(
+            moduleRows,
+            modules,
+          );
+        }
+      } catch (error) {
+        moduleRows = [];
+        administrativeIssues.push(
+          buildCompanyAdministrativeIssue("modules", error),
+        );
+      }
+    } else {
+      administrativeIssues.push(
+        buildCompanyAdministrativeIssue("modules", moduleResult.reason),
+      );
+    }
+
+    if (!canPublishCompanyDetails(requestSequence, companyId)) return;
+
+    setUsers(nextUsers);
+    setCompanyUsersCount(nextUsersCount);
+    setCompanyModules(moduleRows);
+    setCompanyStats({
+      algorithms: nextAlgorithmsCount,
+      workers: null,
+      cameras: null,
+      locations: null,
+      subLocations: null,
+      countingScenarios: null,
+      occupancyScenarios: null,
+    });
+    setCompanyAdministrativeIssues(administrativeIssues);
+    setLoadedCompanyId(companyId);
+    setLoadingDetails(false);
+
     try {
-      const [userRows, moduleRows] = await Promise.all([
-        apiFetch<ManagedUser[]>(`/companies/${companyId}/users`, {
-          companyScopeId: companyId,
-        }),
-        apiFetch<CompanyModule[]>(
-          `/companies/${companyId}/modules`,
-          { companyScopeId: companyId },
-        ),
-      ]);
-      const companyScopeIds = uniqueScopeIds(companyId);
-      const scopedUserRows = userRows.filter((user) => {
-        const userCompanyId = getScopedRowCompanyId(user);
-        return !userCompanyId || companyScopeIds.includes(userCompanyId);
-      });
       const [
-        workerRows,
-        locationRows,
-        cameraRows,
-        scenarioRows,
-        occupancyScenarioRows,
-      ] = await Promise.all([
+        workerResult,
+        locationResult,
+        cameraResult,
+        scenarioResult,
+        occupancyScenarioResult,
+      ] = await Promise.allSettled([
         fetchScopedWorkers(companyId),
         fetchValidatedRows("/locations", requireLocationRows, companyId),
         fetchValidatedRows("/cameras", requireCameraRows, companyId),
         fetchValidatedRows("/scenarios", requireScenarioRows, companyId),
         fetchScopedOccupancyScenarios(companyId),
       ]);
-      const workerScopePartition = partitionWorkersByCompanyScope(
-        workerRows,
-        companyScopeIds,
-      );
-      const scopedLocations = filterRowsByCompanyScopes(
-        locationRows,
-        companyScopeIds,
-      );
-      const scopedScenarios = filterRowsByCompanyScopes(
-        scenarioRows,
-        companyScopeIds,
-      );
-      const scopedOccupancyScenarios = filterRowsByCompanyScopes(
-        occupancyScenarioRows,
-        companyScopeIds,
-      );
-      const subLocationRows = await fetchCompanySubLocations(
-        scopedLocations,
-        companyScopeIds,
-        companyId,
-      );
-      const scopedCameras = filterRowsByCompanyScopes(cameraRows, companyScopeIds);
-      requireInfrastructureRelations({
-        cameras: scopedCameras,
-        locations: scopedLocations,
-        subLocations: subLocationRows,
-      });
-      const collapsedWorkerRows = collapseWorkerIdentityChains(
-        workersFromExplicitCompanyScope(workerScopePartition),
-      );
-      const collapsedWorkerDuplicateCount = collapsedWorkerRows.reduce(
-        (count, worker) =>
-          count + Math.max(0, (worker.__duplicate_record_count ?? 1) - 1),
-        0,
-      );
 
       if (!canPublishCompanyDetails(requestSequence, companyId)) return;
 
-      setUsers(scopedUserRows.filter((user) => !user.is_master));
-      setCompanyModules(moduleRows);
-      setWorkers(
-        sortWorkersByActivity(collapsedWorkerRows),
-      );
-      setCompanyStats({
-        algorithms: enabledOperationalModuleCount(moduleRows, modules),
-        cameras: scopedCameras.length,
-        locations: scopedLocations.length,
-        subLocations: subLocationRows.length,
-        countingScenarios: scopedScenarios.length,
-        occupancyScenarios: scopedOccupancyScenarios.length,
-      });
-      setWorkerScopeWarning(
-        buildWorkerScopeWarning(
+      const operationalIssues: CompanyOperationalIssue[] = [];
+      const nextStats: CompanyOperationalStats = {
+        algorithms: nextAlgorithmsCount,
+        workers: null,
+        cameras: null,
+        locations: null,
+        subLocations: null,
+        countingScenarios: null,
+        occupancyScenarios: null,
+      };
+      let nextWorkers: Worker[] = [];
+      let nextWorkerScopeWarning = "";
+
+      if (workerResult.status === "fulfilled") {
+        const workerScopePartition = partitionWorkersByCompanyScope(
+          workerResult.value,
+          companyScopeIds,
+        );
+        const collapsedWorkerRows = collapseWorkerIdentityChains(
+          workersFromExplicitCompanyScope(workerScopePartition),
+        );
+        const collapsedWorkerDuplicateCount = collapsedWorkerRows.reduce(
+          (count, worker) =>
+            count + Math.max(0, (worker.__duplicate_record_count ?? 1) - 1),
+          0,
+        );
+
+        nextWorkers = sortWorkersByActivity(collapsedWorkerRows);
+        nextStats.workers = workerScopePartition.foreignRows.length
+          ? null
+          : nextWorkers.length;
+        nextWorkerScopeWarning = buildWorkerScopeWarning(
           workerScopePartition.foreignRows.length,
           workerScopePartition.unscopedRows.length,
           collapsedWorkerDuplicateCount,
@@ -601,37 +730,233 @@ export function SuperAdminDashboard() {
           uniqueScopeIds(
             workerScopePartition.foreignRows.map(resolveWorkerCompanyId),
           ),
-        ),
-      );
+        );
+        if (workerScopePartition.foreignRows.length) {
+          operationalIssues.push({
+            resource: "workers",
+            label: "Workers",
+            message: "resposta fora do escopo da empresa selecionada",
+          });
+        }
+      } else {
+        operationalIssues.push(
+          buildCompanyOperationalIssue("workers", workerResult.reason),
+        );
+      }
+
+      let scopedLocations: Location[] | null = null;
+      if (locationResult.status === "fulfilled") {
+        scopedLocations = filterRowsByCompanyScopes(
+          locationResult.value,
+          companyScopeIds,
+        );
+        nextStats.locations = scopedLocations.length;
+      } else {
+        operationalIssues.push(
+          buildCompanyOperationalIssue("locations", locationResult.reason),
+        );
+      }
+
+      let scopedCameras: Camera[] | null = null;
+      if (cameraResult.status === "fulfilled") {
+        scopedCameras = filterRowsByCompanyScopes(
+          cameraResult.value,
+          companyScopeIds,
+        );
+        nextStats.cameras = scopedCameras.length;
+      } else {
+        operationalIssues.push(
+          buildCompanyOperationalIssue("cameras", cameraResult.reason),
+        );
+      }
+
+      if (scenarioResult.status === "fulfilled") {
+        nextStats.countingScenarios = filterRowsByCompanyScopes(
+          scenarioResult.value,
+          companyScopeIds,
+        ).length;
+      } else {
+        operationalIssues.push(
+          buildCompanyOperationalIssue(
+            "countingScenarios",
+            scenarioResult.reason,
+          ),
+        );
+      }
+
+      if (occupancyScenarioResult.status === "fulfilled") {
+        nextStats.occupancyScenarios = filterRowsByCompanyScopes(
+          occupancyScenarioResult.value,
+          companyScopeIds,
+        ).length;
+      } else {
+        operationalIssues.push(
+          buildCompanyOperationalIssue(
+            "occupancyScenarios",
+            occupancyScenarioResult.reason,
+          ),
+        );
+      }
+
+      const [subLocationResult] = await Promise.allSettled([
+        scopedLocations
+          ? fetchCompanySubLocations(
+              scopedLocations,
+              companyScopeIds,
+              companyId,
+            )
+          : Promise.reject(
+              new Error("Locations não certificados para esta consulta."),
+            ),
+      ]);
+
+      if (!canPublishCompanyDetails(requestSequence, companyId)) return;
+
+      let scopedSubLocations: SubLocation[] | null = null;
+      if (subLocationResult.status === "fulfilled") {
+        scopedSubLocations = subLocationResult.value;
+        nextStats.subLocations = scopedSubLocations.length;
+      } else {
+        operationalIssues.push(
+          buildCompanyOperationalIssue(
+            "subLocations",
+            subLocationResult.reason,
+          ),
+        );
+      }
+
+      if (scopedCameras && scopedLocations && scopedSubLocations) {
+        try {
+          requireInfrastructureRelations({
+            cameras: scopedCameras,
+            locations: scopedLocations,
+            subLocations: scopedSubLocations,
+          });
+        } catch (error) {
+          nextStats.cameras = null;
+          nextStats.locations = null;
+          nextStats.subLocations = null;
+          operationalIssues.push(
+            buildCompanyOperationalIssue("infrastructure", error),
+          );
+        }
+      }
+
+      if (!canPublishCompanyDetails(requestSequence, companyId)) return;
+
+      setWorkers(nextWorkers);
+      setCompanyStats(nextStats);
+      setCompanyOperationalIssues(operationalIssues);
+      setWorkerScopeWarning(nextWorkerScopeWarning);
     } catch (error) {
       if (!canPublishCompanyDetails(requestSequence, companyId)) return;
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar dados da empresa.";
-      setUsers([]);
-      setCompanyModules([]);
       setWorkers([]);
-      setCompanyStats(null);
-      setCompanyDetailsError(message);
-      toast.error(message);
+      setCompanyStats((current) =>
+        current
+          ? {
+              ...current,
+              workers: null,
+              cameras: null,
+              locations: null,
+              subLocations: null,
+              countingScenarios: null,
+              occupancyScenarios: null,
+            }
+          : current,
+      );
+      setCompanyOperationalIssues([
+        buildCompanyOperationalIssue("infrastructure", error),
+      ]);
+      setWorkerScopeWarning("");
     } finally {
       if (canPublishCompanyDetails(requestSequence, companyId)) {
-        setLoadingDetails(false);
+        setLoadingOperationalDetails(false);
       }
     }
-  }, [canPublishCompanyDetails, modules]);
+  }, [canPublishCompanyDetails, clearCompanyDetailsState, modules]);
 
   React.useEffect(() => {
     loadCompanies();
   }, [loadCompanies]);
 
+  const ensureCompanyTimeZone = React.useCallback(async (
+    company: Company,
+    notifyFailure = false,
+  ) => {
+    const normalizedCompany = normalizeCompanyRecord(company);
+    const currentResolution = getCompanyTimeZoneResolutionForScope(
+      currentUser,
+      company.id,
+    );
+    const declaredTimeZone = canonicalCompanyTimeZone(
+      normalizedCompany.timezone,
+    );
+    const currentTimeZone =
+      declaredTimeZone ??
+      (!currentResolution.fallback &&
+      currentResolution.source === "current-user-company"
+        ? currentResolution.timeZone
+        : null);
+    if (currentTimeZone) {
+      return { ...normalizedCompany, timezone: currentTimeZone };
+    }
+
+    try {
+      const response = await apiFetch<Company>(`/companies/${company.id}`, {
+        companyScopeId: company.id,
+      });
+      if (response.id?.trim() !== company.id) {
+        throw new Error("A API retornou o cadastro de outra empresa.");
+      }
+      const detailedCompany = normalizeCompanyRecord(response);
+      const timeZone = canonicalCompanyTimeZone(detailedCompany.timezone);
+      if (!timeZone) {
+        throw new Error(
+          "O detalhe da empresa não informou um timezone IANA válido.",
+        );
+      }
+      const certifiedCompany = {
+        ...normalizedCompany,
+        ...detailedCompany,
+        id: company.id,
+        timezone: timeZone,
+      };
+      setCompanies((current) =>
+        current.map((row) =>
+          row.id === certifiedCompany.id ? certifiedCompany : row,
+        ),
+      );
+      writeCompanyCache([certifiedCompany]);
+      return certifiedCompany;
+    } catch (error) {
+      if (notifyFailure) {
+        toast.error(
+          error instanceof Error
+            ? `Não foi possível certificar o fuso da empresa: ${error.message}`
+            : "Não foi possível certificar o fuso da empresa.",
+        );
+      }
+      return null;
+    }
+  }, [currentUser]);
+
   React.useEffect(() => {
     if (!selectedCompany) return;
 
     const storedScope = getStoredMasterCompanyScope();
-    const selectedTimezone = selectedCompany.timezone?.trim() || null;
+    const resolution = getCompanyTimeZoneResolutionForScope(
+      currentUser,
+      selectedCompany.id,
+    );
+    const selectedTimezone =
+      canonicalCompanyTimeZone(selectedCompany.timezone) ??
+      (!resolution.fallback ? resolution.timeZone : null);
+    const requiresDetailHydration =
+      !canonicalCompanyTimeZone(selectedCompany.timezone) &&
+      resolution.source !== "current-user-company";
     if (
+      selectedTimezone &&
+      !requiresDetailHydration &&
       storedScope?.id === selectedCompany.id &&
       storedScope.name === selectedCompany.name &&
       (storedScope.trade_name ?? null) ===
@@ -647,7 +972,28 @@ export function SuperAdminDashboard() {
       timezone: selectedTimezone,
       trade_name: selectedCompany.trade_name ?? null,
     });
-  }, [selectedCompany]);
+
+    if (!requiresDetailHydration && selectedTimezone) return;
+    let active = true;
+    void ensureCompanyTimeZone(selectedCompany).then((certifiedCompany) => {
+      if (
+        !active ||
+        !certifiedCompany ||
+        selectedCompanyIdRef.current !== certifiedCompany.id
+      ) {
+        return;
+      }
+      setStoredMasterCompanyScope({
+        id: certifiedCompany.id,
+        name: certifiedCompany.name,
+        timezone: certifiedCompany.timezone,
+        trade_name: certifiedCompany.trade_name ?? null,
+      });
+    });
+    return () => {
+      active = false;
+    };
+  }, [currentUser, ensureCompanyTimeZone, selectedCompany]);
 
   React.useEffect(() => {
     void loadCompanyDetails(selectedCompanyId);
@@ -662,7 +1008,7 @@ export function SuperAdminDashboard() {
             trade_name: company.trade_name ?? "",
             cnpj: company.cnpj ?? "",
             plan: company.plan ?? "pro",
-            timezone: company.timezone ?? "America/Sao_Paulo",
+            timezone: canonicalCompanyTimeZone(company.timezone) ?? "",
             user_limit: String(company.user_limit ?? 10),
             active: String(company.active),
           }
@@ -675,6 +1021,10 @@ export function SuperAdminDashboard() {
     const companyId = selectedCompanyIdRef.current;
     if (!companyId) {
       toast.error("Selecione uma empresa antes de criar usuário.");
+      return;
+    }
+    if (loadedCompanyId !== companyId) {
+      toast.error("Aguarde o carregamento da empresa selecionada.");
       return;
     }
 
@@ -740,36 +1090,48 @@ export function SuperAdminDashboard() {
 
   function selectCompanyScope(company: Company) {
     selectCompanyId(company.id);
+    const resolution = getCompanyTimeZoneResolutionForScope(
+      currentUser,
+      company.id,
+    );
     setStoredMasterCompanyScope({
       id: company.id,
       name: company.name,
-      timezone: company.timezone?.trim() || null,
+      timezone:
+        canonicalCompanyTimeZone(company.timezone) ??
+        (!resolution.fallback ? resolution.timeZone : null),
       trade_name: company.trade_name ?? null,
     });
   }
 
-  function openCompanyDashboard(company: Company) {
-    selectCompanyScope(company);
+  async function openCompanyDashboard(company: Company) {
+    const certifiedCompany = await ensureCompanyTimeZone(company, true);
+    if (!certifiedCompany) return;
+    selectCompanyScope(certifiedCompany);
     router.push("/dashboard/live");
   }
 
-  function openCompanySection(tab: CompanyTab) {
+  async function openCompanySection(tab: CompanyTab) {
     if (!selectedCompany) {
       toast.error("Selecione uma empresa para gerenciar.");
       return;
     }
 
-    selectCompanyScope(selectedCompany);
+    const certifiedCompany = await ensureCompanyTimeZone(selectedCompany, true);
+    if (!certifiedCompany) return;
+    selectCompanyScope(certifiedCompany);
     setActiveCompanyTab(tab);
   }
 
-  function openCompanyRoute(path: string) {
+  async function openCompanyRoute(path: string) {
     if (!selectedCompany) {
       toast.error("Selecione uma empresa para gerenciar.");
       return;
     }
 
-    selectCompanyScope(selectedCompany);
+    const certifiedCompany = await ensureCompanyTimeZone(selectedCompany, true);
+    if (!certifiedCompany) return;
+    selectCompanyScope(certifiedCompany);
     router.push(path);
   }
 
@@ -872,6 +1234,12 @@ export function SuperAdminDashboard() {
       return;
     }
 
+    const timeZone = canonicalCompanyTimeZone(companyForm.timezone);
+    if (!timeZone) {
+      toast.error("Informe um timezone IANA válido para a empresa.");
+      return;
+    }
+
     setSaving(true);
     try {
       const body = {
@@ -879,7 +1247,7 @@ export function SuperAdminDashboard() {
         trade_name: companyForm.trade_name.trim() || undefined,
         cnpj: companyForm.cnpj.trim() || undefined,
         plan: companyForm.plan,
-        timezone: companyForm.timezone.trim() || "America/Sao_Paulo",
+        timezone: timeZone,
         user_limit: Math.trunc(userLimit),
         ...(editingCompany
           ? { active: companyForm.active === "true" }
@@ -912,14 +1280,17 @@ export function SuperAdminDashboard() {
   }
 
   async function deleteCompany(company: Company) {
-    const usersCount = selectedCompanyId === company.id ? users.length : 0;
-    const workersCount = selectedCompanyId === company.id ? workers.length : 0;
+    const hasLoadedCompany =
+      selectedCompanyId === company.id && loadedCompanyId === company.id;
+    const usersCount = hasLoadedCompany ? companyUsersCount : null;
+    const workersCount = hasLoadedCompany ? companyStats?.workers ?? null : null;
+    const loadedSummary = hasLoadedCompany
+      ? `Resumo carregado: ${formatCertifiedCount(usersCount)} usuário(s) e ${formatCertifiedCount(workersCount)} worker(s).`
+      : "";
     const message = [
       `Excluir a empresa "${company.name}"?`,
       "Esta ação é permanente e pode remover dados do tenant no backend.",
-      usersCount || workersCount
-        ? `Resumo carregado: ${formatNumber(usersCount)} usuário(s) e ${formatNumber(workersCount)} worker(s).`
-        : "",
+      loadedSummary,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -940,12 +1311,6 @@ export function SuperAdminDashboard() {
       }
       if (selectedCompanyIdRef.current === company.id) {
         selectCompanyId("");
-        setUsers([]);
-        setCompanyModules([]);
-        setWorkers([]);
-        setWorkerScopeWarning("");
-        setCompanyStats(null);
-        setCompanyDetailsError("");
       }
 
       await loadCompanies();
@@ -1368,7 +1733,7 @@ export function SuperAdminDashboard() {
 
   async function toggleCompanyModule(module: IpxModule) {
     const companyId = selectedCompanyIdRef.current;
-    if (!companyId) return;
+    if (!companyId || loadedCompanyId !== companyId) return;
 
     const assignment = companyModules.find((row) => row.module_id === module.id);
     setUpdatingModuleId(module.id);
@@ -1399,6 +1764,21 @@ export function SuperAdminDashboard() {
     }
   }
 
+  const hasCurrentCompanyDetails = Boolean(
+    selectedCompanyId && loadedCompanyId === selectedCompanyId,
+  );
+  const userAdministrativeIssue = companyAdministrativeIssues.find(
+    (issue) => issue.resource === "users",
+  );
+  const moduleAdministrativeIssue = companyAdministrativeIssues.find(
+    (issue) => issue.resource === "modules",
+  );
+  const workerOperationalIssue = companyOperationalIssues.find(
+    (issue) => issue.resource === "workers",
+  );
+  const loadingAnyCompanyDetails =
+    loadingDetails || loadingOperationalDetails;
+
   return (
     <section className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -1419,14 +1799,36 @@ export function SuperAdminDashboard() {
         <MetricCard
           icon={Users}
           label="Usuários da empresa"
-          value={formatNumber(users.length)}
-          detail={selectedCompany ? selectedCompany.name : "Selecione uma empresa"}
+          value={
+            loadingDetails
+              ? "..."
+              : formatCertifiedCount(
+                  hasCurrentCompanyDetails ? companyUsersCount : null,
+                )
+          }
+          detail={
+            userAdministrativeIssue
+              ? "Dados indisponíveis"
+              : selectedCompany
+                ? selectedCompany.name
+                : "Selecione uma empresa"
+          }
         />
         <MetricCard
           icon={ServerCog}
           label="Workers"
-          value={formatNumber(workers.length)}
-          detail="Vinculados à empresa"
+          value={
+            loadingOperationalDetails
+              ? "..."
+              : formatCertifiedCount(
+                  hasCurrentCompanyDetails ? companyStats?.workers : null,
+                )
+          }
+          detail={
+            workerOperationalIssue
+              ? "Dados indisponíveis"
+              : "Vinculados à empresa"
+          }
         />
       </div>
 
@@ -1446,12 +1848,12 @@ export function SuperAdminDashboard() {
               loadCompanies();
               loadCompanyDetails(selectedCompanyId);
             }}
-            disabled={loading || loadingDetails}
+            disabled={loading || loadingAnyCompanyDetails}
           >
             <RefreshCw
               className={cn(
                 "h-4 w-4",
-                (loading || loadingDetails) && "animate-spin",
+                (loading || loadingAnyCompanyDetails) && "animate-spin",
               )}
             />
             Atualizar
@@ -1578,14 +1980,15 @@ export function SuperAdminDashboard() {
 
           <CompanyManagementFlow
             company={selectedCompany}
-            error={companyDetailsError}
-            loading={loadingDetails}
+            administrativeIssues={companyAdministrativeIssues}
+            operationalIssues={companyOperationalIssues}
+            loadingAdministrative={loadingDetails}
+            loadingOperational={loadingOperationalDetails}
             stats={
-              companyStats
+              hasCurrentCompanyDetails && companyStats
                 ? {
                     ...companyStats,
-                    users: users.length,
-                    workers: workers.length,
+                    users: companyUsersCount,
                   }
                 : null
             }
@@ -1618,18 +2021,31 @@ export function SuperAdminDashboard() {
                     type="button"
                     className="w-full sm:w-auto"
                     onClick={() => openUser()}
-                    disabled={!selectedCompanyId}
+                    disabled={
+                      !selectedCompanyId ||
+                      !hasCurrentCompanyDetails ||
+                      loadingDetails
+                    }
                   >
                     <UserPlus className="h-4 w-4" />
                     Novo usuário
                   </Button>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  {userAdministrativeIssue ? (
+                    <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
+                      Usuários indisponíveis: {userAdministrativeIssue.message}.
+                    </div>
+                  ) : null}
                   <Input
                     value={userQuery}
                     onChange={(event) => setUserQuery(event.target.value)}
                     placeholder="Buscar usuário"
-                    disabled={!selectedCompanyId || loadingDetails}
+                    disabled={
+                      !selectedCompanyId ||
+                      !hasCurrentCompanyDetails ||
+                      loadingDetails
+                    }
                   />
 
                   {loadingDetails ? (
@@ -1688,6 +2104,8 @@ export function SuperAdminDashboard() {
                         ))}
                       </TableBody>
                     </Table>
+                  ) : userAdministrativeIssue ? (
+                    <EmptyState text="Não foi possível certificar os usuários desta empresa." />
                   ) : (
                     <EmptyState text="Nenhum usuário para a empresa selecionada." />
                   )}
@@ -1795,9 +2213,16 @@ export function SuperAdminDashboard() {
                     Catálogo de algoritmos da plataforma para a empresa selecionada.
                   </CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="space-y-3">
+                  {moduleAdministrativeIssue ? (
+                    <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
+                      Algoritmos indisponíveis: {moduleAdministrativeIssue.message}.
+                    </div>
+                  ) : null}
                   {loadingDetails ? (
                     <TableSkeleton />
+                  ) : moduleAdministrativeIssue ? (
+                    <EmptyState text="Não foi possível certificar os algoritmos desta empresa." />
                   ) : visibleModules.length ? (
                     <div className="divide-y rounded-md border">
                       {visibleModules.map((module) => {
@@ -1849,6 +2274,7 @@ export function SuperAdminDashboard() {
                               onClick={() => toggleCompanyModule(module)}
                               disabled={
                                 !selectedCompanyId ||
+                                !hasCurrentCompanyDetails ||
                                 !module.active ||
                                 updatingModuleId === module.id
                               }
@@ -1885,10 +2311,13 @@ export function SuperAdminDashboard() {
                     variant="outline"
                     className="w-full sm:w-auto"
                     onClick={() => loadCompanyDetails(selectedCompanyId)}
-                    disabled={!selectedCompanyId || loadingDetails}
+                    disabled={!selectedCompanyId || loadingAnyCompanyDetails}
                   >
                     <RefreshCw
-                      className={cn("h-4 w-4", loadingDetails && "animate-spin")}
+                      className={cn(
+                        "h-4 w-4",
+                        loadingAnyCompanyDetails && "animate-spin",
+                      )}
                     />
                     Atualizar
                   </Button>
@@ -1899,7 +2328,12 @@ export function SuperAdminDashboard() {
                       {workerScopeWarning}
                     </div>
                   ) : null}
-                  {loadingDetails ? (
+                  {workerOperationalIssue && !workerScopeWarning ? (
+                    <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
+                      Workers indisponíveis: {workerOperationalIssue.message}.
+                    </div>
+                  ) : null}
+                  {loadingOperationalDetails ? (
                     <TableSkeleton />
                   ) : workers.length ? (
                     <Table>
@@ -1966,6 +2400,8 @@ export function SuperAdminDashboard() {
                         })}
                       </TableBody>
                     </Table>
+                  ) : workerOperationalIssue ? (
+                    <EmptyState text="Nenhum worker certificado para a empresa selecionada." />
                   ) : (
                     <EmptyState text="Nenhum worker retornado para esta empresa." />
                   )}
@@ -2478,89 +2914,129 @@ function CompanySummary({
 
 function CompanyManagementFlow({
   company,
-  error,
-  loading,
+  administrativeIssues,
+  operationalIssues,
+  loadingAdministrative,
+  loadingOperational,
   stats,
   onOpenRoute,
   onOpenTab,
 }: {
   company: Company | null;
-  error: string;
-  loading: boolean;
+  administrativeIssues: CompanyAdministrativeIssue[];
+  operationalIssues: CompanyOperationalIssue[];
+  loadingAdministrative: boolean;
+  loadingOperational: boolean;
   stats:
     | (CompanyOperationalStats & {
-        users: number;
-        workers: number;
+        users: number | null;
       })
     | null;
   onOpenRoute: (path: string) => void;
   onOpenTab: (tab: CompanyTab) => void;
 }) {
-  const disabled = !company || loading || !stats;
-  const scenarioTotal = stats
-    ? stats.countingScenarios + stats.occupancyScenarios
-    : 0;
-  const steps = stats
+  const disabled = !company;
+  const scenarioTotal =
+    stats?.countingScenarios != null && stats.occupancyScenarios != null
+      ? stats.countingScenarios + stats.occupancyScenarios
+      : null;
+  const steps = company
     ? [
-    {
-      index: "01",
-      label: "Usuários",
-      detail: "Perfis e permissões",
-      count: stats.users,
-      icon: Users,
-      onClick: () => onOpenTab("users"),
-    },
-    {
-      index: "02",
-      label: "Workers",
-      detail: "Edge e API key",
-      count: stats.workers,
-      icon: ServerCog,
-      onClick: () => onOpenTab("workers"),
-    },
-    {
-      index: "03",
-      label: "Algoritmos",
-      detail: "Analíticos habilitados",
-      count: stats.algorithms,
-      icon: CircuitBoard,
-      onClick: () => onOpenTab("modules"),
-    },
-    {
-      index: "04",
-      label: "Câmeras",
-      detail: "Origem de vídeo",
-      count: stats.cameras,
-      icon: CameraIcon,
-      onClick: () => onOpenRoute("/manager/cameras"),
-    },
-    {
-      index: "05",
-      label: "Locations",
-      detail: "Unidades principais",
-      count: stats.locations,
-      icon: MapPinned,
-      onClick: () => onOpenRoute("/manager/locations"),
-    },
-    {
-      index: "06",
-      label: "Sublocations",
-      detail: "Grupos de câmeras",
-      count: stats.subLocations,
-      icon: Network,
-      onClick: () => onOpenRoute("/manager/locations#locations"),
-    },
-    {
-      index: "07",
-      label: "Cenários",
-      detail: `${formatNumber(stats.countingScenarios)} contagem / ${formatNumber(
-        stats.occupancyScenarios,
-      )} ocupação`,
-      count: scenarioTotal,
-      icon: ListChecks,
-      onClick: () => onOpenRoute("/manager/scenarios"),
-    },
-  ]
+        {
+          index: "01",
+          label: "Usuários",
+          detail: certifiedCountDetail(
+            stats?.users,
+            loadingAdministrative,
+            "Perfis e permissões",
+          ),
+          count: stats?.users ?? null,
+          loading: loadingAdministrative,
+          icon: Users,
+          onClick: () => onOpenTab("users"),
+        },
+        {
+          index: "02",
+          label: "Workers",
+          detail: certifiedCountDetail(
+            stats?.workers,
+            loadingOperational,
+            "Edge e API key",
+          ),
+          count: stats?.workers ?? null,
+          loading: loadingOperational,
+          icon: ServerCog,
+          onClick: () => onOpenTab("workers"),
+        },
+        {
+          index: "03",
+          label: "Algoritmos",
+          detail: certifiedCountDetail(
+            stats?.algorithms,
+            loadingAdministrative,
+            "Analíticos habilitados",
+          ),
+          count: stats?.algorithms ?? null,
+          loading: loadingAdministrative,
+          icon: CircuitBoard,
+          onClick: () => onOpenTab("modules"),
+        },
+        {
+          index: "04",
+          label: "Câmeras",
+          detail: certifiedCountDetail(
+            stats?.cameras,
+            loadingOperational,
+            "Origem de vídeo",
+          ),
+          count: stats?.cameras ?? null,
+          loading: loadingOperational,
+          icon: CameraIcon,
+          onClick: () => onOpenRoute("/manager/cameras"),
+        },
+        {
+          index: "05",
+          label: "Locations",
+          detail: certifiedCountDetail(
+            stats?.locations,
+            loadingOperational,
+            "Unidades principais",
+          ),
+          count: stats?.locations ?? null,
+          loading: loadingOperational,
+          icon: MapPinned,
+          onClick: () => onOpenRoute("/manager/locations"),
+        },
+        {
+          index: "06",
+          label: "Sublocations",
+          detail: certifiedCountDetail(
+            stats?.subLocations,
+            loadingOperational,
+            "Grupos de câmeras",
+          ),
+          count: stats?.subLocations ?? null,
+          loading: loadingOperational,
+          icon: Network,
+          onClick: () => onOpenRoute("/manager/locations#locations"),
+        },
+        {
+          index: "07",
+          label: "Cenários",
+          detail:
+            loadingOperational && scenarioTotal == null
+              ? "Carregando..."
+              : `${formatCertifiedCount(
+                  stats?.countingScenarios,
+                )} contagem / ${formatCertifiedCount(
+                  stats?.occupancyScenarios,
+                )} ocupação`,
+          count: scenarioTotal,
+          loading: loadingOperational,
+          icon: ListChecks,
+          onClick: () => onOpenRoute("/manager/scenarios"),
+        },
+      ]
     : [];
 
   return (
@@ -2571,12 +3047,23 @@ function CompanyManagementFlow({
           {company ? company.name : "Selecione uma empresa para ver a hierarquia."}
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        {error ? (
-          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm font-medium text-destructive">
-            Totais operacionais não certificados: {error}
+      <CardContent className="space-y-3">
+        {administrativeIssues.length ? (
+          <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-800 dark:text-amber-200">
+            <span className="font-semibold">Dados administrativos parciais.</span>{" "}
+            {administrativeIssues
+              .map((issue) => `${issue.label}: ${issue.message}`)
+              .join(" • ")}
           </div>
-        ) : (
+        ) : null}
+        {operationalIssues.length ? (
+          <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-800 dark:text-amber-200">
+            <span className="font-semibold">Dados operacionais parciais.</span>{" "}
+            {operationalIssues
+              .map((issue) => `${issue.label}: ${issue.message}`)
+              .join(" • ")}
+          </div>
+        ) : null}
         <div className="grid gap-2 md:grid-cols-2">
           {steps.map((step) => {
             const Icon = step.icon;
@@ -2610,13 +3097,14 @@ function CompanyManagementFlow({
                   </div>
                 </div>
                 <div className="rounded-md border border-border bg-card px-2 py-1 text-xs font-semibold text-foreground">
-                  {loading ? "..." : formatNumber(step.count)}
+                  {step.loading && step.count == null
+                    ? "..."
+                    : formatCertifiedCount(step.count)}
                 </div>
               </button>
             );
           })}
         </div>
-        )}
       </CardContent>
     </Card>
   );
@@ -2709,6 +3197,82 @@ function WorkerScopeBadge({
   );
 }
 
+const companyAdministrativeResourceLabels: Record<
+  CompanyAdministrativeResource,
+  string
+> = {
+  users: "Usuários",
+  modules: "Algoritmos",
+};
+
+function buildCompanyAdministrativeIssue(
+  resource: CompanyAdministrativeResource,
+  reason: unknown,
+): CompanyAdministrativeIssue {
+  const rawMessage =
+    reason instanceof Error && reason.message.trim()
+      ? reason.message.trim()
+      : "A API não certificou esta consulta.";
+  const message = /fora da empresa autenticada|fora do escopo/i.test(rawMessage)
+    ? "resposta fora do escopo da empresa selecionada"
+    : rawMessage.replace(/[.!]+$/, "");
+
+  return {
+    resource,
+    label: companyAdministrativeResourceLabels[resource],
+    message,
+  };
+}
+
+const companyOperationalResourceLabels: Record<
+  CompanyOperationalResource,
+  string
+> = {
+  workers: "Workers",
+  locations: "Locations",
+  subLocations: "Sublocations",
+  cameras: "Câmeras",
+  countingScenarios: "Cenários de contagem",
+  occupancyScenarios: "Cenários de ocupação",
+  infrastructure: "Infraestrutura",
+};
+
+function buildCompanyOperationalIssue(
+  resource: CompanyOperationalResource,
+  reason: unknown,
+): CompanyOperationalIssue {
+  const rawMessage =
+    reason instanceof Error && reason.message.trim()
+      ? reason.message.trim()
+      : "A API não certificou esta consulta.";
+  const message = /fora da empresa autenticada|fora do escopo/i.test(rawMessage)
+    ? "resposta fora do escopo da empresa selecionada"
+    : /company_id.*inválido ou ausente/i.test(rawMessage)
+      ? "company_id ausente ou inválido na resposta"
+      : /Locations não certificados/i.test(rawMessage)
+        ? "dependência de Locations indisponível"
+        : rawMessage.replace(/[.!]+$/, "");
+
+  return {
+    resource,
+    label: companyOperationalResourceLabels[resource],
+    message,
+  };
+}
+
+function formatCertifiedCount(value?: number | null) {
+  return typeof value === "number" ? formatNumber(value) : "—";
+}
+
+function certifiedCountDetail(
+  value: number | null | undefined,
+  loading: boolean,
+  availableDetail: string,
+) {
+  if (loading && value == null) return "Carregando...";
+  return value == null ? "Dados indisponíveis" : availableDetail;
+}
+
 function buildWorkerScopeWarning(
   foreignCount: number,
   unscopedCount: number,
@@ -2719,20 +3283,20 @@ function buildWorkerScopeWarning(
   const messages = [];
   if (foreignCount) {
     const returnedScopes = foreignCompanyIds.length
-      ? ` A API retornou company_id ${foreignCompanyIds.join(", ")}`
+      ? ` Recebido: ${foreignCompanyIds.join(", ")}.`
       : "";
     const requestedScope = selectedCompanyId
-      ? ` ao solicitar a empresa ${selectedCompanyId}`
+      ? ` Solicitado: ${selectedCompanyId}.`
       : "";
     messages.push(
-      `${formatNumber(foreignCount)} worker(s) foram ocultados por pertencerem a outra empresa.${returnedScopes}${requestedScope}. O JWT atual não autorizou dados operacionais dessa empresa.`,
+      `${formatNumber(foreignCount)} worker(s) de outra empresa foram ocultados.${returnedScopes}${requestedScope}`,
     );
   }
   if (unscopedCount) {
     messages.push(
       foreignCount
-        ? `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram ocultados porque a resposta também contém outra empresa.`
-        : `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram mantidos no escopo autenticado solicitado.`,
+        ? `${formatNumber(unscopedCount)} worker(s) sem company_id também foram ocultados.`
+        : `${formatNumber(unscopedCount)} worker(s) sem company_id foram mantidos no escopo autenticado.`,
     );
   }
   if (duplicateCount) {
@@ -2776,7 +3340,7 @@ async function fetchValidatedRows<T>(
 
 async function fetchScopedWorkers(companyScopeId: string) {
   return apiFetch<unknown>("/workers", { companyScopeId })
-    .then((value) => requireWorkerRows(value, companyScopeId));
+    .then((value) => requireWorkerRows(value));
 }
 
 async function fetchScopedOccupancyScenarios(companyScopeId: string) {

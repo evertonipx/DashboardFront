@@ -67,7 +67,7 @@ import {
 import {
   buildFixedHourlyAxisValues,
   HOUR_OF_DAY_LABELS,
-  latestHourlyPointHour,
+  resolveFixedHourlyDayWindow,
 } from "@/lib/hourly-axis";
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
 import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
@@ -254,17 +254,21 @@ export function ScenarioComparisonCard({
     () => buildScenarioComparisonSeries(selectedScenarios, rows, definition),
     [definition, rows, selectedScenarios],
   );
-  const hasData = series.some((item) =>
-    item.points.some((point) => point.total !== null && point.total !== 0),
-  );
+  const hasData =
+    (definition.granularity === "hour" &&
+      series.some((item) => item.points.length > 0)) ||
+    series.some((item) =>
+      item.points.some((point) => point.total !== null && point.total !== 0),
+    );
   const option = React.useMemo(
     () =>
       buildScenarioComparisonChartOption(
         series,
-        definition.granularity,
+        definition,
         widgetColor,
+        lastUpdated ?? new Date(),
       ),
-    [definition.granularity, series, widgetColor],
+    [definition, lastUpdated, series, widgetColor],
   );
   const effectiveGranularityLabel = `${granularityLabel(
     definition.granularity,
@@ -1358,28 +1362,26 @@ function accumulateChartPoints(points: ChartPoint[]) {
 
 export function buildScenarioComparisonChartOption(
   series: ScenarioComparisonSeries[],
-  granularity: AggregateGranularity,
+  definition: ScenarioComparisonDefinition,
   widgetColor?: string,
+  referenceTime = new Date(),
 ): EnterpriseChartOption {
-  const fixedHourlyAxis =
-    granularity === "hour" &&
-    series.length > 0 &&
-    series.every((item) => pointsShareOneCalendarDay(item.points));
-  const hourlyThrough = fixedHourlyAxis
-    ? latestHourlyPointHour(
-        series.flatMap((item) =>
-          item.points.flatMap((point) =>
-            point.total === null
-              ? []
-              : [{ bucket: point.id, total: point.total }],
-          ),
-        ),
-      )
-    : -1;
+  const { granularity } = definition;
+  const fixedHourlyWindow =
+    granularity === "hour"
+      ? resolveFixedHourlyDayWindow(
+          definition.currentFrom,
+          definition.currentTo,
+          referenceTime,
+        )
+      : null;
+  const fixedHourlyAxis = fixedHourlyWindow !== null;
+  const hourlyThrough = fixedHourlyWindow?.throughHour ?? -1;
+  const hourlyFrom = fixedHourlyWindow?.fromHour ?? 0;
   const bucketLabels = fixedHourlyAxis
     ? HOUR_OF_DAY_LABELS
     : series[0]?.points.map((point) => point.name) ?? [];
-  const dense = bucketLabels.length > 12;
+  const dense = !fixedHourlyAxis && bucketLabels.length > 12;
   const manySeries = series.length > 12;
   const veryManySeries = series.length > 24;
   const calendarPoints =
@@ -1410,10 +1412,10 @@ export function buildScenarioComparisonChartOption(
         : pastelBarColor(item.colorIndex),
     ),
     grid: {
-      bottom: dense ? 34 : 18,
+      bottom: fixedHourlyAxis ? 6 : dense ? 34 : 18,
       containLabel: true,
-      left: 42,
-      right: 18,
+      left: fixedHourlyAxis ? 6 : 42,
+      right: fixedHourlyAxis ? 10 : 18,
       top: series.length > 1 ? (manySeries ? 76 : 58) : 28,
     },
     legend:
@@ -1455,15 +1457,23 @@ export function buildScenarioComparisonChartOption(
           : `${formatNumber(Number(value))} eventos`,
     },
     xAxis: {
-      axisLabel: buildCalendarAxisLabel({
-        fontSize: 11,
-        hideOverlap: true,
-        holidayIndexes: holidayCategoryIndexes(calendarDates),
-        interval: 0,
-        rotate: dense ? 24 : 0,
-        saturdayIndexes,
-        sundayIndexes,
-      }),
+      axisLabel: fixedHourlyAxis
+        ? {
+            color: "#66758A",
+            fontSize: 10,
+            hideOverlap: true,
+            interval: 1,
+            rotate: 0,
+          }
+        : buildCalendarAxisLabel({
+            fontSize: 11,
+            hideOverlap: true,
+            holidayIndexes: holidayCategoryIndexes(calendarDates),
+            interval: 0,
+            rotate: dense ? 24 : 0,
+            saturdayIndexes,
+            sundayIndexes,
+          }),
       axisLine: {
         lineStyle: {
           color: "#D8E3F2",
@@ -1514,6 +1524,10 @@ export function buildScenarioComparisonChartOption(
                   : [{ bucket: point.id, total: point.total }],
               ),
               hourlyThrough,
+              {
+                fromHour: hourlyFrom,
+                missingHourValue: null,
+              },
             )
           : item.points.map((point) => point.total),
         emphasis: {
@@ -1537,22 +1551,6 @@ export function buildScenarioComparisonChartOption(
       };
     }),
   };
-}
-
-function pointsShareOneCalendarDay(points: readonly ChartPoint[]) {
-  if (!points.length) return false;
-
-  const days = new Set<string>();
-  for (const point of points) {
-    const date = new Date(point.id);
-    if (Number.isNaN(date.getTime())) return false;
-    days.add(
-      `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`,
-    );
-    if (days.size > 1) return false;
-  }
-
-  return days.size === 1;
 }
 
 export function buildScenarioComparisonReportChart({
@@ -1599,7 +1597,7 @@ export function buildScenarioComparisonReportChart({
     ].join(" · "),
     option: buildScenarioComparisonChartOption(
       series,
-      definition.granularity,
+      definition,
       widgetColor,
     ),
     table: {

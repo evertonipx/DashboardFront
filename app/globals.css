@@ -108,7 +108,10 @@
   }
 
   [data-card-layout-grid] > [data-layout-card-id] {
-    grid-column: span 1 / span 1 !important;
+    grid-column: span var(--widget-column-span-single, 1) / span
+      var(--widget-column-span-single, 1) !important;
+    grid-row: span var(--widget-row-span-single, 2) / span
+      var(--widget-row-span-single, 2) !important;
   }
 
   [data-layout-card-id] [data-card-header] {
@@ -243,57 +246,30 @@
 
 @container (min-width: 640px) {
   [data-card-layout-grid] {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(12, minmax(0, 1fr));
   }
 
-  [data-card-layout-grid]
-    > [data-layout-card-id][data-layout-card-size="wide"],
-  [data-card-layout-grid]
-    > [data-layout-card-id][data-layout-card-size="large"],
-  [data-card-layout-grid]
-    > [data-layout-card-id][data-layout-card-size="full"] {
-    grid-column: span 2 / span 2 !important;
+  [data-card-layout-grid] > [data-layout-card-id] {
+    grid-column: span var(--widget-column-span-two, 6) / span
+      var(--widget-column-span-two, 6) !important;
+    grid-row: span var(--widget-row-span-multi, 2) / span
+      var(--widget-row-span-multi, 2) !important;
   }
 }
 
-/* A three-column stage keeps corporate-width dashboards balanced after the
-   expanded sidebar reduces the content area to roughly 1,000-1,150px. */
+/* Twelve logical tracks allow six useful Bento widths while the resolver
+   preserves the former 2/3/4-column proportions at each container tier. */
 @container (min-width: 960px) and (max-width: 1199px) {
-  [data-card-layout-grid] {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  [data-card-layout-grid]
-    > [data-layout-card-id][data-layout-card-size="wide"] {
-    grid-column: span 2 / span 2 !important;
-  }
-
-  [data-card-layout-grid]
-    > [data-layout-card-id][data-layout-card-size="large"],
-  [data-card-layout-grid]
-    > [data-layout-card-id][data-layout-card-size="full"] {
-    grid-column: span 3 / span 3 !important;
+  [data-card-layout-grid] > [data-layout-card-id] {
+    grid-column: span var(--widget-column-span-three, 4) / span
+      var(--widget-column-span-three, 4) !important;
   }
 }
 
 @container (min-width: 1200px) {
-  [data-card-layout-grid] {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  [data-card-layout-grid]
-    > [data-layout-card-id][data-layout-card-size="wide"] {
-    grid-column: span 2 / span 2 !important;
-  }
-
-  [data-card-layout-grid]
-    > [data-layout-card-id][data-layout-card-size="large"] {
-    grid-column: span 3 / span 3 !important;
-  }
-
-  [data-card-layout-grid]
-    > [data-layout-card-id][data-layout-card-size="full"] {
-    grid-column: span 4 / span 4 !important;
+  [data-card-layout-grid] > [data-layout-card-id] {
+    grid-column: span var(--widget-column-span-desktop, 3) / span
+      var(--widget-column-span-desktop, 3) !important;
   }
 }
 

@@ -775,6 +775,13 @@ function addExportValueLabel(
   const record = series as Record<string, unknown>;
   if (record.type !== "bar" && record.type !== "line") return series;
   if (isExportReferenceSeries(record)) return series;
+  if (
+    record.label &&
+    typeof record.label === "object" &&
+    (record.label as { show?: unknown }).show === false
+  ) {
+    return series;
+  }
 
   const isLine = record.type === "line";
   const verticalBarLabel = record.type === "bar" && !horizontal;

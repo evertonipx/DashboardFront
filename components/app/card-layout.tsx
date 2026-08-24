@@ -13,14 +13,9 @@ import {
   GripVertical,
   LayoutTemplate,
   LayoutGrid,
-  Maximize2,
-  Minimize2,
   Palette,
-  PanelTop,
   RotateCcw,
   Settings2,
-  StretchHorizontal,
-  StretchVertical,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -38,6 +33,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/components/app/auth-provider";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
+import { WidgetBentoPreview } from "@/components/app/widget-bento-preview";
 import { WidgetViewPresetsDialog } from "@/components/app/widget-view-presets";
 import { WidgetAppearanceProvider } from "@/components/app/widget-appearance";
 import { hasVisualAdminAccess } from "@/lib/access";
@@ -49,6 +45,14 @@ import { useEffectiveCompanyScopeId } from "@/lib/master-company-scope";
 import { flushUserGridSync } from "@/lib/user-grid";
 import { cn } from "@/lib/utils";
 import {
+  CARD_LAYOUT_LEVELS,
+  clampCardLayoutLevel,
+  resolveCardLayoutDimensions,
+  resolveCardLayoutHeightPixels,
+  type CardLayoutLevel,
+  type CardLayoutRowSpanOverrides,
+} from "@/lib/card-layout-sizing";
+import {
   applyDefaultWidgetViewPresetIfEmpty,
   type WidgetViewPreset,
   type WidgetViewPresetNamespace,
@@ -56,6 +60,10 @@ import {
 } from "@/lib/widget-view-presets";
 import {
   CARD_ZOOM_LEVELS,
+  cardHeightToLayoutLevel,
+  cardLayoutLevelToCardHeight,
+  cardLayoutLevelToCardSize,
+  cardSizeToLayoutLevel,
   orderByCardPreferences,
   saveCardPreferences,
   type CardPreference,
@@ -76,10 +84,17 @@ type LayoutCard = {
   defaultHeight?: CardHeight;
   defaultSize?: CardSize;
   minHeight?: CardHeight;
+  maxHeight?: CardHeight;
+  minWidthLevel?: CardLayoutLevel;
+  maxWidthLevel?: CardLayoutLevel;
+  minHeightLevel?: CardLayoutLevel;
+  maxHeightLevel?: CardLayoutLevel;
+  narrowMinHeightLevel?: CardLayoutLevel;
+  minHeightByWidthLevel?: Partial<
+    Record<CardLayoutLevel, CardLayoutLevel>
+  >;
+  rowSpanOverrides?: CardLayoutRowSpanOverrides;
   className?: string;
-  shortHeightClassName?: string;
-  standardHeightClassName?: string;
-  tallHeightClassName?: string;
   titleEditable?: boolean;
   zoomEnabled?: boolean;
   node: React.ReactNode;
@@ -137,7 +152,9 @@ export function CardLayout({
   const [saved, setSaved] = React.useState(false);
   const [savedViewsOpen, setSavedViewsOpen] = React.useState(false);
   const [internalOrganizerOpen, setInternalOrganizerOpen] = React.useState(false);
+  const [layoutWidth, setLayoutWidth] = React.useState(0);
   const defaultApplicationRef = React.useRef("");
+  const layoutRootRef = React.useRef<HTMLDivElement>(null);
   const organizerOpen = controlledOrganizerOpen ?? internalOrganizerOpen;
   const screenReorderEnabled = controlledReorderMode ?? internalReorderMode;
   const setOrganizerOpen = React.useCallback(
@@ -179,6 +196,17 @@ export function CardLayout({
   React.useEffect(() => {
     onPreferencesChange?.(preferences);
   }, [onPreferencesChange, preferences]);
+
+  React.useEffect(() => {
+    const root = layoutRootRef.current;
+    if (!root) return;
+
+    const updateWidth = () => setLayoutWidth(root.getBoundingClientRect().width);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, []);
 
   React.useEffect(() => {
     if (!preferenceScopeId || !user?.id) return;
@@ -275,41 +303,53 @@ export function CardLayout({
         const preference = getPreference(preferences, card.id);
 
         return {
-          chartType: preference?.chartType,
+          ...preference,
           id: card.id,
           visible: preference?.visible ?? true,
-          color: preference?.color,
-          height: preference?.height,
-          size: preference?.size,
-          title: preference?.title,
-          zoom: preference?.zoom,
         };
       }),
     );
     flashSaved();
   }
 
+  function visibleOrganizerCards() {
+    return organizerCards.filter(
+      (card) => getPreference(preferences, card.id)?.visible !== false,
+    );
+  }
+
+  function mergeVisibleOrder(nextVisibleCards: LayoutCard[]) {
+    let visibleIndex = 0;
+    return organizerCards.map((card) =>
+      getPreference(preferences, card.id)?.visible === false
+        ? card
+        : nextVisibleCards[visibleIndex++] ?? card,
+    );
+  }
+
   function moveOrganizerCard(sourceId: string, targetId: string) {
     if (sourceId === targetId) return;
 
-    const sourceIndex = organizerCards.findIndex((card) => card.id === sourceId);
-    const targetIndex = organizerCards.findIndex((card) => card.id === targetId);
+    const visibleCards = visibleOrganizerCards();
+    const sourceIndex = visibleCards.findIndex((card) => card.id === sourceId);
+    const targetIndex = visibleCards.findIndex((card) => card.id === targetId);
     if (sourceIndex === -1 || targetIndex === -1) return;
 
-    const next = [...organizerCards];
+    const next = [...visibleCards];
     const [moved] = next.splice(sourceIndex, 1);
     next.splice(targetIndex, 0, moved);
-    persistFullOrder(next);
+    persistFullOrder(mergeVisibleOrder(next));
   }
 
   function moveOrganizerCardTo(cardId: string, targetIndex: number) {
-    const sourceIndex = organizerCards.findIndex((card) => card.id === cardId);
+    const visibleCards = visibleOrganizerCards();
+    const sourceIndex = visibleCards.findIndex((card) => card.id === cardId);
     if (sourceIndex === -1) return;
 
-    const next = [...organizerCards];
+    const next = [...visibleCards];
     const [moved] = next.splice(sourceIndex, 1);
     next.splice(Math.max(0, Math.min(targetIndex, next.length)), 0, moved);
-    persistFullOrder(next);
+    persistFullOrder(mergeVisibleOrder(next));
   }
 
   function toggleCardVisibility(cardId: string) {
@@ -328,27 +368,56 @@ export function CardLayout({
     flashSaved();
   }
 
-  function resizeCard(cardId: string, size: CardSize) {
+  function resizeCard(cardId: string, widthLevel: CardLayoutLevel) {
+    const card = cards.find((candidate) => candidate.id === cardId);
     persistPreferences(
-      preferences.map((preference) =>
-        preference.id === cardId ? { ...preference, size } : preference,
-      ),
+      preferences.map((preference) => {
+        if (preference.id !== cardId || !card) return preference;
+        const currentHeightLevel = resolveRequestedCardHeightLevel(
+          card,
+          preference,
+          widthLevel,
+        );
+        const resolved = resolveCardPreferenceDimensions(
+          card,
+          widthLevel,
+          currentHeightLevel,
+        );
+
+        return {
+          ...preference,
+          height: cardLayoutLevelToCardHeight(resolved.heightLevel),
+          heightLevel: resolved.heightLevel,
+          size: cardLayoutLevelToCardSize(resolved.widthLevel),
+          widthLevel: resolved.widthLevel,
+        };
+      }),
     );
     flashSaved();
   }
 
-  function resizeCardHeight(cardId: string, height: CardHeight) {
+  function resizeCardHeight(cardId: string, heightLevel: CardLayoutLevel) {
     const card = cards.find((candidate) => candidate.id === cardId);
     const preference = preferences.find((candidate) => candidate.id === cardId);
-    const currentSize = preference?.size ?? card?.defaultSize;
-    const nextHeight = card
-      ? clampCardHeight(height, minimumCardHeight(card, currentSize))
-      : height;
+    const widthLevel = card
+      ? resolveRequestedCardWidthLevel(card, preference)
+      : 1;
+    const resolved = card
+      ? resolveCardPreferenceDimensions(
+          card,
+          widthLevel,
+          heightLevel,
+        )
+      : { heightLevel };
 
     persistPreferences(
       preferences.map((preference) =>
         preference.id === cardId
-          ? { ...preference, height: nextHeight }
+          ? {
+              ...preference,
+              height: cardLayoutLevelToCardHeight(resolved.heightLevel),
+              heightLevel: resolved.heightLevel,
+            }
           : preference,
       ),
     );
@@ -399,6 +468,7 @@ export function CardLayout({
 
   return (
     <div
+      ref={layoutRootRef}
       data-card-layout-root
       className={cn(
         "min-w-0 max-w-full",
@@ -433,6 +503,7 @@ export function CardLayout({
       {monitorMode || !canEditLayout ? null : (
         <WidgetOrganizerDialog
           cards={organizerCards}
+          layoutWidth={layoutWidth}
           draggingId={organizerDraggingId}
           onDragEnd={() => {
             setOrganizerDraggingId(null);
@@ -499,8 +570,8 @@ export function CardLayout({
       <div
         data-card-layout-grid
         className={cn(
-          "grid min-w-0 grid-flow-row-dense auto-rows-[164px] grid-cols-[minmax(0,1fr)]",
-          monitorMode ? "gap-3" : "gap-4",
+          "grid min-w-0 grid-flow-row auto-rows-[74px] grid-cols-[minmax(0,1fr)]",
+          monitorMode ? "gap-x-3 gap-y-4" : "gap-4",
         )}
       >
         {orderedCards.map((card) => (
@@ -536,6 +607,7 @@ export function CardLayout({
             overId={screenOverId}
             preference={preferences.find((preference) => preference.id === card.id)}
             reorderEnabled={screenReorderEnabled}
+            layoutWidth={layoutWidth}
           />
         ))}
       </div>
@@ -579,6 +651,7 @@ export function ReorderModeButton({
 function CardLayoutItem({
   card,
   draggingId,
+  layoutWidth,
   onDragEnd,
   onDragOver,
   onDragStart,
@@ -589,6 +662,7 @@ function CardLayoutItem({
 }: {
   card: LayoutCard;
   draggingId: string | null;
+  layoutWidth: number;
   onDragEnd: () => void;
   onDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
   onDragStart: (event: React.DragEvent<HTMLButtonElement>) => void;
@@ -597,30 +671,46 @@ function CardLayoutItem({
   preference?: CardPreference;
   reorderEnabled: boolean;
 }) {
-  const currentSize = preference?.size ?? card.defaultSize;
-  const minimumHeight = minimumCardHeight(card, currentSize);
-  const currentHeight = resolveCardHeight(card, preference, currentSize);
+  const requestedWidthLevel = resolveRequestedCardWidthLevel(card, preference);
+  const requestedHeightLevel = resolveRequestedCardHeightLevel(
+    card,
+    preference,
+    requestedWidthLevel,
+  );
+  const dimensions = resolveCardDimensions(
+    card,
+    requestedWidthLevel,
+    requestedHeightLevel,
+    layoutWidth,
+  );
   const chartTypes = supportedChartTypes(card);
 
   return (
     <div
       data-layout-card-id={card.id}
       data-layout-reorder-enabled={reorderEnabled ? "true" : undefined}
-      data-layout-card-height={currentHeight}
-      data-layout-card-min-compact-height={minimumCardHeight(card, "compact")}
-      data-layout-card-min-height={minimumHeight}
-      data-layout-card-size={currentSize ?? "compact"}
+      data-layout-card-height={cardLayoutLevelToCardHeight(
+        dimensions.heightLevel,
+      )}
+      data-layout-card-height-level={dimensions.heightLevel}
+      data-layout-card-min-height-level={resolveMinimumHeightLevel(
+        card,
+        dimensions.widthLevel,
+        layoutWidth,
+      )}
+      data-layout-card-max-height-level={resolveMaximumHeightLevel(card)}
+      data-layout-card-size={cardLayoutLevelToCardSize(dimensions.widthLevel)}
+      data-layout-card-width-level={dimensions.widthLevel}
       onDragOver={onDragOver}
       onDrop={onDrop}
+      style={cardLayoutItemStyle(
+        card,
+        dimensions.widthLevel,
+        requestedHeightLevel,
+      )}
       className={cn(
         "group relative h-full min-h-0 min-w-0 transition",
-        sizeClassName(currentSize, card.className),
-        heightClassName(
-          currentHeight,
-          card.shortHeightClassName,
-          card.standardHeightClassName,
-          card.tallHeightClassName,
-        ),
+        card.className,
         reorderEnabled &&
           "rounded-md ring-1 ring-primary/25 ring-offset-2 ring-offset-background",
         draggingId === card.id && "opacity-50",
@@ -660,6 +750,7 @@ function WidgetOrganizerDialog({
   cards,
   draggingId,
   editActions,
+  layoutWidth,
   onDragEnd,
   onDragLeave,
   onDragOver,
@@ -685,19 +776,20 @@ function WidgetOrganizerDialog({
   cards: LayoutCard[];
   draggingId: string | null;
   editActions?: React.ReactNode;
+  layoutWidth: number;
   onDragEnd: () => void;
   onDragLeave: () => void;
-  onDragOver: (event: React.DragEvent<HTMLDivElement>, cardId: string) => void;
-  onDragStart: (event: React.DragEvent<HTMLDivElement>, cardId: string) => void;
-  onDrop: (event: React.DragEvent<HTMLDivElement>, cardId: string) => void;
+  onDragOver: (event: React.DragEvent<HTMLElement>, cardId: string) => void;
+  onDragStart: (event: React.DragEvent<HTMLElement>, cardId: string) => void;
+  onDrop: (event: React.DragEvent<HTMLElement>, cardId: string) => void;
   onMoveDown: (cardId: string, index: number) => void;
   onMoveUp: (cardId: string, index: number) => void;
   onManageSavedViews: () => void;
   onOpenChange: (open: boolean) => void;
   onColorChange: (cardId: string, color?: string) => void;
   onChartTypeChange: (cardId: string, chartType: CardChartType) => void;
-  onHeightChange: (cardId: string, height: CardHeight) => void;
-  onResize: (cardId: string, size: CardSize) => void;
+  onHeightChange: (cardId: string, height: CardLayoutLevel) => void;
+  onResize: (cardId: string, size: CardLayoutLevel) => void;
   onRestoreDefault: () => void;
   onTitleChange: (cardId: string, title?: string) => void;
   onToggleVisibility: (cardId: string) => void;
@@ -707,14 +799,99 @@ function WidgetOrganizerDialog({
   preferences: CardPreference[];
   saved: boolean;
 }) {
+  const activeCards = cards.filter(
+    (card) => getPreference(preferences, card.id)?.visible !== false,
+  );
+  const hiddenCards = cards.filter(
+    (card) => getPreference(preferences, card.id)?.visible === false,
+  );
+  const [selectedCardId, setSelectedCardId] = React.useState<string | null>(
+    null,
+  );
+
+  React.useEffect(() => {
+    if (!open) return;
+    const selectedExists = cards.some((card) => card.id === selectedCardId);
+    if (selectedExists) return;
+    setSelectedCardId(activeCards[0]?.id ?? hiddenCards[0]?.id ?? null);
+  }, [activeCards, cards, hiddenCards, open, selectedCardId]);
+
+  const selectedCard =
+    cards.find((card) => card.id === selectedCardId) ??
+    activeCards[0] ??
+    hiddenCards[0];
+  const selectedPreference = selectedCard
+    ? getPreference(preferences, selectedCard.id)
+    : undefined;
+  const selectedVisible = selectedPreference?.visible !== false;
+  const selectedWidthLevel = selectedCard
+    ? resolveRequestedCardWidthLevel(selectedCard, selectedPreference)
+    : 1;
+  const selectedRequestedHeightLevel = selectedCard
+    ? resolveRequestedCardHeightLevel(
+        selectedCard,
+        selectedPreference,
+        selectedWidthLevel,
+      )
+    : 1;
+  const selectedDimensions = selectedCard
+    ? resolveCardDimensions(
+        selectedCard,
+        selectedWidthLevel,
+        selectedRequestedHeightLevel,
+        layoutWidth,
+      )
+    : null;
+  const selectedActiveIndex = selectedCard
+    ? activeCards.findIndex((card) => card.id === selectedCard.id)
+    : -1;
+  const previewItems = activeCards.map((card) => {
+    const preference = getPreference(preferences, card.id);
+    const widthLevel = resolveRequestedCardWidthLevel(card, preference);
+    const heightLevel = resolveRequestedCardHeightLevel(
+      card,
+      preference,
+      widthLevel,
+    );
+    const dimensions = resolveCardDimensions(
+      card,
+      widthLevel,
+      heightLevel,
+      layoutWidth,
+    );
+
+    return {
+      columnSpan: dimensions.columnSpan,
+      dragging: draggingId === card.id,
+      id: card.id,
+      label: preference?.title ?? card.label ?? card.id,
+      over: overId === card.id && draggingId !== card.id,
+      rowSpan: dimensions.rowSpan,
+      selected: selectedCard?.id === card.id,
+    };
+  });
+  const previewColumnCount =
+    previewItems.length && selectedCard
+      ? resolveCardDimensions(
+          selectedCard,
+          selectedWidthLevel,
+          selectedRequestedHeightLevel,
+          layoutWidth,
+        ).columnCount
+      : resolveCardLayoutDimensions({
+          containerWidth: layoutWidth,
+          heightLevel: 1,
+          widthLevel: 1,
+        }).columnCount;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="grid max-h-[92vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-4xl">
+      <DialogContent className="grid max-h-[94vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-6xl">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <DialogHeader className="min-w-0">
             <DialogTitle>Configurar widgets</DialogTitle>
             <DialogDescription>
-              Adicione, reordene e ajuste a aparência dos widgets.
+              Organize o Bento real da tela e ajuste cada widget com precisão.
             </DialogDescription>
           </DialogHeader>
           <div className="flex min-w-0 flex-wrap items-center gap-2 lg:shrink-0 lg:pr-8">
@@ -735,201 +912,227 @@ function WidgetOrganizerDialog({
           </div>
         </div>
 
-        <div className="min-h-0 space-y-2 overflow-y-auto pr-1">
-          {cards.map((card, index) => {
-            const preference = getPreference(preferences, card.id);
-            const visible = preference?.visible !== false;
-            const currentSize = preference?.size ?? card.defaultSize;
-            const minimumHeight = minimumCardHeight(card, currentSize);
-            const currentHeight = resolveCardHeight(
-              card,
-              preference,
-              currentSize,
-            );
-            const chartTypes = supportedChartTypes(card);
-            const currentChartType = resolveCardChartType(
-              preference?.chartType,
-              chartTypes,
-            );
-            const currentZoom = preference?.zoom ?? 100;
-            const first = index === 0;
-            const last = index === cards.length - 1;
+        <div className="grid min-h-0 gap-4 overflow-hidden lg:grid-cols-[minmax(0,1.35fr)_minmax(20rem,0.65fr)]">
+          <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+            <WidgetBentoPreview
+              columnCount={previewColumnCount}
+              hiddenCount={hiddenCards.length}
+              items={previewItems}
+              layoutLabel={layoutPreviewLabel(layoutWidth)}
+              onSelect={setSelectedCardId}
+              onDragStart={(event, cardId) => {
+                setSelectedCardId(cardId);
+                onDragStart(event, cardId);
+              }}
+              onDragOver={(event, cardId) => onDragOver(event, cardId)}
+              onDragLeave={() => onDragLeave()}
+              onDrop={(event, cardId) => onDrop(event, cardId)}
+              onDragEnd={() => onDragEnd()}
+            />
 
-            return (
-              <div
-                key={card.id}
-                data-widget-config-id={card.id}
-                draggable
-                onDragStart={(event) => onDragStart(event, card.id)}
-                onDragOver={(event) => onDragOver(event, card.id)}
-                onDragLeave={onDragLeave}
-                onDrop={(event) => onDrop(event, card.id)}
-                onDragEnd={onDragEnd}
-                className={cn(
-                  "grid gap-3 rounded-md border bg-card p-3 transition sm:grid-cols-[auto_minmax(0,1fr)]",
-                  draggingId === card.id && "opacity-50",
-                  overId === card.id &&
-                    draggingId !== card.id &&
-                    "ring-2 ring-primary ring-offset-2",
-                  !visible && "border-dashed bg-muted/20",
+            <details
+              className="rounded-lg border bg-muted/10"
+              data-hidden-widget-section
+              open={hiddenCards.length > 0}
+            >
+              <summary className="cursor-pointer list-none px-3 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+                <span className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-semibold">Widgets ocultos</span>
+                  <Badge variant="secondary">{hiddenCards.length}</Badge>
+                </span>
+              </summary>
+              <div className="space-y-2 border-t p-2">
+                {hiddenCards.length ? (
+                  hiddenCards.map((card) => {
+                    const preference = getPreference(preferences, card.id);
+                    const widthLevel = resolveRequestedCardWidthLevel(
+                      card,
+                      preference,
+                    );
+                    const heightLevel = resolveRequestedCardHeightLevel(
+                      card,
+                      preference,
+                      widthLevel,
+                    );
+                    return (
+                      <div
+                        key={card.id}
+                        className={cn(
+                          "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-dashed bg-card p-2",
+                          selectedCard?.id === card.id &&
+                            "border-primary ring-1 ring-primary/30",
+                        )}
+                        data-hidden-widget-id={card.id}
+                      >
+                        <button
+                          type="button"
+                          className="min-w-0 rounded-sm px-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={() => setSelectedCardId(card.id)}
+                          aria-pressed={selectedCard?.id === card.id}
+                        >
+                          <span className="block truncate text-sm font-medium">
+                            {preference?.title ?? card.label ?? card.id}
+                          </span>
+                          <span className="block text-[11px] text-muted-foreground">
+                            {widthLevelLabel(widthLevel)} · {heightLevelLabel(heightLevel)}
+                          </span>
+                        </button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8 shrink-0"
+                          onClick={() => {
+                            setSelectedCardId(card.id);
+                            onToggleVisibility(card.id);
+                          }}
+                          aria-label={`Exibir ${preference?.title ?? card.label ?? card.id}`}
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                          Exibir
+                        </Button>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="px-2 py-4 text-center text-xs text-muted-foreground">
+                    Todos os widgets estão ativos.
+                  </p>
                 )}
-              >
-                <div className="flex h-9 w-9 shrink-0 cursor-grab items-center justify-center rounded-md border bg-background text-muted-foreground">
-                  <GripVertical className="h-4 w-4" />
-                </div>
+              </div>
+            </details>
+          </div>
 
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="truncate text-sm font-semibold text-foreground">
-                      {preference?.title ?? card.label ?? card.id}
+          <aside
+            className="min-h-0 overflow-y-auto rounded-lg border bg-card p-3"
+            data-widget-inspector
+          >
+            {selectedCard && selectedDimensions ? (
+              <div className="space-y-4" data-widget-config-id={selectedCard.id}>
+                <div className="min-w-0 border-b pb-3">
+                  <div className="flex min-w-0 items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="break-words text-sm font-semibold [overflow-wrap:anywhere]">
+                        {selectedPreference?.title ??
+                          selectedCard.label ??
+                          selectedCard.id}
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-1.5">
+                        <Badge variant={selectedVisible ? "outline" : "secondary"}>
+                          {selectedVisible ? "Ativo" : "Oculto"}
+                        </Badge>
+                        <Badge variant="outline">
+                          {widthLevelLabel(selectedDimensions.widthLevel)} · {heightLevelLabel(selectedDimensions.heightLevel)}
+                        </Badge>
+                      </div>
                     </div>
-                    <Badge variant={visible ? "outline" : "secondary"}>
-                      {visible ? "Visível" : "Oculto"}
-                    </Badge>
-                    <Badge variant="outline">
-                      {sizeLabel(currentSize)} · {heightLabel(currentHeight)}
-                    </Badge>
+                    <Button
+                      type="button"
+                      variant={selectedVisible ? "outline" : "secondary"}
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      onClick={() => onToggleVisibility(selectedCard.id)}
+                      aria-label={`${selectedVisible ? "Ocultar" : "Exibir"} ${selectedPreference?.title ?? selectedCard.label ?? selectedCard.id}`}
+                      title={selectedVisible ? "Ocultar widget" : "Exibir widget"}
+                    >
+                      {selectedVisible ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
                   </div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    Posição {formatPosition(index)} de {cards.length}
-                  </div>
+
+                  {selectedVisible ? (
+                    <div className="mt-3 flex items-center gap-2">
+                      <span className="mr-auto text-xs text-muted-foreground">
+                        Ordem {formatPosition(selectedActiveIndex)} de {activeCards.length}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8"
+                        disabled={selectedActiveIndex <= 0}
+                        onClick={() =>
+                          onMoveUp(selectedCard.id, selectedActiveIndex)
+                        }
+                        aria-label={`Mover ${selectedPreference?.title ?? selectedCard.label ?? selectedCard.id} para cima`}
+                      >
+                        <ArrowUp className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8"
+                        disabled={
+                          selectedActiveIndex < 0 ||
+                          selectedActiveIndex === activeCards.length - 1
+                        }
+                        onClick={() =>
+                          onMoveDown(selectedCard.id, selectedActiveIndex)
+                        }
+                        aria-label={`Mover ${selectedPreference?.title ?? selectedCard.label ?? selectedCard.id} para baixo`}
+                      >
+                        <ArrowDown className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  ) : null}
                 </div>
 
-                <div className="flex min-w-0 flex-wrap items-center gap-2 sm:col-span-2 sm:pl-12">
-                  {card.titleEditable ? (
-                    <WidgetTitleEditor
-                      cardId={card.id}
-                      defaultTitle={card.label ?? card.id}
-                      onChange={onTitleChange}
-                      title={preference?.title}
-                    />
-                  ) : null}
-                  {chartTypes.length ? (
+                {selectedCard.titleEditable ? (
+                  <WidgetTitleEditor
+                    cardId={selectedCard.id}
+                    defaultTitle={selectedCard.label ?? selectedCard.id}
+                    onChange={onTitleChange}
+                    title={selectedPreference?.title}
+                  />
+                ) : null}
+
+                <WidgetDimensionControls
+                  card={selectedCard}
+                  dimensions={selectedDimensions}
+                  layoutWidth={layoutWidth}
+                  onHeightChange={onHeightChange}
+                  onWidthChange={onResize}
+                />
+
+                <div className="flex min-w-0 flex-wrap items-center gap-2 border-t pt-3">
+                  {supportedChartTypes(selectedCard).length ? (
                     <WidgetChartTypePicker
-                      cardId={card.id}
-                      chartType={currentChartType}
-                      chartTypes={chartTypes}
+                      cardId={selectedCard.id}
+                      chartType={resolveCardChartType(
+                        selectedPreference?.chartType,
+                        supportedChartTypes(selectedCard),
+                      )}
+                      chartTypes={supportedChartTypes(selectedCard)}
                       onChange={onChartTypeChange}
                     />
                   ) : null}
-                  {card.zoomEnabled ? (
+                  {selectedCard.zoomEnabled ? (
                     <WidgetZoomPicker
-                      cardId={card.id}
+                      cardId={selectedCard.id}
                       onChange={onZoomChange}
-                      zoom={currentZoom}
+                      zoom={selectedPreference?.zoom ?? 100}
                     />
                   ) : null}
-                  {card.colorEditable !== false ? (
+                  {selectedCard.colorEditable !== false ? (
                     <WidgetColorPicker
-                      cardId={card.id}
-                      color={preference?.color}
-                      gradient={card.colorPreview === "gradient"}
+                      cardId={selectedCard.id}
+                      color={selectedPreference?.color}
+                      gradient={selectedCard.colorPreview === "gradient"}
                       onChange={onColorChange}
                     />
                   ) : null}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    className="h-8 w-8"
-                    disabled={first}
-                    onClick={() => onMoveUp(card.id, index)}
-                    aria-label="Subir"
-                    title="Subir"
-                  >
-                    <ArrowUp className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    className="h-8 w-8"
-                    disabled={last}
-                    onClick={() => onMoveDown(card.id, index)}
-                    aria-label="Descer"
-                    title="Descer"
-                  >
-                    <ArrowDown className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={visible ? "outline" : "secondary"}
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => onToggleVisibility(card.id)}
-                    aria-label={visible ? "Ocultar" : "Exibir"}
-                    title={visible ? "Ocultar" : "Exibir"}
-                  >
-                    {visible ? (
-                      <EyeOff className="h-3.5 w-3.5" />
-                    ) : (
-                      <Eye className="h-3.5 w-3.5" />
-                    )}
-                  </Button>
-                  <div className="inline-flex rounded-md border bg-background p-1">
-                    <SizeButton
-                      active={currentSize === "compact" || !currentSize}
-                      icon={Minimize2}
-                      label="Compacto"
-                      onClick={() => onResize(card.id, "compact")}
-                    />
-                    <SizeButton
-                      active={currentSize === "wide"}
-                      icon={PanelTop}
-                      label="Largo"
-                      onClick={() => onResize(card.id, "wide")}
-                    />
-                    <SizeButton
-                      active={currentSize === "large"}
-                      icon={StretchHorizontal}
-                      label="Três colunas"
-                      onClick={() => onResize(card.id, "large")}
-                    />
-                    <SizeButton
-                      active={currentSize === "full"}
-                      icon={Maximize2}
-                      label="Largura total"
-                      onClick={() => onResize(card.id, "full")}
-                    />
-                  </div>
-                  <div
-                    className="inline-flex rounded-md border bg-background p-1"
-                    aria-label="Altura do widget"
-                    role="group"
-                  >
-                    <SizeButton
-                      active={currentHeight === "short"}
-                      disabled={isCardHeightBelow("short", minimumHeight)}
-                      icon={Minimize2}
-                      label={
-                        isCardHeightBelow("short", minimumHeight)
-                          ? "Altura baixa indisponível para este widget"
-                          : "Altura baixa"
-                      }
-                      onClick={() => onHeightChange(card.id, "short")}
-                    />
-                    <SizeButton
-                      active={currentHeight === "standard"}
-                      disabled={isCardHeightBelow("standard", minimumHeight)}
-                      icon={PanelTop}
-                      label={
-                        isCardHeightBelow("standard", minimumHeight)
-                          ? "Altura padrão indisponível para este widget"
-                          : "Altura padrão"
-                      }
-                      onClick={() => onHeightChange(card.id, "standard")}
-                    />
-                    <SizeButton
-                      active={currentHeight === "tall"}
-                      icon={StretchVertical}
-                      label="Altura ampliada"
-                      onClick={() => onHeightChange(card.id, "tall")}
-                    />
-                  </div>
                 </div>
               </div>
-            );
-          })}
+            ) : (
+              <div className="flex min-h-48 items-center justify-center text-center text-sm text-muted-foreground">
+                Não há widgets disponíveis para configurar.
+              </div>
+            )}
+          </aside>
         </div>
 
         <DialogFooter className="sm:items-center sm:justify-between">
@@ -955,6 +1158,179 @@ function WidgetOrganizerDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+const CARD_WIDTH_LEVEL_OPTIONS: ReadonlyArray<{
+  label: string;
+  level: CardLayoutLevel;
+  percent: number;
+}> = [
+  { label: "Compacta", level: 1, percent: 25 },
+  { label: "Pequena", level: 2, percent: 33 },
+  { label: "Larga", level: 3, percent: 50 },
+  { label: "Expandida", level: 4, percent: 67 },
+  { label: "Ampla", level: 5, percent: 75 },
+  { label: "Total", level: 6, percent: 100 },
+];
+
+const CARD_HEIGHT_LEVEL_OPTIONS: ReadonlyArray<{
+  label: string;
+  level: CardLayoutLevel;
+  pixels: number;
+}> = CARD_LAYOUT_LEVELS.map((level) => ({
+  label: [
+    "Baixa",
+    "Média-baixa",
+    "Padrão",
+    "Média-alta",
+    "Alta",
+    "Extra alta",
+  ][level - 1],
+  level,
+  pixels: resolveCardLayoutHeightPixels(level),
+}));
+
+function WidgetDimensionControls({
+  card,
+  dimensions,
+  layoutWidth,
+  onHeightChange,
+  onWidthChange,
+}: {
+  card: LayoutCard;
+  dimensions: ReturnType<typeof resolveCardLayoutDimensions>;
+  layoutWidth: number;
+  onHeightChange: (cardId: string, level: CardLayoutLevel) => void;
+  onWidthChange: (cardId: string, level: CardLayoutLevel) => void;
+}) {
+  return (
+    <div className="space-y-4 border-t pt-3" data-widget-dimension-controls>
+      <fieldset className="min-w-0 space-y-2">
+        <legend className="flex w-full items-center justify-between gap-3 text-xs font-medium">
+          <span>Largura</span>
+          <span className="font-normal text-muted-foreground">
+            {widthLevelContextLabel(
+              dimensions.widthLevel,
+              dimensions.widthRatio,
+            )}
+          </span>
+        </legend>
+        <div className="grid grid-cols-6 gap-1 rounded-md border bg-muted/20 p-1">
+          {CARD_WIDTH_LEVEL_OPTIONS.map((option) => {
+            const candidate = resolveCardDimensions(
+              card,
+              option.level,
+              dimensions.heightLevel,
+              layoutWidth,
+            );
+            const disabled = candidate.widthLevel !== option.level;
+            const actualPercent = Math.round(candidate.widthRatio * 100);
+            return (
+              <DimensionLevelButton
+                key={option.level}
+                active={dimensions.widthLevel === option.level}
+                axis="width"
+                disabled={disabled}
+                label={`${option.label} · ${option.percent}% no desktop${
+                  actualPercent === option.percent
+                    ? ""
+                    : ` · ${actualPercent}% nesta tela`
+                }${
+                  disabled ? " · indisponível para este widget" : ""
+                }`}
+                level={option.level}
+                onClick={() => onWidthChange(card.id, option.level)}
+                ratio={option.percent}
+              />
+            );
+          })}
+        </div>
+      </fieldset>
+
+      <fieldset className="min-w-0 space-y-2">
+        <legend className="flex w-full items-center justify-between gap-3 text-xs font-medium">
+          <span>Altura</span>
+          <span className="font-normal text-muted-foreground">
+            {heightLevelLabel(dimensions.heightLevel)}
+          </span>
+        </legend>
+        <div className="grid grid-cols-6 gap-1 rounded-md border bg-muted/20 p-1">
+          {CARD_HEIGHT_LEVEL_OPTIONS.map((option) => {
+            const candidate = resolveCardDimensions(
+              card,
+              dimensions.widthLevel,
+              option.level,
+              layoutWidth,
+            );
+            const disabled = candidate.heightLevel !== option.level;
+            return (
+              <DimensionLevelButton
+                key={option.level}
+                active={dimensions.heightLevel === option.level}
+                axis="height"
+                disabled={disabled}
+                label={`${option.label} · ${option.pixels}px${
+                  disabled ? " · indisponível para este widget" : ""
+                }`}
+                level={option.level}
+                onClick={() => onHeightChange(card.id, option.level)}
+                ratio={Math.round((option.pixels / 704) * 100)}
+              />
+            );
+          })}
+        </div>
+      </fieldset>
+    </div>
+  );
+}
+
+function DimensionLevelButton({
+  active,
+  axis,
+  disabled,
+  label,
+  level,
+  onClick,
+  ratio,
+}: {
+  active: boolean;
+  axis: "height" | "width";
+  disabled: boolean;
+  label: string;
+  level: CardLayoutLevel;
+  onClick: () => void;
+  ratio: number;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "flex h-11 min-w-0 flex-col items-center justify-center gap-1 rounded-sm text-[9px] font-semibold text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+        active && "bg-primary text-primary-foreground shadow-sm hover:bg-primary hover:text-primary-foreground",
+        disabled && "cursor-not-allowed opacity-35",
+      )}
+      disabled={disabled}
+      onClick={onClick}
+      aria-label={label}
+      aria-pressed={active}
+      title={label}
+    >
+      <span
+        className="relative flex h-5 w-7 items-center justify-center rounded-sm border border-current/35"
+        aria-hidden="true"
+      >
+        <span
+          className="rounded-[1px] bg-current"
+          style={
+            axis === "width"
+              ? { height: "0.3rem", width: `${Math.max(18, ratio)}%` }
+              : { height: `${Math.max(18, ratio)}%`, width: "0.45rem" }
+          }
+        />
+      </span>
+      <span aria-hidden="true">{level}</span>
+    </button>
   );
 }
 
@@ -1235,54 +1611,6 @@ function widgetColorPreviewStyle(
   };
 }
 
-function SizeButton({
-  active,
-  disabled = false,
-  icon: Icon,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  disabled?: boolean;
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <Button
-      type="button"
-      variant={active ? "secondary" : "ghost"}
-      size="icon"
-      className="h-7 w-7"
-      disabled={disabled}
-      onClick={onClick}
-      aria-label={label}
-      title={label}
-    >
-      <Icon className="h-3.5 w-3.5" />
-    </Button>
-  );
-}
-
-function sizeClassName(size: CardSize | undefined, fallback: string | undefined) {
-  if (!size) return fallback;
-  if (size === "wide") return "sm:col-span-2 xl:col-span-2";
-  if (size === "large") return "sm:col-span-2 xl:col-span-3";
-  if (size === "full") return "sm:col-span-2 xl:col-span-4";
-  return undefined;
-}
-
-function heightClassName(
-  height: CardHeight,
-  shortHeightClassName?: string,
-  standardHeightClassName?: string,
-  tallHeightClassName?: string,
-) {
-  if (height === "tall") return tallHeightClassName ?? "row-span-3";
-  if (height === "standard") return standardHeightClassName ?? "row-span-2";
-  return shortHeightClassName ?? "row-span-1";
-}
-
 const CARTESIAN_CHART_TYPES = ["bar", "line"] as const;
 
 function supportedChartTypes(card: LayoutCard): readonly CardChartType[] {
@@ -1298,52 +1626,143 @@ function resolveCardChartType(
   return supportedTypes[0] ?? "bar";
 }
 
-const CARD_HEIGHT_ORDER: Record<CardHeight, number> = {
-  short: 0,
-  standard: 1,
-  tall: 2,
-};
-
-function minimumCardHeight(
+function resolveRequestedCardWidthLevel(
   card: LayoutCard,
-  currentSize: CardSize | undefined,
-): CardHeight {
-  if (card.minHeight) {
-    const compactingWideWidget =
-      card.minHeight === "short" &&
-      currentSize === "compact" &&
-      card.defaultSize !== undefined &&
-      card.defaultSize !== "compact";
-    return compactingWideWidget ? "standard" : card.minHeight;
-  }
+  preference: CardPreference | undefined,
+) {
+  const requested =
+    preference?.widthLevel ??
+    (preference?.size
+      ? cardSizeToLayoutLevel(preference.size)
+      : card.defaultSize
+        ? cardSizeToLayoutLevel(card.defaultSize)
+        : 1);
+  return clampCardLayoutLevel(
+    requested,
+    card.minWidthLevel ?? 1,
+    card.maxWidthLevel ?? 6,
+  );
+}
 
+function resolveRequestedCardHeightLevel(
+  card: LayoutCard,
+  preference: CardPreference | undefined,
+  widthLevel: CardLayoutLevel,
+) {
+  return (
+    preference?.heightLevel ??
+    (preference?.height
+      ? cardHeightToLayoutLevel(preference.height)
+      : card.defaultHeight
+        ? cardHeightToLayoutLevel(card.defaultHeight)
+        : widthLevel <= 2
+          ? 1
+          : 3)
+  );
+}
+
+function inferredMinimumHeightLevel(card: LayoutCard): CardLayoutLevel {
+  if (card.minHeightLevel) return card.minHeightLevel;
+  if (card.minHeight) return cardHeightToLayoutLevel(card.minHeight);
   const isComplexWidget =
     supportedChartTypes(card).length > 0 ||
     (card.defaultSize !== undefined && card.defaultSize !== "compact") ||
     card.className?.includes("col-span");
-
-  return isComplexWidget ? "standard" : "short";
+  return isComplexWidget ? 3 : 1;
 }
 
-function isCardHeightBelow(height: CardHeight, minimum: CardHeight) {
-  return CARD_HEIGHT_ORDER[height] < CARD_HEIGHT_ORDER[minimum];
+function resolveMaximumHeightLevel(card: LayoutCard): CardLayoutLevel {
+  return (
+    card.maxHeightLevel ??
+    (card.maxHeight ? cardHeightToLayoutLevel(card.maxHeight) : 6)
+  );
 }
 
-function clampCardHeight(height: CardHeight, minimum: CardHeight): CardHeight {
-  return isCardHeightBelow(height, minimum) ? minimum : height;
+function cardDimensionConstraints(card: LayoutCard) {
+  return {
+    maxHeightLevel: resolveMaximumHeightLevel(card),
+    maxWidthLevel: card.maxWidthLevel ?? 6,
+    minHeightByWidthLevel: card.minHeightByWidthLevel,
+    minHeightLevel: inferredMinimumHeightLevel(card),
+    minWidthLevel: card.minWidthLevel ?? 1,
+    narrowMinHeightLevel: card.narrowMinHeightLevel,
+  };
 }
 
-function resolveCardHeight(
+function resolveCardDimensions(
   card: LayoutCard,
-  preference: CardPreference | undefined,
-  currentSize: CardSize | undefined,
+  widthLevel: CardLayoutLevel,
+  heightLevel: CardLayoutLevel,
+  layoutWidth: number,
 ) {
-  const requestedHeight =
-    preference?.height ??
-    card.defaultHeight ??
-    (currentSize === "compact" ? "short" : "standard");
+  return resolveCardLayoutDimensions({
+    constraints: cardDimensionConstraints(card),
+    containerWidth: layoutWidth,
+    heightLevel,
+    rowSpanOverrides: card.rowSpanOverrides,
+    widthLevel,
+  });
+}
 
-  return clampCardHeight(requestedHeight, minimumCardHeight(card, currentSize));
+function resolveCardPreferenceDimensions(
+  card: LayoutCard,
+  widthLevel: CardLayoutLevel,
+  heightLevel: CardLayoutLevel,
+) {
+  return resolveCardLayoutDimensions({
+    constraints: cardDimensionConstraints(card),
+    heightLevel,
+    rowSpanOverrides: card.rowSpanOverrides,
+    tier: "desktop",
+    widthLevel,
+  });
+}
+
+function resolveMinimumHeightLevel(
+  card: LayoutCard,
+  widthLevel: CardLayoutLevel,
+  layoutWidth: number,
+) {
+  return resolveCardDimensions(card, widthLevel, 1, layoutWidth).heightLevel;
+}
+
+type CardLayoutItemStyle = React.CSSProperties & {
+  "--widget-column-span-desktop": number;
+  "--widget-column-span-single": number;
+  "--widget-column-span-three": number;
+  "--widget-column-span-two": number;
+  "--widget-row-span-multi": number;
+  "--widget-row-span-single": number;
+};
+
+function cardLayoutItemStyle(
+  card: LayoutCard,
+  widthLevel: CardLayoutLevel,
+  heightLevel: CardLayoutLevel,
+): CardLayoutItemStyle {
+  const dimensionsForTier = (
+    tier: "single" | "two-column" | "three-column" | "desktop",
+  ) =>
+    resolveCardLayoutDimensions({
+      constraints: cardDimensionConstraints(card),
+      heightLevel,
+      rowSpanOverrides: card.rowSpanOverrides,
+      tier,
+      widthLevel,
+    });
+  const single = dimensionsForTier("single");
+  const two = dimensionsForTier("two-column");
+  const three = dimensionsForTier("three-column");
+  const desktop = dimensionsForTier("desktop");
+
+  return {
+    "--widget-column-span-desktop": desktop.columnSpan,
+    "--widget-column-span-single": single.columnSpan,
+    "--widget-column-span-three": three.columnSpan,
+    "--widget-column-span-two": two.columnSpan,
+    "--widget-row-span-multi": two.rowSpan,
+    "--widget-row-span-single": single.rowSpan,
+  };
 }
 
 function orderByAllCardPreferences(cards: LayoutCard[], preferences: CardPreference[]) {
@@ -1361,17 +1780,29 @@ function getPreference(preferences: CardPreference[], cardId: string) {
   return preferences.find((preference) => preference.id === cardId);
 }
 
-function sizeLabel(size: CardSize | undefined) {
-  if (size === "full") return "Largura total";
-  if (size === "large") return "Três colunas";
-  if (size === "wide") return "Largo";
-  return "Compacto";
+function widthLevelLabel(level: CardLayoutLevel) {
+  const option = CARD_WIDTH_LEVEL_OPTIONS[level - 1];
+  return `${option.label} · ${option.percent}%`;
 }
 
-function heightLabel(height: CardHeight) {
-  if (height === "tall") return "Altura ampliada";
-  if (height === "standard") return "Altura padrão";
-  return "Altura baixa";
+function widthLevelContextLabel(level: CardLayoutLevel, widthRatio: number) {
+  const option = CARD_WIDTH_LEVEL_OPTIONS[level - 1];
+  const actualPercent = Math.round(widthRatio * 100);
+  return actualPercent === option.percent
+    ? widthLevelLabel(level)
+    : `${option.label} · ${actualPercent}% nesta tela`;
+}
+
+function heightLevelLabel(level: CardLayoutLevel) {
+  const option = CARD_HEIGHT_LEVEL_OPTIONS[level - 1];
+  return `${option.label} · ${option.pixels}px`;
+}
+
+function layoutPreviewLabel(layoutWidth: number) {
+  if (layoutWidth < 640) return "Celular · 1 coluna";
+  if (layoutWidth < 960) return "Tablet · 2 faixas";
+  if (layoutWidth < 1_200) return "Intermediário · 3 faixas";
+  return "Desktop · 4 faixas";
 }
 
 function formatPosition(index: number) {

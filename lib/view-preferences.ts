@@ -1,8 +1,83 @@
+import {
+  normalizeCardLayoutLevel,
+  type CardLayoutLevel,
+} from "@/lib/card-layout-sizing";
+
 export type CardMenuKey = "live" | "reports" | "analysis" | "occupancy";
 
 export type CardSize = "compact" | "wide" | "large" | "full";
 
 export type CardHeight = "short" | "standard" | "tall";
+
+const CARD_SIZE_LAYOUT_LEVELS: Record<CardSize, CardLayoutLevel> = {
+  compact: 1,
+  wide: 3,
+  large: 5,
+  full: 6,
+};
+
+const CARD_HEIGHT_LAYOUT_LEVELS: Record<CardHeight, CardLayoutLevel> = {
+  short: 1,
+  standard: 3,
+  tall: 5,
+};
+
+const CARD_SIZE_BY_LAYOUT_LEVEL: Record<CardLayoutLevel, CardSize> = {
+  1: "compact",
+  2: "compact",
+  3: "wide",
+  4: "large",
+  5: "large",
+  6: "full",
+};
+
+const CARD_HEIGHT_BY_LAYOUT_LEVEL: Record<CardLayoutLevel, CardHeight> = {
+  1: "short",
+  2: "standard",
+  3: "standard",
+  4: "tall",
+  5: "tall",
+  6: "tall",
+};
+
+const CARD_HEIGHT_ORDER: Record<CardHeight, number> = {
+  short: 0,
+  standard: 1,
+  tall: 2,
+};
+
+export function clampCardHeightToRange(
+  height: CardHeight,
+  minimum: CardHeight,
+  maximum: CardHeight,
+): CardHeight {
+  const effectiveMaximum =
+    CARD_HEIGHT_ORDER[maximum] < CARD_HEIGHT_ORDER[minimum]
+      ? minimum
+      : maximum;
+
+  if (CARD_HEIGHT_ORDER[height] < CARD_HEIGHT_ORDER[minimum]) return minimum;
+  if (CARD_HEIGHT_ORDER[height] > CARD_HEIGHT_ORDER[effectiveMaximum]) {
+    return effectiveMaximum;
+  }
+  return height;
+}
+
+export function cardSizeToLayoutLevel(size: CardSize): CardLayoutLevel {
+  return CARD_SIZE_LAYOUT_LEVELS[size];
+}
+
+export function cardHeightToLayoutLevel(height: CardHeight): CardLayoutLevel {
+  return CARD_HEIGHT_LAYOUT_LEVELS[height];
+}
+
+export function cardLayoutLevelToCardSize(level: CardLayoutLevel): CardSize {
+  return CARD_SIZE_BY_LAYOUT_LEVEL[level];
+}
+
+export function cardLayoutLevelToCardHeight(level: CardLayoutLevel): CardHeight {
+  return CARD_HEIGHT_BY_LAYOUT_LEVEL[level];
+}
 
 export type CardChartType = "bar" | "line" | "rose" | "treemap";
 
@@ -13,10 +88,12 @@ export type CardPreference = {
   chartType?: CardChartType;
   color?: string;
   height?: CardHeight;
+  heightLevel?: CardLayoutLevel;
   id: string;
   title?: string;
   visible: boolean;
   size?: CardSize;
+  widthLevel?: CardLayoutLevel;
   zoom?: CardZoom;
 };
 
@@ -53,6 +130,7 @@ export const cardViewMenus: CardMenuDefinition[] = [
       card("live_target_progress", "Hoje x média-base", "Progresso de hoje contra a média diária configurada."),
       card("live_month_previous_comparison", "Acumulado x mês anterior", "Mês corrente contra os dias equivalentes do mês anterior."),
       card("live_month_year_comparison", "Acumulado x ano anterior", "Mês corrente contra os dias equivalentes do ano anterior."),
+      card("live_chart_minute_day", "Minuto a minuto · Hoje", "Fluxo do dia em resolução de minuto, de 00h a 23h."),
       card("live_chart_hour", "Hora a hora", "Total horário atual e base comparativa."),
       card("live_moving_average_trend", "Tendência 7 x 30 dias", "Médias móveis diária rápida e lenta."),
       card("live_hourly_occupancy", "Ocupação hora a hora", "Saldo de entradas e saídas desde o horário inicial."),
@@ -180,24 +258,40 @@ export function normalizeCardPreferences(
   );
   const normalized = (preferences ?? [])
     .filter((preference) => definitionIds.has(preference.id))
-    .map((preference) => ({
-      chartType: isCardChartType(byId.get(preference.id)?.chartType)
-        ? byId.get(preference.id)?.chartType
-        : undefined,
-      color: isCardColor(byId.get(preference.id)?.color)
-        ? byId.get(preference.id)?.color
-        : undefined,
-      height: isCardHeight(byId.get(preference.id)?.height)
-        ? byId.get(preference.id)?.height
-        : undefined,
-      id: preference.id,
-      title: normalizeCardTitle(byId.get(preference.id)?.title),
-      visible: byId.get(preference.id)?.visible ?? true,
-      size: isCardSize(byId.get(preference.id)?.size)
-        ? byId.get(preference.id)?.size
-        : undefined,
-      zoom: normalizeCardZoom(byId.get(preference.id)?.zoom),
-    }));
+    .map((preference) => {
+      const storedPreference = byId.get(preference.id);
+      const legacyHeight = isCardHeight(storedPreference?.height)
+        ? storedPreference.height
+        : undefined;
+      const legacySize = isCardSize(storedPreference?.size)
+        ? storedPreference.size
+        : undefined;
+      const heightLevel =
+        normalizeCardLayoutLevel(storedPreference?.heightLevel) ??
+        (legacyHeight ? cardHeightToLayoutLevel(legacyHeight) : undefined);
+      const widthLevel =
+        normalizeCardLayoutLevel(storedPreference?.widthLevel) ??
+        (legacySize ? cardSizeToLayoutLevel(legacySize) : undefined);
+
+      return {
+        chartType: isCardChartType(storedPreference?.chartType)
+          ? storedPreference.chartType
+          : undefined,
+        color: isCardColor(storedPreference?.color)
+          ? storedPreference.color
+          : undefined,
+        height: heightLevel
+          ? cardLayoutLevelToCardHeight(heightLevel)
+          : undefined,
+        heightLevel,
+        id: preference.id,
+        title: normalizeCardTitle(storedPreference?.title),
+        visible: storedPreference?.visible ?? true,
+        size: widthLevel ? cardLayoutLevelToCardSize(widthLevel) : undefined,
+        widthLevel,
+        zoom: normalizeCardZoom(storedPreference?.zoom),
+      };
+    });
   const normalizedIds = new Set(normalized.map((preference) => preference.id));
   const defaultOrder = Array.from(definitionIds);
   const merged = [...normalized];
@@ -218,10 +312,12 @@ export function normalizeCardPreferences(
         chartType: undefined,
         color: undefined,
         height: undefined,
+        heightLevel: undefined,
         id,
         title: undefined,
         visible: true,
         size: undefined,
+        widthLevel: undefined,
         zoom: undefined,
       },
     );

@@ -324,6 +324,7 @@ export function OccupancyReportsDashboard({
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
   const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
   const [analysisSettingsOpen, setAnalysisSettingsOpen] = React.useState(false);
+  const [reportSettingsOpen, setReportSettingsOpen] = React.useState(false);
   const [layoutPreferences, setLayoutPreferences] = React.useState<
     CardPreference[]
   >([]);
@@ -1092,7 +1093,11 @@ export function OccupancyReportsDashboard({
       defaultSize: "compact" as const,
       id: card.id,
       label: card.label,
+      maxHeightLevel: 2 as const,
+      maxWidthLevel: 3 as const,
       minHeight: "short" as const,
+      minHeightLevel: 1 as const,
+      minWidthLevel: 1 as const,
       node: (
         <MetricCard
           description={card.description}
@@ -1111,7 +1116,12 @@ export function OccupancyReportsDashboard({
       defaultSize: "wide" as const,
       id: definition.id,
       label: definition.label,
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
       minHeight: "standard" as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
+      narrowMinHeightLevel: 5 as const,
       node: (
         <OccupancyReportChartCard
           definition={definition}
@@ -1296,6 +1306,69 @@ export function OccupancyReportsDashboard({
       value={analysisRangeInput}
     />
   ) : null;
+  const compactViewActions = (
+    <>
+      <ReportExportActions
+        compact
+        disabled={
+          chartsPending ||
+          !selectedScope ||
+          Boolean(occupancyCertificationError) ||
+          reportDataCompleteUntil === null
+        }
+        payload={occupancyReportPayload}
+      />
+      {canEditVisual ? (
+        <>
+          <ReorderModeButton
+            className="h-8 w-8 shrink-0"
+            enabled={layoutReorderMode}
+            onChange={setLayoutReorderMode}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={() => setLayoutOrganizerOpen(true)}
+            aria-label="Configurar widgets de ocupação"
+            title="Configurar widgets"
+          >
+            <Settings2 className="h-4 w-4" />
+          </Button>
+        </>
+      ) : null}
+      <Button
+        type="button"
+        variant="outline"
+        size="icon"
+        className="h-8 w-8 shrink-0"
+        onClick={() => {
+          if (selectedScope) loadCharts(selectedScope, true, true);
+          loadScopes();
+        }}
+        disabled={refreshing || chartsPending}
+        aria-label={
+          analysis
+            ? "Atualizar análise de Ocupação"
+            : "Atualizar relatório de Ocupação"
+        }
+        title={analysis ? "Atualizar análise" : "Atualizar relatório"}
+      >
+        <RefreshCw
+          className={cn(
+            "h-4 w-4",
+            (refreshing || chartsPending) && "animate-spin",
+          )}
+        />
+      </Button>
+      <MonitorModeButton
+        compact
+        onClick={enterMonitorMode}
+        disabled={!scopeOptions.length}
+      />
+    </>
+  );
 
   return (
     <section
@@ -1360,12 +1433,7 @@ export function OccupancyReportsDashboard({
           </div>
         </div>
       ) : (
-      <div
-        className={cn(
-          "rounded-md border border-border bg-card shadow-soft",
-          analysis ? "px-3 py-2" : "p-4",
-        )}
-      >
+      <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
         {occupancyCertificationError ? (
           <>
             {analysis ? (
@@ -1386,46 +1454,70 @@ export function OccupancyReportsDashboard({
           <div
             className={cn(
               analysis
-                ? "grid min-w-0 gap-2 sm:grid-cols-2"
-                : "grid gap-4 md:grid-cols-[180px_1fr_auto]",
+                ? "grid min-w-0 grid-cols-[minmax(0,32px)_minmax(0,64px)_minmax(0,96px)_minmax(212px,1fr)] items-center gap-1 @4xl:grid-cols-[300px_minmax(140px,170px)_minmax(180px,220px)_minmax(212px,1fr)] @4xl:gap-2"
+                : "grid min-w-0 grid-cols-[minmax(0,64px)_minmax(0,96px)_minmax(212px,1fr)] items-center gap-1 @md:grid-cols-[96px_minmax(120px,1fr)_minmax(212px,1fr)] @md:gap-2 @xl:grid-cols-[120px_200px_minmax(212px,1fr)] @2xl:grid-cols-[132px_220px_minmax(212px,1fr)]",
             )}
             aria-label={analysis ? "Carregando controles da análise de Ocupação" : undefined}
             role={analysis ? "region" : undefined}
           >
             {analysis ? (
-              <div className="min-w-0 sm:col-span-2">{analysisDateRangeControl}</div>
-            ) : null}
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className={cn("h-10 w-full", analysis && "sm:col-span-2")} />
+              <>
+                <div className="col-start-1 row-start-1 min-w-0">
+                  {analysisDateRangeControl}
+                </div>
+                <div className="contents">
+                  <Skeleton className="h-8 w-full" />
+                  <Skeleton className="h-8 w-full" />
+                </div>
+                <div className="col-start-4 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+                  <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @sm:block @5xl:w-12" />
+                  <Skeleton className="h-8 w-[212px] shrink-0" />
+                </div>
+              </>
+            ) : (
+              <>
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-full" />
+                <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+                  <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @lg:block @2xl:w-10 @4xl:w-24" />
+                  <Skeleton className="h-8 w-[212px] max-w-full shrink-0" />
+                </div>
+              </>
+            )}
           </div>
         ) : scopeOptions.length ? (
-          <div className={cn(analysis && "space-y-2")}>
+          <div className="space-y-2">
             <div
-              aria-label={analysis ? "Controles da análise de Ocupação" : undefined}
+              aria-label={
+                analysis
+                  ? "Controles da análise de Ocupação"
+                  : "Controles dos relatórios de Ocupação"
+              }
               className={cn(
                 analysis
-                  ? "grid min-w-0 gap-2 sm:grid-cols-2 lg:grid-cols-[minmax(240px,auto)_minmax(140px,170px)_minmax(180px,220px)_auto] lg:items-center"
-                  : "flex flex-col gap-3 2xl:flex-row 2xl:items-end 2xl:justify-between",
+                  ? "grid min-w-0 grid-cols-[minmax(0,32px)_minmax(0,64px)_minmax(0,96px)_minmax(212px,1fr)] items-center gap-1 @4xl:grid-cols-[300px_minmax(140px,170px)_minmax(180px,220px)_minmax(212px,1fr)] @4xl:gap-2"
+                  : "grid min-w-0 grid-cols-[minmax(0,64px)_minmax(0,96px)_minmax(212px,1fr)] items-center gap-1 @md:grid-cols-[96px_minmax(120px,1fr)_minmax(212px,1fr)] @md:gap-2 @xl:grid-cols-[120px_200px_minmax(212px,1fr)] @2xl:grid-cols-[132px_220px_minmax(212px,1fr)]",
               )}
-              role={analysis ? "group" : undefined}
+              role="group"
             >
             {analysis ? (
-              <div className="min-w-0 sm:col-span-2 lg:col-span-1">
+              <div className="col-start-1 row-start-1 min-w-0">
                 {analysisDateRangeControl}
               </div>
             ) : null}
             <div
-              aria-label={analysis ? "Ações da análise de Ocupação" : undefined}
               className={cn(
                 analysis
                   ? "contents"
-                  : "grid min-w-0 flex-1 gap-3 md:grid-cols-[180px_minmax(0,1fr)]",
+                  : "contents",
               )}
             >
-              <div className={cn(analysis ? "min-w-0" : "space-y-2")}>
+              <div className="min-w-0">
                 {!analysis ? (
-                  <Label className="block" htmlFor={scopeModeSelectId}>
+                  <Label
+                    className="sr-only"
+                    htmlFor={scopeModeSelectId}
+                  >
                     Visão
                   </Label>
                 ) : null}
@@ -1439,8 +1531,12 @@ export function OccupancyReportsDashboard({
                 >
                   <SelectTrigger
                     id={scopeModeSelectId}
-                    aria-label={analysis ? "Tipo de visão da análise de Ocupação" : undefined}
-                    className={cn("bg-card", analysis && "h-8 w-full min-w-0")}
+                    aria-label={
+                      analysis
+                        ? "Tipo de visão da análise de Ocupação"
+                        : "Tipo de visão dos relatórios de Ocupação"
+                    }
+                    className="h-8 w-full min-w-0 bg-card"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -1453,17 +1549,24 @@ export function OccupancyReportsDashboard({
                   </SelectContent>
                 </Select>
               </div>
-              <div className="min-w-0 space-y-2">
+              <div className="min-w-0">
                 {!analysis ? (
-                  <Label className="block" htmlFor={scopeSelectId}>
+                  <Label
+                    className="sr-only"
+                    htmlFor={scopeSelectId}
+                  >
                     {scopeModeLabel(scopeMode)}
                   </Label>
                 ) : null}
                 <Select value={selectedId} onValueChange={updateSelectedScope}>
                   <SelectTrigger
                     id={scopeSelectId}
-                    aria-label={analysis ? `${scopeModeLabel(scopeMode)} da análise de Ocupação` : undefined}
-                    className={cn("bg-card", analysis && "h-8 w-full min-w-0")}
+                    aria-label={
+                      analysis
+                        ? `${scopeModeLabel(scopeMode)} da análise de Ocupação`
+                        : `${scopeModeLabel(scopeMode)} dos relatórios em foco`
+                    }
+                    className="h-8 w-full min-w-0 bg-card"
                   >
                     <SelectValue placeholder="Selecione uma visão" />
                   </SelectTrigger>
@@ -1477,130 +1580,94 @@ export function OccupancyReportsDashboard({
                 </Select>
               </div>
             </div>
-            <div
-              className={cn(
-                analysis
-                  ? "flex min-w-0 flex-wrap items-center gap-2 sm:col-span-2 lg:col-span-1 lg:ml-auto lg:flex-nowrap"
-                  : "flex flex-wrap items-center gap-2",
-              )}
-            >
-              {!analysis ? (
-                <Badge variant="outline" className="gap-1 bg-card">
-                  <MapPinned className="h-3.5 w-3.5" />
-                  {scopeModeLabel(scopeMode)}
-                </Badge>
-              ) : null}
-              {analysis ? (
-                <Button
-                  type="button"
-                  size="icon"
-                  className="h-8 w-8"
-                  variant={analysisSettingsOpen ? "default" : "outline"}
-                  onClick={() => setAnalysisSettingsOpen((current) => !current)}
-                  aria-expanded={analysisSettingsOpen}
-                  aria-controls="occupancy-analysis-settings"
-                  aria-label="Configurações da análise de Ocupação"
-                  title="Configurações da análise"
-                >
-                  <SlidersHorizontal className="h-4 w-4" />
-                </Button>
-              ) : (
-                <>
-                  <PreviousPeriodToggle
-                    checked={showPreviousPeriod}
-                    onCheckedChange={updateShowPreviousPeriod}
-                  />
-                  {showPreviousPeriod ? (
-                    <ComparisonModeSelect
-                      value={intradayComparison}
-                      onValueChange={updateIntradayComparison}
-                    />
-                  ) : null}
-                  <MetricVisibilityControls
-                    value={metricVisibility}
-                    onChange={setMetricVisibility}
-                  />
-                </>
-              )}
-              <ReportExportActions
-                compact
-                disabled={
-                  chartsPending ||
-                  !selectedScope ||
-                  Boolean(occupancyCertificationError) ||
-                  reportDataCompleteUntil === null
-                }
-                payload={occupancyReportPayload}
-              />
-              {canEditVisual ? (
-                <>
-                  <ReorderModeButton
-                    className={cn(analysis && "h-8 w-8")}
-                    enabled={layoutReorderMode}
-                    onChange={setLayoutReorderMode}
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    className={cn(analysis && "h-8 w-8")}
-                    onClick={() => setLayoutOrganizerOpen(true)}
-                    aria-label="Configurar widgets de ocupação"
-                    title="Configurar widgets"
-                  >
-                    <Settings2 className="h-4 w-4" />
-                  </Button>
-                </>
-              ) : null}
-              {visibleLastUpdated ? (
-                analysis ? (
+            {analysis ? (
+              <div className="col-start-4 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+                {visibleLastUpdated ? (
                   <span
-                    className="inline-flex h-8 shrink-0 items-center gap-1 px-1 text-xs tabular-nums text-muted-foreground"
+                    className="hidden h-8 w-8 shrink-0 items-center justify-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @sm:inline-flex @5xl:w-auto @5xl:justify-start @5xl:px-1.5"
                     aria-label={`Última atualização às ${formatTime(visibleLastUpdated)}`}
                     title={`Última atualização: ${formatTime(visibleLastUpdated)}`}
                   >
-                    <Clock3 className="h-3.5 w-3.5" />
-                    {formatTime(visibleLastUpdated)}
+                    <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                    <span className="sr-only @5xl:not-sr-only">
+                      {formatTime(visibleLastUpdated)}
+                    </span>
                   </span>
-                ) : (
-                  <Badge variant="outline" className="gap-1 bg-card">
-                  <Clock3 className="h-3.5 w-3.5" />
-                  {formatTime(visibleLastUpdated)}
-                  </Badge>
-                )
-              ) : null}
-              <Button
-                type="button"
-                variant="outline"
-                size={analysis ? "icon" : "default"}
-                className={cn(analysis && "h-8 w-8")}
-                onClick={() => {
-                  if (selectedScope) loadCharts(selectedScope, true, true);
-                  loadScopes();
-                }}
-                disabled={refreshing || chartsPending}
-                aria-label={analysis ? "Atualizar análise de Ocupação" : undefined}
-                title={analysis ? "Atualizar análise" : undefined}
-              >
-                <RefreshCw
-                  className={cn(
-                    "h-4 w-4",
-                    (refreshing || chartsPending) && "animate-spin",
-                  )}
-                />
-                {analysis ? <span className="sr-only">Atualizar</span> : "Atualizar"}
-              </Button>
-              <MonitorModeButton
-                compact={analysis}
-                onClick={enterMonitorMode}
-                disabled={!scopeOptions.length}
-              />
+                ) : null}
+                <div
+                  aria-label="Ações da análise de Ocupação"
+                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [&_[data-premium-control]]:shrink-0"
+                  role="group"
+                >
+                  <Button
+                    type="button"
+                    size="icon"
+                    className="h-8 w-8 shrink-0"
+                    variant={analysisSettingsOpen ? "default" : "outline"}
+                    onClick={() => setAnalysisSettingsOpen((current) => !current)}
+                    aria-expanded={analysisSettingsOpen}
+                    aria-controls="occupancy-analysis-settings"
+                    aria-label="Configurações da análise de Ocupação"
+                    title="Configurações da análise"
+                  >
+                    <SlidersHorizontal className="h-4 w-4" />
+                  </Button>
+                  {compactViewActions}
+                </div>
+              </div>
+            ) : (
+              <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+                {visibleLastUpdated ? (
+                  <span
+                    className="hidden min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @lg:inline-flex"
+                    aria-label={`Última atualização às ${formatTime(visibleLastUpdated)}`}
+                    title={`Última atualização: ${formatTime(visibleLastUpdated)}`}
+                  >
+                    <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                    <span className="hidden @2xl:inline @4xl:hidden">
+                      {formatTime(visibleLastUpdated)}
+                    </span>
+                    <span className="hidden @4xl:inline">
+                      Atualizado às {formatTime(visibleLastUpdated)}
+                    </span>
+                  </span>
+                ) : null}
+                <div
+                  aria-label="Ações dos relatórios de Ocupação"
+                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [&_[data-premium-control]]:shrink-0"
+                  role="group"
+                >
+                  <Button
+                    type="button"
+                    size="icon"
+                    className="h-8 w-8 shrink-0"
+                    variant={reportSettingsOpen ? "default" : "outline"}
+                    onClick={() => setReportSettingsOpen((current) => !current)}
+                    aria-expanded={reportSettingsOpen}
+                    aria-controls="occupancy-report-settings"
+                    aria-label="Configurações dos relatórios de Ocupação"
+                    title="Configurações dos relatórios"
+                  >
+                    <SlidersHorizontal className="h-4 w-4" />
+                  </Button>
+                  {compactViewActions}
+                </div>
+              </div>
+            )}
             </div>
-            </div>
-            {analysis && analysisSettingsOpen ? (
+            {(analysis && analysisSettingsOpen) ||
+            (!analysis && reportSettingsOpen) ? (
               <div
-                id="occupancy-analysis-settings"
-                aria-label="Configurações da análise de Ocupação"
+                id={
+                  analysis
+                    ? "occupancy-analysis-settings"
+                    : "occupancy-report-settings"
+                }
+                aria-label={
+                  analysis
+                    ? "Configurações da análise de Ocupação"
+                    : "Configurações dos relatórios de Ocupação"
+                }
                 className="grid gap-3 rounded-xl border bg-muted/15 p-3 shadow-sm lg:grid-cols-2"
                 role="group"
               >
@@ -1620,6 +1687,7 @@ export function OccupancyReportsDashboard({
                     {showPreviousPeriod ? (
                       <ComparisonModeSelect
                         compact
+                        fit
                         value={intradayComparison}
                         onValueChange={updateIntradayComparison}
                       />
@@ -1863,11 +1931,11 @@ function OccupancyReportChartCard({
           </p>
         ) : null}
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : state?.error ? (
           <EmptyChartState text="Dados temporariamente indisponíveis para este gráfico." />
         ) : hasData ? (
-          <div className="h-[300px] w-full">
+          <div className="h-full min-h-0 w-full">
             <EChart option={option} themeMode="explicit" />
           </div>
         ) : (
@@ -1880,7 +1948,7 @@ function OccupancyReportChartCard({
 
 function EmptyChartState({ text }: { text: string }) {
   return (
-    <div className="flex h-[300px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+    <div className="flex h-full min-h-0 items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
       {text}
     </div>
   );
@@ -1906,7 +1974,9 @@ function MetricVisibilityControls({
       aria-label="Séries históricas exibidas"
       className={cn(
         "flex flex-wrap items-center rounded-md border bg-muted/20",
-        compact ? "h-8 gap-0.5 p-0.5" : "gap-1 p-1",
+        compact
+          ? "h-8 shrink-0 flex-nowrap gap-0.5 p-0.5"
+          : "gap-1 p-1",
       )}
       role="group"
     >
@@ -1957,7 +2027,7 @@ function PreviousPeriodToggle({
       aria-checked={checked}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        "inline-flex items-center gap-2 rounded-md border px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+        "inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md border px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
         compact ? "h-8" : "h-9",
         checked
           ? "border-primary/30 bg-primary/10 text-primary"
@@ -1984,10 +2054,12 @@ function PreviousPeriodToggle({
 
 function ComparisonModeSelect({
   compact = false,
+  fit = false,
   value,
   onValueChange,
 }: {
   compact?: boolean;
+  fit?: boolean;
   value: IntradayComparisonMode;
   onValueChange: (value: IntradayComparisonMode) => void;
 }) {
@@ -2001,7 +2073,8 @@ function ComparisonModeSelect({
       <SelectTrigger
         aria-label="Base temporal da comparação"
         className={cn(
-          "w-full min-w-0 bg-card text-xs sm:w-[190px]",
+          "min-w-0 max-w-full bg-card text-xs",
+          fit ? "w-[190px]" : "w-full sm:w-[190px]",
           compact ? "h-8" : "h-9",
         )}
       >

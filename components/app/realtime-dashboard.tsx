@@ -97,7 +97,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { hasVisualAdminAccess } from "@/lib/access";
+import { hasMasterAccess, hasVisualAdminAccess } from "@/lib/access";
 import { apiFetch } from "@/lib/api";
 import {
   aggregateBucketInRange,
@@ -114,6 +114,12 @@ import {
   type HourlyAggregateCache,
 } from "@/lib/aggregate-hour-query";
 import {
+  clearMinuteDayAggregateCache,
+  fetchMinuteDayAggregateBootstrap,
+  refreshMinuteDayAggregateCache,
+  type MinuteDayAggregateCache,
+} from "@/lib/aggregate-minute-day-query";
+import {
   reconcileAggregateRows,
   rollupAggregateRowsMany,
 } from "@/lib/aggregate-reconciliation";
@@ -129,6 +135,7 @@ import {
 import {
   certifyCompanyScopeTimeZoneOverride,
   filterScopedApiRows,
+  getCurrentUserCompanyId,
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
   useEffectiveCompanyTimeZoneResolution,
@@ -178,6 +185,11 @@ import {
   HOUR_OF_DAY_LABELS,
   latestHourlyPointHour,
 } from "@/lib/hourly-axis";
+import {
+  buildFixedMinuteDayAxis,
+  minuteDayHourAxisLabel,
+  type MinuteDayAxisSlot,
+} from "@/lib/minute-axis";
 import {
   DAY_OF_MONTH_AXIS_LABELS,
   buildCalendarAxisLabel,
@@ -263,6 +275,15 @@ type RealtimeChartState = {
   rows: AggregateEventRow[];
   granularity: AggregateGranularity;
   error?: string;
+};
+
+type OptionalWorkerMetadata = {
+  rows: Worker[];
+  warning: string;
+};
+
+type WorkerMetadataValidationOptions = {
+  requireExplicitCompanyId: boolean;
 };
 
 type ChartPoint = {
@@ -355,6 +376,7 @@ const OPERATIONAL_TREND_DAYS_ID = "live_operational_trend_days";
 const OPERATIONAL_MONTH_HOURS_ID = "live_operational_month_hours";
 const OPERATIONAL_CURRENT_HOUR_MINUTES_ID =
   "live_operational_current_hour_minutes";
+const LIVE_DAY_MINUTES_ID = "live_chart_minute_day";
 const LIVE_ANNUAL_RECENT_MONTHS_ID = "live_annual_recent_months";
 const OCCUPANCY_HOURS_ID = "live_hourly_occupancy_data";
 const CANONICAL_HOUR_DERIVED_TARGETS: ReadonlyArray<{
@@ -457,6 +479,10 @@ export function RealtimeDashboard({
     ? certifyCompanyScopeTimeZoneOverride(user, cleanCompanyIdOverride)
     : null;
   const companyScopeId = cleanCompanyIdOverride || storedCompanyScopeId;
+  const requireExplicitWorkerCompanyId =
+    hasMasterAccess(user) &&
+    Boolean(companyScopeId) &&
+    getCurrentUserCompanyId(user) !== companyScopeId;
   const companyTimeZone =
     overrideScopeCertification?.timeZone ?? companyTimeZoneResolution.timeZone;
   const companyScopeCertificationError =
@@ -493,6 +519,8 @@ export function RealtimeDashboard({
   const [loadingAnnualHistory, setLoadingAnnualHistory] =
     React.useState(false);
   const [metadataError, setMetadataError] = React.useState("");
+  const [workerMetadataWarning, setWorkerMetadataWarning] =
+    React.useState("");
   const [chartLoadError, setChartLoadError] = React.useState("");
   const [hasLoadedCharts, setHasLoadedCharts] = React.useState(false);
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
@@ -532,6 +560,9 @@ export function RealtimeDashboard({
   const annualHistoryAttemptMinuteRef = React.useRef("");
   const metadataRequestSequenceRef = React.useRef(0);
   const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
+    new Map(),
+  );
+  const minuteDayAggregateCacheRef = React.useRef<MinuteDayAggregateCache>(
     new Map(),
   );
 
@@ -626,6 +657,8 @@ export function RealtimeDashboard({
       loadLiveOperationalSettings(companyScopeId, preferenceScope),
     );
   }, [companyScopeId, preferenceScope]);
+  const minuteDayState = chartData[LIVE_DAY_MINUTES_ID];
+  const minuteDayRows = minuteDayState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const hourState = chartData.live_chart_hour;
   const hourRows = hourState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const occupancyHourState = chartData[OCCUPANCY_HOURS_ID];
@@ -688,7 +721,9 @@ export function RealtimeDashboard({
     companyScopeCertificationError ||
     metadataError ||
     chartLoadError ||
-    Object.values(chartData).find((state) => state.error)?.error;
+    Object.entries(chartData).find(
+      ([id, state]) => id !== LIVE_DAY_MINUTES_ID && state.error,
+    )?.[1].error;
   const liveComparisonDisabledReason = liveDataCertificationError
     ? `Comparativo não certificado: ${liveDataCertificationError}`
     : !liveComparisonHourlySource
@@ -710,30 +745,43 @@ export function RealtimeDashboard({
       setSelectedId("");
       setChartData({});
       setMetadataError(companyScopeCertificationError);
+      setWorkerMetadataWarning("");
       setLoadingScenarios(false);
       return;
     }
     if (!silent) {
       setLoadingScenarios(true);
       setMetadataError("");
+      setWorkerMetadataWarning("");
     }
     try {
-      const [data, cameraRows, locationRows, workerRows] = await Promise.all([
-        apiFetch<unknown>("/scenarios", { companyScopeId }),
-        apiFetch<unknown>("/cameras", { companyScopeId }),
-        apiFetch<unknown>("/locations", { companyScopeId }),
-        fetchRealtimeWorkers(companyScopeId),
-      ]);
+      const [scenarioResult, cameraResult, locationResult, workerResult] =
+        await Promise.allSettled([
+          apiFetch<unknown>("/scenarios", { companyScopeId }),
+          apiFetch<unknown>("/cameras", { companyScopeId }),
+          apiFetch<unknown>("/locations", { companyScopeId }),
+          fetchRealtimeWorkers(companyScopeId, {
+            requireExplicitCompanyId: requireExplicitWorkerCompanyId,
+          }),
+        ]);
+      if (scenarioResult.status === "rejected") throw scenarioResult.reason;
+      if (cameraResult.status === "rejected") throw cameraResult.reason;
+      if (locationResult.status === "rejected") throw locationResult.reason;
+
+      const workerMetadata =
+        workerResult.status === "fulfilled"
+          ? workerResult.value
+          : unavailableWorkerMetadata(workerResult.reason);
       const scopedScenarios = filterScopedApiRows(
-        requireScenarioRows(data, companyScopeId),
+        requireScenarioRows(scenarioResult.value, companyScopeId),
         companyScopeId,
       );
       const scopedCameras = filterScopedApiRows(
-        requireCameraRows(cameraRows, companyScopeId),
+        requireCameraRows(cameraResult.value, companyScopeId),
         companyScopeId,
       );
       const scopedLocations = filterScopedApiRows(
-        requireLocationRows(locationRows, companyScopeId),
+        requireLocationRows(locationResult.value, companyScopeId),
         companyScopeId,
       );
       const subLocationRows = await fetchSubLocations(
@@ -751,11 +799,12 @@ export function RealtimeDashboard({
 
       if (requestSequence !== metadataRequestSequenceRef.current) return;
       setMetadataError("");
+      setWorkerMetadataWarning(workerMetadata.warning);
       setScenarios(visible);
       setCameras(scopedCameras);
       setLocations(scopedLocations);
       setSubLocations(subLocationRows);
-      setWorkers(workerRows);
+      setWorkers(workerMetadata.rows);
       const modes = buildRealtimeScopeModes({
         cameras: scopedCameras,
         groups: cameraGroups,
@@ -764,7 +813,7 @@ export function RealtimeDashboard({
         scenarios: visible,
         subLocations: subLocationRows,
         workerLocationAssignments,
-        workers: workerRows,
+        workers: workerMetadata.rows,
       });
       const nextMode = modes.some((mode) => mode.value === scopeMode)
         ? scopeMode
@@ -778,7 +827,7 @@ export function RealtimeDashboard({
         scenarios: visible,
         subLocations: subLocationRows,
         workerLocationAssignments,
-        workers: workerRows,
+        workers: workerMetadata.rows,
       });
 
       if (nextMode !== scopeMode) setScopeMode(nextMode);
@@ -804,6 +853,7 @@ export function RealtimeDashboard({
       setSelectedId("");
       setChartData({});
       setMetadataError(message);
+      setWorkerMetadataWarning("");
       toast.error(message);
     } finally {
       if (!silent && requestSequence === metadataRequestSequenceRef.current) {
@@ -815,6 +865,7 @@ export function RealtimeDashboard({
     companyScopeCertificationError,
     companyScopeId,
     manager,
+    requireExplicitWorkerCompanyId,
     scopeMode,
     workerLocationAssignments,
   ]);
@@ -829,6 +880,7 @@ export function RealtimeDashboard({
         runningRef.current = false;
         hasLoadedChartsRef.current = false;
         clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+        clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
         setChartData({});
         setAnnualHistoryState(null);
         setChartLoadError(companyScopeCertificationError);
@@ -860,6 +912,7 @@ export function RealtimeDashboard({
         runningRef.current = false;
         hasLoadedChartsRef.current = false;
         clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+        clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
         const message =
           error instanceof Error
             ? error.message
@@ -889,6 +942,8 @@ export function RealtimeDashboard({
 
       const now = new Date();
       const definitions = buildRealtimeChartDefinitions(now);
+      const minuteDayDefinition = buildMinuteDayDefinition(now);
+      const minuteDayCacheScope = `live-minute-day:${companyScopeId}:${companyTimeZone}`;
       const supportDefinitions = [
         buildCurrentMonthDaysDefinition(now),
         buildOperationalComparisonHoursDefinition(
@@ -908,7 +963,7 @@ export function RealtimeDashboard({
       ];
       const allDefinitions = [...definitions, ...supportDefinitions];
       try {
-        const entries = await Promise.all(
+        const entriesPromise = Promise.all(
           allDefinitions.map(async (definition) => {
             if (CANONICAL_HOUR_DERIVED_IDS.has(definition.id)) {
               return [
@@ -971,6 +1026,37 @@ export function RealtimeDashboard({
             }
           }),
         );
+        const minuteDayBootstrapPromise =
+          fetchMinuteDayAggregateBootstrap({
+            cache: minuteDayAggregateCacheRef.current,
+            cacheScope: minuteDayCacheScope,
+            companyScopeId,
+            from: minuteDayDefinition.from,
+            now,
+            signal: controller.signal,
+            to: minuteDayDefinition.to,
+          })
+            .then(
+              (rows): RealtimeChartState => ({
+                granularity: "minute",
+                rows,
+              }),
+            )
+            .catch((error): RealtimeChartState => {
+              if (isAbortError(error)) throw error;
+              return {
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : "Não foi possível carregar os minutos do dia.",
+                granularity: "minute",
+                rows: [],
+              };
+            });
+        const [entries, minuteDayBootstrapState] = await Promise.all([
+          entriesPromise,
+          minuteDayBootstrapPromise,
+        ]);
 
         if (
           controller.signal.aborted ||
@@ -984,6 +1070,50 @@ export function RealtimeDashboard({
           allDefinitions,
           now,
         );
+        const rollingMinuteDefinition = definitions.find(
+          (definition) => definition.id === "live_chart_minute",
+        );
+        const rollingMinuteState = nextData.live_chart_minute;
+        let minuteDayRows = minuteDayBootstrapState.rows;
+        let minuteDayError = minuteDayBootstrapState.error;
+        if (
+          !minuteDayError &&
+          rollingMinuteDefinition &&
+          rollingMinuteState &&
+          !rollingMinuteState.error &&
+          rollingMinuteState.granularity === "minute"
+        ) {
+          try {
+            minuteDayRows =
+              (await refreshMinuteDayAggregateCache({
+                cache: minuteDayAggregateCacheRef.current,
+                cacheScope: minuteDayCacheScope,
+                companyScopeId,
+                from: minuteDayDefinition.from,
+                now,
+                signal: controller.signal,
+                sourceFrom: new Date(
+                  Math.max(
+                    minuteDayDefinition.from.getTime(),
+                    rollingMinuteDefinition.from.getTime(),
+                  ),
+                ),
+                sourceRows: rollingMinuteState.rows,
+                sourceTo: minuteDayDefinition.to,
+              })) ?? minuteDayRows;
+          } catch (error) {
+            if (isAbortError(error)) throw error;
+            minuteDayError =
+              error instanceof Error
+                ? error.message
+                : "Não foi possível reconciliar os minutos do dia.";
+          }
+        }
+        nextData[LIVE_DAY_MINUTES_ID] = {
+          granularity: "minute",
+          ...(minuteDayError ? { error: minuteDayError } : {}),
+          rows: minuteDayRows,
+        };
         const refreshedAt = new Date();
 
         setChartData(nextData);
@@ -993,7 +1123,11 @@ export function RealtimeDashboard({
         setHasLoadedCharts(true);
         hasLoadedChartsRef.current = true;
 
-        if (entries.some(([, state]) => state.error) && !silentLoad) {
+        if (
+          (entries.some(([, state]) => state.error) ||
+            minuteDayBootstrapState.error) &&
+          !silentLoad
+        ) {
           toast.error(
             "Alguns dados não puderam ser reconciliados; os valores afetados não estão certificados.",
           );
@@ -1200,7 +1334,9 @@ export function RealtimeDashboard({
     annualHistoryLoadedDayRef.current = "";
     annualHistoryAttemptMinuteRef.current = "";
     clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+    clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
     setMetadataError("");
+    setWorkerMetadataWarning("");
     setChartLoadError(companyScopeCertificationError);
     setAnnualHistoryState(null);
     setLoadingAnnualHistory(false);
@@ -2234,7 +2370,17 @@ export function RealtimeDashboard({
         />
       ),
     },
-  ].map((card) => ({ ...card, titleEditable: true as const }));
+  ].map((card) => ({
+    ...card,
+    defaultHeight: "short" as const,
+    maxHeight: "short" as const,
+    maxHeightLevel: 1 as const,
+    maxWidthLevel: 3 as const,
+    minHeight: "short" as const,
+    minHeightLevel: 1 as const,
+    minWidthLevel: 1 as const,
+    titleEditable: true as const,
+  }));
 
   const operationalComparisonDefinition =
     buildOperationalComparisonHoursDefinition(
@@ -2244,7 +2390,35 @@ export function RealtimeDashboard({
   const hourlyDefinition = chartDefinitions.find(
     (definition) => definition.id === "live_chart_hour",
   );
+  const minuteDayDefinition = buildMinuteDayDefinition(clock);
   const operationalCards = [
+    {
+      id: LIVE_DAY_MINUTES_ID,
+      label: "Minuto a minuto · Hoje",
+      defaultHeight: "tall" as const,
+      defaultSize: "full" as const,
+      className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 4 as const,
+      narrowMinHeightLevel: 5 as const,
+      titleEditable: true as const,
+      zoomEnabled: true as const,
+      node: selectedScope ? (
+        <MinuteDayChartCard
+          clock={clock}
+          companyTimeZone={companyTimeZone}
+          definition={minuteDayDefinition}
+          loading={initialLoading}
+          rows={minuteDayRows}
+          scope={selectedScope}
+          state={minuteDayState}
+        />
+      ) : (
+        <EmptyRealtimeCard title="Minuto a minuto · Hoje" />
+      ),
+    },
     {
       id: "live_chart_hour",
       chartTypeEnabled: true,
@@ -2252,6 +2426,10 @@ export function RealtimeDashboard({
       defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
       node:
         selectedScope && hourlyDefinition ? (
         <OperationalHourlyChartCard
@@ -2281,6 +2459,10 @@ export function RealtimeDashboard({
       defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
       node: (
         <OperationalTrendCard
           error={operationalMonthHourState?.error}
@@ -2298,6 +2480,11 @@ export function RealtimeDashboard({
       defaultHeight: "standard" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 5 as const,
+      minWidthLevel: 4 as const,
+      narrowMinHeightLevel: 5 as const,
       node: (
         <HourlyOccupancyCard
           canConfigure={canEditVisual}
@@ -2383,6 +2570,11 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 5 as const,
+      minWidthLevel: 4 as const,
+      narrowMinHeightLevel: 5 as const,
       node: (
         <ScenarioCumulativeTotalsCard
           canConfigure={canEditVisual}
@@ -2407,8 +2599,11 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      standardHeightClassName: "row-span-4 sm:row-span-2",
-      tallHeightClassName: "row-span-4 sm:row-span-3",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 4 as const,
+      narrowMinHeightLevel: 5 as const,
       node: (
         <ScenarioTotalsTableCard
           canConfigure={canEditVisual}
@@ -2433,8 +2628,11 @@ export function RealtimeDashboard({
       label: "Comparativo mensal por ano",
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
-      minHeight: "tall" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 5 as const,
+      minWidthLevel: 4 as const,
       node: (
         <LiveAnnualComparisonCard
           accumulated={false}
@@ -2452,8 +2650,11 @@ export function RealtimeDashboard({
       label: "Comparativo acumulado por ano",
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
-      minHeight: "tall" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 5 as const,
+      minWidthLevel: 4 as const,
       node: (
         <LiveAnnualComparisonCard
           accumulated
@@ -2472,6 +2673,11 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 5 as const,
+      minWidthLevel: 4 as const,
+      narrowMinHeightLevel: 5 as const,
       node: (
         <OperationalHeatmapCard
           canConfigure={canEditVisual}
@@ -2503,6 +2709,10 @@ export function RealtimeDashboard({
       defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
       node: (
         <MonthlyAccessRankingCard
           canConfigure={canEditVisual}
@@ -2527,6 +2737,10 @@ export function RealtimeDashboard({
       defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
       node: (
         <PeakDaysRankingCard
           canConfigure={canEditVisual}
@@ -2552,6 +2766,10 @@ export function RealtimeDashboard({
       defaultHeight: "standard" as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
       node: (
         <ScenarioRoseCard
           canConfigure={canEditVisual}
@@ -2577,6 +2795,10 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 4 as const,
       node: (
         <OperationalMonthComparisonCard
           loading={initialLoading}
@@ -2594,6 +2816,10 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 4 as const,
       node: (
         <OperationalMonthCumulativeCard
           loading={initialLoading}
@@ -2672,6 +2898,10 @@ export function RealtimeDashboard({
     .filter((card): card is NonNullable<typeof card> => Boolean(card))
     .map((card) => ({
       ...card,
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
       titleEditable: true as const,
       zoomEnabled: true as const,
     }));
@@ -2686,6 +2916,11 @@ export function RealtimeDashboard({
         label: widget.title,
         defaultSize: "full" as const,
         className: "sm:col-span-2 xl:col-span-4",
+        maxHeightLevel: 6 as const,
+        maxWidthLevel: 6 as const,
+        minHeightLevel: 5 as const,
+        minWidthLevel: 4 as const,
+        narrowMinHeightLevel: 5 as const,
         node: (
           <ScenarioComparisonCard
             action={
@@ -2733,14 +2968,20 @@ export function RealtimeDashboard({
           widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
             ? ("full" as const)
             : ("wide" as const),
-        standardHeightClassName:
-          widget.widgetType === "totals_table"
-            ? "row-span-4 sm:row-span-2"
-            : undefined,
-        tallHeightClassName:
-          widget.widgetType === "totals_table"
-            ? "row-span-4 sm:row-span-3"
-            : undefined,
+        maxHeightLevel: 6 as const,
+        maxWidthLevel: 6 as const,
+        minHeightLevel:
+          widget.widgetType === "heatmap"
+            ? (5 as const)
+            : (4 as const),
+        minWidthLevel:
+          widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
+            ? (4 as const)
+            : (3 as const),
+        narrowMinHeightLevel:
+          widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
+            ? (5 as const)
+            : (4 as const),
         node: (
           <CustomScenarioWidgetCard
             canConfigure={canEditVisual}
@@ -2804,6 +3045,10 @@ export function RealtimeDashboard({
       label: widget.title,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
+      maxHeightLevel: 6 as const,
+      maxWidthLevel: 6 as const,
+      minHeightLevel: 4 as const,
+      minWidthLevel: 3 as const,
       node: scope ? (
         <RealtimeChartCard
           action={
@@ -2975,6 +3220,17 @@ export function RealtimeDashboard({
     readonly [string, ReportPayload["charts"][number]]
   > = [];
   if (selectedScope && hourlyDefinition) {
+    liveChartEntries.push([
+      LIVE_DAY_MINUTES_ID,
+      buildMinuteDayReportChart({
+        clock,
+        companyTimeZone,
+        definition: minuteDayDefinition,
+        rows: minuteDayRows,
+        scope: selectedScope,
+        widgetColor: liveColorByCardId.get(LIVE_DAY_MINUTES_ID),
+      }),
+    ]);
     liveChartEntries.push([
       "live_chart_hour",
       buildOperationalHourlyReportChart({
@@ -3391,6 +3647,14 @@ export function RealtimeDashboard({
 
   async function buildConfiguredLiveReportPayload() {
     const chartByCardId = new Map(configuredLiveChartEntries);
+    if (
+      visibleLiveCardIds.includes(LIVE_DAY_MINUTES_ID) &&
+      minuteDayState?.error
+    ) {
+      throw new Error(
+        `O widget minuto a minuto não está certificado: ${minuteDayState.error}`,
+      );
+    }
     const visibleComparisonWidgets = customWidgets.filter(
       (widget) =>
         widget.kind === "scenario_comparison" &&
@@ -3482,6 +3746,15 @@ export function RealtimeDashboard({
           Consulta bloqueada: {liveDataCertificationError}
         </div>
       ) : null}
+      {workerMetadataWarning && !initialLoading ? (
+        <div
+          aria-live="polite"
+          className="rounded-md border border-amber-300/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 [overflow-wrap:anywhere] dark:text-amber-200"
+          role="status"
+        >
+          {workerMetadataWarning}
+        </div>
+      ) : null}
 
       {monitorMode ? (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card/80 px-3 py-2">
@@ -3516,16 +3789,19 @@ export function RealtimeDashboard({
       ) : (
       <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
         {loadingScenarios ? (
-          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(140px,170px)_minmax(180px,220px)_minmax(0,1fr)]">
+          <div className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(176px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(176px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(176px,1fr)] @lg:grid-cols-[112px_168px_minmax(176px,1fr)] @xl:grid-cols-[120px_200px_minmax(176px,1fr)] @2xl:grid-cols-[132px_220px_minmax(176px,1fr)]">
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full @xl:col-span-2 @4xl:col-span-1 @4xl:w-48 @4xl:justify-self-end" />
+            <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+              <Skeleton className="hidden h-3.5 w-4 shrink-0 @lg:block @xl:w-12 @2xl:w-24" />
+              <Skeleton className="h-8 w-[176px] shrink-0" />
+            </div>
           </div>
         ) : scopeOptions.length ? (
           <div className="space-y-3">
             <div
               aria-label="Controles da visão ao vivo de Contagem"
-              className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(140px,170px)_minmax(180px,220px)_minmax(0,1fr)] @4xl:items-center"
+              className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(176px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(176px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(176px,1fr)] @lg:grid-cols-[112px_168px_minmax(176px,1fr)] @xl:grid-cols-[120px_200px_minmax(176px,1fr)] @2xl:grid-cols-[132px_220px_minmax(176px,1fr)]"
               role="group"
             >
               <div className="min-w-0">
@@ -3568,75 +3844,93 @@ export function RealtimeDashboard({
                   </SelectContent>
                 </Select>
               </div>
-              <div
-                aria-label="Ações da visão ao vivo de Contagem"
-                className="flex min-w-0 flex-wrap items-center gap-2 @xl:col-span-2 @xl:justify-end @4xl:col-span-1 @4xl:flex-nowrap @4xl:justify-self-end"
-                role="group"
-              >
-                <ReportExportActions
-                  compact
-                  disabled={
-                    initialLoading ||
-                    loadingAnnualHistory ||
-                    !selectedScope ||
-                    Boolean(liveDataCertificationError) ||
-                    Boolean(liveAnnualComparisonError)
-                  }
-                  getPayload={buildConfiguredLiveReportPayload}
-                  payload={liveReportPayload}
-                />
-                {canEditVisual ? (
-                  <>
-                    <ReorderModeButton
-                      className="h-8 w-8"
-                      enabled={layoutReorderMode}
-                      onChange={setLayoutReorderMode}
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      className="h-8 w-8"
-                      onClick={() => setLayoutOrganizerOpen(true)}
-                      aria-label="Configurar widgets"
-                      title="Configurar widgets"
-                    >
-                      <Settings2 className="h-4 w-4" />
-                    </Button>
-                  </>
-                ) : null}
-                <Button
-                  type="button"
-                  variant={operationalSettingsOpen ? "default" : "outline"}
-                  size="icon"
-                  className="h-8 w-8"
-                  onClick={() =>
-                    setOperationalSettingsOpen((current) => !current)
-                  }
-                  aria-label="Bases de comparação"
-                  title="Bases de comparação"
-                >
-                  <Target className="h-4 w-4" />
-                </Button>
+              <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
                 {lastUpdated ? (
                   <span
                     aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                    className="inline-flex h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
+                    className="hidden min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @lg:inline-flex"
                     title={`Última atualização às ${formatTime(lastUpdated)}`}
                   >
-                    <Clock3 className="h-3.5 w-3.5" />
-                    {formatTime(lastUpdated)}
+                    <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                    <span className="hidden @xl:inline @2xl:hidden">
+                      {formatTime(lastUpdated)}
+                    </span>
+                    <span className="hidden @2xl:inline">
+                      Atualizado às {formatTime(lastUpdated)}
+                    </span>
                   </span>
                 ) : null}
-                <MonitorModeButton
-                  compact
-                  onClick={enterMonitorMode}
-                  disabled={!scopeOptions.length}
-                />
+                <div
+                  aria-label="Ações da visão ao vivo de Contagem"
+                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1"
+                  role="group"
+                >
+                  <ReportExportActions
+                    compact
+                    disabled={
+                      initialLoading ||
+                      loadingAnnualHistory ||
+                      !selectedScope ||
+                      Boolean(liveDataCertificationError) ||
+                      Boolean(liveAnnualComparisonError)
+                    }
+                    getPayload={buildConfiguredLiveReportPayload}
+                    payload={liveReportPayload}
+                  />
+                  {canEditVisual ? (
+                    <>
+                      <ReorderModeButton
+                        className="h-8 w-8 shrink-0"
+                        enabled={layoutReorderMode}
+                        onChange={setLayoutReorderMode}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8 shrink-0"
+                        onClick={() => setLayoutOrganizerOpen(true)}
+                        aria-label="Configurar widgets"
+                        title="Configurar widgets"
+                      >
+                        <Settings2 className="h-4 w-4" />
+                      </Button>
+                    </>
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant={operationalSettingsOpen ? "default" : "outline"}
+                    size="icon"
+                    className="h-8 w-8 shrink-0"
+                    onClick={() =>
+                      setOperationalSettingsOpen((current) => !current)
+                    }
+                    aria-label={
+                      operationalSettingsOpen
+                        ? "Ocultar bases de comparação"
+                        : "Exibir bases de comparação"
+                    }
+                    aria-controls="counting-live-comparison-settings"
+                    aria-expanded={operationalSettingsOpen}
+                    title={
+                      operationalSettingsOpen
+                        ? "Ocultar bases de comparação"
+                        : "Exibir bases de comparação"
+                    }
+                  >
+                    <Target className="h-4 w-4" />
+                  </Button>
+                  <MonitorModeButton
+                    compact
+                    onClick={enterMonitorMode}
+                    disabled={!scopeOptions.length}
+                  />
+                </div>
               </div>
             </div>
             {operationalSettingsOpen ? (
               <div
+                id="counting-live-comparison-settings"
                 aria-label="Bases de comparação da Contagem"
                 className="grid gap-3 rounded-xl border bg-muted/15 p-3 md:grid-cols-2 md:items-end"
                 role="group"
@@ -3990,7 +4284,7 @@ function MetricCard({
   return (
     <Card className="@container h-full min-w-0 overflow-hidden">
       <CardContent className="h-full min-h-0 p-4">
-        <div className="min-w-0">
+        <div className="flex h-full min-h-0 min-w-0 flex-col">
           <div className="flex min-w-0 items-start gap-1.5 break-words text-xs font-medium uppercase text-muted-foreground [overflow-wrap:anywhere]">
             <Icon
               className={cn("h-3.5 w-3.5 shrink-0", iconToneClass)}
@@ -4026,7 +4320,7 @@ function MetricCard({
             </div>
           )}
           <div
-            className="mt-1 line-clamp-1 break-words text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
+            className="mt-auto line-clamp-2 break-words pt-1 text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
             title={description}
           >
             {description}
@@ -4046,6 +4340,91 @@ function metricComparisonClassName(value: string) {
     return "text-rose-700 dark:text-rose-300";
   }
   return "text-muted-foreground";
+}
+
+function MinuteDayChartCard({
+  clock,
+  companyTimeZone,
+  definition,
+  loading,
+  rows,
+  scope,
+  state,
+}: {
+  clock: Date;
+  companyTimeZone: string;
+  definition: RealtimeChartDefinition;
+  loading: boolean;
+  rows: AggregateEventRow[];
+  scope: RealtimeScopeOption;
+  state?: RealtimeChartState;
+}) {
+  const widgetColor = useWidgetColor();
+  const points = React.useMemo(
+    () => buildScopePoints(definition, rows, scope),
+    [definition, rows, scope],
+  );
+  const slots = React.useMemo(
+    () =>
+      buildFixedMinuteDayAxis({
+        day: clock,
+        points,
+        referenceTime: clock,
+        timeZone: companyTimeZone,
+      }),
+    [clock, companyTimeZone, points],
+  );
+  const option = React.useMemo(
+    () => buildMinuteDayChartOption(slots, widgetColor),
+    [slots, widgetColor],
+  );
+  const currentSlot = slots.find((slot) => slot.status === "current");
+
+  return (
+    <Card className="@container min-w-0 overflow-hidden">
+      <CardHeader className="pb-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Activity className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={definition.label} />
+            </CardTitle>
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
+              {definition.description}
+            </CardDescription>
+          </div>
+          <div className="col-span-full flex min-w-0 flex-wrap items-center gap-2">
+            <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
+              {scope.name}
+            </Badge>
+            {currentSlot ? (
+              <Badge variant="outline" className="w-fit bg-card">
+                Em andamento · {currentSlot.label}
+              </Badge>
+            ) : null}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <Skeleton className="h-full min-h-0 w-full" />
+        ) : state?.error ? (
+          <EmptyChartState text={state.error} />
+        ) : (
+          <div className="h-full min-h-0 w-full">
+            <EChart
+              ariaDescription="Fluxo certificado minuto a minuto do dia atual; minutos futuros permanecem vazios."
+              ariaLabel="Fluxo minuto a minuto de hoje"
+              className="h-full min-h-0"
+              mergeUpdates
+              option={option}
+              valueLabels="none"
+            />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function RealtimeChartCard({
@@ -4099,11 +4478,11 @@ function RealtimeChartCard({
       </CardHeader>
       <CardContent>
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : state?.error ? (
           <EmptyChartState text={state.error} />
         ) : hasData ? (
-          <div className="h-[300px] w-full">
+          <div className="h-full min-h-0 w-full">
             <EChart option={option} />
           </div>
         ) : (
@@ -4192,14 +4571,14 @@ function OperationalHourlyChartCard({
       </CardHeader>
       <CardContent>
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : state?.error ? (
           <EmptyChartState text={state.error} />
         ) : hasData ? (
-          <EChart option={option} className="h-[300px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
-            className="h-[300px]"
+            className="h-full min-h-0"
             text="Sem eventos para a comparação horária."
           />
         )}
@@ -4582,11 +4961,11 @@ function OperationalHeatmapCard({
             text="Selecione ao menos um cenário para montar o mapa de calor."
           />
         ) : loading ? (
-          <Skeleton className="h-[500px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : error ? (
           <EmptyChartState className="h-[260px]" text={error} />
         ) : hasData ? (
-          <EChart option={option} className="h-[500px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[260px]"
@@ -4711,11 +5090,11 @@ function HourlyOccupancyCard({
             text="Configure ao menos um cenário de entrada ou de saída."
           />
         ) : loading ? (
-          <Skeleton className="h-[320px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : error ? (
           <EmptyChartState className="h-[220px]" text={error} />
         ) : hasData ? (
-          <EChart option={option} className="h-[320px] min-h-0 flex-1" />
+          <EChart option={option} className="h-full min-h-0 flex-1" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -4931,9 +5310,9 @@ function ScenarioCumulativeTotalsCard({
             text="Selecione ao menos um cenário para calcular o acumulado."
           />
         ) : loading ? (
-          <Skeleton className="h-[320px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : orderedPoints.some((point) => point.total > 0) ? (
-          <EChart option={option} className="h-[320px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -5197,14 +5576,14 @@ function LiveAnnualComparisonCard({
       </CardHeader>
       <CardContent className="min-w-0 px-3 pb-3 pt-2">
         {loading ? (
-          <Skeleton className="h-[320px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : error ? (
-          <EmptyChartState className="h-[320px]" text={error} />
+          <EmptyChartState className="h-full min-h-0" text={error} />
         ) : hasData ? (
-          <EChart option={option} className="h-[320px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
-            className="h-[320px]"
+            className="h-full min-h-0"
             text="Sem valores mensais no histórico desta visão."
           />
         )}
@@ -5387,14 +5766,14 @@ function OperationalTrendCard({
       </CardHeader>
       <CardContent className="min-w-0">
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : error ? (
           <EmptyChartState
             className="h-[200px]"
             text="Não foi possível certificar a base horária da tendência."
           />
         ) : hasData ? (
-          <EChart option={option} className="h-[300px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
@@ -5537,9 +5916,9 @@ function ScenarioRoseCard({
             text="Selecione ao menos um cenário para montar a composição."
           />
         ) : loading ? (
-          <Skeleton className="h-[320px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : visiblePoints.length ? (
-          <EChart option={option} className="h-[320px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -5646,9 +6025,9 @@ function MonthlyAccessRankingCard({
             text="Selecione ao menos um cenário para montar o ranking."
           />
         ) : loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : rankedPoints.length ? (
-          <EChart option={option} className="h-[300px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
@@ -5757,9 +6136,9 @@ function PeakDaysRankingCard({
             text="Selecione ao menos um cenário para calcular os dias de pico."
           />
         ) : loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : points.length ? (
-          <EChart option={option} className="h-[300px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
@@ -5843,9 +6222,9 @@ function TodayComparisonCard({
       </CardHeader>
       <CardContent>
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : points.length ? (
-          <div className="h-[300px] w-full">
+          <div className="h-full min-h-0 w-full">
             <EChart option={option} />
           </div>
         ) : (
@@ -5884,7 +6263,7 @@ function EmptyChartState({
   return (
     <div
       className={cn(
-        "flex h-[300px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground",
+        "flex h-full min-h-0 items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground",
         className,
       )}
     >
@@ -5942,6 +6321,18 @@ function buildRealtimeChartDefinitions(now: Date): RealtimeChartDefinition[] {
       to: addMonths(currentMonthStart, 1),
     },
   ];
+}
+
+function buildMinuteDayDefinition(now: Date): RealtimeChartDefinition {
+  return {
+    id: LIVE_DAY_MINUTES_ID,
+    label: "Minuto a minuto · Hoje",
+    description:
+      "Fluxo do dia em resolução de minuto, com horários futuros vazios.",
+    granularity: "minute",
+    from: startOfDay(now),
+    to: addMinutes(startOfMinute(now), 1),
+  };
 }
 
 function buildCurrentMonthDaysDefinition(now: Date): RealtimeChartDefinition {
@@ -6264,13 +6655,41 @@ async function fetchSubLocations(
   );
 }
 
-async function fetchRealtimeWorkers(companyId?: string | null) {
+async function fetchRealtimeWorkers(
+  companyId: string | null | undefined,
+  { requireExplicitCompanyId }: WorkerMetadataValidationOptions,
+): Promise<OptionalWorkerMetadata> {
   const companyScopeId = companyId?.trim() || undefined;
   const rows = await apiFetch<unknown>("/workers", { companyScopeId }).then(
-    (value) => requireWorkerRows(value, companyScopeId),
+    (value) =>
+      requireWorkerRows(
+        value,
+        requireExplicitCompanyId ? undefined : companyScopeId,
+      ),
   );
-  const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
-  return sortWorkersByActivity(collapseWorkerIdentityChains(scopedRows));
+  const { foreignRows, scopedRows } = partitionWorkersByCompanyScope(
+    rows,
+    companyId,
+  );
+
+  return {
+    rows: sortWorkersByActivity(collapseWorkerIdentityChains(scopedRows)),
+    warning: foreignRows.length
+      ? `${formatNumber(foreignRows.length)} worker(s) fora da empresa selecionada foram ocultados. Os cenários, câmeras e locais continuam disponíveis.`
+      : "",
+  };
+}
+
+function unavailableWorkerMetadata(error: unknown): OptionalWorkerMetadata {
+  const detail =
+    error instanceof Error
+      ? error.message
+      : "A API não certificou os workers desta empresa.";
+
+  return {
+    rows: [],
+    warning: `Vínculos de workers indisponíveis: ${detail}`,
+  };
 }
 
 function buildRealtimeScopeOptions({
@@ -7486,6 +7905,131 @@ function isSingleDayHourlyDefinition(definition: RealtimeChartDefinition) {
   );
 }
 
+function buildMinuteDayChartOption(
+  slots: readonly MinuteDayAxisSlot[],
+  widgetColor = "#1267C4",
+): EnterpriseChartOption {
+  return {
+    animation: false,
+    color: [widgetColor],
+    dataZoom: [],
+    grid: {
+      bottom: 4,
+      containLabel: true,
+      left: 4,
+      right: 10,
+      top: 18,
+    },
+    tooltip: {
+      axisPointer: {
+        lineStyle: {
+          color: widgetColor,
+          opacity: 0.35,
+          width: 1,
+        },
+        type: "line",
+      },
+      backgroundColor: "#ffffff",
+      borderColor: "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      formatter: (parameters: unknown) => {
+        const first = Array.isArray(parameters) ? parameters[0] : parameters;
+        const dataIndex =
+          first && typeof first === "object"
+            ? Number((first as { dataIndex?: unknown }).dataIndex)
+            : -1;
+        const slot = Number.isSafeInteger(dataIndex)
+          ? slots[dataIndex]
+          : undefined;
+        if (!slot) return "";
+        if (slot.status === "future") {
+          return `${slot.label}<br/>Aguardando este horário`;
+        }
+        if (slot.status === "unavailable") {
+          return `${slot.label}<br/>Horário inexistente por mudança de fuso`;
+        }
+        const suffix =
+          slot.status === "current" ? " · minuto em andamento" : "";
+        return `${slot.label}<br/><strong>${formatNumber(
+          slot.value ?? 0,
+        )} eventos</strong>${suffix}`;
+      },
+      padding: [10, 12],
+      textStyle: {
+        color: "#13233A",
+        fontSize: 12,
+      },
+      trigger: "axis",
+    },
+    xAxis: {
+      axisLabel: {
+        color: "#66758A",
+        fontSize: 10,
+        formatter: (_value: string, index: number) =>
+          minuteDayHourAxisLabel(index),
+        hideOverlap: true,
+        interval: 59,
+      },
+      axisLine: {
+        lineStyle: {
+          color: "#D8E3F2",
+        },
+      },
+      axisTick: {
+        alignWithLabel: true,
+        interval: 59,
+        length: 3,
+      },
+      boundaryGap: false,
+      data: slots.map((slot) => slot.label),
+      type: "category",
+    },
+    yAxis: {
+      axisLabel: {
+        color: "#66758A",
+        fontSize: 11,
+      },
+      min: 0,
+      minInterval: 1,
+      splitLine: {
+        lineStyle: {
+          color: "#E8EEF6",
+        },
+      },
+      type: "value",
+    },
+    series: [
+      {
+        areaStyle: {
+          color: widgetColor,
+          opacity: 0.1,
+        },
+        connectNulls: false,
+        data: slots.map((slot) => slot.value),
+        emphasis: {
+          focus: "series",
+        },
+        label: {
+          show: false,
+        },
+        lineStyle: {
+          color: widgetColor,
+          width: 1.75,
+        },
+        name: "Fluxo por minuto",
+        progressive: 2_000,
+        progressiveThreshold: 1_000,
+        sampling: "lttb",
+        showSymbol: false,
+        smooth: 0.12,
+        symbol: "none",
+        type: "line",
+      },
+    ],
+  };
+}
+
 function buildChartOption(
   definition: RealtimeChartDefinition,
   points: ChartPoint[],
@@ -7648,6 +8192,61 @@ function buildScenarioComparisonOption(
   widgetColor = "#1267C4",
 ): EnterpriseChartOption {
   return buildScopeTotalsComparisonOption(points, widgetColor, "Hoje");
+}
+
+function buildMinuteDayReportChart({
+  clock,
+  companyTimeZone,
+  definition,
+  rows,
+  scope,
+  widgetColor = "#1267C4",
+}: {
+  clock: Date;
+  companyTimeZone: string;
+  definition: RealtimeChartDefinition;
+  rows: AggregateEventRow[];
+  scope: RealtimeScopeOption;
+  widgetColor?: string;
+}): ReportPayload["charts"][number] {
+  const points = buildScopePoints(definition, rows, scope);
+  const slots = buildFixedMinuteDayAxis({
+    day: clock,
+    points,
+    referenceTime: clock,
+    timeZone: companyTimeZone,
+  });
+
+  return {
+    description: `${definition.description} Visão: ${scope.name}. O eixo preserva as 24 horas e mantém o futuro vazio.`,
+    option: buildMinuteDayChartOption(slots, widgetColor),
+    table: {
+      title: "Dados - Minuto a minuto · Hoje",
+      columns: [
+        { key: "minute", label: "Horário", width: 14 },
+        { key: "status", label: "Situação", width: 24 },
+        { key: "total", label: "Total", numeric: true, width: 18 },
+      ],
+      rows: slots
+        .filter(
+          (slot) =>
+            slot.status === "elapsed" ||
+            slot.status === "current" ||
+            slot.status === "unavailable",
+        )
+        .map((slot) => ({
+          minute: slot.label,
+          status:
+            slot.status === "current"
+              ? "Em andamento"
+              : slot.status === "unavailable"
+                ? "Horário inexistente"
+                : "Concluído",
+          total: slot.value,
+        })),
+    },
+    title: definition.label,
+  };
 }
 
 function buildRealtimeScopeReportChart(

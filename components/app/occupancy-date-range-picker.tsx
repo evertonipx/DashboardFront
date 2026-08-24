@@ -229,19 +229,18 @@ export function AnalysisDateRangePicker({
         <Button
           type="button"
           variant="outline"
-          className="h-auto min-h-10 w-full justify-start bg-card px-3 py-2 text-left sm:w-auto sm:min-w-[280px]"
+          className="h-8 w-8 min-w-0 max-w-full shrink-0 justify-center bg-card px-0 py-0 text-left text-xs @sm:w-[300px] @sm:justify-start @sm:px-2.5"
           disabled={disabled}
           aria-haspopup="dialog"
           aria-label={`Alterar período da ${contextLabel}. Atual: ${formatAnalysisDateRangeLabel(value)} no fuso ${timeZoneLabel}`}
+          title={`${formatAnalysisDateRangeLabel(value)} · ${formatRangeDayCount(value)} · ${timeZoneLabel}`}
         >
-          <CalendarDays className="h-4 w-4 text-primary" />
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-medium">
-              {formatAnalysisDateRangeLabel(value)}
-            </span>
-            <span className="block truncate text-[11px] font-normal text-muted-foreground">
-              {formatRangeDayCount(value)} · {timeZoneLabel}
-            </span>
+          <CalendarDays className="h-4 w-4 shrink-0 text-primary" />
+          <span className="sr-only font-medium @sm:not-sr-only @sm:min-w-0 @sm:flex-1 @sm:truncate">
+            {formatAnalysisDateRangeLabel(value)}
+          </span>
+          <span className="hidden shrink-0 text-[10px] font-normal text-muted-foreground @2xl:inline">
+            {formatRangeDayCount(value)}
           </span>
         </Button>
       </DialogTrigger>
