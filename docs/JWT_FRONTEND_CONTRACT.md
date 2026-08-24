@@ -97,8 +97,13 @@ O endpoint `/users/me/permissions` não existe no backend atual.
   entre o ID do path e o escopo explícito da operação; o backend permanece a
   fronteira final de autorização.
 - Se JWT, `/auth/me`, catálogo, seleção e cache não informarem um IANA válido
-  para o mesmo tenant, a consulta permanece bloqueada. Não há fallback para o
-  fuso do navegador nem para uma empresa diferente.
+  para o mesmo tenant, o frontend usa a política explícita do ambiente
+  `NEXT_PUBLIC_IPXDATA_DEFAULT_COMPANY_TIME_ZONE` (por padrão,
+  `America/Sao_Paulo`). Ela só é certificada para a empresa autenticada ou
+  selecionada e nunca vem do fuso do navegador nem de outra empresa. Um IANA
+  específico retornado posteriormente pela API sempre tem precedência. Em
+  ambientes com empresas fora desse fuso, o backend deve expor o timezone por
+  tenant no JWT, em `/auth/me` ou no catálogo autorizado.
 
 ## Limitação confirmada do backend
 

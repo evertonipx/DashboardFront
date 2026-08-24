@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
@@ -128,7 +128,7 @@ test("sessão substituída remove expiração antiga e rejeita login malformado"
   }
 });
 
-test("timezone efetivo acompanha a empresa selecionada e usa fallback explícito", () => {
+test("timezone efetivo prioriza a empresa e certifica a política do ambiente", () => {
   const originalWindow = globalThis.window;
   const storage = memoryStorage();
   globalThis.window = {
@@ -197,21 +197,49 @@ test("timezone efetivo acompanha a empresa selecionada e usa fallback explícito
       timeZone: "America/Manaus",
     });
 
+    const regularDeploymentResolution =
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution({
+        company_id: "company-without-timezone",
+        email: "user@example.com",
+        id: "user-without-timezone",
+        is_master: false,
+        name: "User without timezone",
+      });
+    assert.deepEqual(regularDeploymentResolution, {
+      fallback: false,
+      source: "deployment-default",
+      timeZone: "America/Sao_Paulo",
+    });
+    assert.equal(
+      companyTimeZone.requireCertifiedCompanyTimeZone(
+        regularDeploymentResolution,
+      ),
+      "America/Sao_Paulo",
+      "usuário comum não pode ser bloqueado quando a API omite o IANA",
+    );
+
     masterCompanyScope.setStoredMasterCompanyScope({
       id: "company-invalid",
       name: "Empresa sem fuso válido",
       timezone: "Mars/Olympus",
     });
-    const fallback =
+    const deploymentResolution =
       masterCompanyScope.getEffectiveCompanyTimeZoneResolution({
         email: "master@example.com",
         id: "master",
         is_master: true,
         name: "Master",
       });
-    assert.equal(fallback.timeZone, "America/Sao_Paulo");
-    assert.equal(fallback.fallback, true);
-    assert.match(fallback.warning, /inválido.*America\/Sao_Paulo/);
+    assert.deepEqual(deploymentResolution, {
+      fallback: false,
+      source: "deployment-default",
+      timeZone: "America/Sao_Paulo",
+    });
+    assert.equal(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(null).fallback,
+      true,
+      "a política não deve certificar uma consulta sem empresa autenticada",
+    );
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
@@ -327,9 +355,9 @@ test("override do video wall exige empresa ativa e timezone do mesmo escopo", ()
       ),
       {
         companyScopeId: "company-without-timezone",
-        error: "Fuso da empresa do video wall não certificado.",
+        timeZone: "America/Sao_Paulo",
       },
-      "o caminho explícito não pode usar o timezone fallback",
+      "o caminho explícito pode usar a política IANA do ambiente no escopo ativo",
     );
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
@@ -3125,10 +3153,14 @@ test("superadmin usa timezone do JWT apenas quando o tenant do claim é o seleci
       id: "company-other",
       name: "Outra empresa",
     });
-    assert.equal(
-      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master).fallback,
-      true,
-      "o fuso do JWT não pode atravessar para outro tenant selecionado",
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
+      {
+        fallback: false,
+        source: "deployment-default",
+        timeZone: "America/Sao_Paulo",
+      },
+      "outro tenant usa a política do ambiente sem herdar o fuso do JWT",
     );
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
@@ -3253,10 +3285,14 @@ test("403 no detalhe não invalida timezone do mesmo tenant vindo de JWT, listag
       name: "Empresa sem fonte",
     });
     await assertCompanyDetailForbidden("company-without-source");
-    assert.equal(
-      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master).fallback,
-      true,
-      "o 403 não autoriza reutilizar o timezone JWT de outro tenant",
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
+      {
+        fallback: false,
+        source: "deployment-default",
+        timeZone: "America/Sao_Paulo",
+      },
+      "o 403 usa a política do ambiente sem reutilizar o JWT de outro tenant",
     );
 
     assert.deepEqual(
@@ -3558,6 +3594,22 @@ test("bootstrap próprio usa a identidade do JWT sem herdar a empresa visual do 
   assert.match(
     dashboardViewRouteSource,
     /reconcileCurrentUserWithAccessToken\(rawUser, accessToken\)/,
+  );
+});
+
+test("reconciliação JWT usada pelo Route Handler permanece server-safe", () => {
+  const routeSource = readFileSync(
+    resolve(projectRoot, "app/api/v1/dashboard-views/[menuKey]/route.ts"),
+    "utf8",
+  );
+
+  assert.match(routeSource, /from ["']@\/lib\/access-token-claims["']/);
+  assert.equal(
+    findClientRuntimeDependency(
+      resolve(projectRoot, "lib/access-token-claims.ts"),
+    ),
+    null,
+    "access-token-claims não pode alcançar uma boundary `use client` no servidor",
   );
 });
 
@@ -4269,6 +4321,105 @@ function findTestElement(node, type) {
     if (match) return match;
   }
   return null;
+}
+
+function findClientRuntimeDependency(entryFilename) {
+  const queue = [{ filename: entryFilename, path: [] }];
+  const visited = new Set();
+
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current || visited.has(current.filename)) continue;
+    visited.add(current.filename);
+
+    const source = readFileSync(current.filename, "utf8");
+    const sourceFile = ts.createSourceFile(
+      current.filename,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    const dependencyPath = [...current.path, current.filename];
+
+    if (hasUseClientDirective(sourceFile)) return dependencyPath;
+
+    for (const specifier of runtimeModuleSpecifiers(sourceFile)) {
+      const dependency = resolveLocalTypeScriptModule(
+        current.filename,
+        specifier,
+      );
+      if (dependency) queue.push({ filename: dependency, path: dependencyPath });
+    }
+  }
+
+  return null;
+}
+
+function hasUseClientDirective(sourceFile) {
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isExpressionStatement(statement) ||
+      !ts.isStringLiteral(statement.expression)
+    ) {
+      return false;
+    }
+    if (statement.expression.text === "use client") return true;
+  }
+  return false;
+}
+
+function runtimeModuleSpecifiers(sourceFile) {
+  const specifiers = [];
+  for (const statement of sourceFile.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const clause = statement.importClause;
+      const onlyNamedTypes =
+        clause &&
+        !clause.name &&
+        clause.namedBindings &&
+        ts.isNamedImports(clause.namedBindings) &&
+        clause.namedBindings.elements.every((element) => element.isTypeOnly);
+      if (clause?.isTypeOnly || onlyNamedTypes) continue;
+      if (ts.isStringLiteral(statement.moduleSpecifier)) {
+        specifiers.push(statement.moduleSpecifier.text);
+      }
+      continue;
+    }
+
+    if (
+      ts.isExportDeclaration(statement) &&
+      statement.moduleSpecifier &&
+      !statement.isTypeOnly
+    ) {
+      const onlyNamedTypes =
+        statement.exportClause &&
+        ts.isNamedExports(statement.exportClause) &&
+        statement.exportClause.elements.every((element) => element.isTypeOnly);
+      if (!onlyNamedTypes && ts.isStringLiteral(statement.moduleSpecifier)) {
+        specifiers.push(statement.moduleSpecifier.text);
+      }
+    }
+  }
+  return specifiers;
+}
+
+function resolveLocalTypeScriptModule(fromFilename, specifier) {
+  const baseFilename = specifier.startsWith("@/")
+    ? resolve(projectRoot, specifier.slice(2))
+    : specifier.startsWith(".")
+      ? resolve(dirname(fromFilename), specifier)
+      : null;
+  if (!baseFilename) return null;
+
+  return (
+    [
+      baseFilename,
+      `${baseFilename}.ts`,
+      `${baseFilename}.tsx`,
+      resolve(baseFilename, "index.ts"),
+      resolve(baseFilename, "index.tsx"),
+    ].find((candidate) => existsSync(candidate)) ?? null
+  );
 }
 
 function loadTypeScriptModule(relativePath) {

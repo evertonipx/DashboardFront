@@ -6,7 +6,9 @@ import {
   readCachedCompany,
 } from "@/lib/company-cache";
 import {
+  DEFAULT_COMPANY_TIME_ZONE,
   resolveCompanyTimeZone,
+  type CompanyTimeZoneCandidate,
   type CompanyTimeZoneResolution,
 } from "@/lib/company-time-zone";
 import type { CurrentUser } from "@/lib/types";
@@ -98,70 +100,87 @@ export function getCompanyTimeZoneResolutionForScope(
     ? getStoredMasterCompanyScope()
     : getStoredCurrentCompanyScope();
   const cachedCompany = readCachedCompany(cleanCompanyScopeId);
-
-  return resolveCompanyTimeZone(
-    master
-      ? [
-          {
-            source: "current-user-company",
-            value:
-              userCompanyId === cleanCompanyScopeId
-                ? user?.company?.timezone
-                : undefined,
-          },
-          {
-            source: "current-user-company",
-            value:
-              userCompanyId === cleanCompanyScopeId
-                ? user?.company_timezone
-                : undefined,
-          },
-          {
-            source: "selected-company",
-            value:
-              storedScope?.id === cleanCompanyScopeId
-                ? storedScope.timezone
-                : undefined,
-          },
-          {
-            source: "company-cache",
-            value: cachedCompany?.timezone,
-          },
-        ]
-      : [
-          {
-            source: "current-user-company",
-            value:
-              userCompanyId === cleanCompanyScopeId
-                ? user?.company?.timezone
-                : undefined,
-          },
-          {
-            source: "current-user-company",
-            value:
-              userCompanyId === cleanCompanyScopeId
-                ? user?.company_timezone
-                : undefined,
-          },
-          {
-            source: "current-company-scope",
-            value:
-              storedScope?.id === cleanCompanyScopeId
-                ? storedScope?.timezone
-                : undefined,
-          },
-          {
-            source: "company-cache",
-            value: cachedCompany?.timezone,
-          },
-        ],
+  const scopeBelongsToAuthenticatedContext = Boolean(
+    cleanCompanyScopeId &&
+      (master
+        ? storedScope?.id === cleanCompanyScopeId
+        : userCompanyId === cleanCompanyScopeId),
   );
+  const candidates: CompanyTimeZoneCandidate[] = master
+    ? [
+        {
+          source: "current-user-company",
+          value:
+            userCompanyId === cleanCompanyScopeId
+              ? user?.company?.timezone
+              : undefined,
+        },
+        {
+          source: "current-user-company",
+          value:
+            userCompanyId === cleanCompanyScopeId
+              ? user?.company_timezone
+              : undefined,
+        },
+        {
+          source: "selected-company",
+          value:
+            storedScope?.id === cleanCompanyScopeId
+              ? storedScope.timezone
+              : undefined,
+        },
+        {
+          source: "company-cache",
+          value: cachedCompany?.timezone,
+        },
+      ]
+    : [
+        {
+          source: "current-user-company",
+          value:
+            userCompanyId === cleanCompanyScopeId
+              ? user?.company?.timezone
+              : undefined,
+        },
+        {
+          source: "current-user-company",
+          value:
+            userCompanyId === cleanCompanyScopeId
+              ? user?.company_timezone
+              : undefined,
+        },
+        {
+          source: "current-company-scope",
+          value:
+            storedScope?.id === cleanCompanyScopeId
+              ? storedScope?.timezone
+              : undefined,
+        },
+        {
+          source: "company-cache",
+          value: cachedCompany?.timezone,
+        },
+      ];
+
+  return resolveCompanyTimeZone([
+    ...candidates,
+    {
+      // The live API currently omits timezone from both JWT and `/auth/me` for
+      // regular users. This is an explicit deployment policy, never a browser
+      // inference, and is only certified for the authenticated/selected scope.
+      source: "deployment-default",
+      value: scopeBelongsToAuthenticatedContext
+        ? DEFAULT_COMPANY_TIME_ZONE
+        : undefined,
+    },
+  ]);
 }
 
 /**
  * An explicit company in a video-wall URL is accepted only while it remains
  * the effective authenticated scope and has timezone metadata tied to that
- * same company. There is deliberately no timezone fallback in this path.
+ * same company, including the explicit deployment policy. Browser timezone is
+ * deliberately never accepted as a fallback in this path.
  */
 export function certifyCompanyScopeTimeZoneOverride(
   user: CurrentUser | null,

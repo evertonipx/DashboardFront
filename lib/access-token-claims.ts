@@ -1,7 +1,7 @@
 import type { CurrentUser } from "@/lib/types";
 import { normalizeRole } from "@/lib/user-role";
 import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
-import { resolveCurrentUserCompanyTimeZone } from "@/lib/company-cache";
+import { resolveCurrentUserCompanyTimeZone } from "@/lib/company-time-zone-record";
 
 type AccessTokenClaims = Record<string, unknown> & {
   company?: unknown;

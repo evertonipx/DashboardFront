@@ -1,10 +1,21 @@
-export const DEFAULT_COMPANY_TIME_ZONE = "America/Sao_Paulo";
+const BUILT_IN_COMPANY_TIME_ZONE = "America/Sao_Paulo";
+
+/**
+ * Deployment-wide IANA policy used when the current API contract does not
+ * expose the authenticated company's timezone. A company-specific value from
+ * JWT, `/auth/me`, the authorized directory or the same-tenant cache always
+ * takes precedence.
+ */
+export const DEFAULT_COMPANY_TIME_ZONE =
+  process.env.NEXT_PUBLIC_IPXDATA_DEFAULT_COMPANY_TIME_ZONE?.trim() ||
+  BUILT_IN_COMPANY_TIME_ZONE;
 
 export type CompanyTimeZoneSource =
   | "selected-company"
   | "current-user-company"
   | "current-company-scope"
   | "company-cache"
+  | "deployment-default"
   | "fallback";
 
 export type CompanyTimeZoneCandidate = {
