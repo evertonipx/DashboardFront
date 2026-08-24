@@ -6,10 +6,10 @@ import type {
   TokenResponse,
 } from "@/lib/types";
 import {
-  accessTokenDeclaresMasterAccess,
   accessTokenExpirationMilliseconds,
-  accessTokenMatchesUserIdentity,
-  accessTokensShareUserIdentity,
+  accessTokenExplicitlyMismatchesUserIdentity,
+  accessTokensExplicitlyChangeUserIdentity,
+  resolveAccessTokenMasterClaimState,
   resolveAccessTokenContext,
 } from "@/lib/access-token-claims";
 import {
@@ -24,23 +24,58 @@ const REFRESH_KEY = "refresh_token";
 const TOKEN_TYPE_KEY = "token_type";
 const EXPIRES_KEY = "expires_in";
 const EXPIRES_AT_KEY = "expires_at";
+export const SESSION_SYNC_STORAGE_KEY = "ipxdata.auth-session-sync.v1";
 const REFRESH_SKEW_MS = 60_000;
 
 export const SESSION_EXPIRED_EVENT = "ipxdata:session-expired";
 export const SESSION_UPDATED_EVENT = "ipxdata:session-updated";
 
 type RefreshAttempt = {
-  promise: Promise<Session | TokenResponse | null>;
+  accessToken: string;
+  promise: Promise<RefreshResult>;
   refreshToken: string;
+  sessionRevision: number;
 };
 
+type CurrentUserAttempt = {
+  accessToken: string;
+  promise: Promise<CurrentUserSessionResponse>;
+  sessionRevision: number;
+};
+
+type RefreshResult =
+  | { status: "failed" }
+  | { status: "superseded" }
+  | {
+      session: Session | TokenResponse;
+      sessionRevision: number;
+      status: "refreshed";
+    };
+
 let refreshAttempt: RefreshAttempt | null = null;
-let authenticatedMasterAccessToken = "";
+let currentUserAttempt: CurrentUserAttempt | null = null;
+type AuthenticatedPrincipal = {
+  accessToken: string;
+  user: CurrentUser;
+};
+
+let authenticatedPrincipal: AuthenticatedPrincipal | null = null;
+let authenticatedMasterAccess: AuthenticatedPrincipal | null = null;
+let storedSessionRevision = 0;
+let loginAttemptRevision = 0;
+
+export type CurrentUserSessionResponse = {
+  accessToken: string;
+  sessionRevision: number;
+  user: CurrentUser;
+};
 
 type ApiFetchOptions = Omit<RequestInit, "body"> & {
   auth?: boolean;
   body?: unknown;
+  captureAccessToken?: (accessToken: string) => void;
   companyScopeId?: string;
+  expectedAccessToken?: string;
   jwtCompanyScopeOnly?: boolean;
   retry?: boolean;
 };
@@ -87,14 +122,19 @@ export function getStoredRefreshToken() {
   return window.localStorage.getItem(REFRESH_KEY) ?? "";
 }
 
-export function setStoredSession(tokens: TokenResponse | Session) {
+export function setStoredSession(
+  tokens: TokenResponse | Session,
+  options: { notifySessionUpdate?: boolean } = {},
+) {
   if (!isBrowser()) return;
 
   const previousAccessToken = window.localStorage.getItem(ACCESS_KEY) ?? "";
   const accessTokenChanged = previousAccessToken !== tokens.access_token;
   if (accessTokenChanged) {
-    authenticatedMasterAccessToken = "";
+    authenticatedPrincipal = null;
+    authenticatedMasterAccess = null;
   }
+  storedSessionRevision += 1;
 
   window.localStorage.setItem(ACCESS_KEY, tokens.access_token);
   window.localStorage.setItem(REFRESH_KEY, tokens.refresh_token);
@@ -129,13 +169,20 @@ export function setStoredSession(tokens: TokenResponse | Session) {
   } else {
     window.localStorage.removeItem(EXPIRES_AT_KEY);
   }
-  if (accessTokenChanged && previousAccessToken) {
+  if (
+    options.notifySessionUpdate !== false &&
+    previousAccessToken
+  ) {
     window.dispatchEvent(new Event(SESSION_UPDATED_EVENT));
   }
+  writeSessionSyncSignal();
 }
 
 export function clearStoredSession() {
-  authenticatedMasterAccessToken = "";
+  authenticatedPrincipal = null;
+  authenticatedMasterAccess = null;
+  currentUserAttempt = null;
+  storedSessionRevision += 1;
   if (!isBrowser()) return;
 
   refreshAttempt = null;
@@ -147,6 +194,24 @@ export function clearStoredSession() {
   window.localStorage.removeItem(EXPIRES_AT_KEY);
   clearStoredMasterCompanyScope();
   clearStoredCurrentCompanyScope();
+  writeSessionSyncSignal();
+}
+
+export function synchronizeExternalSessionUpdate() {
+  authenticatedPrincipal = null;
+  authenticatedMasterAccess = null;
+  currentUserAttempt = null;
+  refreshAttempt = null;
+  storedSessionRevision += 1;
+  loginAttemptRevision += 1;
+}
+
+function writeSessionSyncSignal() {
+  if (!isBrowser()) return;
+  window.localStorage.setItem(
+    SESSION_SYNC_STORAGE_KEY,
+    `${Date.now()}:${storedSessionRevision}:${Math.random()}`,
+  );
 }
 
 async function parseResponse(response: Response) {
@@ -181,13 +246,24 @@ function shouldRefreshSoon(session: Session | null) {
   return session.expires_at - Date.now() <= REFRESH_SKEW_MS;
 }
 
-async function performRefresh(capturedRefreshToken: string) {
+async function performRefresh(
+  capturedRefreshToken: string,
+  capturedAccessToken: string,
+  capturedSessionRevision: number,
+): Promise<RefreshResult> {
   const sessionBeforeRefresh = getStoredSession();
-  const preserveAuthenticatedMasterAccess = Boolean(
+  const confirmedPrincipalBeforeRefresh =
     sessionBeforeRefresh?.access_token &&
-      sessionBeforeRefresh.refresh_token === capturedRefreshToken &&
-      authenticatedMasterAccessToken === sessionBeforeRefresh.access_token,
-  );
+    sessionBeforeRefresh.refresh_token === capturedRefreshToken &&
+    authenticatedPrincipal?.accessToken === sessionBeforeRefresh.access_token
+      ? authenticatedPrincipal
+      : null;
+  const confirmedMasterBeforeRefresh =
+    sessionBeforeRefresh?.access_token &&
+    sessionBeforeRefresh.refresh_token === capturedRefreshToken &&
+    authenticatedMasterAccess?.accessToken === sessionBeforeRefresh.access_token
+      ? authenticatedMasterAccess
+      : null;
   const response = await fetch(`${apiBase()}/auth/refresh`, {
     method: "POST",
     headers: {
@@ -199,58 +275,121 @@ async function performRefresh(capturedRefreshToken: string) {
 
   const payload = await parseResponse(response);
   if (!response.ok) {
-    const currentRefreshToken = getStoredRefreshToken();
-    if (currentRefreshToken === capturedRefreshToken) {
+    const currentSession = getStoredSession();
+    if (
+      currentSession?.refresh_token === capturedRefreshToken &&
+      currentSession.access_token === capturedAccessToken &&
+      storedSessionRevision === capturedSessionRevision
+    ) {
       clearStoredSession();
-      notifySessionExpired();
-      return null;
+      return { status: "failed" };
     }
-    return getStoredSession();
+    return { status: "superseded" };
   }
 
   // A login can replace the tenant session while this request is in flight.
   // Never let a late response from the previous account overwrite it.
-  if (getStoredRefreshToken() !== capturedRefreshToken) {
-    return getStoredSession();
+  const currentSession = getStoredSession();
+  if (
+    currentSession?.refresh_token !== capturedRefreshToken ||
+    currentSession.access_token !== capturedAccessToken ||
+    storedSessionRevision !== capturedSessionRevision
+  ) {
+    return { status: "superseded" };
   }
 
   const refreshedTokens = requireTokenResponse(payload, capturedRefreshToken);
-  setStoredSession(refreshedTokens);
-  if (
-    preserveAuthenticatedMasterAccess &&
-    sessionBeforeRefresh?.access_token &&
-    accessTokensShareUserIdentity(
-      sessionBeforeRefresh.access_token,
+  const refreshExplicitlyChangesIdentity = Boolean(
+    accessTokensExplicitlyChangeUserIdentity(
+      capturedAccessToken,
       refreshedTokens.access_token,
-    ) &&
-    accessTokenDeclaresMasterAccess(refreshedTokens.access_token)
-  ) {
-    authenticatedMasterAccessToken = refreshedTokens.access_token;
+    ) ||
+      (confirmedPrincipalBeforeRefresh &&
+        accessTokenExplicitlyMismatchesUserIdentity(
+          refreshedTokens.access_token,
+          confirmedPrincipalBeforeRefresh.user,
+        )),
+  );
+  if (refreshExplicitlyChangesIdentity) {
+    // A refresh token must never rotate into another principal. Reject the
+    // response before it can inherit cached tenant scope from the old user.
+    clearStoredSession();
+    return { status: "failed" };
   }
-  return refreshedTokens;
+
+  setStoredSession(refreshedTokens);
+  if (confirmedPrincipalBeforeRefresh) {
+    authenticatedPrincipal = {
+      accessToken: refreshedTokens.access_token,
+      user: confirmedPrincipalBeforeRefresh.user,
+    };
+  }
+  const refreshedMasterClaim = resolveAccessTokenMasterClaimState(
+    refreshedTokens.access_token,
+  );
+  if (
+    confirmedMasterBeforeRefresh &&
+    (refreshedMasterClaim === "master" || refreshedMasterClaim === "unknown")
+  ) {
+    authenticatedMasterAccess = {
+      accessToken: refreshedTokens.access_token,
+      user: confirmedMasterBeforeRefresh.user,
+    };
+  } else if (
+    refreshedMasterClaim === "non-master" ||
+    refreshedMasterClaim === "invalid"
+  ) {
+    clearStoredMasterCompanyScope();
+  }
+  return {
+    session: refreshedTokens,
+    sessionRevision: storedSessionRevision,
+    status: "refreshed",
+  };
 }
 
 async function refreshSession() {
-  const refreshToken = getStoredRefreshToken();
-  if (!refreshToken) return null;
+  const session = getStoredSession();
+  const refreshToken = session?.refresh_token ?? "";
+  const accessToken = session?.access_token ?? "";
+  const sessionRevision = storedSessionRevision;
+  if (!refreshToken || !accessToken) {
+    return { status: "failed" } satisfies RefreshResult;
+  }
 
-  if (!refreshAttempt || refreshAttempt.refreshToken !== refreshToken) {
-    const promise = performRefresh(refreshToken).finally(() => {
+  if (
+    !refreshAttempt ||
+    refreshAttempt.refreshToken !== refreshToken ||
+    refreshAttempt.accessToken !== accessToken ||
+    refreshAttempt.sessionRevision !== sessionRevision
+  ) {
+    const promise = performRefresh(
+      refreshToken,
+      accessToken,
+      sessionRevision,
+    ).finally(() => {
       if (refreshAttempt?.promise === promise) {
         refreshAttempt = null;
       }
     });
-    refreshAttempt = { promise, refreshToken };
+    refreshAttempt = {
+      accessToken,
+      promise,
+      refreshToken,
+      sessionRevision,
+    };
   }
 
-  return refreshAttempt.promise;
+  return refreshAttempt!.promise;
 }
 
 export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
   const {
     auth = true,
     body,
+    captureAccessToken,
     companyScopeId,
+    expectedAccessToken,
     jwtCompanyScopeOnly = false,
     retry = true,
     headers,
@@ -260,10 +399,27 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   let session = getStoredSession();
 
   if (auth && shouldRefreshSoon(session)) {
-    const refreshed = await refreshSession();
-    if (refreshed) {
-      session = getStoredSession();
+    const refreshResult = await refreshSession();
+    if (refreshResult.status === "superseded") {
+      throw new ApiError(
+        "A sessão foi substituída antes de concluir a operação.",
+        409,
+      );
     }
+    if (refreshResult.status === "failed") {
+      notifySessionExpired();
+      throw new ApiError("Não foi possível renovar a sessão.", 401);
+    }
+    if (
+      refreshResult.sessionRevision !== storedSessionRevision ||
+      getStoredSession()?.access_token !== refreshResult.session.access_token
+    ) {
+      throw new ApiError(
+        "A sessão foi substituída antes de concluir a operação.",
+        409,
+      );
+    }
+    session = getStoredSession();
   }
 
   const requestHeaders = new Headers(headers);
@@ -276,6 +432,19 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     requestHeaders.set("Authorization", `Bearer ${session.access_token}`);
   }
 
+  if (
+    auth &&
+    expectedAccessToken &&
+    session?.access_token !== expectedAccessToken
+  ) {
+    throw new ApiError(
+      "A sessão foi atualizada antes de concluir a operação.",
+      409,
+    );
+  }
+  captureAccessToken?.(auth ? session?.access_token ?? "" : "");
+  const requestSessionRevision = storedSessionRevision;
+
   // Company users remain scoped exclusively by their signed JWT. A master
   // user, however, needs to forward the company selected in the UI to the
   // tenant-aware endpoints. The backend remains the authorization boundary
@@ -286,14 +455,24 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     : null;
   const tokenDeclaresMaster = Boolean(
     session?.access_token &&
-      accessTokenDeclaresMasterAccess(session.access_token),
+      resolveAccessTokenMasterClaimState(session.access_token) === "master",
   );
   const authMeConfirmedMaster = Boolean(
     session?.access_token &&
-      authenticatedMasterAccessToken === session.access_token,
+      authenticatedMasterAccess?.accessToken === session.access_token,
   );
   const requestedCompanyScope = companyScopeId?.trim() ?? "";
   const pathCompanyScope = companyScopeFromAdministrativePath(path);
+  if (
+    requestedCompanyScope &&
+    pathCompanyScope &&
+    requestedCompanyScope !== pathCompanyScope
+  ) {
+    throw new ApiError(
+      "A empresa da rota diverge da empresa selecionada para a operação.",
+      403,
+    );
+  }
   if (
     auth &&
     tokenContext?.companyId &&
@@ -316,12 +495,6 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
       ? requestedCompanyScope || getStoredMasterCompanyScope()?.id.trim()
       : "";
   if (masterCompanyScope) {
-    if (pathCompanyScope && pathCompanyScope !== masterCompanyScope) {
-      throw new ApiError(
-        "A empresa da rota diverge da empresa selecionada para a operação.",
-        403,
-      );
-    }
     requestHeaders.set("X-Company-ID", masterCompanyScope);
   }
   const response = await fetch(`${apiBase()}${path}`, {
@@ -331,16 +504,69 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     cache: "no-store",
   });
 
-  if (response.status === 401 && auth && retry) {
-    const refreshed = await refreshSession();
-    if (refreshed) {
-      return apiFetch<T>(path, { ...options, retry: false });
-    }
-
-    notifySessionExpired();
+  if (
+    auth &&
+    (requestSessionRevision !== storedSessionRevision ||
+      (getStoredSession()?.access_token ?? "") !==
+        (session?.access_token ?? ""))
+  ) {
+    // The response belongs to a session that no longer owns the browser.
+    // Never publish it, and never replay mutations with the replacement token.
+    throw new ApiError(
+      "A sessão foi atualizada durante a operação.",
+      409,
+    );
   }
 
   const payload = await parseResponse(response);
+  if (
+    auth &&
+    (requestSessionRevision !== storedSessionRevision ||
+      (getStoredSession()?.access_token ?? "") !==
+        (session?.access_token ?? ""))
+  ) {
+    // Fetch resolves when headers arrive; the session can still change while
+    // a streamed JSON body is being consumed.
+    throw new ApiError(
+      "A sessão foi atualizada durante a operação.",
+      409,
+    );
+  }
+
+  if (response.status === 401 && auth && retry) {
+    const activeSession = getStoredSession();
+    const requestSessionIsCurrent = Boolean(
+      session?.access_token &&
+        requestSessionRevision === storedSessionRevision &&
+        activeSession?.access_token === session.access_token,
+    );
+    if (!requestSessionIsCurrent) {
+      if (activeSession) {
+        throw new ApiError(
+          "A sessão foi atualizada durante a operação.",
+          409,
+        );
+      }
+    } else {
+      const refreshResult = await refreshSession();
+      if (refreshResult.status === "superseded") {
+        throw new ApiError(
+          "A sessão foi substituída antes de concluir a operação.",
+          409,
+        );
+      }
+      if (
+        refreshResult.status === "refreshed" &&
+        refreshResult.sessionRevision === storedSessionRevision &&
+        getStoredSession()?.access_token ===
+          refreshResult.session.access_token
+      ) {
+        return apiFetch<T>(path, { ...options, retry: false });
+      }
+
+      notifySessionExpired();
+    }
+  }
 
   if (!response.ok) {
     throw new ApiError(
@@ -354,22 +580,123 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
 }
 
 export async function loginRequest(email: string, password: string) {
+  const loginAttempt = ++loginAttemptRevision;
   const payload = await apiFetch<unknown>("/auth/login", {
     method: "POST",
     auth: false,
     body: { email, password },
   });
+  if (loginAttempt !== loginAttemptRevision) {
+    throw new Error(
+      "Esta tentativa de login foi substituída por uma tentativa mais recente.",
+    );
+  }
   const tokens = requireTokenResponse(payload);
   refreshAttempt = null;
   clearStoredMasterCompanyScope();
   clearStoredCurrentCompanyScope();
-  setStoredSession(tokens);
+  // An explicit login hydrates `/auth/me` itself. Emitting the silent-refresh
+  // event here would start a competing reconciliation with the same token.
+  setStoredSession(tokens, { notifySessionUpdate: false });
 
   return tokens;
 }
 
-export function currentUserRequest() {
-  return apiFetch<CurrentUser>("/auth/me");
+export async function currentUserRequest() {
+  const session = getStoredSession();
+  const accessToken = session?.access_token ?? "";
+  const sessionRevision = storedSessionRevision;
+  if (
+    currentUserAttempt &&
+    currentUserAttempt.accessToken === accessToken &&
+    currentUserAttempt.sessionRevision === sessionRevision
+  ) {
+    return currentUserAttempt.promise;
+  }
+
+  const promise = performCurrentUserRequest().finally(() => {
+    if (currentUserAttempt?.promise === promise) {
+      currentUserAttempt = null;
+    }
+  });
+  currentUserAttempt = { accessToken, promise, sessionRevision };
+  return promise;
+}
+
+export function currentUserRequestIsInFlight() {
+  return currentUserAttempt !== null;
+}
+
+async function performCurrentUserRequest() {
+  // Bind `/auth/me` to the exact access token that authenticated its response.
+  // A silent refresh or a new login may rotate localStorage while the request
+  // is in flight; reconciling that old response against the new token creates
+  // a false identity mismatch. Retry against the winning session instead.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let requestAccessToken = "";
+    let requestSessionRevision = -1;
+    let user: CurrentUser;
+    try {
+      user = await apiFetch<CurrentUser>("/auth/me", {
+        captureAccessToken(accessToken) {
+          requestAccessToken = accessToken;
+          requestSessionRevision = storedSessionRevision;
+        },
+      });
+    } catch (error) {
+      const requestSession = {
+        accessToken: requestAccessToken,
+        sessionRevision: requestSessionRevision,
+      };
+      if (
+        requestAccessToken &&
+        getStoredSession() &&
+        !currentUserSessionIsCurrent(requestSession)
+      ) {
+        // The failure belongs to a session that already lost the race. It
+        // must not sign out or surface an error over the winning login.
+        continue;
+      }
+      if (
+        requestAccessToken &&
+        error instanceof ApiError &&
+        (error.status === 401 || error.status === 403) &&
+        currentUserSessionIsCurrent(requestSession)
+      ) {
+        clearStoredSession();
+        notifySessionExpired();
+      }
+      throw error;
+    }
+    if (
+      requestAccessToken &&
+      currentUserSessionIsCurrent({
+        accessToken: requestAccessToken,
+        sessionRevision: requestSessionRevision,
+      })
+    ) {
+      return {
+        accessToken: requestAccessToken,
+        sessionRevision: requestSessionRevision,
+        user,
+      } satisfies CurrentUserSessionResponse;
+    }
+  }
+
+  throw new ApiError(
+    "A sessão foi atualizada durante a identificação. Tente novamente.",
+    409,
+  );
+}
+
+export function currentUserSessionIsCurrent(
+  session: Pick<CurrentUserSessionResponse, "accessToken" | "sessionRevision">,
+) {
+  return Boolean(
+    session.accessToken &&
+      session.sessionRevision === storedSessionRevision &&
+      getStoredSession()?.access_token === session.accessToken,
+  );
 }
 
 function requireTokenResponse(payload: unknown, fallbackRefreshToken = "") {
@@ -415,15 +742,22 @@ function requireNonEmptyToken(value: unknown, field: string) {
  * the authenticated session changes. The backend remains the authority that
  * accepts or rejects a cross-company X-Company-ID header.
  */
-export function setAuthenticatedMasterAccess(user: CurrentUser | null) {
+export function setAuthenticatedMasterAccess(
+  user: CurrentUser | null,
+  authenticatedAccessToken = getStoredSession()?.access_token ?? "",
+) {
   const accessToken = getStoredSession()?.access_token ?? "";
-  authenticatedMasterAccessToken =
+  authenticatedPrincipal =
+    accessToken && accessToken === authenticatedAccessToken && user
+      ? { accessToken, user }
+      : null;
+  authenticatedMasterAccess =
     accessToken &&
+    accessToken === authenticatedAccessToken &&
     user &&
-    isMasterUser(user) &&
-    accessTokenMatchesUserIdentity(accessToken, user)
-      ? accessToken
-      : "";
+    isMasterUser(user)
+      ? { accessToken, user }
+      : null;
 }
 
 function shouldSendMasterCompanyScope(path: string) {
@@ -431,7 +765,12 @@ function shouldSendMasterCompanyScope(path: string) {
   if (pathname === "/users/me" || pathname.startsWith("/users/me/")) {
     return false;
   }
-  if (/^\/companies\/[^/]+(?:\/|$)/.test(pathname)) return true;
+  // `/companies/{id}` and its nested administrative resources are already
+  // scoped by the path and authorized from the master JWT. Sending the
+  // selected tenant again as X-Company-ID makes the backend reinterpret an
+  // administrative request as a tenant request and can turn a valid master
+  // operation into 403. We still validate path/options consistency above.
+  if (/^\/companies\/[^/]+(?:\/|$)/.test(pathname)) return false;
 
   return [
     "/analytics",

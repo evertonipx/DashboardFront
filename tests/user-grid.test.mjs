@@ -40,6 +40,159 @@ test("GET do grid falhou: preferências locais nunca habilitam PUT", async () =>
   );
 });
 
+test("resposta tardia do grid não aplica nem persiste após troca de sessão", async () => {
+  const managedKey = scopedKey(
+    "ipxdata.card-views.v1",
+    "company-a",
+    "user-a",
+  );
+  const remoteOnlyKey = scopedKey(
+    "ipxdata.live-dashboard-settings.v1",
+    "company-a",
+    "user-a",
+  );
+
+  await withBrowser(
+    {
+      access_token: "token-a",
+      refresh_token: "refresh-a",
+      [managedKey]: "local-session-a",
+    },
+    async ({ requests, storage }) => {
+      const events = [];
+      let sessionIsCurrent = true;
+      let markGetStarted;
+      let resolveGridResponse;
+      const getStarted = new Promise((resolve) => {
+        markGetStarted = resolve;
+      });
+      const pendingGridResponse = new Promise((resolve) => {
+        resolveGridResponse = resolve;
+      });
+      globalThis.window.dispatchEvent = (event) => {
+        events.push({ detail: event.detail, type: event.type });
+        return true;
+      };
+      globalThis.fetch = async (url, init = {}) => {
+        requests.push(requestRecord(url, init));
+        markGetStarted();
+        return pendingGridResponse;
+      };
+
+      const hydration = userGrid.hydrateUserGridFromServer("user-a", {
+        expectedAccessToken: "token-a",
+        shouldApply: () =>
+          sessionIsCurrent && storage.getItem("access_token") === "token-a",
+      });
+      await getStarted;
+
+      sessionIsCurrent = false;
+      storage.setItem("access_token", "token-b");
+      storage.setItem("refresh_token", "refresh-b");
+      resolveGridResponse(
+        jsonResponse({
+          grid: gridDocument({
+            [managedKey]: "remote-session-a",
+            [remoteOnlyKey]: "remote-only-session-a",
+          }),
+        }),
+      );
+
+      assert.equal(await hydration, false);
+      assert.equal(storage.getItem(managedKey), "local-session-a");
+      assert.equal(storage.getItem(remoteOnlyKey), null);
+      assert.deepEqual(
+        requests.map((request) => request.method),
+        ["GET"],
+        "a resposta obsoleta não pode disparar PUT de merge",
+      );
+      assert.equal(
+        events.some(({ type }) => type === userGrid.USER_GRID_HYDRATED_EVENT),
+        false,
+        "a sessão substituída não pode ser anunciada como hidratada",
+      );
+
+      storage.setItem(managedKey, "changed-after-session-swap");
+      userGrid.requestUserGridSync();
+      assert.equal(await userGrid.flushUserGridSync(), false);
+      assert.deepEqual(
+        requests.map((request) => request.method),
+        ["GET"],
+        "o grid abandonado deve permanecer não persistível",
+      );
+    },
+  );
+});
+
+test("flush pendente do grid A não grava autenticado pela sessão B", async () => {
+  const managedKey = scopedKey(
+    "ipxdata.card-views.v1",
+    "company-a",
+    "user-a",
+  );
+
+  await withBrowser(
+    {
+      access_token: "token-a",
+      refresh_token: "refresh-a",
+      [managedKey]: "grid-hidratado-a",
+    },
+    async ({ requests, storage }) => {
+      let sessionIsCurrent = true;
+      let scheduledFlush = null;
+      globalThis.fetch = async (url, init = {}) => {
+        requests.push(requestRecord(url, init));
+        return jsonResponse({
+          grid: gridDocument({
+            [managedKey]: "grid-hidratado-a",
+          }),
+        });
+      };
+
+      assert.equal(
+        await userGrid.hydrateUserGridFromServer("user-a", {
+          expectedAccessToken: "token-a",
+          shouldApply: () =>
+            sessionIsCurrent && storage.getItem("access_token") === "token-a",
+        }),
+        true,
+      );
+      assert.deepEqual(
+        requests.map(({ authorization, method }) => ({ authorization, method })),
+        [{ authorization: "Bearer token-a", method: "GET" }],
+      );
+
+      globalThis.window.setTimeout = (callback) => {
+        scheduledFlush = callback;
+        return 91;
+      };
+      globalThis.window.clearTimeout = () => undefined;
+      storage.setItem(managedKey, "mudança-local-pendente-a");
+      userGrid.requestUserGridSync();
+      assert.equal(typeof scheduledFlush, "function");
+
+      sessionIsCurrent = false;
+      storage.setItem("access_token", "token-b");
+      storage.setItem("refresh_token", "refresh-b");
+
+      assert.equal(await userGrid.flushUserGridSync(), false);
+      scheduledFlush();
+      await Promise.resolve();
+
+      const putRequests = requests.filter(({ method }) => method === "PUT");
+      assert.deepEqual(putRequests, []);
+      assert.equal(
+        requests.some(
+          ({ authorization, method }) =>
+            method === "PUT" && authorization === "Bearer token-b",
+        ),
+        false,
+        "o flush abandonado não pode herdar a autenticação da sessão B",
+      );
+    },
+  );
+});
+
 test("merge do grid isola usuários, preserva empresas e não exclui chaves ausentes", async () => {
   const companyAUserA = scopedKey(
     "ipxdata.card-views.v1",
@@ -250,6 +403,7 @@ function gridDocument(entries) {
 
 function requestRecord(url, init) {
   return {
+    authorization: new Headers(init.headers).get("Authorization"),
     body: typeof init.body === "string" ? JSON.parse(init.body) : init.body,
     method: init.method ?? "GET",
     url: String(url),

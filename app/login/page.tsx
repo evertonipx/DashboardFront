@@ -65,6 +65,8 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState("");
+  const loginAttemptRef = React.useRef(0);
+  const submitInFlightRef = React.useRef(false);
   const isDefaultBrand = branding.key === DEFAULT_LOGIN_BRANDING.key;
 
   React.useEffect(() => {
@@ -75,6 +77,9 @@ export default function LoginPage() {
     let mounted = true;
 
     if (!loading && user) {
+      loginAttemptRef.current += 1;
+      setFormError("");
+      setSubmitting(false);
       resolvePostLoginPath(user).then((path) => {
         if (mounted) router.replace(path);
       });
@@ -87,20 +92,31 @@ export default function LoginPage() {
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    // React state is applied on the next render. A synchronous ref closes the
+    // small window in which Enter + click (or a double click) could send two
+    // successful login requests with the same credentials.
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
+    const loginAttempt = ++loginAttemptRef.current;
     setFormError("");
     setSubmitting(true);
 
     try {
       const currentUser = await login(email.trim(), password);
+      if (loginAttempt !== loginAttemptRef.current) return;
       toast.success("Login realizado com sucesso");
       router.replace(await resolvePostLoginPath(currentUser));
     } catch (error) {
+      if (loginAttempt !== loginAttemptRef.current) return;
       const message =
         error instanceof Error ? error.message : "Não foi possível autenticar.";
       setFormError(message);
       toast.error(message);
     } finally {
-      setSubmitting(false);
+      submitInFlightRef.current = false;
+      if (loginAttempt === loginAttemptRef.current) {
+        setSubmitting(false);
+      }
     }
   }
 

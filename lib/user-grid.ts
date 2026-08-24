@@ -7,6 +7,11 @@ type UserGridResponse = {
   updated_at?: string | null;
 };
 
+type UserGridHydrationOptions = {
+  expectedAccessToken?: string;
+  shouldApply?: () => boolean;
+};
+
 type UserGridDocument = {
   entries: Record<string, string>;
   format: "ipxdata-user-grid";
@@ -70,6 +75,7 @@ const MANAGED_GRID_BASE_PATTERNS = [
 
 let activeUserId = "";
 let activeDocument: UserGridDocument | null = null;
+let activeHydrationOptions: UserGridHydrationOptions = {};
 let hydrated = false;
 let generation = 0;
 let saveTimer: number | null = null;
@@ -78,22 +84,39 @@ let activeListenerCleanup: (() => void) | null = null;
 let localSnapshot = new Map<string, string>();
 const pendingChanges = new Map<string, string | null>();
 
-export async function hydrateUserGridFromServer(userId: string) {
+export async function hydrateUserGridFromServer(
+  userId: string,
+  options: UserGridHydrationOptions = {},
+) {
   const cleanUserId = userId.trim();
   if (!cleanUserId || typeof window === "undefined") return false;
-  if (hydrated && activeUserId === cleanUserId) return true;
+  const shouldApply = options.shouldApply ?? (() => true);
+  if (!shouldApply()) return false;
+  if (hydrated && activeUserId === cleanUserId) {
+    activeHydrationOptions = options;
+    if (pendingChanges.size) scheduleFlush();
+    return true;
+  }
 
   const currentGeneration = ++generation;
   activeUserId = cleanUserId;
   activeDocument = null;
+  activeHydrationOptions = options;
   hydrated = false;
   pendingChanges.clear();
   clearSaveTimer();
   emitStatus("loading");
 
   try {
-    const response = await apiFetch<UserGridResponse>("/users/me/grid");
-    if (currentGeneration !== generation || activeUserId !== cleanUserId) {
+    const response = await apiFetch<UserGridResponse>("/users/me/grid", {
+      expectedAccessToken: options.expectedAccessToken,
+    });
+    if (
+      !shouldApply() ||
+      currentGeneration !== generation ||
+      activeUserId !== cleanUserId
+    ) {
+      abandonHydration(currentGeneration, cleanUserId);
       return false;
     }
 
@@ -127,11 +150,17 @@ export async function hydrateUserGridFromServer(userId: string) {
       (!parsed.nativeDocument && localSnapshot.size) ||
       nativeDocumentNeedsMerge
     ) {
-      await persistActiveDocument(currentGeneration).catch(() => undefined);
+      await persistActiveDocument(currentGeneration, options).catch(
+        () => undefined,
+      );
     }
 
-    return true;
+    return shouldApply();
   } catch {
+    if (!shouldApply()) {
+      abandonHydration(currentGeneration, cleanUserId);
+      return false;
+    }
     if (currentGeneration !== generation) return false;
     // A failed read provides no safe merge base for the whole-document PUT.
     // Keep local preferences untouched, but do not create a writable document
@@ -184,6 +213,7 @@ export function clearUserGridSync() {
   clearSaveTimer();
   activeUserId = "";
   activeDocument = null;
+  activeHydrationOptions = {};
   hydrated = false;
   localSnapshot = new Map();
   pendingChanges.clear();
@@ -191,12 +221,24 @@ export function clearUserGridSync() {
 }
 
 export function requestUserGridSync() {
-  if (!activeUserId || !hydrated) return;
+  if (
+    !activeUserId ||
+    !hydrated ||
+    activeHydrationOptions.shouldApply?.() === false
+  ) {
+    return;
+  }
   captureLocalChanges(activeUserId);
 }
 
 export async function flushUserGridSync() {
-  if (!activeUserId || !hydrated) return false;
+  if (
+    !activeUserId ||
+    !hydrated ||
+    activeHydrationOptions.shouldApply?.() === false
+  ) {
+    return false;
+  }
   captureLocalChanges(activeUserId);
   clearSaveTimer();
   if (flushPromise) await flushPromise;
@@ -205,7 +247,13 @@ export async function flushUserGridSync() {
 }
 
 function captureLocalChanges(userId: string) {
-  if (!hydrated || activeUserId !== userId) return;
+  if (
+    !hydrated ||
+    activeUserId !== userId ||
+    activeHydrationOptions.shouldApply?.() === false
+  ) {
+    return;
+  }
   const current = new Map(Object.entries(collectManagedEntries(userId)));
   const keys = new Set([...localSnapshot.keys(), ...current.keys()]);
 
@@ -221,7 +269,12 @@ function captureLocalChanges(userId: string) {
 }
 
 function scheduleFlush(delay = SAVE_DEBOUNCE_MS) {
-  if (typeof window === "undefined" || !hydrated || !pendingChanges.size) {
+  if (
+    typeof window === "undefined" ||
+    !hydrated ||
+    !pendingChanges.size ||
+    activeHydrationOptions.shouldApply?.() === false
+  ) {
     return;
   }
   clearSaveTimer();
@@ -232,7 +285,14 @@ function scheduleFlush(delay = SAVE_DEBOUNCE_MS) {
 }
 
 async function flushPendingChanges() {
-  if (!activeDocument || !activeUserId || !pendingChanges.size) return;
+  if (
+    !activeDocument ||
+    !activeUserId ||
+    !pendingChanges.size ||
+    activeHydrationOptions.shouldApply?.() === false
+  ) {
+    return;
+  }
   if (flushPromise) {
     scheduleFlush();
     return;
@@ -246,18 +306,29 @@ async function flushPendingChanges() {
   });
   activeDocument.updatedAt = new Date().toISOString();
 
-  flushPromise = persistActiveDocument(currentGeneration)
-    .then(() => {
+  const hydrationOptions = activeHydrationOptions;
+  flushPromise = persistActiveDocument(currentGeneration, hydrationOptions)
+    .then((persisted) => {
+      if (!persisted) return;
       changes.forEach((value, key) => {
         if (pendingChanges.get(key) === value) pendingChanges.delete(key);
       });
     })
     .catch(() => {
-      if (currentGeneration === generation) scheduleFlush(RETRY_DELAY_MS);
+      if (
+        currentGeneration === generation &&
+        hydrationOptions.shouldApply?.() !== false
+      ) {
+        scheduleFlush(RETRY_DELAY_MS);
+      }
     })
     .finally(() => {
       flushPromise = null;
-      if (pendingChanges.size && currentGeneration === generation) {
+      if (
+        pendingChanges.size &&
+        currentGeneration === generation &&
+        hydrationOptions.shouldApply?.() !== false
+      ) {
         scheduleFlush();
       }
     });
@@ -265,8 +336,17 @@ async function flushPendingChanges() {
   await flushPromise;
 }
 
-async function persistActiveDocument(currentGeneration: number) {
-  if (!activeDocument || currentGeneration !== generation) return;
+async function persistActiveDocument(
+  currentGeneration: number,
+  hydrationOptions: UserGridHydrationOptions = {},
+) {
+  if (
+    !activeDocument ||
+    currentGeneration !== generation ||
+    hydrationOptions.shouldApply?.() === false
+  ) {
+    return false;
+  }
   emitStatus("saving");
   const documentToSave = cloneDocument(activeDocument);
   let response: UserGridResponse;
@@ -274,18 +354,41 @@ async function persistActiveDocument(currentGeneration: number) {
     response = await apiFetch<UserGridResponse>("/users/me/grid", {
       method: "PUT",
       body: { grid: documentToSave },
+      expectedAccessToken: hydrationOptions.expectedAccessToken,
     });
   } catch (error) {
-    if (currentGeneration === generation) emitStatus("error");
+    if (
+      currentGeneration === generation &&
+      hydrationOptions.shouldApply?.() !== false
+    ) {
+      emitStatus("error");
+    }
     throw error;
   }
-  if (currentGeneration !== generation) return;
+  if (
+    currentGeneration !== generation ||
+    hydrationOptions.shouldApply?.() === false
+  ) {
+    return false;
+  }
 
   const returned = normalizeGridDocument(response.grid);
   activeDocument = returned.nativeDocument
     ? returned.document
     : documentToSave;
   emitStatus("saved");
+  return true;
+}
+
+function abandonHydration(currentGeneration: number, userId: string) {
+  if (currentGeneration !== generation || activeUserId !== userId) return;
+  activeUserId = "";
+  activeDocument = null;
+  activeHydrationOptions = {};
+  hydrated = false;
+  localSnapshot = new Map();
+  pendingChanges.clear();
+  emitStatus("idle");
 }
 
 function applyRemoteEntries(entries: Record<string, string>, userId: string) {

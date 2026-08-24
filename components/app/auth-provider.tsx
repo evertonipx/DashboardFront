@@ -8,23 +8,29 @@ import {
   ApiError,
   apiFetch,
   clearStoredSession,
+  currentUserSessionIsCurrent,
   currentUserRequest,
+  currentUserRequestIsInFlight,
   getStoredRefreshToken,
   getStoredSession,
   loginRequest,
   SESSION_EXPIRED_EVENT,
+  SESSION_SYNC_STORAGE_KEY,
   SESSION_UPDATED_EVENT,
   setAuthenticatedMasterAccess,
+  synchronizeExternalSessionUpdate,
+  type CurrentUserSessionResponse,
 } from "@/lib/api";
 import {
-  accessTokenMatchesUserIdentity,
   reconcileCurrentUserWithAccessToken,
 } from "@/lib/access-token-claims";
 import { hasDeclaredManagerAccess, hasMasterAccess } from "@/lib/access";
 import {
+  buildCurrentUserCompanyCacheRecord,
   normalizeCompanyRecord,
   readCachedCompany,
   resolveCompanyRecordTimeZone,
+  resolveCurrentUserCompanyTimeZone,
   writeCompanyCache,
 } from "@/lib/company-cache";
 import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
@@ -58,6 +64,13 @@ type AuthContextValue = {
   refreshUser: () => Promise<CurrentUser | null>;
 };
 
+type PublishedPrincipal = Pick<
+  CurrentUserSessionResponse,
+  "accessToken" | "sessionRevision"
+> & {
+  user: CurrentUser;
+};
+
 const AuthContext = React.createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -66,43 +79,78 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isManager, setIsManager] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const gridSyncErrorShown = React.useRef(false);
-  const userRef = React.useRef<CurrentUser | null>(null);
+  const publishedPrincipalRef = React.useRef<PublishedPrincipal | null>(null);
+  const refreshUserAttemptRef = React.useRef<
+    Promise<CurrentUser | null> | null
+  >(null);
 
-  React.useEffect(() => {
-    userRef.current = user;
-  }, [user]);
-
-  const resolveManagerAccess = React.useCallback(async (currentUser: CurrentUser | null) => {
+  const resolveManagerAccess = React.useCallback((currentUser: CurrentUser | null) => {
     if (!currentUser) return false;
     if (hasDeclaredManagerAccess(currentUser)) return true;
     if (hasAnyOperationalPermission(currentUser)) return true;
     return false;
   }, []);
 
-  const refreshUser = React.useCallback(async () => {
-    try {
-      const currentUser = await hydrateAuthenticatedUser(
-        await currentUserRequest(),
-        userRef.current,
-      );
-      const canManage = await resolveManagerAccess(currentUser);
+  const clearPublishedPrincipal = React.useCallback(() => {
+    publishedPrincipalRef.current = null;
+    clearUserGridSync();
+    setUser(null);
+    setIsManager(false);
+  }, []);
+
+  const publishAuthenticatedPrincipal = React.useCallback(
+    (
+      currentUser: CurrentUser,
+      authenticatedSession: CurrentUserSessionResponse,
+    ) => {
+      assertAuthenticatedSessionCurrent(authenticatedSession);
+      publishedPrincipalRef.current = {
+        accessToken: authenticatedSession.accessToken,
+        sessionRevision: authenticatedSession.sessionRevision,
+        user: currentUser,
+      };
       setUser(currentUser);
-      setIsManager(canManage);
+      setIsManager(resolveManagerAccess(currentUser));
       return currentUser;
-    } catch (error) {
-      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-        clearStoredSession();
-        clearUserGridSync();
-        setUser(null);
-        setIsManager(false);
+    },
+    [resolveManagerAccess],
+  );
+
+  const refreshUser = React.useCallback(() => {
+    if (refreshUserAttemptRef.current) return refreshUserAttemptRef.current;
+
+    const fallbackPrincipal = publishedPrincipalRef.current;
+    const promise = (async () => {
+      try {
+        return await hydrateCurrentAuthenticatedSession(
+          fallbackPrincipal,
+          publishAuthenticatedPrincipal,
+        );
+      } catch {
+        // Network/5xx failures may preserve only the profile certified for the
+        // exact token and revision that still own the browser. Current 401/403
+        // failures clear storage in the request layer and therefore fail this
+        // check. No JWT guess can carry profile A into session B.
+        const publishedPrincipal = publishedPrincipalRef.current;
+        if (
+          publishedPrincipal &&
+          currentUserSessionIsCurrent(publishedPrincipal)
+        ) {
+          return publishedPrincipal.user;
+        }
+        clearPublishedPrincipal();
         return null;
       }
+    })();
 
-      // Rede/5xx não invalidam uma sessão previamente autenticada. Preserve o
-      // último perfil até que uma nova tentativa consiga revalidá-lo.
-      return userRef.current;
-    }
-  }, [resolveManagerAccess]);
+    refreshUserAttemptRef.current = promise;
+    void promise.finally(() => {
+      if (refreshUserAttemptRef.current === promise) {
+        refreshUserAttemptRef.current = null;
+      }
+    });
+    return promise;
+  }, [clearPublishedPrincipal, publishAuthenticatedPrincipal]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -114,10 +162,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const currentUser = await refreshUser();
+      await refreshUser();
       if (!mounted) return;
 
-      setUser(currentUser);
       setLoading(false);
     }
 
@@ -127,6 +174,49 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       mounted = false;
     };
   }, [refreshUser]);
+
+  React.useEffect(() => {
+    let reconciliationTimer: number | null = null;
+
+    function reconcileExternalSession() {
+      reconciliationTimer = null;
+      synchronizeExternalSessionUpdate();
+      // A cross-tab revision is a distinct session lineage. Do not reuse a
+      // hydration promise that started before the storage signal.
+      refreshUserAttemptRef.current = null;
+      const session = getStoredSession();
+
+      if (!session) {
+        clearPublishedPrincipal();
+        router.replace("/login");
+        return;
+      }
+
+      // synchronizeExternalSessionUpdate advances the local revision. Never
+      // leave a principal from the previous tab/session rendered while the new
+      // exact snapshot is being certified by `/auth/me`.
+      clearPublishedPrincipal();
+      void refreshUser();
+    }
+
+    function handleSessionStorage(event: StorageEvent) {
+      if (event.key !== SESSION_SYNC_STORAGE_KEY) return;
+      if (reconciliationTimer !== null) {
+        window.clearTimeout(reconciliationTimer);
+      }
+      // The sync marker is written after every token field, so one queued turn
+      // is enough to coalesce consecutive cross-tab session changes.
+      reconciliationTimer = window.setTimeout(reconcileExternalSession, 0);
+    }
+
+    window.addEventListener("storage", handleSessionStorage);
+    return () => {
+      window.removeEventListener("storage", handleSessionStorage);
+      if (reconciliationTimer !== null) {
+        window.clearTimeout(reconciliationTimer);
+      }
+    };
+  }, [clearPublishedPrincipal, refreshUser, router]);
 
   React.useEffect(() => {
     if (!user?.id) return;
@@ -161,9 +251,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     function handleSessionExpired() {
       clearStoredSession();
-      clearUserGridSync();
-      setUser(null);
-      setIsManager(false);
+      refreshUserAttemptRef.current = null;
+      clearPublishedPrincipal();
       router.replace("/login");
     }
 
@@ -171,21 +260,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
     };
-  }, [router]);
+  }, [clearPublishedPrincipal, router]);
 
   React.useEffect(() => {
     let reconciling = false;
 
     function handleSessionUpdated() {
-      const currentUser = userRef.current;
       const accessToken = getStoredSession()?.access_token ?? "";
-      if (
-        reconciling ||
-        !currentUser ||
-        !accessTokenMatchesUserIdentity(accessToken, currentUser)
-      ) {
-        return;
-      }
+      if (reconciling || !accessToken) return;
+
+      const publishedPrincipal = publishedPrincipalRef.current;
+      // During bootstrap/login, the request that caused a proactive refresh is
+      // already responsible for publishing `/auth/me`; starting another chain
+      // here would duplicate the GET. A published old revision is hidden
+      // immediately, then either that in-flight request or this handler wins.
+      if (!publishedPrincipal) return;
+      clearPublishedPrincipal();
+      if (currentUserRequestIsInFlight()) return;
 
       reconciling = true;
       void refreshUser().finally(() => {
@@ -197,35 +288,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       window.removeEventListener(SESSION_UPDATED_EVENT, handleSessionUpdated);
     };
-  }, [refreshUser]);
+  }, [clearPublishedPrincipal, refreshUser]);
 
   const login = React.useCallback(async (email: string, password: string) => {
     await loginRequest(email, password);
-    const currentUser = await hydrateAuthenticatedUser(
-      await currentUserRequest(),
+    refreshUserAttemptRef.current = null;
+    clearPublishedPrincipal();
+    return hydrateCurrentAuthenticatedSession(
+      null,
+      publishAuthenticatedPrincipal,
     );
-    const canManage = await resolveManagerAccess(currentUser);
-    setUser(currentUser);
-    setIsManager(canManage);
-    return currentUser;
-  }, [resolveManagerAccess]);
+  }, [clearPublishedPrincipal, publishAuthenticatedPrincipal]);
 
   const logout = React.useCallback(async () => {
+    const accessToken = getStoredSession()?.access_token ?? "";
     const refreshToken = getStoredRefreshToken();
+
+    // Local logout is immediate. The revocation request is pinned to the old
+    // credentials so its late completion can never clear a newer login.
+    clearStoredSession();
+    refreshUserAttemptRef.current = null;
+    clearPublishedPrincipal();
+    router.replace("/login");
 
     if (refreshToken) {
       await apiFetch("/auth/logout", {
         method: "POST",
+        auth: false,
         body: { refresh_token: refreshToken },
+        headers: accessToken
+          ? { Authorization: `Bearer ${accessToken}` }
+          : undefined,
       }).catch(() => undefined);
     }
-
-    clearStoredSession();
-    clearUserGridSync();
-    setUser(null);
-    setIsManager(false);
-    router.replace("/login");
-  }, [router]);
+  }, [clearPublishedPrincipal, router]);
 
   const value = React.useMemo<AuthContextValue>(
     () => ({
@@ -254,28 +350,22 @@ export function useAuth() {
 
 async function hydrateCurrentUser(
   user: CurrentUser,
+  authenticatedSession: CurrentUserSessionResponse,
   fallbackUser: CurrentUser | null = null,
 ) {
-  const preliminaryCompanyScope = getUserCompanyScope(user);
-  if (hasMasterAccess(user)) {
-    clearStoredCurrentCompanyScope();
-    synchronizeMasterCompanyScope(preliminaryCompanyScope);
-  } else {
-    clearStoredMasterCompanyScope();
-    if (preliminaryCompanyScope) {
-      setStoredCurrentCompanyScope(preliminaryCompanyScope);
-    } else {
-      clearStoredCurrentCompanyScope();
-    }
-  }
-
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   const [permissions, company] = await Promise.all([
     hydrateUserPermissions(
       user,
       fallbackUser?.permissions ?? user.permissions ?? [],
+      authenticatedSession,
     ),
     hydrateUserCompany(user),
   ]);
+  assertAuthenticatedSessionCurrent(authenticatedSession);
+
+  const declaredUserTimeZone =
+    resolveCurrentUserCompanyTimeZone(user).timeZone;
 
   const hydratedUser = {
     ...user,
@@ -283,14 +373,18 @@ async function hydrateCurrentUser(
     company: company ?? user.company,
     company_name: company?.name ?? user.company_name,
     company_timezone:
-      company?.timezone ?? user.company_timezone ?? user.company?.timezone,
+      company?.timezone ?? declaredUserTimeZone,
     company_trade_name: company?.trade_name ?? user.company_trade_name,
   };
 
   if (hasMasterAccess(hydratedUser)) {
     clearStoredCurrentCompanyScope();
     synchronizeMasterCompanyScope(getUserCompanyScope(hydratedUser));
-    await hydrateStoredMasterCompanyScope(hydratedUser);
+    await hydrateStoredMasterCompanyScope(
+      hydratedUser,
+      authenticatedSession,
+    );
+    assertAuthenticatedSessionCurrent(authenticatedSession);
   } else {
     clearStoredMasterCompanyScope();
     const companyScope = getUserCompanyScope(hydratedUser);
@@ -305,36 +399,141 @@ async function hydrateCurrentUser(
 }
 
 async function hydrateAuthenticatedUser(
-  user: CurrentUser,
+  authenticatedSession: CurrentUserSessionResponse,
   fallbackUser: CurrentUser | null = null,
 ) {
-  const accessToken = getStoredSession()?.access_token ?? "";
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   const tokenEnrichedUser = reconcileCurrentUserWithAccessToken(
-    user,
-    accessToken,
+    authenticatedSession.user,
+    authenticatedSession.accessToken,
   );
   if (!tokenEnrichedUser) {
-    throw new ApiError(
-      "A identidade retornada pela API diverge do contexto autenticado no JWT.",
-      401,
+    // A 200 without any usable principal is a malformed API response. Claim
+    // aliases never reject a profile that `/auth/me` authenticated itself.
+    assertAuthenticatedSessionCurrent(authenticatedSession);
+    clearStoredSession();
+    throw new Error(
+      "A API não retornou uma identidade autenticada utilizável.",
     );
   }
-  setAuthenticatedMasterAccess(tokenEnrichedUser);
-  const hydratedUser = await hydrateCurrentUser(tokenEnrichedUser, fallbackUser);
-  await hydrateUserGridFromServer(hydratedUser.id);
+  setAuthenticatedMasterAccess(
+    tokenEnrichedUser,
+    authenticatedSession.accessToken,
+  );
+  const hydratedUser = await hydrateCurrentUser(
+    tokenEnrichedUser,
+    authenticatedSession,
+    fallbackUser,
+  );
+  assertAuthenticatedSessionCurrent(authenticatedSession);
+  await hydrateUserGridFromServer(hydratedUser.id, {
+    expectedAccessToken: authenticatedSession.accessToken,
+    shouldApply: () => currentUserSessionIsCurrent(authenticatedSession),
+  });
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   const companyId = getEffectiveCompanyScopeId(hydratedUser);
   if (companyId) {
     await migrateLegacyLiveDefault({
       companyId,
+      expectedAccessToken: authenticatedSession.accessToken,
+      shouldApply: () => currentUserSessionIsCurrent(authenticatedSession),
       userId: hydratedUser.id,
     }).catch(() => false);
+    assertAuthenticatedSessionCurrent(authenticatedSession);
   }
   return hydratedUser;
+}
+
+async function hydrateCurrentAuthenticatedSession<T>(
+  fallbackPrincipal: PublishedPrincipal | null,
+  commit: (
+    user: CurrentUser,
+    authenticatedSession: CurrentUserSessionResponse,
+  ) => T,
+): Promise<T> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const sessionResponse = await currentUserRequest();
+    try {
+      assertAuthenticatedSessionCurrent(sessionResponse);
+      const exactFallbackUser =
+        fallbackPrincipal &&
+        fallbackPrincipal.accessToken === sessionResponse.accessToken &&
+        fallbackPrincipal.sessionRevision === sessionResponse.sessionRevision &&
+        currentUserSessionIsCurrent(fallbackPrincipal)
+          ? fallbackPrincipal.user
+        : null;
+      const reconciledSessionUser = reconcileCurrentUserWithAccessToken(
+        sessionResponse.user,
+        sessionResponse.accessToken,
+      );
+      const compatibleFallbackUser =
+        exactFallbackUser &&
+        reconciledSessionUser &&
+        currentUsersShareIdentityAndCompany(
+          exactFallbackUser,
+          reconciledSessionUser,
+        )
+          ? exactFallbackUser
+          : null;
+      const hydratedUser = await hydrateAuthenticatedUser(
+        sessionResponse,
+        compatibleFallbackUser,
+      );
+      assertAuthenticatedSessionCurrent(sessionResponse);
+      // Commit while the snapshot check and React state updates still share
+      // the same synchronous turn. A stale user is never published.
+      return commit(hydratedUser, sessionResponse);
+    } catch (error) {
+      if (error instanceof AuthenticatedSessionChangedError) continue;
+      throw error;
+    }
+  }
+
+  throw new ApiError(
+    "A sessão foi atualizada durante a autenticação. Tente novamente.",
+    409,
+  );
+}
+
+class AuthenticatedSessionChangedError extends Error {
+  constructor() {
+    super("A sessão autenticada foi substituída durante a hidratação.");
+    this.name = "AuthenticatedSessionChangedError";
+  }
+}
+
+function assertAuthenticatedSessionCurrent(
+  authenticatedSession: CurrentUserSessionResponse,
+) {
+  if (!currentUserSessionIsCurrent(authenticatedSession)) {
+    throw new AuthenticatedSessionChangedError();
+  }
+}
+
+function currentUsersShareIdentityAndCompany(
+  left: CurrentUser,
+  right: CurrentUser,
+) {
+  const leftUserId = left.id?.trim() ?? "";
+  const rightUserId = right.id?.trim() ?? "";
+  if (!leftUserId || leftUserId !== rightUserId) return false;
+
+  const leftCompanyId = getCurrentUserCompanyId(left).trim();
+  const rightCompanyId = getCurrentUserCompanyId(right).trim();
+  if (leftCompanyId || rightCompanyId) {
+    return Boolean(
+      leftCompanyId &&
+        rightCompanyId &&
+        leftCompanyId === rightCompanyId,
+    );
+  }
+  return true;
 }
 
 async function hydrateUserPermissions(
   user: CurrentUser,
   fallbackPermissions: UserPermission[],
+  authenticatedSession: CurrentUserSessionResponse,
 ) {
   if (!user.id) return fallbackPermissions;
 
@@ -343,6 +542,7 @@ async function hydrateUserPermissions(
       // This request hydrates the authenticated principal itself. The backend
       // derives that identity from the same JWT; a company selected by a
       // superadmin must not leak into this bootstrap request.
+      expectedAccessToken: authenticatedSession.accessToken,
       jwtCompanyScopeOnly: true,
     });
   } catch {
@@ -363,49 +563,15 @@ async function hydrateUserCompany(user: CurrentUser) {
     writeCompanyCache([fallbackCompany!]);
     return fallbackCompany;
   }
-  if (!companyId) return fallbackCompany;
-
-  try {
-    const response = await apiFetch<CurrentUserCompany>(
-      `/companies/${companyId}`,
-      { jwtCompanyScopeOnly: hasMasterAccess(user) },
-    );
-    if (response.id?.trim() !== companyId) {
-      throw new Error("A API retornou o cadastro de outra empresa.");
-    }
-    const company = mergeCurrentUserCompanies(
-      companyId,
-      fallbackCompany,
-      normalizeCompanyRecord(response),
-    );
-    if (!company) return fallbackCompany;
-    writeCompanyCache([company]);
-    return company;
-  } catch {
-    return fallbackCompany;
-  }
+  // `/companies/{id}` is an administrative endpoint in the live API and
+  // returns 403 for a regular user. Its own company metadata must come from
+  // the authenticated JWT and `/auth/me`; if neither certifies the timezone,
+  // dashboards stay fail-closed instead of probing a forbidden route.
+  return fallbackCompany;
 }
 
 function getDeclaredCompany(user: CurrentUser) {
-  const companyId = getCurrentUserCompanyId(user);
-  const declaredTimeZone =
-    resolveCompanyRecordTimeZone(user.company).timeZone ??
-    resolveCompanyRecordTimeZone(user).timeZone;
-  if (user.company?.name) {
-    return {
-      ...user.company,
-      id: user.company.id || companyId,
-      timezone: declaredTimeZone,
-    };
-  }
-  if (!companyId || !user.company_name) return null;
-
-  return {
-    id: companyId,
-    name: user.company_name,
-    timezone: declaredTimeZone,
-    trade_name: user.company_trade_name ?? null,
-  } satisfies CurrentUserCompany;
+  return buildCurrentUserCompanyCacheRecord(user);
 }
 
 function getUserCompanyScope(user: CurrentUser) {
@@ -413,8 +579,7 @@ function getUserCompanyScope(user: CurrentUser) {
   if (!id) return null;
 
   const timeZone =
-    resolveCompanyRecordTimeZone(user.company).timeZone ??
-    resolveCompanyRecordTimeZone(user).timeZone;
+    resolveCurrentUserCompanyTimeZone(user).timeZone;
 
   return {
     id,
@@ -473,11 +638,15 @@ function synchronizeMasterCompanyScope(
   });
 }
 
-async function hydrateStoredMasterCompanyScope(user: CurrentUser) {
+async function hydrateStoredMasterCompanyScope(
+  user: CurrentUser,
+  authenticatedSession: CurrentUserSessionResponse,
+) {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   const storedScope = getStoredMasterCompanyScope();
   if (!storedScope) return;
   const resolution = getCompanyTimeZoneResolutionForScope(user, storedScope.id);
-  if (!resolution.fallback && resolution.source === "current-user-company") {
+  if (!resolution.fallback) {
     if (canonicalCompanyTimeZone(storedScope.timezone) !== resolution.timeZone) {
       setStoredMasterCompanyScope({
         ...storedScope,
@@ -488,15 +657,25 @@ async function hydrateStoredMasterCompanyScope(user: CurrentUser) {
   }
 
   try {
-    const response = await apiFetch<CurrentUserCompany>(
-      `/companies/${storedScope.id}`,
-      { companyScopeId: storedScope.id },
+    const response = await apiFetch<CurrentUserCompany[]>("/companies", {
+      expectedAccessToken: authenticatedSession.accessToken,
+      jwtCompanyScopeOnly: true,
+    });
+    assertAuthenticatedSessionCurrent(authenticatedSession);
+    if (!Array.isArray(response)) return;
+    const companies = response.map(normalizeCompanyRecord);
+    writeCompanyCache(companies);
+    const company = companies.find(
+      (row) => row.id?.trim() === storedScope.id,
     );
-    if (response.id?.trim() !== storedScope.id) return;
-    const company = normalizeCompanyRecord(response);
-    const timeZone = canonicalCompanyTimeZone(company.timezone);
-    if (!timeZone) return;
-    writeCompanyCache([{ ...company, timezone: timeZone }]);
+    if (!company) return;
+    const timeZone = resolveCompanyRecordTimeZone(company).timeZone;
+    if (!timeZone) {
+      if (storedScope.timezone) {
+        setStoredMasterCompanyScope({ ...storedScope, timezone: null });
+      }
+      return;
+    }
     setStoredMasterCompanyScope({
       ...storedScope,
       name: company.name || storedScope.name,

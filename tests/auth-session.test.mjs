@@ -671,9 +671,9 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
     accessTokenClaims.resolveAccessTokenContext(
       accessToken({ ...claims, companyId: "company-other" }),
       now,
-    ),
-    null,
-    "aliases divergentes não podem escolher um tenant arbitrariamente",
+    )?.companyId,
+    "company-jwt",
+    "company_id canônico deve vencer aliases de migração divergentes",
   );
   assert.equal(
     accessTokenClaims.resolveAccessTokenContext(
@@ -792,7 +792,7 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
   );
 });
 
-test("claims não sobrescrevem role explícita nem atravessam identidade ou empresa", () => {
+test("user id canônico vence sub legado sem atravessar identidade ou empresa", () => {
   const now = Date.UTC(2026, 7, 4, 12, 0, 0);
   const user = currentUser();
   const validClaims = {
@@ -804,9 +804,96 @@ test("claims não sobrescrevem role explícita nem atravessam identidade ou empr
     user_id: user.id,
   };
 
+  const migratedSubject = accessToken({
+    ...validClaims,
+    sub: user.email,
+  });
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(migratedSubject, now)?.userId,
+    user.id,
+    "user_id deve ter precedência sobre um sub com semântica diferente",
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenMatchesUserIdentity(migratedSubject, user, now),
+    true,
+  );
+  assert.equal(
+    accessTokenClaims.enrichCurrentUserFromAccessToken(
+      user,
+      migratedSubject,
+      now,
+    ).role,
+    "admin",
+    "a migração de sub não pode impedir os metadados do mesmo usuário",
+  );
+
+  const emailInCanonicalUserId = accessToken({
+    ...validClaims,
+    sub: user.id,
+    user_id: user.email,
+  });
+  assert.equal(
+    accessTokenClaims.accessTokenMatchesUserIdentity(
+      emailInCanonicalUserId,
+      user,
+      now,
+    ),
+    false,
+    "user_id é um ID de aplicação e não pode ser certificado por igualdade com email",
+  );
+  assert.strictEqual(
+    accessTokenClaims.enrichCurrentUserFromAccessToken(
+      user,
+      emailInCanonicalUserId,
+      now,
+    ),
+    user,
+    "sub válido não pode contornar um user_id canônico incompatível",
+  );
+  assert.equal(
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      user,
+      emailInCanonicalUserId,
+      now,
+    )?.role,
+    undefined,
+    "um user_id contendo email não pode conceder role ao perfil autoritativo",
+  );
+
+  const camelCaseUserId = accessToken({
+    ...validClaims,
+    sub: "provider-subject-that-is-not-the-user-id",
+    user_id: undefined,
+    userId: user.id,
+  });
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(camelCaseUserId, now)?.userId,
+    user.id,
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenMatchesUserIdentity(camelCaseUserId, user, now),
+    true,
+  );
+
+  const emailSubject = accessToken({
+    company_id: user.company_id,
+    exp: now / 1000 + 900,
+    role: "admin",
+    sub: user.email.toUpperCase(),
+  });
+  assert.equal(
+    accessTokenClaims.accessTokenMatchesUserIdentity(emailSubject, user, now),
+    true,
+    "sub em formato de email deve reconciliar sem depender de caixa",
+  );
+  assert.equal(
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(user, emailSubject, now)
+      ?.role,
+    "admin",
+  );
+
   for (const claims of [
     { ...validClaims, user_id: "user-other" },
-    { ...validClaims, sub: "user-other" },
     { ...validClaims, company_id: "company-other" },
     { ...validClaims, exp: now / 1000 },
     { ...validClaims, nbf: now / 1000 + 60 },
@@ -836,7 +923,301 @@ test("claims não sobrescrevem role explícita nem atravessam identidade ou empr
   );
 });
 
-test("refresh atrasado da conta anterior não sobrescreve o novo tenant", async () => {
+test("claims master conflitantes não elevam o perfil autenticado", () => {
+  const now = Date.UTC(2026, 7, 4, 12, 0, 0);
+  const user = currentUser();
+  const contradictoryToken = accessToken({
+    company_id: user.company_id,
+    exp: now / 1000 + 900,
+    is_master: false,
+    role: "super-admin",
+    user_id: user.id,
+  });
+
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(contradictoryToken, now),
+    null,
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenDeclaresMasterAccess(contradictoryToken, now),
+    false,
+  );
+  assert.strictEqual(
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      user,
+      contradictoryToken,
+      now,
+    ),
+    user,
+    "role super-admin não pode vencer is_master false no mesmo JWT",
+  );
+});
+
+test("auth me 200 com id é autoritativo mesmo para JWT inválido ou desconhecido", () => {
+  const now = Date.UTC(2026, 7, 4, 12, 0, 0);
+  const user = currentUser();
+  const tokensWithoutUsableContext = [
+    "jwt-inválido",
+    accessToken({
+      exp: now / 1000 + 900,
+      principal: "claim-ainda-desconhecido-pelo-frontend",
+    }),
+  ];
+
+  for (const token of tokensWithoutUsableContext) {
+    assert.strictEqual(
+      accessTokenClaims.reconcileCurrentUserWithAccessToken(user, token, now),
+      user,
+      "um perfil autenticado não pode ser rejeitado por decodificação local opcional",
+    );
+  }
+
+  const compatibleOperationalMetadata =
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      user,
+      accessToken({
+        company_id: user.company_id,
+        company_timezone: "America/Manaus",
+        exp: now / 1000 + 900,
+        principal: "claim-ainda-desconhecido-pelo-frontend",
+        role: "admin",
+      }),
+      now,
+    );
+  assert.ok(compatibleOperationalMetadata);
+  assert.equal(
+    compatibleOperationalMetadata.company_timezone,
+    "America/Manaus",
+    "timezone pode completar a empresa explicitamente idêntica sem conceder acesso",
+  );
+  assert.equal(
+    compatibleOperationalMetadata.role,
+    undefined,
+    "claim sem identidade comparável não pode conceder papel de acesso",
+  );
+
+  const divergentMetadata =
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      user,
+      accessToken({
+        company_id: "company-other",
+        company_timezone: "America/Manaus",
+        exp: now / 1000 + 900,
+        role: "admin",
+        user_id: "user-other",
+      }),
+      now,
+    );
+  assert.ok(divergentMetadata, "o 200 autenticado continua sendo utilizável");
+  assert.equal(divergentMetadata.id, user.id);
+  assert.equal(divergentMetadata.company_id, user.company_id);
+  assert.equal(
+    divergentMetadata.company_timezone,
+    undefined,
+    "metadado de outra empresa não pode completar o perfil autoritativo",
+  );
+  assert.equal(
+    divergentMetadata.role,
+    undefined,
+    "papel de um principal incompatível não pode elevar o perfil autoritativo",
+  );
+
+  for (const token of [
+    "jwt-inválido",
+    accessToken({
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      role: "admin",
+      user_id: user.id,
+    }),
+  ]) {
+    assert.equal(
+      accessTokenClaims.reconcileCurrentUserWithAccessToken(
+        { ...user, id: "" },
+        token,
+        now,
+      ),
+      null,
+      "auth me precisa fornecer id mesmo quando o JWT possui identidade válida",
+    );
+  }
+});
+
+test("timezone same-tenant sobrevive a migrações de claims não operacionais", () => {
+  const now = Date.UTC(2026, 7, 24, 12, 0, 0);
+  const user = {
+    company_id: "company-timezone",
+    email: "timezone@example.com",
+    id: "user-timezone",
+    is_master: false,
+    name: "Timezone",
+  };
+  const cases = [
+    {
+      claims: {
+        company_id: user.company_id,
+        company_timezone: "America/Manaus",
+        exp: now / 1000 + 900,
+        role: { slug: "operator" },
+        user_id: user.id,
+      },
+      expected: "America/Manaus",
+    },
+    {
+      claims: {
+        company_id: user.company_id,
+        exp: now / 1000 + 900,
+        iat: "formato-em-migracao",
+        timeZone: "America/Recife",
+        user_id: user.id,
+      },
+      expected: "America/Recife",
+    },
+    {
+      claims: {
+        company_id: user.company_id,
+        exp: now / 1000 + 900,
+        is_master: "false",
+        metadata: { timezone: "America/Fortaleza" },
+        user_id: user.id,
+      },
+      expected: "America/Fortaleza",
+    },
+  ];
+
+  for (const { claims, expected } of cases) {
+    const token = accessToken(claims);
+    assert.equal(
+      accessTokenClaims.resolveAccessTokenContext(token, now),
+      null,
+      "o caso deve exercitar a extração desacoplada do contexto de acesso",
+    );
+    const reconciled =
+      accessTokenClaims.reconcileCurrentUserWithAccessToken(user, token, now);
+    assert.ok(reconciled);
+    assert.equal(reconciled.company_timezone, expected);
+    assert.equal(
+      reconciled.role,
+      undefined,
+      "claims incompatíveis não podem conceder papel junto com o timezone",
+    );
+  }
+
+  const foreign = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: "company-foreign",
+      company_timezone: "Asia/Tokyo",
+      exp: "formato-em-migracao",
+    }),
+    now,
+  );
+  assert.ok(foreign);
+  assert.equal(
+    foreign.company_timezone,
+    undefined,
+    "a extração operacional nunca pode atravessar para outro tenant",
+  );
+
+  for (const [profileMetadata, expected] of [
+    [{ settings: { timezone: "America/Fortaleza" } }, "America/Fortaleza"],
+    [{ timeZone: "America/Recife" }, "America/Recife"],
+  ]) {
+    const apiAuthoritative =
+      accessTokenClaims.reconcileCurrentUserWithAccessToken(
+        { ...user, ...profileMetadata },
+        accessToken({
+          company_id: user.company_id,
+          company_timezone: "America/Manaus",
+          exp: now / 1000 + 900,
+          role: "operator",
+          user_id: user.id,
+        }),
+        now,
+      );
+    assert.ok(apiAuthoritative);
+    assert.equal(
+      apiAuthoritative.company_timezone,
+      expected,
+      "timezone explícito de /auth/me deve vencer o complemento do JWT",
+    );
+  }
+});
+
+test("login sem cache persiste o timezone JWT para a rotação do mesmo tenant", () => {
+  const originalWindow = globalThis.window;
+  const storage = memoryStorage();
+  const now = Date.UTC(2026, 7, 24, 12, 0, 0);
+  const companyId = "company-cold-login";
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    const authenticated =
+      accessTokenClaims.reconcileCurrentUserWithAccessToken(
+        {
+          company_id: companyId,
+          email: "cold@example.com",
+          id: "user-cold-login",
+          is_master: false,
+          name: "Cold login",
+        },
+        accessToken({
+          company_id: companyId,
+          company_timezone: "America/Manaus",
+          exp: now / 1000 + 900,
+          role: { slug: "operator-em-migracao" },
+          user_id: "user-cold-login",
+        }),
+        now,
+      );
+    assert.ok(authenticated);
+    const cacheRecord =
+      companyCache.buildCurrentUserCompanyCacheRecord(authenticated);
+    assert.deepEqual(cacheRecord, {
+      id: companyId,
+      name: companyId,
+      timezone: "America/Manaus",
+      trade_name: null,
+    });
+    companyCache.writeCompanyCache([cacheRecord]);
+
+    const rotatedProfile = {
+      company_id: companyId,
+      email: authenticated.email,
+      id: authenticated.id,
+      is_master: false,
+      name: authenticated.name,
+    };
+    assert.deepEqual(
+      masterCompanyScope.getCompanyTimeZoneResolutionForScope(
+        rotatedProfile,
+        companyId,
+      ),
+      {
+        fallback: false,
+        source: "company-cache",
+        timeZone: "America/Manaus",
+      },
+      "refresh que omite timezone deve reutilizar só a certificação do mesmo tenant",
+    );
+    assert.equal(
+      masterCompanyScope.getCompanyTimeZoneResolutionForScope(
+        rotatedProfile,
+        "company-foreign",
+      ).fallback,
+      true,
+      "o cache certificado não pode atravessar para outra empresa",
+    );
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("refresh atrasado da conta anterior aborta sem replay no novo tenant", async () => {
   const originalWindow = globalThis.window;
   const originalFetch = globalThis.fetch;
   const storage = memoryStorage();
@@ -897,10 +1278,20 @@ test("refresh atrasado da conta anterior não sobrescreve o novo tenant", async 
         token_type: "Bearer",
       }),
     );
-    await oldRequest;
+    await assert.rejects(
+      oldRequest,
+      (error) => error instanceof api.ApiError && error.status === 409,
+    );
 
     assert.equal(storage.getItem("access_token"), "access-company-new");
     assert.equal(storage.getItem("refresh_token"), "refresh-company-new");
+    assert.deepEqual(
+      workerAuthorization,
+      [],
+      "a chamada antiga não pode ser retransmitida com o token vencedor",
+    );
+
+    await api.apiFetch("/workers");
     assert.deepEqual(workerAuthorization, ["Bearer access-company-new"]);
   } finally {
     api.clearStoredSession();
@@ -910,6 +1301,916 @@ test("refresh atrasado da conta anterior não sobrescreve o novo tenant", async 
     } else {
       globalThis.window = originalWindow;
     }
+  }
+});
+
+test("mutações aguardando refresh antigo nunca são enviadas pela sessão vencedora", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    for (const method of ["POST", "PUT"]) {
+      const suffix = method.toLowerCase();
+      const mutationRequests = [];
+      const refreshBodies = [];
+      let markRefreshStarted;
+      let resolveOldRefresh;
+      const refreshStarted = new Promise((resolve) => {
+        markRefreshStarted = resolve;
+      });
+      const oldRefreshResponse = new Promise((resolve) => {
+        resolveOldRefresh = resolve;
+      });
+
+      globalThis.fetch = async (url, init = {}) => {
+        const path = String(url);
+        if (path.endsWith("/auth/refresh")) {
+          refreshBodies.push(JSON.parse(String(init.body)));
+          markRefreshStarted();
+          return oldRefreshResponse;
+        }
+        if (path.endsWith("/auth/login")) {
+          return jsonResponse({
+            access_token: `access-winning-${suffix}`,
+            expires_in: 900,
+            refresh_token: `refresh-winning-${suffix}`,
+            token_type: "Bearer",
+          });
+        }
+        if (path.endsWith(`/mutation-${suffix}`)) {
+          mutationRequests.push({
+            authorization: new Headers(init.headers).get("Authorization"),
+            method: init.method,
+          });
+          return jsonResponse({ ok: true });
+        }
+        throw new Error(`Requisição inesperada: ${path}`);
+      };
+
+      api.clearStoredSession();
+      api.setStoredSession({
+        access_token: `access-expiring-${suffix}`,
+        expires_in: 1,
+        refresh_token: `refresh-expiring-${suffix}`,
+        token_type: "Bearer",
+      });
+      const mutation = api.apiFetch(`/mutation-${suffix}`, {
+        body: { source: suffix },
+        method,
+      });
+      await refreshStarted;
+      await api.loginRequest(`winning-${suffix}@example.com`, "password");
+      resolveOldRefresh(
+        jsonResponse({
+          access_token: `access-late-${suffix}`,
+          expires_in: 900,
+          refresh_token: `refresh-late-${suffix}`,
+          token_type: "Bearer",
+        }),
+      );
+
+      await assert.rejects(
+        mutation,
+        (error) => error instanceof api.ApiError && error.status === 409,
+      );
+      assert.deepEqual(refreshBodies, [
+        { refresh_token: `refresh-expiring-${suffix}` },
+      ]);
+      assert.deepEqual(
+        mutationRequests,
+        [],
+        `${method} de A não pode ser enviado com Bearer B`,
+      );
+      assert.equal(
+        api.getStoredSession()?.access_token,
+        `access-winning-${suffix}`,
+      );
+      assert.equal(
+        api.getStoredSession()?.refresh_token,
+        `refresh-winning-${suffix}`,
+      );
+    }
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("payload antigo é descartado quando a sessão muda durante response json", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  let markBodyStarted;
+  let resolveBody;
+  const bodyStarted = new Promise((resolve) => {
+    markBodyStarted = resolve;
+  });
+  const pendingBody = new Promise((resolve) => {
+    resolveBody = resolve;
+  });
+  const authorizations = [];
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (_url, init = {}) => {
+    authorizations.push(new Headers(init.headers).get("Authorization"));
+    return {
+      headers: new Headers({ "content-type": "application/json" }),
+      json() {
+        markBodyStarted();
+        return pendingBody;
+      },
+      ok: true,
+      status: 200,
+    };
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: "access-stream-a",
+      expires_in: 900,
+      refresh_token: "refresh-stream-a",
+      token_type: "Bearer",
+    });
+    const request = api.apiFetch("/streamed-payload");
+    await bodyStarted;
+
+    api.setStoredSession({
+      access_token: "access-stream-b",
+      expires_in: 900,
+      refresh_token: "refresh-stream-b",
+      token_type: "Bearer",
+    });
+    resolveBody({ owner: "session-a", secret: "payload-a" });
+
+    await assert.rejects(
+      request,
+      (error) => error instanceof api.ApiError && error.status === 409,
+    );
+    assert.deepEqual(authorizations, ["Bearer access-stream-a"]);
+    assert.equal(api.getStoredSession()?.access_token, "access-stream-b");
+    assert.equal(api.getStoredSession()?.refresh_token, "refresh-stream-b");
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("current user concorrente para a mesma sessão compartilha um único GET", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  let markProfileStarted;
+  let releaseProfile;
+  let profileRequests = 0;
+  const profileStarted = new Promise((resolve) => {
+    markProfileStarted = resolve;
+  });
+  const profileGate = new Promise((resolve) => {
+    releaseProfile = resolve;
+  });
+  const profile = {
+    company_id: "company-single-flight",
+    email: "single-flight@example.com",
+    id: "user-single-flight",
+    is_master: false,
+    name: "Single flight",
+  };
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /\/auth\/me$/);
+    profileRequests += 1;
+    markProfileStarted();
+    await profileGate;
+    return jsonResponse(profile);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: "access-single-flight",
+      expires_in: 900,
+      refresh_token: "refresh-single-flight",
+      token_type: "Bearer",
+    });
+
+    const first = api.currentUserRequest();
+    const second = api.currentUserRequest();
+    const third = api.currentUserRequest();
+    await profileStarted;
+    assert.equal(profileRequests, 1);
+
+    releaseProfile();
+    const responses = await Promise.all([first, second, third]);
+    assert.equal(profileRequests, 1);
+    for (const response of responses) {
+      assert.equal(response.accessToken, "access-single-flight");
+      assert.deepEqual(response.user, profile);
+      assert.equal(api.currentUserSessionIsCurrent(response), true);
+    }
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("resposta tardia do POST login não sobrescreve uma tentativa mais recente", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  let markLoginAStarted;
+  let resolveLoginA;
+  const loginAStarted = new Promise((resolve) => {
+    markLoginAStarted = resolve;
+  });
+  const loginAResponse = new Promise((resolve) => {
+    resolveLoginA = resolve;
+  });
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (!path.endsWith("/auth/login")) {
+      throw new Error(`Requisição inesperada: ${path}`);
+    }
+    const body = JSON.parse(String(init.body));
+    if (body.email === "login-a@example.com") {
+      markLoginAStarted();
+      return loginAResponse;
+    }
+    if (body.email === "login-b@example.com") {
+      return jsonResponse({
+        access_token: "access-login-b",
+        expires_in: 900,
+        refresh_token: "refresh-login-b",
+        token_type: "Bearer",
+      });
+    }
+    throw new Error(`Login inesperado: ${body.email}`);
+  };
+
+  try {
+    api.clearStoredSession();
+    const loginA = api.loginRequest("login-a@example.com", "password-a");
+    await loginAStarted;
+    const loginB = await api.loginRequest("login-b@example.com", "password-b");
+    assert.equal(loginB.access_token, "access-login-b");
+    assert.equal(api.getStoredSession()?.access_token, "access-login-b");
+
+    resolveLoginA(
+      jsonResponse({
+        access_token: "access-login-a",
+        expires_in: 900,
+        refresh_token: "refresh-login-a",
+        token_type: "Bearer",
+      }),
+    );
+    await assert.rejects(loginA, /substituída por uma tentativa mais recente/);
+
+    assert.equal(api.getStoredSession()?.access_token, "access-login-b");
+    assert.equal(api.getStoredSession()?.refresh_token, "refresh-login-b");
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("login válido vence resposta concorrente e a identificação antiga converge para a sessão atual", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const oldToken = accessToken({
+    company_id: "company-old",
+    company_timezone: "America/Manaus",
+    exp: nowSeconds + 900,
+    role: "operator",
+    sub: "user-old",
+  });
+  const validToken = accessToken({
+    company_id: "company-valid",
+    company_timezone: "America/Fortaleza",
+    exp: nowSeconds + 900,
+    role: "operator",
+    sub: "user-valid",
+  });
+  let markOldProfileStarted;
+  let resolveOldProfile;
+  const profileAuthorizations = [];
+  const oldProfileStarted = new Promise((resolve) => {
+    markOldProfileStarted = resolve;
+  });
+  const oldProfileResponse = new Promise((resolve) => {
+    resolveOldProfile = resolve;
+  });
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path.endsWith("/auth/login")) {
+      const body = JSON.parse(String(init.body));
+      const token = body.email === "old@example.com" ? oldToken : validToken;
+      return jsonResponse({
+        access_token: token,
+        expires_in: 900,
+        refresh_token:
+          body.email === "old@example.com" ? "refresh-old" : "refresh-valid",
+        token_type: "Bearer",
+      });
+    }
+    if (path.endsWith("/auth/me")) {
+      const authorization = new Headers(init.headers).get("Authorization");
+      profileAuthorizations.push(authorization);
+      if (authorization === `Bearer ${oldToken}`) {
+        markOldProfileStarted();
+        return oldProfileResponse;
+      }
+      if (authorization === `Bearer ${validToken}`) {
+        return jsonResponse({
+          company_id: "company-valid",
+          email: "valid@example.com",
+          id: "user-valid",
+          is_master: false,
+          name: "Valid",
+        });
+      }
+    }
+    throw new Error(`Requisição inesperada: ${path}`);
+  };
+
+  try {
+    api.clearStoredSession();
+    const oldAttempt = authenticate("old@example.com");
+    await oldProfileStarted;
+    const validUser = await authenticate("valid@example.com");
+    resolveOldProfile(
+      jsonResponse({
+        company_id: "company-old",
+        email: "old@example.com",
+        id: "user-old",
+        is_master: false,
+        name: "Old",
+      }),
+    );
+
+    const supersededUser = await oldAttempt;
+    assert.equal(validUser.id, "user-valid");
+    assert.equal(
+      supersededUser.id,
+      "user-valid",
+      "a resposta antiga deve ser descartada e repetida contra a sessão vencedora",
+    );
+    assert.deepEqual(profileAuthorizations, [
+      `Bearer ${oldToken}`,
+      `Bearer ${validToken}`,
+      `Bearer ${validToken}`,
+    ]);
+    assert.equal(api.getStoredSession()?.access_token, validToken);
+    assert.equal(api.getStoredSession()?.refresh_token, "refresh-valid");
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+
+  async function authenticate(email) {
+    await api.loginRequest(email, "password");
+    const sessionResponse = await api.currentUserRequest();
+    const user = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      sessionResponse.user,
+      sessionResponse.accessToken,
+    );
+    assert.equal(api.currentUserSessionIsCurrent(sessionResponse), true);
+    assert.ok(user);
+    return user;
+  }
+});
+
+test("403 atrasado de auth me é descartado e repetido sem apagar a sessão vencedora", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const supersededToken = accessToken({
+    company_id: "company-superseded",
+    exp: nowSeconds + 900,
+    role: "operator",
+    sub: "user-superseded",
+  });
+  const winningToken = accessToken({
+    company_id: "company-winning",
+    exp: nowSeconds + 900,
+    role: "operator",
+    sub: "user-winning",
+  });
+  const authorizations = [];
+  const events = [];
+  let markSupersededRequestStarted;
+  let resolveSupersededResponse;
+  const supersededRequestStarted = new Promise((resolve) => {
+    markSupersededRequestStarted = resolve;
+  });
+  const supersededResponse = new Promise((resolve) => {
+    resolveSupersededResponse = resolve;
+  });
+
+  globalThis.window = {
+    dispatchEvent(event) {
+      events.push(event.type);
+    },
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (!path.endsWith("/auth/me")) {
+      throw new Error(`Requisição inesperada: ${path}`);
+    }
+    const authorization = new Headers(init.headers).get("Authorization");
+    authorizations.push(authorization);
+    if (authorization === `Bearer ${supersededToken}`) {
+      markSupersededRequestStarted();
+      return supersededResponse;
+    }
+    if (authorization === `Bearer ${winningToken}`) {
+      return jsonResponse({
+        company_id: "company-winning",
+        email: "winning@example.com",
+        id: "user-winning",
+        is_master: false,
+        name: "Winning",
+      });
+    }
+    throw new Error(`Authorization inesperado: ${authorization}`);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: supersededToken,
+      expires_in: 900,
+      refresh_token: "refresh-superseded",
+      token_type: "Bearer",
+    });
+    const supersededRequest = api.currentUserRequest();
+    await supersededRequestStarted;
+
+    api.setStoredSession({
+      access_token: winningToken,
+      expires_in: 900,
+      refresh_token: "refresh-winning",
+      token_type: "Bearer",
+    });
+    const winningResponse = await api.currentUserRequest();
+    resolveSupersededResponse(jsonResponse({ detail: "forbidden" }, 403));
+    const retriedResponse = await supersededRequest;
+
+    assert.equal(winningResponse.user.id, "user-winning");
+    assert.equal(retriedResponse.user.id, "user-winning");
+    assert.equal(retriedResponse.accessToken, winningToken);
+    assert.equal(api.currentUserSessionIsCurrent(retriedResponse), true);
+    assert.deepEqual(authorizations, [
+      `Bearer ${supersededToken}`,
+      `Bearer ${winningToken}`,
+      `Bearer ${winningToken}`,
+    ]);
+    assert.equal(api.getStoredSession()?.access_token, winningToken);
+    assert.equal(api.getStoredSession()?.refresh_token, "refresh-winning");
+    assert.equal(
+      events.includes(api.SESSION_EXPIRED_EVENT),
+      false,
+      "403 do snapshot obsoleto não pode expirar a sessão vencedora",
+    );
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("403 atual de auth me encerra somente a própria sessão", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const events = [];
+  const requests = [];
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const rejectedToken = accessToken({
+    company_id: "company-current-403",
+    exp: nowSeconds + 900,
+    role: "operator",
+    user_id: "user-current-403",
+  });
+
+  globalThis.window = {
+    dispatchEvent(event) {
+      events.push(event.type);
+    },
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    requests.push(path);
+    assert.match(path, /\/auth\/me$/);
+    assert.equal(
+      new Headers(init.headers).get("Authorization"),
+      `Bearer ${rejectedToken}`,
+    );
+    return jsonResponse({ detail: "forbidden" }, 403);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: rejectedToken,
+      expires_in: 900,
+      refresh_token: "refresh-current-403",
+      token_type: "Bearer",
+    });
+
+    await assert.rejects(
+      () => api.currentUserRequest(),
+      (error) => error instanceof api.ApiError && error.status === 403,
+    );
+
+    assert.equal(requests.length, 1, "403 de auth me não deve tentar refresh");
+    assert.equal(api.getStoredSession(), null);
+    assert.equal(
+      events.filter((type) => type === api.SESSION_EXPIRED_EVENT).length,
+      1,
+      "a rejeição autoritativa da sessão atual deve notificar expiração uma vez",
+    );
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("401 atrasado da sessão substituída repete auth me sem renovar a sessão vencedora", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const supersededToken = accessToken({
+    company_id: "company-old-401",
+    exp: nowSeconds + 900,
+    role: "operator",
+    sub: "user-old-401",
+  });
+  const winningToken = accessToken({
+    company_id: "company-winning-401",
+    exp: nowSeconds + 900,
+    role: "operator",
+    sub: "user-winning-401",
+  });
+  const profileAuthorizations = [];
+  const refreshBodies = [];
+  let markSupersededRequestStarted;
+  let resolveSupersededResponse;
+  const supersededRequestStarted = new Promise((resolve) => {
+    markSupersededRequestStarted = resolve;
+  });
+  const supersededResponse = new Promise((resolve) => {
+    resolveSupersededResponse = resolve;
+  });
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path.endsWith("/auth/me")) {
+      const authorization = new Headers(init.headers).get("Authorization");
+      profileAuthorizations.push(authorization);
+      if (authorization === `Bearer ${supersededToken}`) {
+        markSupersededRequestStarted();
+        return supersededResponse;
+      }
+      if (authorization === `Bearer ${winningToken}`) {
+        return jsonResponse({
+          company_id: "company-winning-401",
+          email: "winning-401@example.com",
+          id: "user-winning-401",
+          is_master: false,
+          name: "Winning 401",
+        });
+      }
+    }
+    if (path.endsWith("/auth/refresh")) {
+      refreshBodies.push(JSON.parse(String(init.body)));
+      return jsonResponse({
+        access_token: winningToken,
+        expires_in: 900,
+        refresh_token: "refresh-winning-401",
+        token_type: "Bearer",
+      });
+    }
+    throw new Error(`Requisição inesperada: ${path}`);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: supersededToken,
+      expires_in: 900,
+      refresh_token: "refresh-superseded-401",
+      token_type: "Bearer",
+    });
+    const supersededRequest = api.currentUserRequest();
+    await supersededRequestStarted;
+
+    api.setStoredSession({
+      access_token: winningToken,
+      expires_in: 900,
+      refresh_token: "refresh-winning-401",
+      token_type: "Bearer",
+    });
+    const winningResponse = await api.currentUserRequest();
+    resolveSupersededResponse(jsonResponse({ detail: "expired" }, 401));
+    const retriedResponse = await supersededRequest;
+
+    assert.equal(winningResponse.user.id, "user-winning-401");
+    assert.equal(retriedResponse.user.id, "user-winning-401");
+    assert.equal(retriedResponse.accessToken, winningToken);
+    assert.deepEqual(
+      refreshBodies,
+      [],
+      "um 401 autenticado com A não pode renovar usando o refresh token de B",
+    );
+    assert.deepEqual(profileAuthorizations, [
+      `Bearer ${supersededToken}`,
+      `Bearer ${winningToken}`,
+      `Bearer ${winningToken}`,
+    ]);
+    assert.equal(api.getStoredSession()?.access_token, winningToken);
+    assert.equal(
+      api.getStoredSession()?.refresh_token,
+      "refresh-winning-401",
+    );
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("401 atual invalida somente a própria sessão autenticada", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const events = [];
+  const refreshBodies = [];
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const rejectedToken = accessToken({
+    company_id: "company-rejected",
+    exp: nowSeconds + 900,
+    role: "operator",
+    sub: "user-rejected",
+  });
+
+  globalThis.window = {
+    dispatchEvent(event) {
+      events.push(event.type);
+    },
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path.endsWith("/auth/me")) {
+      assert.equal(
+        new Headers(init.headers).get("Authorization"),
+        `Bearer ${rejectedToken}`,
+      );
+      return jsonResponse({ detail: "expired" }, 401);
+    }
+    if (path.endsWith("/auth/refresh")) {
+      refreshBodies.push(JSON.parse(String(init.body)));
+      return jsonResponse({ detail: "invalid refresh" }, 401);
+    }
+    throw new Error(`Requisição inesperada: ${path}`);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: rejectedToken,
+      expires_in: 900,
+      refresh_token: "refresh-rejected",
+      token_type: "Bearer",
+    });
+
+    await assert.rejects(
+      () => api.currentUserRequest(),
+      (error) => error instanceof api.ApiError && error.status === 401,
+    );
+
+    assert.deepEqual(refreshBodies, [{ refresh_token: "refresh-rejected" }]);
+    assert.equal(api.getStoredSession(), null);
+    assert.ok(events.includes(api.SESSION_EXPIRED_EVENT));
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("duplo envio do formulário dispara somente uma autenticação", async () => {
+  const winningUser = {
+    company_id: "company-valid",
+    email: "valid@example.com",
+    id: "user-valid",
+    is_master: false,
+    name: "Valid",
+  };
+  let resolveLogin;
+  let loginCalls = 0;
+  const pendingLogin = new Promise((resolve) => {
+    resolveLogin = resolve;
+  });
+  const harness = renderLoginPageHarness({
+    login() {
+      loginCalls += 1;
+      return pendingLogin;
+    },
+  });
+
+  const firstAttempt = harness.submit();
+  const blockedDuplicate = harness.submit();
+  await blockedDuplicate;
+  assert.equal(loginCalls, 1, "Enter + clique não podem criar dois POSTs de login");
+  resolveLogin(winningUser);
+  await firstAttempt;
+
+  assert.deepEqual(harness.successToasts, ["Login realizado com sucesso"]);
+  assert.deepEqual(harness.errorToasts, []);
+  assert.equal(harness.stateValues[5], "", "o alerta inline deve permanecer limpo");
+  assert.deepEqual(harness.routes, ["/dashboard/live"]);
+});
+
+test("logout limpa localmente antes da API e sua resposta tardia preserva novo login", async () => {
+  const originalWindow = globalThis.window;
+  const storage = memoryStorage({
+    access_token: "access-logout-a",
+    expires_at: String(Date.now() + 900_000),
+    expires_in: "900",
+    refresh_token: "refresh-logout-a",
+    token_type: "Bearer",
+  });
+  let resolveLogoutResponse;
+  const logoutResponse = new Promise((resolve) => {
+    resolveLogoutResponse = resolve;
+  });
+  globalThis.window = {
+    addEventListener() {},
+    dispatchEvent() {},
+    localStorage: storage,
+    removeEventListener() {},
+  };
+
+  try {
+    const harness = renderAuthProviderLogoutHarness({
+      logoutResponse,
+      storage,
+    });
+    const logout = harness.logout();
+
+    assert.equal(storage.getItem("access_token"), null);
+    assert.equal(storage.getItem("refresh_token"), null);
+    assert.deepEqual(harness.routes, ["/login"]);
+    assert.equal(harness.gridClearCalls, 1);
+    assert.deepEqual(harness.requests, [
+      {
+        options: {
+          auth: false,
+          body: { refresh_token: "refresh-logout-a" },
+          headers: { Authorization: "Bearer access-logout-a" },
+          method: "POST",
+        },
+        path: "/auth/logout",
+      },
+    ]);
+
+    storage.setItem("access_token", "access-login-b-after-logout");
+    storage.setItem("refresh_token", "refresh-login-b-after-logout");
+    storage.setItem("token_type", "Bearer");
+    resolveLogoutResponse({});
+    await logout;
+
+    assert.equal(
+      storage.getItem("access_token"),
+      "access-login-b-after-logout",
+    );
+    assert.equal(
+      storage.getItem("refresh_token"),
+      "refresh-login-b-after-logout",
+    );
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("marcador multiaba remove UI antiga antes de hidratar ou encerrar a sessão externa", () => {
+  const originalWindow = globalThis.window;
+  const userA = {
+    company_id: "company-a",
+    email: "user-a@example.com",
+    id: "user-a",
+    is_master: false,
+    name: "User A",
+  };
+
+  try {
+    const switchedStorage = memoryStorage({
+      access_token: "token-a",
+      refresh_token: "refresh-a",
+    });
+    const switched = renderAuthProviderStorageHarness({
+      initialUser: userA,
+      storage: switchedStorage,
+    });
+    switchedStorage.setItem("access_token", "token-b");
+    switchedStorage.setItem("refresh_token", "refresh-b");
+    switched.emitSessionStorage();
+
+    const clearGridIndex = switched.order.indexOf("clear-grid");
+    const clearUserIndex = switched.order.indexOf("set-user:null");
+    const hydrateBIndex = switched.order.lastIndexOf("hydrate-current-session");
+    assert.ok(clearGridIndex >= 0);
+    assert.ok(clearUserIndex > clearGridIndex);
+    assert.ok(
+      hydrateBIndex > clearUserIndex,
+      "perfil e grid de A devem sumir antes do início da hidratação de B",
+    );
+    assert.equal(switched.stateValues[0], null);
+    assert.equal(switched.stateValues[1], false);
+    assert.deepEqual(switched.routes, []);
+    switched.cleanup();
+
+    const loggedOutStorage = memoryStorage({
+      access_token: "token-a",
+      refresh_token: "refresh-a",
+    });
+    const loggedOut = renderAuthProviderStorageHarness({
+      initialUser: userA,
+      storage: loggedOutStorage,
+    });
+    loggedOutStorage.removeItem("access_token");
+    loggedOutStorage.removeItem("refresh_token");
+    loggedOut.emitSessionStorage();
+
+    assert.ok(loggedOut.order.includes("synchronize-external-session"));
+    assert.ok(loggedOut.order.includes("clear-grid"));
+    assert.equal(loggedOut.stateValues[0], null);
+    assert.equal(loggedOut.stateValues[1], false);
+    assert.deepEqual(loggedOut.routes, ["/login"]);
+    const logoutSyncIndex = loggedOut.order.indexOf(
+      "synchronize-external-session",
+    );
+    assert.equal(
+      loggedOut.order
+        .slice(logoutSyncIndex + 1)
+        .includes("hydrate-current-session"),
+      false,
+      "logout externo não deve iniciar uma nova hidratação sem sessão",
+    );
+    loggedOut.cleanup();
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
   }
 });
 
@@ -990,7 +2291,7 @@ test("escopo selecionado pelo master segue apenas para rotas tenant-aware", asyn
       },
       {
         path: "/api/v1/companies/company-selected/users",
-        companyId: "company-selected",
+        companyId: null,
       },
       { path: "/api/v1/cameras", companyId: "company-explicit" },
       {
@@ -1104,7 +2405,7 @@ test("usuário comum consulta exclusivamente a empresa assinada no JWT", async (
   }
 });
 
-test("master confirmado por auth me escopa recursos mesmo quando o JWT omite a função", async () => {
+test("master confirmado por auth me funciona com JWT sem identidade reconhecível", async () => {
   const originalWindow = globalThis.window;
   const originalFetch = globalThis.fetch;
   const storage = memoryStorage();
@@ -1129,7 +2430,7 @@ test("master confirmado por auth me escopa recursos mesmo quando o JWT omite a f
       access_token: accessToken({
         exp: nowSeconds + 900,
         nbf: nowSeconds - 1,
-        sub: "master-with-legacy-token",
+        principal: "formato-de-identidade-ainda-desconhecido",
       }),
       expires_in: 900,
       refresh_token: "refresh-master-with-legacy-token",
@@ -1371,13 +2672,16 @@ test("confirmação master não atravessa refresh para outra identidade", async 
       name: "Master",
     });
 
-    await api.apiFetch("/workers");
-    assert.deepEqual(requests, [
-      {
-        path: "/api/v1/workers",
-        companyId: null,
-      },
-    ]);
+    await assert.rejects(
+      () => api.apiFetch("/workers"),
+      (error) => error instanceof api.ApiError && error.status === 401,
+    );
+    assert.deepEqual(
+      requests,
+      [],
+      "refresh que muda de identidade deve ser rejeitado antes da operação",
+    );
+    assert.equal(api.getStoredSession(), null);
   } finally {
     api.clearStoredSession();
     globalThis.fetch = originalFetch;
@@ -1388,6 +2692,219 @@ test("confirmação master não atravessa refresh para outra identidade", async 
     }
   }
 });
+
+test("confirmação master sobrevive ao refresh que omite role e is_master", async () => {
+  const result = await runConfirmedMasterRefreshScenario({
+    currentUserId: "master-refresh-without-role",
+    refreshedClaims: {
+      sub: "master-refresh-without-role",
+    },
+    scopeId: "company-preserved-without-role",
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.refreshCalls, 1);
+  assert.deepEqual(result.requests, [
+    {
+      path: "/api/v1/workers",
+      companyId: "company-preserved-without-role",
+    },
+  ]);
+  assert.equal(
+    result.storedScope?.id,
+    "company-preserved-without-role",
+    "a omissão de role/is_master não deve apagar uma confirmação anterior de /auth/me",
+  );
+});
+
+test("refresh preserva o principal durante migração entre sub email e user_id", async () => {
+  const currentUserId = "master-migrating-identity-claims";
+  const currentUserEmail = "master.migration@example.com";
+  const scenarios = [
+    {
+      initialClaims: { sub: currentUserEmail },
+      refreshedClaims: { sub: currentUserEmail, user_id: currentUserId },
+    },
+    {
+      initialClaims: { sub: currentUserEmail, user_id: currentUserId },
+      refreshedClaims: { sub: currentUserEmail },
+    },
+  ];
+
+  for (const [index, scenario] of scenarios.entries()) {
+    const scopeId = `company-identity-migration-${index}`;
+    const result = await runConfirmedMasterRefreshScenario({
+      currentUserEmail,
+      currentUserId,
+      initialClaims: scenario.initialClaims,
+      refreshedClaims: scenario.refreshedClaims,
+      scopeId,
+    });
+
+    assert.equal(result.error, null);
+    assert.deepEqual(result.requests, [
+      { path: "/api/v1/workers", companyId: scopeId },
+    ]);
+    assert.equal(result.storedScope?.id, scopeId);
+  }
+});
+
+test("is_master false no JWT renovado remove confirmação e escopo master", async () => {
+  const result = await runConfirmedMasterRefreshScenario({
+    currentUserId: "master-demoted-by-boolean",
+    refreshedClaims: {
+      is_master: false,
+      sub: "master-demoted-by-boolean",
+    },
+    scopeId: "company-cleared-by-boolean-demotion",
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.refreshCalls, 1);
+  assert.deepEqual(result.requests, [
+    {
+      path: "/api/v1/workers",
+      companyId: null,
+    },
+  ]);
+  assert.equal(
+    result.storedScope,
+    null,
+    "uma despromoção explícita deve apagar a seleção cross-tenant anterior",
+  );
+});
+
+test("refresh master de outra identidade é rejeitado sem herdar empresa", async () => {
+  const result = await runConfirmedMasterRefreshScenario({
+    currentUserId: "master-before-identity-switch",
+    refreshedClaims: {
+      role: "super-admin",
+      sub: "different-master-after-refresh",
+    },
+    scopeId: "company-must-not-cross-master-identities",
+  });
+
+  assert.ok(result.error instanceof api.ApiError);
+  assert.equal(result.error.status, 401);
+  assert.equal(result.refreshCalls, 1);
+  assert.deepEqual(
+    result.requests,
+    [],
+    "a operação original não pode ser enviada com o token de outra identidade",
+  );
+  assert.equal(result.storedSession, null);
+  assert.equal(
+    result.storedScope,
+    null,
+    "a empresa selecionada não pode sobreviver à troca de identidade",
+  );
+});
+
+test("is_master false vence role super-admin conflitante no refresh", async () => {
+  const result = await runConfirmedMasterRefreshScenario({
+    currentUserId: "master-with-conflicting-refresh-claims",
+    refreshedClaims: {
+      is_master: false,
+      role: "super-admin",
+      sub: "master-with-conflicting-refresh-claims",
+    },
+    scopeId: "company-must-not-use-conflicting-master-claims",
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.refreshCalls, 1);
+  assert.deepEqual(result.requests, [
+    {
+      path: "/api/v1/workers",
+      companyId: null,
+    },
+  ]);
+  assert.equal(
+    result.storedScope,
+    null,
+    "claims master conflitantes não podem manter a seleção cross-tenant",
+  );
+});
+
+async function runConfirmedMasterRefreshScenario({
+  currentUserEmail,
+  currentUserId,
+  initialClaims,
+  refreshedClaims,
+  scopeId,
+}) {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests = [];
+  let refreshCalls = 0;
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path === "/api/v1/auth/refresh") {
+      refreshCalls += 1;
+      return jsonResponse({
+        access_token: accessToken(refreshedClaims),
+        expires_in: 900,
+        refresh_token: `refresh-${currentUserId}`,
+        token_type: "Bearer",
+      });
+    }
+    requests.push({
+      path,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+    });
+    return jsonResponse([]);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken(initialClaims ?? { sub: currentUserId }),
+      expires_at: Date.now() + 1_000,
+      expires_in: 1,
+      refresh_token: `refresh-${currentUserId}`,
+      token_type: "Bearer",
+    });
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: scopeId,
+      name: "Empresa selecionada antes do refresh",
+    });
+    api.setAuthenticatedMasterAccess({
+      email: currentUserEmail ?? `${currentUserId}@example.com`,
+      id: currentUserId,
+      is_master: true,
+      name: "Master",
+    });
+
+    let error = null;
+    try {
+      await api.apiFetch("/workers");
+    } catch (requestError) {
+      error = requestError;
+    }
+
+    return {
+      error,
+      refreshCalls,
+      requests: [...requests],
+      storedScope: masterCompanyScope.getStoredMasterCompanyScope(),
+      storedSession: api.getStoredSession(),
+    };
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete globalThis.window;
+    } else {
+      globalThis.window = originalWindow;
+    }
+  }
+}
 
 test("worker sem company id só é aceito quando a resposta escopada não mistura empresas", () => {
   const target = { company_id: "company-selected", id: "worker-target" };
@@ -1415,6 +2932,153 @@ test("worker sem company id só é aceito quando a resposta escopada não mistur
       .map((worker) => worker.id),
     ["worker-target"],
   );
+});
+
+test("usuário comum certifica timezone do JWT ou auth me somente no próprio tenant", () => {
+  const originalWindow = globalThis.window;
+  const storage = memoryStorage();
+  const now = Date.UTC(2026, 7, 24, 12, 0, 0);
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    const jwtUser = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      {
+        company_id: "company-regular",
+        email: "regular@example.com",
+        id: "user-regular",
+        is_master: false,
+        name: "Regular",
+      },
+      accessToken({
+        company_id: "company-regular",
+        company_timezone: "America/Manaus",
+        exp: now / 1000 + 900,
+        role: "operator",
+        sub: "user-regular",
+      }),
+      now,
+    );
+    assert.ok(jwtUser);
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(jwtUser),
+      {
+        fallback: false,
+        source: "current-user-company",
+        timeZone: "America/Manaus",
+      },
+      "o JWT deve completar o timezone omitido por /auth/me",
+    );
+    assert.equal(
+      masterCompanyScope.getCompanyTimeZoneResolutionForScope(
+        jwtUser,
+        "company-other",
+      ).fallback,
+      true,
+      "o timezone assinado não pode atravessar para outro tenant",
+    );
+
+    const authMeUser = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      {
+        company_id: "company-regular",
+        company_timezone: "America/Fortaleza",
+        email: "regular@example.com",
+        id: "user-regular",
+        is_master: false,
+        name: "Regular",
+      },
+      accessToken({
+        company_id: "company-regular",
+        company_timezone: "America/Manaus",
+        exp: now / 1000 + 900,
+        role: "operator",
+        sub: "user-regular",
+      }),
+      now,
+    );
+    assert.ok(authMeUser);
+    assert.equal(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(authMeUser)
+        .timeZone,
+      "America/Fortaleza",
+      "o timezone explícito de /auth/me deve vencer o metadado complementar do JWT",
+    );
+
+    for (const [companyClaim, expectedTimeZone] of [
+      [
+        {
+          id: "company-nested",
+          timezone: "America/Recife",
+        },
+        "America/Recife",
+      ],
+      [
+        {
+          id: "company-nested",
+          settings: { timezone: "America/Belem" },
+        },
+        "America/Belem",
+      ],
+    ]) {
+      const nestedUser = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+        {
+          company_id: "company-nested",
+          email: "nested@example.com",
+          id: "user-nested",
+          is_master: false,
+          name: "Nested",
+        },
+        accessToken({
+          company: companyClaim,
+          exp: now / 1000 + 900,
+          role: "operator",
+          sub: "user-nested",
+        }),
+        now,
+      );
+      assert.ok(nestedUser);
+      assert.deepEqual(
+        masterCompanyScope.getEffectiveCompanyTimeZoneResolution(nestedUser),
+        {
+          fallback: false,
+          source: "current-user-company",
+          timeZone: expectedTimeZone,
+        },
+      );
+    }
+
+    const canonicalCompanyContext =
+      accessTokenClaims.resolveAccessTokenContext(
+        accessToken({
+          company: {
+            id: "company-nested-other",
+            timezone: "America/Recife",
+          },
+          company_id: "company-regular",
+          exp: now / 1000 + 900,
+          role: "operator",
+          sub: "user-regular",
+          tenant_id: "tenant-related-but-not-canonical",
+        }),
+        now,
+      );
+    assert.ok(canonicalCompanyContext);
+    assert.equal(
+      canonicalCompanyContext.companyId,
+      "company-regular",
+      "company_id canônico deve vencer objetos e aliases de tenant auxiliares",
+    );
+    assert.equal(
+      canonicalCompanyContext.timeZone,
+      "",
+      "timezone nested de outra empresa não pode atravessar o company_id canônico",
+    );
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
 });
 
 test("superadmin usa timezone do JWT apenas quando o tenant do claim é o selecionado", () => {
@@ -1469,6 +3133,160 @@ test("superadmin usa timezone do JWT apenas quando o tenant do claim é o seleci
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
+  }
+});
+
+test("403 no detalhe não invalida timezone do mesmo tenant vindo de JWT, listagem ou cache", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const detailRequests = [];
+  const now = Date.now();
+  const token = accessToken({
+    company_id: "company-jwt",
+    company_timezone: "America/Manaus",
+    exp: now / 1000 + 900,
+    nbf: now / 1000 - 1,
+    role: "super-admin",
+    sub: "master-jwt",
+  });
+  const master = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    {
+      email: "master@example.com",
+      id: "master-jwt",
+      is_master: true,
+      name: "Master",
+    },
+    token,
+    now,
+  );
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    detailRequests.push({
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+      path: String(url),
+    });
+    return jsonResponse({ detail: "forbidden" }, 403);
+  };
+
+  try {
+    assert.ok(master);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: token,
+      expires_in: 900,
+      refresh_token: "refresh-master-timezone",
+      token_type: "Bearer",
+    });
+
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-jwt",
+      name: "Empresa JWT",
+    });
+    await assertCompanyDetailForbidden("company-jwt");
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
+      {
+        fallback: false,
+        source: "current-user-company",
+        timeZone: "America/Manaus",
+      },
+      "o 403 não pode apagar o claim vinculado à mesma empresa",
+    );
+
+    companyCache.writeCompanyCache([
+      {
+        company_timezone: "America/Recife",
+        id: "company-list",
+        name: "Empresa da listagem",
+      },
+    ]);
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-list",
+      name: "Empresa da listagem",
+    });
+    await assertCompanyDetailForbidden("company-list");
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
+      {
+        fallback: false,
+        source: "company-cache",
+        timeZone: "America/Recife",
+      },
+      "o alias real da listagem deve continuar certificado após o 403",
+    );
+
+    companyCache.writeCompanyCache([
+      {
+        id: "company-cache",
+        name: "Empresa em cache",
+        tenantTimezone: "America/Fortaleza",
+      },
+    ]);
+    companyCache.writeCompanyCache([
+      {
+        id: "company-cache",
+        name: "Empresa parcial atualizada",
+      },
+    ]);
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-cache",
+      name: "Empresa parcial atualizada",
+    });
+    await assertCompanyDetailForbidden("company-cache");
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
+      {
+        fallback: false,
+        source: "company-cache",
+        timeZone: "America/Fortaleza",
+      },
+      "uma listagem parcial e um detalhe negado não podem destruir o cache válido",
+    );
+
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-without-source",
+      name: "Empresa sem fonte",
+    });
+    await assertCompanyDetailForbidden("company-without-source");
+    assert.equal(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master).fallback,
+      true,
+      "o 403 não autoriza reutilizar o timezone JWT de outro tenant",
+    );
+
+    assert.deepEqual(
+      detailRequests,
+      [
+        "company-jwt",
+        "company-list",
+        "company-cache",
+        "company-without-source",
+      ].map((companyId) => ({
+        companyId: null,
+        path: `/api/v1/companies/${companyId}`,
+      })),
+      "rotas administrativas já identificadas pelo path não devem enviar X-Company-ID",
+    );
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+
+  async function assertCompanyDetailForbidden(companyId) {
+    await assert.rejects(
+      () =>
+        api.apiFetch(`/companies/${companyId}`, {
+          companyScopeId: companyId,
+        }),
+      (error) => error instanceof api.ApiError && error.status === 403,
+    );
   }
 });
 
@@ -1743,6 +3561,58 @@ test("bootstrap próprio usa a identidade do JWT sem herdar a empresa visual do 
   );
 });
 
+test("permissões fallback só atravessam com o snapshot exato da sessão atual", () => {
+  const authSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-provider.tsx"),
+    "utf8",
+  );
+  const sessionStart = authSource.indexOf(
+    "async function hydrateCurrentAuthenticatedSession",
+  );
+  const sessionEnd = authSource.indexOf(
+    "class AuthenticatedSessionChangedError",
+    sessionStart,
+  );
+  const sessionSource = authSource.slice(sessionStart, sessionEnd);
+
+  assert.ok(sessionStart >= 0 && sessionEnd > sessionStart);
+  const exactFallback = sessionSource.indexOf("const exactFallbackUser");
+  const sessionReconciliation = sessionSource.indexOf(
+    "const reconciledSessionUser",
+  );
+  const compatibilityCheck = sessionSource.indexOf(
+    "const compatibleFallbackUser",
+  );
+  const hydration = sessionSource.indexOf(
+    "const hydratedUser = await hydrateAuthenticatedUser",
+  );
+  assert.ok(
+    exactFallback >= 0 &&
+      sessionReconciliation > exactFallback &&
+      compatibilityCheck > sessionReconciliation &&
+      hydration > compatibilityCheck,
+    "fallback exato e /auth/me devem ser validados antes da hidratação",
+  );
+  assert.match(
+    sessionSource.slice(exactFallback, sessionReconciliation),
+    /fallbackPrincipal\s*&&[\s\S]*?fallbackPrincipal\.accessToken\s*===\s*sessionResponse\.accessToken\s*&&[\s\S]*?fallbackPrincipal\.sessionRevision\s*===\s*sessionResponse\.sessionRevision\s*&&[\s\S]*?currentUserSessionIsCurrent\(fallbackPrincipal\)[\s\S]*?\?\s*fallbackPrincipal\.user\s*:\s*null/,
+    "cache anterior exige o mesmo token, revisão e sessão ainda corrente",
+  );
+  assert.match(
+    sessionSource.slice(compatibilityCheck, hydration),
+    /currentUsersShareIdentityAndCompany\(\s*exactFallbackUser,\s*reconciledSessionUser,?\s*\)[\s\S]*?\? exactFallbackUser\s*:\s*null/,
+  );
+  assert.match(
+    sessionSource,
+    /hydrateAuthenticatedUser\(\s*sessionResponse,\s*compatibleFallbackUser,?\s*\)/,
+    "somente o fallback reconciliado pode alcançar a hidratação de permissões",
+  );
+  assert.doesNotMatch(
+    sessionSource,
+    /hydrateAuthenticatedUser\(\s*sessionResponse,\s*fallbackUser,?\s*\)/,
+  );
+});
+
 test("atualização automática só executa para catálogo habilitado e visível", () => {
   assert.equal(
     resourceAutoRefresh.shouldAutoRefreshResources({
@@ -1771,7 +3641,7 @@ test("atualização automática só executa para catálogo habilitado e visível
   );
 });
 
-test("timezone ausente é hidratado antes da navegação e acompanha a rotação do JWT", () => {
+test("timezone do master usa catálogo e cache sem depender do detalhe da empresa", () => {
   const superAdminSource = readFileSync(
     resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
     "utf8",
@@ -1782,10 +3652,11 @@ test("timezone ausente é hidratado antes da navegação e acompanha a rotação
   );
   const apiSource = readFileSync(resolve(projectRoot, "lib/api.ts"), "utf8");
   const ensureStart = superAdminSource.indexOf("const ensureCompanyTimeZone");
-  const detailFetch = superAdminSource.indexOf(
-    "`/companies/${company.id}`",
+  const ensureEnd = superAdminSource.indexOf(
+    "React.useEffect(() =>",
     ensureStart,
   );
+  const ensureSource = superAdminSource.slice(ensureStart, ensureEnd);
   const navigationStart = superAdminSource.indexOf(
     "async function openCompanyDashboard",
   );
@@ -1797,25 +3668,93 @@ test("timezone ausente é hidratado antes da navegação e acompanha a rotação
     'router.push("/dashboard/live")',
     navigationStart,
   );
+  const storedHydrationStart = authSource.indexOf(
+    "async function hydrateStoredMasterCompanyScope",
+  );
+  const storedHydrationSource = authSource.slice(storedHydrationStart);
 
-  assert.ok(ensureStart >= 0 && detailFetch > ensureStart);
+  assert.ok(ensureStart >= 0 && ensureEnd > ensureStart);
+  assert.match(
+    ensureSource,
+    /!currentResolution\.fallback[\s\S]*?currentResolution\.timeZone/,
+    "uma resolução certificada e vinculada ao mesmo ID deve bastar para navegar",
+  );
+  assert.doesNotMatch(
+    ensureSource,
+    /currentResolution\.source\s*===/,
+    "JWT, listagem, escopo salvo e cache certificados não podem ser discriminados",
+  );
+  assert.doesNotMatch(
+    ensureSource,
+    /`\/companies\/\$\{company\.id\}`/,
+    "o fluxo master não pode depender do GET de detalhe que o backend nega",
+  );
+  assert.match(
+    superAdminSource,
+    /apiFetch<Company\[\]>\("\/companies"\)/,
+    "a listagem global deve ser a fonte cross-tenant do superadmin",
+  );
   assert.ok(
     navigationStart >= 0 &&
       certificationBeforeNavigation > navigationStart &&
       navigation > certificationBeforeNavigation,
   );
+  assert.ok(storedHydrationStart >= 0);
   assert.match(
-    authSource,
-    /async function hydrateUserCompany[\s\S]*?`\/companies\/\$\{companyId\}`/,
-    "/auth/me parcial deve tentar hidratar o detalhe da própria empresa",
+    storedHydrationSource,
+    /if \(!resolution\.fallback\)/,
+    "um scope salvo já certificado por JWT/listagem/cache deve ser reutilizado",
+  );
+  assert.doesNotMatch(
+    storedHydrationSource,
+    /resolution\.source\s*===/,
+    "a hidratação do scope salvo deve aceitar qualquer fonte same-tenant certificada",
+  );
+  assert.doesNotMatch(
+    storedHydrationSource,
+    /`\/companies\/\$\{storedScope\.id\}`/,
+    "a recarga direta do master também não pode chamar o detalhe proibido",
   );
   assert.match(
-    authSource,
-    /await hydrateStoredMasterCompanyScope\(hydratedUser\)[\s\S]*?async function hydrateStoredMasterCompanyScope[\s\S]*?`\/companies\/\$\{storedScope\.id\}`/,
-    "uma recarga direta do superadmin deve reparar o tenant salvo antes do dashboard",
+    storedHydrationSource,
+    /["']\/companies["']/,
+    "sem fonte local, a recarga deve consultar o catálogo global",
   );
   assert.match(apiSource, /SESSION_UPDATED_EVENT/);
   assert.match(authSource, /SESSION_UPDATED_EVENT/);
+});
+
+test("bootstrap do usuário comum nunca consulta a rota administrativa da empresa", () => {
+  const authSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-provider.tsx"),
+    "utf8",
+  );
+  const hydrationStart = authSource.indexOf("async function hydrateUserCompany");
+  const hydrationEnd = authSource.indexOf(
+    "function getDeclaredCompany",
+    hydrationStart,
+  );
+  const hydrationSource = authSource.slice(hydrationStart, hydrationEnd);
+
+  assert.ok(hydrationStart >= 0 && hydrationEnd > hydrationStart);
+  assert.match(hydrationSource, /getDeclaredCompany\(user\)/);
+  assert.match(hydrationSource, /readCachedCompany\(companyId\)/);
+  assert.match(hydrationSource, /mergeCurrentUserCompanies\(/);
+  assert.doesNotMatch(
+    hydrationSource,
+    /`\/companies\/\$\{companyId\}`/,
+    "o bootstrap comum não tem autorização para GET /companies/{id}",
+  );
+  assert.doesNotMatch(
+    hydrationSource,
+    /apiFetch</,
+    "a empresa do usuário comum deve vir de JWT, /auth/me ou cache same-tenant",
+  );
+  assert.match(
+    authSource,
+    /reconcileCurrentUserWithAccessToken\([\s\S]*?hydrateCurrentUser\(\s*tokenEnrichedUser/,
+    "o JWT precisa ser reconciliado antes da hidratação local da empresa",
+  );
 });
 
 test("proxy exige destino fixo em produção", () => {
@@ -1857,8 +3796,10 @@ function jsonResponse(value, status = 200) {
   });
 }
 
-function memoryStorage() {
-  const values = new Map();
+function memoryStorage(initialValues = {}) {
+  const values = new Map(
+    Object.entries(initialValues).map(([key, value]) => [key, String(value)]),
+  );
   return {
     getItem(key) {
       return values.has(key) ? values.get(key) : null;
@@ -1870,6 +3811,464 @@ function memoryStorage() {
       values.set(key, String(value));
     },
   };
+}
+
+function renderLoginPageHarness({ login }) {
+  const filename = resolve(projectRoot, "app/login/page.tsx");
+  const source = readFileSync(filename, "utf8");
+  const output = ts.transpileModule(source, {
+    compilerOptions: {
+      esModuleInterop: true,
+      jsx: ts.JsxEmit.ReactJSX,
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+    },
+    fileName: filename,
+  }).outputText;
+  const stateValues = [];
+  const stateWrites = [];
+  const successToasts = [];
+  const errorToasts = [];
+  const routes = [];
+  let stateIndex = 0;
+  const react = {
+    useEffect() {},
+    useRef(initialValue) {
+      return { current: initialValue };
+    },
+    useState(initialValue) {
+      const index = stateIndex;
+      stateIndex += 1;
+      stateValues[index] = initialValue;
+      return [
+        initialValue,
+        (nextValue) => {
+          const value =
+            typeof nextValue === "function"
+              ? nextValue(stateValues[index])
+              : nextValue;
+          stateValues[index] = value;
+          stateWrites.push({ index, value });
+        },
+      ];
+    },
+  };
+  const jsxRuntime = {
+    Fragment: Symbol("Fragment"),
+    jsx: createTestElement,
+    jsxs: createTestElement,
+  };
+  const iconNames = [
+    "Activity",
+    "AlertCircle",
+    "ArrowRight",
+    "BarChart3",
+    "BrainCircuit",
+    "Eye",
+    "EyeOff",
+    "LoaderCircle",
+    "LockKeyhole",
+    "Mail",
+    "ShieldCheck",
+  ];
+  const iconModule = Object.fromEntries(
+    iconNames.map((name) => [name, `test-icon-${name}`]),
+  );
+  const componentModule = (names) =>
+    Object.fromEntries(names.map((name) => [name, `test-component-${name}`]));
+  const modules = new Map([
+    ["react", react],
+    ["react/jsx-runtime", jsxRuntime],
+    ["next/navigation", { useRouter: () => ({ replace: (path) => routes.push(path) }) }],
+    ["lucide-react", iconModule],
+    [
+      "sonner",
+      {
+        toast: {
+          error: (message) => errorToasts.push(message),
+          success: (message) => successToasts.push(message),
+        },
+      },
+    ],
+    [
+      "@/components/app/auth-provider",
+      { useAuth: () => ({ loading: false, login, user: null }) },
+    ],
+    ["@/components/app/theme-provider", componentModule(["ThemeToggle"])],
+    ["@/components/ui/button", componentModule(["Button"])],
+    [
+      "@/components/ui/card",
+      componentModule(["Card", "CardContent", "CardDescription", "CardHeader"]),
+    ],
+    ["@/components/ui/input", componentModule(["Input"])],
+    ["@/components/ui/label", componentModule(["Label"])],
+    ["@/components/ui/skeleton", componentModule(["Skeleton"])],
+    ["@/lib/access", { resolvePostLoginPath: async () => "/dashboard/live" }],
+    [
+      "@/lib/login-branding",
+      {
+        DEFAULT_LOGIN_BRANDING: {
+          accentColor: "#0B4EA2",
+          companyName: "IPXData",
+          key: "default",
+          logoUrl: "",
+        },
+        loginBrandColorWithAlpha: () => "rgb(11 78 162 / 0.28)",
+        loginBrandInitials: () => "IPX",
+        readableLoginBrandColor: () => "#0B4EA2",
+        resolveLoginBranding: () => ({
+          accentColor: "#0B4EA2",
+          companyName: "IPXData",
+          key: "default",
+          logoUrl: "",
+        }),
+      },
+    ],
+  ]);
+  const loadedModule = { exports: {} };
+  const execute = new Function("exports", "require", "module", output);
+  execute(loadedModule.exports, (specifier) => {
+    if (!modules.has(specifier)) {
+      throw new Error(`Módulo inesperado no harness de login: ${specifier}`);
+    }
+    return modules.get(specifier);
+  }, loadedModule);
+  const tree = loadedModule.exports.default();
+  const form = findTestElement(tree, "form");
+  assert.ok(form?.props?.onSubmit, "o formulário de login deve expor onSubmit");
+
+  return {
+    errorToasts,
+    routes,
+    stateValues,
+    stateWrites,
+    submit: () => form.props.onSubmit({ preventDefault() {} }),
+    successToasts,
+  };
+}
+
+function renderAuthProviderLogoutHarness({ logoutResponse, storage }) {
+  const filename = resolve(projectRoot, "components/app/auth-provider.tsx");
+  const source = readFileSync(filename, "utf8");
+  const output = ts.transpileModule(source, {
+    compilerOptions: {
+      esModuleInterop: true,
+      jsx: ts.JsxEmit.ReactJSX,
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+    },
+    fileName: filename,
+  }).outputText;
+  const requests = [];
+  const routes = [];
+  let gridClearCalls = 0;
+  const react = {
+    createContext() {
+      return { Provider: "test-auth-context-provider" };
+    },
+    useCallback(callback) {
+      return callback;
+    },
+    useEffect() {},
+    useMemo(factory) {
+      return factory();
+    },
+    useRef(initialValue) {
+      return { current: initialValue };
+    },
+    useState(initialValue) {
+      let value = initialValue;
+      return [
+        value,
+        (nextValue) => {
+          value =
+            typeof nextValue === "function" ? nextValue(value) : nextValue;
+        },
+      ];
+    },
+  };
+  const apiModule = {
+    ApiError: class TestApiError extends Error {},
+    apiFetch(path, options) {
+      requests.push({ options, path });
+      return logoutResponse;
+    },
+    clearStoredSession() {
+      for (const key of [
+        "access_token",
+        "refresh_token",
+        "token_type",
+        "expires_in",
+        "expires_at",
+      ]) {
+        storage.removeItem(key);
+      }
+    },
+    currentUserSessionIsCurrent: () => true,
+    currentUserRequest: async () => null,
+    getStoredRefreshToken: () => storage.getItem("refresh_token") ?? "",
+    getStoredSession: () => {
+      const accessToken = storage.getItem("access_token");
+      const refreshToken = storage.getItem("refresh_token");
+      return accessToken && refreshToken
+        ? { access_token: accessToken, refresh_token: refreshToken }
+        : null;
+    },
+    loginRequest: async () => undefined,
+    SESSION_EXPIRED_EVENT: "ipxdata:session-expired",
+    SESSION_UPDATED_EVENT: "ipxdata:session-updated",
+    setAuthenticatedMasterAccess() {},
+  };
+  const userGridModule = {
+    clearUserGridSync() {
+      gridClearCalls += 1;
+    },
+    hydrateUserGridFromServer: async () => false,
+    startUserGridSync: () => undefined,
+    USER_GRID_SYNC_STATUS_EVENT: "ipxdata:user-grid-sync-status",
+  };
+  const fallbackModule = new Proxy(
+    {},
+    {
+      get: () => () => false,
+    },
+  );
+  const modules = new Map([
+    ["react", react],
+    [
+      "react/jsx-runtime",
+      {
+        Fragment: Symbol("Fragment"),
+        jsx: createTestElement,
+        jsxs: createTestElement,
+      },
+    ],
+    [
+      "next/navigation",
+      { useRouter: () => ({ replace: (path) => routes.push(path) }) },
+    ],
+    ["sonner", { toast: { error() {} } }],
+    ["@/lib/api", apiModule],
+    ["@/lib/user-grid", userGridModule],
+  ]);
+  const loadedModule = { exports: {} };
+  const execute = new Function("exports", "require", "module", output);
+  execute(
+    loadedModule.exports,
+    (specifier) => modules.get(specifier) ?? fallbackModule,
+    loadedModule,
+  );
+  const tree = loadedModule.exports.AuthProvider({ children: null });
+  assert.equal(tree.type, "test-auth-context-provider");
+
+  return {
+    get gridClearCalls() {
+      return gridClearCalls;
+    },
+    logout: tree.props.value.logout,
+    requests,
+    routes,
+  };
+}
+
+function renderAuthProviderStorageHarness({ initialUser, storage }) {
+  const filename = resolve(projectRoot, "components/app/auth-provider.tsx");
+  const source = readFileSync(filename, "utf8");
+  const output = ts.transpileModule(source, {
+    compilerOptions: {
+      esModuleInterop: true,
+      jsx: ts.JsxEmit.ReactJSX,
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+    },
+    fileName: filename,
+  }).outputText;
+  const effects = [];
+  const listeners = new Map();
+  const order = [];
+  const routes = [];
+  const stateValues = [];
+  const timers = new Map();
+  let nextTimerId = 1;
+  let stateIndex = 0;
+  const windowMock = {
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+    clearTimeout(timerId) {
+      timers.delete(timerId);
+    },
+    dispatchEvent() {},
+    localStorage: storage,
+    removeEventListener(type, listener) {
+      if (listeners.get(type) === listener) listeners.delete(type);
+    },
+    setTimeout(callback) {
+      const timerId = nextTimerId;
+      nextTimerId += 1;
+      timers.set(timerId, callback);
+      return timerId;
+    },
+  };
+  globalThis.window = windowMock;
+  const react = {
+    createContext() {
+      return { Provider: "test-auth-context-provider" };
+    },
+    useCallback(callback) {
+      return callback;
+    },
+    useEffect(effect) {
+      effects.push(effect);
+    },
+    useMemo(factory) {
+      return factory();
+    },
+    useRef(initialValue) {
+      return { current: initialValue };
+    },
+    useState(initialValue) {
+      const index = stateIndex;
+      stateIndex += 1;
+      stateValues[index] = index === 0 ? initialUser : initialValue;
+      return [
+        stateValues[index],
+        (nextValue) => {
+          const value =
+            typeof nextValue === "function"
+              ? nextValue(stateValues[index])
+              : nextValue;
+          stateValues[index] = value;
+          const label = index === 0 ? "user" : index === 1 ? "manager" : "loading";
+          order.push(`set-${label}:${value === null ? "null" : String(value)}`);
+        },
+      ];
+    },
+  };
+  const apiModule = {
+    ApiError: class TestApiError extends Error {},
+    apiFetch: async () => [],
+    clearStoredSession() {
+      storage.removeItem("access_token");
+      storage.removeItem("refresh_token");
+    },
+    currentUserSessionIsCurrent: () => true,
+    currentUserRequest() {
+      order.push("hydrate-current-session");
+      return new Promise(() => undefined);
+    },
+    getStoredRefreshToken: () => storage.getItem("refresh_token") ?? "",
+    getStoredSession: () => {
+      const accessToken = storage.getItem("access_token");
+      const refreshToken = storage.getItem("refresh_token");
+      return accessToken && refreshToken
+        ? { access_token: accessToken, refresh_token: refreshToken }
+        : null;
+    },
+    loginRequest: async () => undefined,
+    SESSION_EXPIRED_EVENT: "ipxdata:session-expired",
+    SESSION_SYNC_STORAGE_KEY: "ipxdata.auth-session-sync.v1",
+    SESSION_UPDATED_EVENT: "ipxdata:session-updated",
+    setAuthenticatedMasterAccess() {},
+    synchronizeExternalSessionUpdate() {
+      order.push("synchronize-external-session");
+    },
+  };
+  const accessTokenModule = {
+    accessTokenMatchesUserIdentity: () => false,
+    reconcileCurrentUserWithAccessToken(user, accessToken) {
+      return user?.id === "user-a" && accessToken === "token-a" ? user : null;
+    },
+  };
+  const userGridModule = {
+    clearUserGridSync() {
+      order.push("clear-grid");
+    },
+    hydrateUserGridFromServer: async () => false,
+    startUserGridSync: () => undefined,
+    USER_GRID_SYNC_STATUS_EVENT: "ipxdata:user-grid-sync-status",
+  };
+  const fallbackModule = new Proxy(
+    {},
+    {
+      get: () => () => false,
+    },
+  );
+  const modules = new Map([
+    ["react", react],
+    [
+      "react/jsx-runtime",
+      {
+        Fragment: Symbol("Fragment"),
+        jsx: createTestElement,
+        jsxs: createTestElement,
+      },
+    ],
+    [
+      "next/navigation",
+      { useRouter: () => ({ replace: (path) => routes.push(path) }) },
+    ],
+    ["sonner", { toast: { error() {} } }],
+    ["@/lib/access-token-claims", accessTokenModule],
+    ["@/lib/api", apiModule],
+    ["@/lib/user-grid", userGridModule],
+  ]);
+  const loadedModule = { exports: {} };
+  const execute = new Function("exports", "require", "module", output);
+  execute(
+    loadedModule.exports,
+    (specifier) => modules.get(specifier) ?? fallbackModule,
+    loadedModule,
+  );
+  const tree = loadedModule.exports.AuthProvider({ children: null });
+  assert.equal(tree.type, "test-auth-context-provider");
+  assert.ok(effects.length >= 2, "o provider deve registrar o efeito multiaba");
+  effects[0]();
+  let cleanupStorageEffect;
+  for (let index = 1; index < effects.length && !listeners.has("storage"); index += 1) {
+    const cleanup = effects[index]();
+    if (listeners.has("storage")) cleanupStorageEffect = cleanup;
+    else cleanup?.();
+  }
+  assert.ok(
+    listeners.has("storage"),
+    "o provider deve registrar o listener multiaba independentemente da ordem dos efeitos",
+  );
+
+  return {
+    cleanup() {
+      cleanupStorageEffect?.();
+      timers.clear();
+    },
+    emitSessionStorage() {
+      const listener = listeners.get("storage");
+      assert.ok(listener, "o provider deve escutar eventos de storage");
+      listener({ key: apiModule.SESSION_SYNC_STORAGE_KEY });
+      while (timers.size) {
+        const callbacks = Array.from(timers.values());
+        timers.clear();
+        callbacks.forEach((callback) => callback());
+      }
+    },
+    order,
+    routes,
+    stateValues,
+  };
+}
+
+function createTestElement(type, props, key) {
+  return { key, props: props ?? {}, type };
+}
+
+function findTestElement(node, type) {
+  if (!node || typeof node !== "object") return null;
+  if (node.type === type) return node;
+  const children = node.props?.children;
+  for (const child of Array.isArray(children) ? children : [children]) {
+    const match = findTestElement(child, type);
+    if (match) return match;
+  }
+  return null;
 }
 
 function loadTypeScriptModule(relativePath) {

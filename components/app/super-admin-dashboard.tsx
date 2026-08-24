@@ -65,6 +65,7 @@ import { ApiError, apiFetch } from "@/lib/api";
 import { buildCompanyUserProfileUpdate } from "@/lib/company-user-profile-update";
 import {
   normalizeCompanyRecord,
+  resolveCompanyRecordTimeZone,
   writeCompanyCache,
 } from "@/lib/company-cache";
 import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
@@ -884,49 +885,59 @@ export function SuperAdminDashboard() {
     notifyFailure = false,
   ) => {
     const normalizedCompany = normalizeCompanyRecord(company);
+    const companyTimeZoneRecord = resolveCompanyRecordTimeZone(company);
     const currentResolution = getCompanyTimeZoneResolutionForScope(
       currentUser,
       company.id,
     );
-    const declaredTimeZone = canonicalCompanyTimeZone(
-      normalizedCompany.timezone,
-    );
+    const declaredTimeZone = companyTimeZoneRecord.timeZone;
     const currentTimeZone =
       declaredTimeZone ??
-      (!currentResolution.fallback &&
-      currentResolution.source === "current-user-company"
+      (!companyTimeZoneRecord.declared && !currentResolution.fallback
         ? currentResolution.timeZone
         : null);
     if (currentTimeZone) {
       return { ...normalizedCompany, timezone: currentTimeZone };
     }
 
-    try {
-      const response = await apiFetch<Company>(`/companies/${company.id}`, {
-        companyScopeId: company.id,
-      });
-      if (response.id?.trim() !== company.id) {
-        throw new Error("A API retornou o cadastro de outra empresa.");
+    if (companyTimeZoneRecord.declared) {
+      if (notifyFailure) {
+        toast.error(
+          "Não foi possível certificar o fuso da empresa: o cadastro não informou um timezone IANA válido.",
+        );
       }
-      const detailedCompany = normalizeCompanyRecord(response);
-      const timeZone = canonicalCompanyTimeZone(detailedCompany.timezone);
+      return null;
+    }
+
+    try {
+      // The global company directory is the authorized cross-tenant source for
+      // a superadmin. `/companies/{id}` is scoped to the company carried by the
+      // JWT in the current backend and returns 403 for another selected tenant.
+      const response = await apiFetch<Company[]>("/companies");
+      if (!Array.isArray(response)) {
+        throw new Error("A API não retornou o catálogo de empresas.");
+      }
+      const companyRows = response.map(normalizeCompanyRecord);
+      const directoryCompany = companyRows.find(
+        (row) => row.id?.trim() === company.id,
+      );
+      if (!directoryCompany) {
+        throw new Error("A empresa selecionada não consta no catálogo autorizado.");
+      }
+      const timeZone = resolveCompanyRecordTimeZone(directoryCompany).timeZone;
       if (!timeZone) {
         throw new Error(
-          "O detalhe da empresa não informou um timezone IANA válido.",
+          "O catálogo de empresas não informou um timezone IANA válido.",
         );
       }
       const certifiedCompany = {
         ...normalizedCompany,
-        ...detailedCompany,
+        ...directoryCompany,
         id: company.id,
         timezone: timeZone,
       };
-      setCompanies((current) =>
-        current.map((row) =>
-          row.id === certifiedCompany.id ? certifiedCompany : row,
-        ),
-      );
-      writeCompanyCache([certifiedCompany]);
+      setCompanies(companyRows);
+      writeCompanyCache(companyRows);
       return certifiedCompany;
     } catch (error) {
       if (notifyFailure) {
@@ -948,15 +959,17 @@ export function SuperAdminDashboard() {
       currentUser,
       selectedCompany.id,
     );
-    const selectedTimezone =
-      canonicalCompanyTimeZone(selectedCompany.timezone) ??
-      (!resolution.fallback ? resolution.timeZone : null);
-    const requiresDetailHydration =
-      !canonicalCompanyTimeZone(selectedCompany.timezone) &&
-      resolution.source !== "current-user-company";
+    const selectedTimeZoneRecord = resolveCompanyRecordTimeZone(selectedCompany);
+    const selectedTimezone = selectedTimeZoneRecord.declared
+      ? selectedTimeZoneRecord.timeZone
+      : !resolution.fallback
+        ? resolution.timeZone
+        : null;
+    const requiresDirectoryHydration =
+      !selectedTimeZoneRecord.declared && resolution.fallback;
     if (
       selectedTimezone &&
-      !requiresDetailHydration &&
+      !requiresDirectoryHydration &&
       storedScope?.id === selectedCompany.id &&
       storedScope.name === selectedCompany.name &&
       (storedScope.trade_name ?? null) ===
@@ -973,7 +986,7 @@ export function SuperAdminDashboard() {
       trade_name: selectedCompany.trade_name ?? null,
     });
 
-    if (!requiresDetailHydration && selectedTimezone) return;
+    if (!requiresDirectoryHydration && selectedTimezone) return;
     let active = true;
     void ensureCompanyTimeZone(selectedCompany).then((certifiedCompany) => {
       if (
