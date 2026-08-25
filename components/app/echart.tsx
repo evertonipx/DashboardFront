@@ -461,6 +461,25 @@ export function applyChartTypePreference(
   } as EnterpriseChartOption;
 }
 
+function resolveLineValueLabelPresentation(
+  valueLabels: "auto" | "always" | "none",
+  pointCount: number,
+) {
+  const showEveryPoint =
+    valueLabels === "always" ||
+    (valueLabels === "auto" && pointCount > 0 && pointCount <= 31);
+
+  return {
+    align: "left" as const,
+    distance: 7,
+    position: "top" as const,
+    rotate: 90,
+    verticalAlign: "middle" as const,
+    ...(showEveryPoint ? { show: true } : {}),
+    ...(valueLabels === "none" ? { show: false } : {}),
+  };
+}
+
 function enhanceInteractiveChartOption(
   option: EnterpriseChartOption,
   dark = false,
@@ -497,9 +516,13 @@ function enhanceInteractiveChartOption(
       !isDecorativeChartSeries(seriesOption);
     const verticalBarLabel = seriesOption.type === "bar" && !horizontal;
     const lineValueLabel = seriesOption.type === "line";
+    const lineValueLabelPresentation = lineValueLabel
+      ? resolveLineValueLabelPresentation(valueLabels, pointCount)
+      : null;
+    const showEveryLinePoint = lineValueLabelPresentation?.show === true;
     const anchoredValueLabel = verticalBarLabel || lineValueLabel;
     const valueLabel = supportsValueLabels &&
-      (existingLabel || showAutomaticValueLabels)
+      (existingLabel || showAutomaticValueLabels || showEveryLinePoint)
       ? {
           // A 90-degree label needs a left anchor: after rotation its whole
           // height grows upward from the bar top instead of crossing it.
@@ -517,17 +540,9 @@ function enhanceInteractiveChartOption(
             horizontal || verticalBarLabel ? "middle" : "bottom",
           ...(existingLabel ?? {}),
           ...(valueLabels === "none" ? { show: false } : {}),
-          // A bar-to-line conversion can carry a 90-degree bar label over to
-          // the line. Point labels are always horizontal and above the point.
-          ...(lineValueLabel
-            ? {
-                align: "center",
-                distance: 6,
-                position: "top",
-                rotate: 0,
-                verticalAlign: "bottom",
-              }
-            : {}),
+          // Compact line charts keep one vertical value anchored to every
+          // point, including labels inherited from a bar chart preference.
+          ...(lineValueLabelPresentation ?? {}),
         }
       : existingLabel;
     const existingLabelLayout =
@@ -546,10 +561,13 @@ function enhanceInteractiveChartOption(
       ...(supportsValueLabels
         ? {
             labelLayout: {
-              hideOverlap: true,
+              // Monthly, annual and hourly lines must keep every point value
+              // visible. Dense series remain protected by the automatic
+              // threshold and can still opt in with valueLabels="always".
+              hideOverlap: !showEveryLinePoint,
               // Keep bar and point labels centered on their own data item.
-              // If space is insufficient, ECharts hides a label instead of
-              // shifting it away from the bar or point it describes.
+              // Dense charts may hide a collision instead of shifting the
+              // value away from the bar or point it describes.
               ...(anchoredValueLabel
                 ? {}
                 : { moveOverlap: horizontal ? "shiftY" : "shiftX" }),
@@ -697,22 +715,34 @@ function valueLabelGrid(
   horizontal: boolean,
 ) {
   if (!grid || Array.isArray(grid) || typeof grid !== "object") return grid;
-  const hasValueLabels = series.some(
-    (item) =>
-      item &&
-      typeof item === "object" &&
-      ((item as { type?: unknown }).type === "bar" ||
-        (item as { type?: unknown }).type === "line") &&
-      (item as { label?: { show?: unknown } }).label?.show !== false,
-  );
-  if (!hasValueLabels) return grid;
+  const visibleValueLabelSeries = series.filter((item) => {
+    if (!item || typeof item !== "object") return false;
+    const seriesOption = item as {
+      label?: unknown;
+      type?: unknown;
+    };
+    if (seriesOption.type !== "bar" && seriesOption.type !== "line") {
+      return false;
+    }
+    if (!seriesOption.label || typeof seriesOption.label !== "object") {
+      return false;
+    }
+    return (seriesOption.label as { show?: unknown }).show !== false;
+  });
+  if (!visibleValueLabelSeries.length) return grid;
+  const hasVerticalValueLabels = visibleValueLabelSeries.some((item) => {
+    const rotate = (item as { label?: { rotate?: unknown } }).label?.rotate;
+    return typeof rotate === "number" && Math.abs(rotate % 180) === 90;
+  });
 
   return {
     ...grid,
     right: horizontal
       ? numericGridOffset(grid.right, 58)
       : grid.right,
-    top: horizontal ? grid.top : numericGridOffset(grid.top, 38),
+    top: horizontal
+      ? grid.top
+      : numericGridOffset(grid.top, hasVerticalValueLabels ? 56 : 38),
   };
 }
 

@@ -11660,6 +11660,92 @@ test("cenário mantém a mesma cor entre comparativos, ranking e máximos", () =
   );
 });
 
+test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => {
+  const applyChartTypePreference = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "applyChartTypePreference",
+  );
+  const resolveLineValueLabelPresentation = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "resolveLineValueLabelPresentation",
+  );
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    hourlyRows: [],
+    includeOpenPeriod: false,
+    monthlyRows: [
+      aggregateRow("2025-01-01", "line-entry", 80),
+      aggregateRow("2025-02-01", "line-entry", 120),
+      aggregateRow("2026-01-01", "line-entry", 100),
+      aggregateRow("2026-02-01", "line-entry", 160),
+    ],
+    now: new Date(2026, 2, 1),
+    period: {
+      from: new Date(2025, 0, 1),
+      to: new Date(2026, 2, 1),
+    },
+    scenarios: [entryScenario],
+    scope: {
+      cameraIds: [],
+      name: "Entrada",
+      scenario: entryScenario,
+    },
+  });
+  const compactLinePresentation = resolveLineValueLabelPresentation(
+    "auto",
+    12,
+  );
+
+  assert.deepEqual(compactLinePresentation, {
+    align: "left",
+    distance: 7,
+    position: "top",
+    rotate: 90,
+    show: true,
+    verticalAlign: "middle",
+  });
+
+  for (const option of [
+    countingIntelligence.buildAnnualComparisonChartOption(model),
+    countingIntelligence.buildAnnualAccumulatedComparisonChartOption(model),
+  ]) {
+    const converted = applyChartTypePreference(option, "line");
+    const valueSeries = converted.series.filter(
+      (series) => series.type === "line" && series.silent !== true,
+    );
+
+    assert.ok(valueSeries.length >= 2);
+    for (const series of valueSeries) {
+      assert.equal(series.data.length, 12);
+      assert.equal(
+        { ...series.label, ...compactLinePresentation }.rotate,
+        90,
+      );
+      assert.equal(
+        { ...series.label, ...compactLinePresentation }.show,
+        true,
+      );
+    }
+  }
+
+  assert.equal(
+    Object.hasOwn(resolveLineValueLabelPresentation("auto", 1_440), "show"),
+    false,
+    "séries densas não devem criar milhares de rótulos automaticamente",
+  );
+  assert.equal(
+    resolveLineValueLabelPresentation("always", 1_440).show,
+    true,
+  );
+  assert.equal(resolveLineValueLabelPresentation("none", 12).show, false);
+
+  const chartSource = readFileSync(
+    resolve(projectRoot, "components/app/echart.tsx"),
+    "utf8",
+  );
+  assert.match(chartSource, /hideOverlap: !showEveryLinePoint/);
+});
+
 test("gráficos e modo monitor preservam navegação por teclado", () => {
   const chartSource = readFileSync(
     resolve(projectRoot, "components/app/echart.tsx"),
