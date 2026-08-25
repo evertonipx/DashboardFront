@@ -1093,13 +1093,11 @@ export function buildScenarioComparisonDefinition(
     };
   }
 
-  const granularity = periodOverride
-    ? fitScenarioGranularityToRange(
-        settings.granularity,
-        range.from,
-        range.to,
-      )
-    : settings.granularity;
+  const granularity = fitScenarioGranularityToRange(
+    settings.granularity,
+    range.from,
+    range.to,
+  );
 
   return {
     accumulated: settings.accumulated,

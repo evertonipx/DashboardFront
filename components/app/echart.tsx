@@ -379,6 +379,14 @@ export function applyChartTypePreference(
       lineSeries.lineStyle && typeof lineSeries.lineStyle === "object"
         ? (lineSeries.lineStyle as Record<string, unknown>)
         : {};
+    const originalLabel =
+      lineSeries.label && typeof lineSeries.label === "object"
+        ? (lineSeries.label as Record<string, unknown>)
+        : {};
+    const originalLabelLayout =
+      lineSeries.labelLayout && typeof lineSeries.labelLayout === "object"
+        ? (lineSeries.labelLayout as Record<string, unknown>)
+        : {};
     const categoryCount = categoryCounts[axisIndex] ?? 0;
     const seriesColor =
       typeof itemStyle.color === "string" ? itemStyle.color : undefined;
@@ -411,6 +419,19 @@ export function applyChartTypePreference(
       ...lineSeries,
       connectNulls: false,
       itemStyle: seriesColor ? { color: seriesColor } : undefined,
+      label: {
+        ...originalLabel,
+        align: "left",
+        distance: 7,
+        position: "top",
+        rotate: 90,
+        show: true,
+        verticalAlign: "middle",
+      },
+      labelLayout: {
+        ...originalLabelLayout,
+        hideOverlap: false,
+      },
       lineStyle: {
         ...(seriesColor ? { color: seriesColor } : {}),
         opacity:
@@ -463,11 +484,8 @@ export function applyChartTypePreference(
 
 function resolveLineValueLabelPresentation(
   valueLabels: "auto" | "always" | "none",
-  pointCount: number,
 ) {
-  const showEveryPoint =
-    valueLabels === "always" ||
-    (valueLabels === "auto" && pointCount > 0 && pointCount <= 31);
+  const showEveryPoint = valueLabels !== "none";
 
   return {
     align: "left" as const,
@@ -517,7 +535,7 @@ function enhanceInteractiveChartOption(
     const verticalBarLabel = seriesOption.type === "bar" && !horizontal;
     const lineValueLabel = seriesOption.type === "line";
     const lineValueLabelPresentation = lineValueLabel
-      ? resolveLineValueLabelPresentation(valueLabels, pointCount)
+      ? resolveLineValueLabelPresentation(valueLabels)
       : null;
     const showEveryLinePoint = lineValueLabelPresentation?.show === true;
     const anchoredValueLabel = verticalBarLabel || lineValueLabel;
@@ -540,8 +558,8 @@ function enhanceInteractiveChartOption(
             horizontal || verticalBarLabel ? "middle" : "bottom",
           ...(existingLabel ?? {}),
           ...(valueLabels === "none" ? { show: false } : {}),
-          // Compact line charts keep one vertical value anchored to every
-          // point, including labels inherited from a bar chart preference.
+          // Line charts keep one vertical value anchored to every point,
+          // including labels inherited from a bar chart preference.
           ...(lineValueLabelPresentation ?? {}),
         }
       : existingLabel;
@@ -561,9 +579,9 @@ function enhanceInteractiveChartOption(
       ...(supportsValueLabels
         ? {
             labelLayout: {
-              // Monthly, annual and hourly lines must keep every point value
-              // visible. Dense series remain protected by the automatic
-              // threshold and can still opt in with valueLabels="always".
+              ...existingLabelLayout,
+              // Every line point remains visible. Exceptionally dense widgets
+              // opt out explicitly with valueLabels="none".
               hideOverlap: !showEveryLinePoint,
               // Keep bar and point labels centered on their own data item.
               // Dense charts may hide a collision instead of shifting the
@@ -571,7 +589,6 @@ function enhanceInteractiveChartOption(
               ...(anchoredValueLabel
                 ? {}
                 : { moveOverlap: horizontal ? "shiftY" : "shiftX" }),
-              ...existingLabelLayout,
             },
           }
         : {}),
@@ -700,10 +717,11 @@ function isDecorativeChartSeries(series: Record<string, unknown>) {
 
 function formatChartValueLabel(value: unknown) {
   const rawValue = Array.isArray(value) ? value[value.length - 1] : value;
+  if (rawValue === null || rawValue === undefined || rawValue === "") return "";
   const numericValue =
-    typeof rawValue === "number" ? rawValue : Number(String(rawValue ?? ""));
+    typeof rawValue === "number" ? rawValue : Number(String(rawValue));
 
-  if (!Number.isFinite(numericValue) || numericValue === 0) return "";
+  if (!Number.isFinite(numericValue)) return "";
   return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(
     numericValue,
   );

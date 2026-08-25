@@ -834,7 +834,7 @@ export function buildAnnualComparisonChartOption(
           fontSize: 9,
           formatter: (params: { value?: number | null }) => {
             const value = params.value;
-            return value === null || value === undefined || value === 0
+            return value === null || value === undefined
               ? ""
               : compactNumber(value);
           },
@@ -1025,7 +1025,7 @@ export function buildAnnualAccumulatedComparisonChartOption(
           fontSize: 9,
           formatter: (params: { value?: number | null }) => {
             const value = params.value;
-            return value === null || value === undefined || value === 0
+            return value === null || value === undefined
               ? ""
               : compactNumber(value);
           },

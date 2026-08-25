@@ -72,25 +72,6 @@ export function CountingReportPeriodControl({
               Todos os widgets, tabelas e exportações
             </div>
           </div>
-          <button
-            id="counting-report-open-period"
-            type="button"
-            role="switch"
-            aria-checked={includeOpenPeriod}
-            disabled={disabled}
-            onClick={() => onIncludeOpenPeriodChange(!includeOpenPeriod)}
-            className={cn(
-              "h-5 w-9 shrink-0 rounded-full p-0.5 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
-              includeOpenPeriod ? "bg-primary" : "bg-muted-foreground/30",
-            )}
-          >
-            <span
-              className={cn(
-                "block h-4 w-4 rounded-full bg-background transition",
-                includeOpenPeriod && "translate-x-4",
-              )}
-            />
-          </button>
         </div>
 
         <div className="grid min-w-0 grid-cols-2 gap-2 @lg:grid-cols-[144px_120px_minmax(0,120px)] @lg:items-end @2xl:grid-cols-[144px_120px_120px_150px_minmax(72px,1fr)]">

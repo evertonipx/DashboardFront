@@ -1316,18 +1316,22 @@ export function OccupancyScenarioDashboard() {
             retrying={loadingScenarios || loadingData || refreshing}
           />
         ) : loadingScenarios ? (
-          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(180px,220px)_116px_minmax(0,1fr)]">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full @4xl:w-[116px]" />
-            <Skeleton className="h-10 w-full @xl:col-span-2 @4xl:col-span-1 @4xl:w-48 @4xl:justify-self-end" />
+          <div className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(212px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(212px,1fr)] @md:gap-2">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+              <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @md:block @lg:w-10 @xl:w-24" />
+              <Skeleton className="h-8 w-[212px] max-w-full shrink-0" />
+            </div>
           </div>
         ) : visibleScenarios.length ? (
           <div className="space-y-3">
-            <div
-              aria-label="Controles da visão de ocupação"
-              className="grid min-w-0 gap-2 @xl:grid-cols-[minmax(180px,220px)_116px] @4xl:grid-cols-[minmax(180px,220px)_116px_minmax(0,1fr)] @4xl:items-center"
-              role="group"
-            >
+            <div className="space-y-1">
+              <div
+                aria-label="Controles da visão de ocupação"
+                className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(212px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(212px,1fr)] @md:gap-2"
+                role="group"
+              >
               <div className="min-w-0">
                 <Select value={selectedId} onValueChange={setSelectedId}>
                   <SelectTrigger
@@ -1353,6 +1357,8 @@ export function OccupancyScenarioDashboard() {
               >
                 <OccupancyPaletteSelect
                   ariaLabel="Paleta dos comparativos desta visão"
+                  compact
+                  fluid
                   value={occupancyComparisonSettings.colorPaletteId}
                   onValueChange={(colorPaletteId) =>
                     updateOccupancyComparisonSettings({ colorPaletteId })
@@ -1360,11 +1366,27 @@ export function OccupancyScenarioDashboard() {
                 />
               </div>
 
-              <div
-                aria-label="Ações da visão de ocupação"
-                className="flex min-w-0 flex-wrap items-center gap-2 @xl:col-span-2 @xl:justify-end @4xl:col-span-1 @4xl:flex-nowrap @4xl:justify-self-end"
-                role="group"
-              >
+              <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+                {lastUpdated ? (
+                  <span
+                    aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
+                    className="hidden min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @md:inline-flex"
+                    title={`Última atualização às ${formatTime(lastUpdated)}`}
+                  >
+                    <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                    <span className="hidden @lg:inline @xl:hidden">
+                      {formatTime(lastUpdated)}
+                    </span>
+                    <span className="hidden @xl:inline">
+                      Atualizado às {formatTime(lastUpdated)}
+                    </span>
+                  </span>
+                ) : null}
+                <div
+                  aria-label="Ações da visão de ocupação"
+                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [&_[data-monitor-mode-trigger]]:shrink-0 [&_[data-premium-control]]:shrink-0"
+                  role="group"
+                >
                   <ReportExportActions
                     compact
                     disabled={
@@ -1378,7 +1400,7 @@ export function OccupancyScenarioDashboard() {
                   {canEditVisual ? (
                     <>
                       <ReorderModeButton
-                        className="h-8 w-8"
+                        className="h-8 w-8 shrink-0"
                         enabled={layoutReorderMode}
                         onChange={setLayoutReorderMode}
                       />
@@ -1386,10 +1408,11 @@ export function OccupancyScenarioDashboard() {
                         type="button"
                         variant="outline"
                         size="icon"
-                        className="h-8 w-8"
+                        className="h-8 w-8 shrink-0"
                         onClick={() => setLayoutOrganizerOpen(true)}
                         aria-label="Configurar widgets de ocupação"
-                        title="Configurar widgets"
+                        aria-haspopup="dialog"
+                        title="Configurar widgets de ocupação"
                       >
                         <Settings2 className="h-4 w-4" />
                       </Button>
@@ -1398,11 +1421,13 @@ export function OccupancyScenarioDashboard() {
                   <Button
                     type="button"
                     size="icon"
-                    className="h-8 w-8"
+                    className="h-8 w-8 shrink-0"
                     variant={operationalSettingsOpen ? "default" : "outline"}
                     onClick={() =>
                       setOperationalSettingsOpen((current) => !current)
                     }
+                    aria-controls="occupancy-operational-settings"
+                    aria-expanded={operationalSettingsOpen}
                     aria-label="Configurações operacionais"
                     title="Configurações operacionais"
                   >
@@ -1411,7 +1436,7 @@ export function OccupancyScenarioDashboard() {
                   <Button
                     type="button"
                     size="icon"
-                    className="h-8 w-8"
+                    className="h-8 w-8 shrink-0"
                     variant="outline"
                     onClick={() => {
                       if (selectedScenario) {
@@ -1433,26 +1458,19 @@ export function OccupancyScenarioDashboard() {
                       )}
                     />
                   </Button>
-                  {lastUpdated ? (
-                    <span
-                      aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                      className="inline-flex h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
-                      title={`Última atualização às ${formatTime(lastUpdated)}`}
-                    >
-                      <Clock3 className="h-3.5 w-3.5" />
-                      {formatTime(lastUpdated)}
-                    </span>
-                  ) : null}
                   <MonitorModeButton
                     compact
                     onClick={enterMonitorMode}
                     disabled={!visibleScenarios.length}
                   />
+                </div>
+              </div>
               </div>
             </div>
 
             {operationalSettingsOpen ? (
               <div
+                id="occupancy-operational-settings"
                 aria-label="Configurações operacionais da ocupação"
                 className="rounded-xl border bg-muted/15 p-3 shadow-sm"
                 role="group"
@@ -1768,6 +1786,9 @@ function OccupancyChartCard({
               option={option}
               themeMode="explicit"
               className="h-full min-h-[190px] @sm:min-h-[260px]"
+              valueLabels={
+                definition.granularity === "minute" ? "none" : undefined
+              }
             />
           </div>
         ) : (

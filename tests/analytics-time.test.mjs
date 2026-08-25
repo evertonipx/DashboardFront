@@ -458,7 +458,10 @@ test("gráficos de ocupação usam paletas explícitas e superfície correta por
     (comparisonSource.match(/themeMode="explicit"/g) ?? []).length >= 6,
     "todos os comparativos ECharts devem preservar a paleta explícita",
   );
-  assert.match(reportsSource, /<EChart option=\{option\} themeMode="explicit"/);
+  assert.match(
+    reportsSource,
+    /<EChart\s+option=\{option\}\s+themeMode="explicit"/,
+  );
   assert.doesNotMatch(
     reportsSource,
     /Dados parciais|Comparativo parcial|Dados de ocupação não certificados/,
@@ -2680,10 +2683,20 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
     paletteSelectSource,
     /aria-label=\{`\$\{ariaLabel\}: \$\{palette\.label\}`\}/,
   );
-  assert.match(paletteSelectSource, /className="h-8 w-\[116px\]/);
-  assert.match(paletteSelectSource, /<PaletteSwatches colors=\{palette\.colors\} selected \/>/);
+  assert.match(
+    paletteSelectSource,
+    /fluid \? "w-full min-w-0" : "w-\[64px\] @sm:w-\[116px\]"/,
+  );
+  assert.match(
+    dashboardSource,
+    /<OccupancyPaletteSelect[\s\S]*?compact[\s\S]*?fluid/,
+  );
+  assert.match(
+    paletteSelectSource,
+    /<PaletteSwatches colors=\{palette\.colors\} compact=\{compact\} selected \/>/,
+  );
   assert.doesNotMatch(paletteSelectSource, /<SelectValue/);
-  assert.match(paletteSelectSource, /selected \? 10 : 5/);
+  assert.match(paletteSelectSource, /selected && !compact \? 10 : 5/);
   assert.match(
     paletteSelectSource,
     /style=\{\{ display: "inline-flex" \}\}/,
@@ -2715,8 +2728,8 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     compactToolbarSource,
-    /className="grid min-w-0 gap-2 [^"]*@4xl:grid-cols-/,
-    "a barra superior deve empilhar no mobile e usar uma linha quando houver largura",
+    /className="grid min-w-0 grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(212px,1fr\)\][^"]*@md:grid-cols-\[minmax\(120px,160px\)_64px_minmax\(212px,1fr\)\]/,
+    "cenário, paleta, horário e ações devem permanecer na mesma linha",
   );
   assert.doesNotMatch(
     compactToolbarSource,
@@ -2729,6 +2742,14 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
     "a barra compacta não deve reintroduzir as segmentações removidas",
   );
   assert.match(compactToolbarSource, /<ReportExportActions[\s\S]*?compact/);
+  assert.match(
+    compactToolbarSource,
+    /aria-label="Ações da visão de ocupação"\s+className="ml-auto flex shrink-0 flex-nowrap/,
+  );
+  assert.match(
+    compactToolbarSource,
+    /<ReportExportActions[\s\S]*?<ReorderModeButton[\s\S]*?aria-label="Configurar widgets de ocupação"[\s\S]*?aria-label="Configurações operacionais"[\s\S]*?aria-label="Atualizar dados de ocupação"[\s\S]*?<MonitorModeButton/,
+  );
   assert.doesNotMatch(
     compactToolbarSource,
     /OccupancyStatusColorsDialog|Cores da comparação|Configurar cenários|manager\/scenarios/,
@@ -2826,12 +2847,27 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     liveToolbar,
-    /className="grid min-w-0 gap-2 [^"]*@4xl:grid-cols-/,
+    /className="grid w-full min-w-0 grid-cols-\[80px_minmax\(0,104px\)_minmax\(176px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(176px,1fr\)\]/,
   );
   assert.doesNotMatch(liveToolbar, /enterprise-horizontal-scroll|overflow-x-auto/);
+  assert.doesNotMatch(liveToolbar, /row-start-2/);
+  assert.match(
+    liveToolbar,
+    /className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2"/,
+  );
   assert.match(liveToolbar, /<ReportExportActions[\s\S]*?compact/);
   assert.match(liveToolbar, /<MonitorModeButton[\s\S]*?compact/);
-  assert.match(liveToolbar, /aria-label="Bases de comparação"/);
+  assert.match(
+    liveToolbar,
+    /aria-label="Ações da visão ao vivo de Contagem"[\s\S]*?<ReportExportActions[\s\S]*?<ReorderModeButton[\s\S]*?aria-label="Configurar widgets"[\s\S]*?<Target[\s\S]*?<MonitorModeButton/,
+  );
+  assert.equal((liveToolbar.match(/<ReorderModeButton/g) ?? []).length, 1);
+  assert.equal(
+    (liveToolbar.match(/aria-label="Configurar widgets"/g) ?? []).length,
+    1,
+  );
+  assert.match(liveToolbar, /aria-controls="counting-live-comparison-settings"/);
+  assert.match(liveToolbar, /aria-expanded=\{operationalSettingsOpen\}/);
   assert.doesNotMatch(liveToolbar, />\s*5 segundos\s*</);
   assert.match(
     liveSource,
@@ -2842,6 +2878,18 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   const analysisToolbar = analysisSource.slice(
     analysisSource.indexOf('aria-label="Controles da análise de Contagem"'),
     analysisSource.indexOf("{loadingScenarios && !scopeOptions.length"),
+  );
+  assert.match(
+    analysisToolbar,
+    /grid-cols-\[32px_minmax\(32px,1fr\)_140px\][^"]*@2xl:grid-cols-\[300px_minmax\(32px,1fr\)_140px\]/,
+  );
+  assert.match(
+    analysisToolbar,
+    /aria-label="Metadados da análise de Contagem"[\s\S]*?Última atualização às/,
+  );
+  assert.match(
+    analysisToolbar,
+    /aria-label="Ações da análise de Contagem"\s+className="col-start-3 row-start-1 flex w-\[140px\][^"]*flex-nowrap/,
   );
   assert.match(analysisToolbar, /<AnalysisDateRangePicker/);
   assert.match(
@@ -2878,6 +2926,10 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
     "o limite de 366 dias deve continuar exclusivo da Ocupação",
   );
   assert.match(pickerSource, /aria-haspopup="dialog"/);
+  assert.match(
+    pickerSource,
+    /className="h-8 w-8 min-w-0 max-w-full shrink-0[^"]*@sm:w-\[300px\][^"]*"/,
+  );
   assert.match(
     analysisSource,
     /maximumInput=\{companyDateKey\(new Date\(\), companyTimeZone\)\}/,
@@ -2988,20 +3040,24 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
   assert.match(reports, /<OccupancyDateRangePicker[\s\S]*?onApply=\{updateAnalysisRangeInput\}/);
   assert.match(
     reports,
-    /aria-label=\{analysis \? "Controles da análise de Ocupação" : undefined\}/,
+    /analysis\s*\? "Controles da análise de Ocupação"\s*: "Controles dos relatórios de Ocupação"/,
     "a análise de Ocupação deve reunir os filtros em uma única barra acessível",
   );
   assert.match(
     reports,
-    /analysis[\s\S]*?"grid min-w-0 gap-2 sm:grid-cols-2 lg:grid-cols-/,
-    "a barra deve reorganizar os controles sem criar rolagem em telas estreitas",
+    /analysis[\s\S]*?"grid min-w-0 grid-cols-\[minmax\(0,32px\)_minmax\(0,64px\)_minmax\(0,96px\)_minmax\(212px,1fr\)\] items-center gap-1 @4xl:grid-cols-\[300px_minmax\(140px,170px\)_minmax\(180px,220px\)_minmax\(212px,1fr\)\]/,
+    "calendário, filtros, horário e ações devem compartilhar uma linha compacta",
   );
   const analysisToolbar = reports.slice(
-    reports.indexOf('aria-label={analysis ? "Controles da análise de Ocupação"'),
-    reports.indexOf('id="occupancy-analysis-settings"'),
+    reports.indexOf('"Controles da análise de Ocupação"'),
+    reports.indexOf("{(analysis && analysisSettingsOpen) ||"),
   );
   assert.doesNotMatch(analysisToolbar, /overflow-x-auto|enterprise-horizontal-scroll/);
-  assert.match(reports, /aria-label=\{analysis \? "Tipo de visão da análise de Ocupação"/);
+  assert.doesNotMatch(analysisToolbar, /row-start-2/);
+  assert.match(
+    reports,
+    /analysis\s*\? "Tipo de visão da análise de Ocupação"\s*: "Tipo de visão dos relatórios de Ocupação"/,
+  );
   assert.match(
     reports,
     /aria-label="Configurações da análise de Ocupação"[\s\S]*?<SlidersHorizontal/,
@@ -3009,11 +3065,11 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
   );
   assert.match(
     reports,
-    /id="occupancy-analysis-settings"[\s\S]*?Comparação temporal[\s\S]*?<PreviousPeriodToggle[\s\S]*?compact[\s\S]*?<ComparisonModeSelect[\s\S]*?compact[\s\S]*?Séries históricas[\s\S]*?<MetricVisibilityControls[\s\S]*?compact/,
+    /\? "occupancy-analysis-settings"\s*: "occupancy-report-settings"[\s\S]*?Comparação temporal[\s\S]*?<PreviousPeriodToggle[\s\S]*?compact[\s\S]*?<ComparisonModeSelect[\s\S]*?compact[\s\S]*?fit[\s\S]*?Séries históricas[\s\S]*?<MetricVisibilityControls[\s\S]*?compact/,
     "a otimização não pode remover os algoritmos de comparação nem as séries históricas",
   );
   assert.match(reports, /<ReportExportActions[\s\S]*?compact/);
-  assert.match(reports, /<MonitorModeButton[\s\S]*?compact=\{analysis\}/);
+  assert.match(reports, /<MonitorModeButton[\s\S]*?compact/);
   assert.match(
     reports,
     /loadingScopes && !scopeOptions\.length/,
@@ -3031,6 +3087,64 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
   assert.match(picker, /Início[\s\S]*?type="date"[\s\S]*?Fim[\s\S]*?type="date"/);
   assert.match(picker, /Cancelar[\s\S]*?Aplicar período/);
   assert.match(picker, /Últimos 7 dias[\s\S]*?Semana passada[\s\S]*?Mês anterior/);
+});
+
+test("Relatórios de Ocupação mantém filtros e ações na régua compacta", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const reportControlsStart = source.indexOf(
+    '"Controles dos relatórios de Ocupação"',
+  );
+  const reportControls = source.slice(
+    reportControlsStart,
+    source.indexOf("{(analysis && analysisSettingsOpen) ||", reportControlsStart),
+  );
+
+  assert.notEqual(reportControlsStart, -1);
+  assert.match(source, /<div className="@container rounded-md border/);
+  assert.match(
+    source,
+    /: "grid min-w-0 grid-cols-\[minmax\(0,64px\)_minmax\(0,96px\)_minmax\(212px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(212px,1fr\)\]"/,
+  );
+  assert.equal(
+    (reportControls.match(/className="h-8 w-full min-w-0 bg-card"/g) ?? [])
+      .length,
+    2,
+  );
+  assert.match(
+    reportControls,
+    /aria-label="Ações dos relatórios de Ocupação"\s+className="ml-auto flex shrink-0 flex-nowrap/,
+  );
+  assert.doesNotMatch(
+    reportControls,
+    /overflow-x-auto|overflow-x-scroll|enterprise-horizontal-scroll|row-start-2/,
+  );
+  assert.match(
+    source,
+    /aria-controls="occupancy-report-settings"[\s\S]*?"occupancy-report-settings"[\s\S]*?<PreviousPeriodToggle[\s\S]*?compact[\s\S]*?<ComparisonModeSelect[\s\S]*?compact[\s\S]*?fit[\s\S]*?<MetricVisibilityControls[\s\S]*?compact/,
+  );
+});
+
+test("Relatórios de Contagem não duplica o controle do mês aberto", () => {
+  const periodSource = readFileSync(
+    resolve(projectRoot, "components/app/counting-report-period-control.tsx"),
+    "utf8",
+  );
+  const reportsSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.equal(
+    (periodSource.match(/id="counting-report-open-period"/g) ?? []).length,
+    1,
+  );
+  assert.match(
+    reportsSource,
+    /aria-label="Ações dos relatórios de Contagem"\s+className="col-start-4 row-start-1 flex w-\[212px\][^"]*flex-nowrap/,
+  );
 });
 
 test("calendário de ocupação expõe uma grade ARIA de sete colunas", () => {
@@ -11669,6 +11783,10 @@ test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => 
     "components/app/echart.tsx",
     "resolveLineValueLabelPresentation",
   );
+  const formatChartValueLabel = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "formatChartValueLabel",
+  );
   const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
   const model = countingIntelligence.buildCountingIntelligenceModel({
     hourlyRows: [],
@@ -11691,10 +11809,7 @@ test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => 
       scenario: entryScenario,
     },
   });
-  const compactLinePresentation = resolveLineValueLabelPresentation(
-    "auto",
-    12,
-  );
+  const compactLinePresentation = resolveLineValueLabelPresentation("auto");
 
   assert.deepEqual(compactLinePresentation, {
     align: "left",
@@ -11717,33 +11832,74 @@ test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => 
     assert.ok(valueSeries.length >= 2);
     for (const series of valueSeries) {
       assert.equal(series.data.length, 12);
-      assert.equal(
-        { ...series.label, ...compactLinePresentation }.rotate,
-        90,
-      );
-      assert.equal(
-        { ...series.label, ...compactLinePresentation }.show,
-        true,
-      );
+      assert.equal(series.label.rotate, 90);
+      assert.equal(series.label.show, true);
+      assert.equal(series.labelLayout.hideOverlap, false);
     }
   }
 
-  assert.equal(
-    Object.hasOwn(resolveLineValueLabelPresentation("auto", 1_440), "show"),
-    false,
-    "séries densas não devem criar milhares de rótulos automaticamente",
-  );
-  assert.equal(
-    resolveLineValueLabelPresentation("always", 1_440).show,
-    true,
-  );
-  assert.equal(resolveLineValueLabelPresentation("none", 12).show, false);
+  assert.equal(resolveLineValueLabelPresentation("auto").show, true);
+  assert.equal(resolveLineValueLabelPresentation("always").show, true);
+  assert.equal(resolveLineValueLabelPresentation("none").show, false);
+  assert.equal(formatChartValueLabel(0), "0");
+  assert.equal(formatChartValueLabel(null), "");
+  assert.equal(formatChartValueLabel(undefined), "");
+  assert.equal(formatChartValueLabel(""), "");
 
   const chartSource = readFileSync(
     resolve(projectRoot, "components/app/echart.tsx"),
     "utf8",
   );
   assert.match(chartSource, /hideOverlap: !showEveryLinePoint/);
+  assert.match(
+    chartSource,
+    /\.\.\.existingLabelLayout,[\s\S]*?hideOverlap: !showEveryLinePoint/,
+  );
+
+  const realtimeSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancyLiveSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancyReportsSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(realtimeSource, /valueLabels="none"/);
+  for (const source of [occupancyLiveSource, occupancyReportsSource]) {
+    assert.match(
+      source,
+      /definition\.granularity === "minute" \? "none" : undefined/,
+    );
+  }
+
+  const exportSource = readFileSync(
+    resolve(projectRoot, "lib/report-export.ts"),
+    "utf8",
+  );
+  assert.match(exportSource, /verticalBarLabel \|\| isLine \? 90 : 0/);
+  assert.match(exportSource, /hideOverlap: !isLine/);
+  assert.doesNotMatch(
+    exportSource,
+    /numericValue === 0[\s\S]{0,80}return ""/,
+  );
+
+  const scenarioComparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+  assert.match(
+    scenarioComparisonSource,
+    /const granularity = fitScenarioGranularityToRange\([\s\S]*?settings\.granularity,[\s\S]*?range\.from,[\s\S]*?range\.to/,
+    "intervalos personalizados extensos devem consolidar antes de renderizar rótulos",
+  );
+  assert.doesNotMatch(
+    scenarioComparisonSource,
+    /const granularity = periodOverride\s*\?/,
+  );
 });
 
 test("gráficos e modo monitor preservam navegação por teclado", () => {
@@ -12209,7 +12365,7 @@ test("widgets de Relatórios preservam títulos, métricas e contexto dentro do 
   );
 });
 
-test("réguas principais reorganizam controles sem rolagem horizontal", () => {
+test("réguas principais mantêm filtros e ações na mesma linha compacta", () => {
   const globalsSource = readFileSync(
     resolve(projectRoot, "app/globals.css"),
     "utf8",
@@ -12255,19 +12411,40 @@ test("réguas principais reorganizam controles sem rolagem horizontal", () => {
 
   for (const toolbar of [analysisToolbar, realtimeToolbar, occupancyToolbar]) {
     assert.match(toolbar, /@container/);
-    assert.match(toolbar, /className="grid min-w-0 gap-2/);
-    assert.match(toolbar, /@4xl:grid-cols-/);
-    assert.match(toolbar, /flex min-w-0 flex-wrap items-center gap-2/);
+    assert.match(toolbar, /grid[^\"]*grid-cols-\[/);
+    assert.match(toolbar, /row-start-1/);
+    assert.match(toolbar, /flex-nowrap/);
     assert.doesNotMatch(
       toolbar,
-      /enterprise-horizontal-scroll|overflow-x-auto|tabIndex=\{0\}/,
+      /enterprise-horizontal-scroll|overflow-x-auto|tabIndex=\{0\}|row-start-2/,
     );
   }
 
-  for (const toolbar of [realtimeToolbar, occupancyToolbar]) {
-    assert.match(toolbar, /className="h-8 w-full min-w-0 bg-card"/);
-  }
-  assert.match(analysisToolbar, /@2xl:grid-cols-/);
+  assert.match(
+    realtimeToolbar,
+    /grid-cols-\[80px_minmax\(0,104px\)_minmax\(176px,1fr\)\]/,
+  );
+  assert.match(
+    realtimeToolbar,
+    /aria-label="Ações da visão ao vivo de Contagem"[\s\S]*?ml-auto flex shrink-0 flex-nowrap/,
+  );
+  assert.match(
+    occupancyToolbar,
+    /grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(212px,1fr\)\]/,
+  );
+  assert.match(occupancyToolbar, /<OccupancyPaletteSelect[\s\S]*?compact[\s\S]*?fluid/);
+  assert.match(
+    occupancyToolbar,
+    /aria-label="Ações da visão de ocupação"[\s\S]*?ml-auto flex shrink-0 flex-nowrap/,
+  );
+  assert.match(
+    analysisToolbar,
+    /grid-cols-\[32px_minmax\(32px,1fr\)_140px\]/,
+  );
+  assert.match(
+    analysisToolbar,
+    /aria-label="Ações da análise de Contagem"[\s\S]*?col-start-3 row-start-1[\s\S]*?flex-nowrap/,
+  );
   assert.match(
     analysisSource,
     /ANALYSIS_READABLE_BADGE_CLASS_NAME\s*=\s*[\s\S]*?whitespace-normal/,

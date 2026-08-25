@@ -792,24 +792,32 @@ function addExportValueLabel(
       ...(record.label && typeof record.label === "object" ? record.label : {}),
       // With a 90-degree rotation, left alignment places the full label
       // above the bar while vertical alignment keeps it centered on the bar.
-      align: horizontal || verticalBarLabel ? "left" : "center",
+      align: horizontal || verticalBarLabel || isLine ? "left" : "center",
       color: "#13233A",
-      distance: horizontal ? 6 : verticalBarLabel ? 5 : dense ? 3 : 5,
+      distance: horizontal
+        ? 6
+        : isLine
+          ? 7
+          : verticalBarLabel
+            ? 5
+            : dense
+              ? 3
+              : 5,
       fontSize: dense ? 7 : 9,
       fontWeight: 600,
       formatter: (params: { value?: unknown }) =>
         formatBarLabelValue(params.value),
       position: horizontal ? "right" : "top",
-      rotate: horizontal || isLine ? 0 : 90,
+      rotate: horizontal ? 0 : verticalBarLabel || isLine ? 90 : 0,
       show: true,
       verticalAlign:
-        horizontal || verticalBarLabel ? "middle" : "bottom",
+        horizontal || verticalBarLabel || isLine ? "middle" : "bottom",
     },
     labelLayout: {
       ...(record.labelLayout && typeof record.labelLayout === "object"
         ? record.labelLayout
         : {}),
-      hideOverlap: true,
+      hideOverlap: !isLine,
     },
   };
 }
@@ -827,11 +835,11 @@ function isExportReferenceSeries(series: Record<string, unknown>) {
 
 function formatBarLabelValue(value: unknown) {
   const rawValue = Array.isArray(value) ? value[value.length - 1] : value;
+  if (rawValue === null || rawValue === undefined || rawValue === "") return "";
   const numericValue =
-    typeof rawValue === "number" ? rawValue : Number(String(rawValue ?? ""));
+    typeof rawValue === "number" ? rawValue : Number(String(rawValue));
 
   if (!Number.isFinite(numericValue)) return "";
-  if (numericValue === 0) return "";
   return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(
     numericValue,
   );

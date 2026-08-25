@@ -3805,16 +3805,19 @@ export function RealtimeDashboard({
       ) : (
       <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
         {loadingScenarios ? (
-          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(140px,170px)_minmax(180px,220px)_minmax(0,1fr)]">
+          <div className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(176px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(176px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(176px,1fr)] @lg:grid-cols-[112px_168px_minmax(176px,1fr)] @xl:grid-cols-[120px_200px_minmax(176px,1fr)] @2xl:grid-cols-[132px_220px_minmax(176px,1fr)]">
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full @xl:col-span-2 @4xl:col-span-1 @4xl:w-48 @4xl:justify-self-end" />
+            <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+              <Skeleton className="hidden h-3.5 w-4 shrink-0 @lg:block @xl:w-12 @2xl:w-24" />
+              <Skeleton className="h-8 w-[176px] shrink-0" />
+            </div>
           </div>
         ) : scopeOptions.length ? (
           <div className="space-y-3">
             <div
               aria-label="Controles da visão ao vivo de Contagem"
-              className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(140px,170px)_minmax(180px,220px)_minmax(0,1fr)] @4xl:items-center"
+              className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(176px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(176px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(176px,1fr)] @lg:grid-cols-[112px_168px_minmax(176px,1fr)] @xl:grid-cols-[120px_200px_minmax(176px,1fr)] @2xl:grid-cols-[132px_220px_minmax(176px,1fr)]"
               role="group"
             >
               <div className="min-w-0">
@@ -3857,29 +3860,38 @@ export function RealtimeDashboard({
                   </SelectContent>
                 </Select>
               </div>
-              <div
-                aria-label="Ações da visão ao vivo de Contagem"
-                className="flex min-w-0 flex-wrap items-center gap-2 @xl:col-span-2 @xl:justify-end @4xl:col-span-1 @4xl:flex-nowrap @4xl:justify-self-end"
-                role="group"
-              >
-              <ReportExportActions
-                compact
-                disabled={
-                  initialLoading ||
-                  loadingAnnualHistory ||
-                  !selectedScope ||
-                  Boolean(liveDataCertificationError) ||
-                  Boolean(liveAnnualComparisonError)
-                }
-                getPayload={buildConfiguredLiveReportPayload}
-                payload={liveReportPayload}
-              />
-              {canEditVisual ? (
-                <>
-                  <ReorderModeButton
-                    className="h-8 w-8"
-                    enabled={layoutReorderMode}
-                    onChange={setLayoutReorderMode}
+              <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+                {lastUpdated ? (
+                  <span
+                    aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
+                    className="hidden min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @lg:inline-flex"
+                    title={`Última atualização às ${formatTime(lastUpdated)}`}
+                  >
+                    <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                    <span className="hidden @xl:inline @2xl:hidden">
+                      {formatTime(lastUpdated)}
+                    </span>
+                    <span className="hidden @2xl:inline">
+                      Atualizado às {formatTime(lastUpdated)}
+                    </span>
+                  </span>
+                ) : null}
+                <div
+                  aria-label="Ações da visão ao vivo de Contagem"
+                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1"
+                  role="group"
+                >
+                  <ReportExportActions
+                    compact
+                    disabled={
+                      initialLoading ||
+                      loadingAnnualHistory ||
+                      !selectedScope ||
+                      Boolean(liveDataCertificationError) ||
+                      Boolean(liveAnnualComparisonError)
+                    }
+                    getPayload={buildConfiguredLiveReportPayload}
+                    payload={liveReportPayload}
                   />
                   {canEditVisual ? (
                     <>
@@ -3905,47 +3917,36 @@ export function RealtimeDashboard({
                     type="button"
                     variant={operationalSettingsOpen ? "default" : "outline"}
                     size="icon"
-                    className="h-8 w-8"
-                    onClick={() => setLayoutOrganizerOpen(true)}
-                    aria-label="Configurar widgets"
-                    title="Configurar widgets"
+                    className="h-8 w-8 shrink-0"
+                    onClick={() =>
+                      setOperationalSettingsOpen((current) => !current)
+                    }
+                    aria-label={
+                      operationalSettingsOpen
+                        ? "Ocultar bases de comparação"
+                        : "Exibir bases de comparação"
+                    }
+                    aria-controls="counting-live-comparison-settings"
+                    aria-expanded={operationalSettingsOpen}
+                    title={
+                      operationalSettingsOpen
+                        ? "Ocultar bases de comparação"
+                        : "Exibir bases de comparação"
+                    }
                   >
                     <Target className="h-4 w-4" />
                   </Button>
-                </>
-              ) : null}
-              <Button
-                type="button"
-                variant={operationalSettingsOpen ? "default" : "outline"}
-                size="icon"
-                className="h-8 w-8"
-                onClick={() =>
-                  setOperationalSettingsOpen((current) => !current)
-                }
-                aria-label="Bases de comparação"
-                title="Bases de comparação"
-              >
-                <Target className="h-4 w-4" />
-              </Button>
-              {lastUpdated ? (
-                <span
-                  aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                    className="inline-flex h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
-                  title={`Última atualização às ${formatTime(lastUpdated)}`}
-                >
-                  <Clock3 className="h-3.5 w-3.5" />
-                  {formatTime(lastUpdated)}
-                </span>
-              ) : null}
-              <MonitorModeButton
-                compact
-                onClick={enterMonitorMode}
-                disabled={!scopeOptions.length}
-              />
+                  <MonitorModeButton
+                    compact
+                    onClick={enterMonitorMode}
+                    disabled={!scopeOptions.length}
+                  />
+                </div>
               </div>
             </div>
             {operationalSettingsOpen ? (
               <div
+                id="counting-live-comparison-settings"
                 aria-label="Bases de comparação da Contagem"
                 className="grid gap-3 rounded-xl border bg-muted/15 p-3 md:grid-cols-2 md:items-end"
                 role="group"
