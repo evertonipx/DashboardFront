@@ -1647,7 +1647,7 @@ function MetricCard({
             </div>
           )}
           <div
-            className="mt-2 line-clamp-2 break-words pt-1 text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
+            className="mt-auto line-clamp-2 break-words pt-1 text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
             title={description}
           >
             {description}

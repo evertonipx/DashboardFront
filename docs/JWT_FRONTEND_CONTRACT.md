@@ -13,10 +13,15 @@ explicitamente permitidos durante migrações.
 - `user_id` identifica o usuário da aplicação quando presente. `sub` é o
   subject JWT e funciona como fallback; ele pode ser e-mail, username ou o
   identificador do provedor e não precisa coincidir com `user_id`.
-- `company_id` é a empresa obrigatória de um usuário comum.
-- `role: super-admin` e `is_master: true` são indicações aditivas de Master. A
-  mesma regra é usada na navegação e nas rotas internas, inclusive quando um
-  `/auth/me` legado ainda devolve `is_master: false`.
+- `company_id` é a empresa canônica de um usuário comum. `companyId`,
+  `tenant_id`, `tenantId` e objetos `company`/`tenant` são fallbacks de
+  migração nessa ordem; metadados nested de outro tenant nunca atravessam o
+  `company_id` canônico.
+- `role: super-admin` e `is_master: true` indicam Master quando os claims são
+  consistentes. `role: super-admin` junto de `is_master: false` é um estado
+  inválido e nunca eleva acesso. Durante refresh, a ausência dos dois campos é
+  distinguida de uma despromoção explícita para preservar somente um Master já
+  certificado por `/auth/me` para a mesma sessão.
 - `exp` e `nbf` limitam a validade local da sessão; o frontend nunca estende a
   validade além de `exp`. Para `nbf`, há tolerância de até 60 segundos de
   diferença de relógio entre navegador e API; o backend continua validando o
@@ -49,6 +54,11 @@ certificadas pelo perfil; `role`, `is_master` e permissões do mesmo JWT compõe
 a autorização efetiva da sessão. Um alias novo ou com outra semântica não
 fabrica logout e também não atravessa identidade ou tenant.
 
+O bootstrap vincula `/auth/me` e todas as leituras complementares ao mesmo
+`access_token` e à mesma revisão de sessão. Respostas tardias de uma sessão
+substituída não podem publicar permissões, módulos, empresa, fuso ou grid no
+perfil vencedor.
+
 As permissões do próprio usuário usam `/users/{user_id}/permissions` em modo
 JWT-only: a empresa selecionada por um superadmin não é anexada a essa chamada.
 Quando o JWT declara grants, essa rota e `/permissions` apenas enriquecem os
@@ -66,8 +76,8 @@ escrita quando ele próprio declara uma ação mutável conhecida; `*_view` nunc
 
 ## Matriz de acesso efetiva
 
-- Master: `is_master: true` ou `role: super-admin`; acesso global, sempre
-  revalidado pelo backend.
+- Master: `is_master: true` ou `role: super-admin`, sem claim explícito
+  contraditório; acesso global, sempre revalidado pelo backend.
 - Admin: `role: admin` no JWT e grants explícitos do módulo. Uma `action`
   mutável certificada pelo catálogo libera a gestão daquele módulo; slugs
   legados específicos, sem metadados, só liberam o recurso correspondente.

@@ -6,11 +6,11 @@ import type {
   TokenResponse,
 } from "@/lib/types";
 import {
-  accessTokenDeclaresMasterAccess,
   accessTokenExpirationMilliseconds,
-  accessTokenMatchesUserIdentity,
+  accessTokenExplicitlyMismatchesUserIdentity,
   accessTokensShareUserIdentity,
   resolveAccessTokenContext,
+  resolveAccessTokenMasterClaimState,
 } from "@/lib/access-token-claims";
 import {
   clearStoredCurrentCompanyScope,
@@ -323,19 +323,21 @@ async function performRefresh(
       user: confirmedPrincipalBeforeRefresh.user,
     };
   }
+  const refreshedMasterState = resolveAccessTokenMasterClaimState(
+    refreshedTokens.access_token,
+  );
   if (
     confirmedMasterBeforeRefresh &&
-    accessTokensShareUserIdentity(
-      capturedAccessToken,
-      refreshedTokens.access_token,
-    ) &&
-    accessTokenDeclaresMasterAccess(refreshedTokens.access_token)
+    (refreshedMasterState === "master" || refreshedMasterState === "unknown")
   ) {
     authenticatedMasterAccess = {
       accessToken: refreshedTokens.access_token,
       user: confirmedMasterBeforeRefresh.user,
     };
-  } else if (!accessTokenDeclaresMasterAccess(refreshedTokens.access_token)) {
+  } else if (
+    refreshedMasterState === "non-master" ||
+    refreshedMasterState === "invalid"
+  ) {
     clearStoredMasterCompanyScope();
   }
   return {
@@ -400,21 +402,6 @@ function accessTokensExplicitlyChangeIdentity(
     previousUserId.trim().toLocaleLowerCase("en-US") !==
       nextUserId.trim().toLocaleLowerCase("en-US")
   );
-}
-
-function accessTokenExplicitlyMismatchesUserIdentity(
-  accessToken: string,
-  user: CurrentUser,
-) {
-  const tokenUserId = resolveAccessTokenContext(accessToken)?.userId.trim();
-  if (!tokenUserId) return false;
-  const normalizedTokenUserId = tokenUserId.toLocaleLowerCase("en-US");
-  return ![user.id, user.email]
-    .filter((value): value is string => Boolean(value?.trim()))
-    .some(
-      (value) =>
-        value.trim().toLocaleLowerCase("en-US") === normalizedTokenUserId,
-    );
 }
 
 export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
@@ -501,7 +488,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     : null;
   const tokenDeclaresMaster = Boolean(
     session?.access_token &&
-      accessTokenDeclaresMasterAccess(session.access_token),
+      resolveAccessTokenMasterClaimState(session.access_token) === "master",
   );
   const authMeConfirmedMaster = Boolean(
     session?.access_token &&
@@ -817,7 +804,7 @@ export function setAuthenticatedMasterAccess(
     accessToken &&
       accessToken === authenticatedAccessToken &&
       user &&
-      accessTokenMatchesUserIdentity(accessToken, user),
+      !accessTokenExplicitlyMismatchesUserIdentity(accessToken, user),
   );
   authenticatedPrincipal = authenticatedUser && user
     ? { accessToken, user }

@@ -40,6 +40,45 @@ test("GET do grid falhou: preferências locais nunca habilitam PUT", async () =>
   );
 });
 
+test("hidratação não persiste o merge quando a sessão muda antes do PUT", async () => {
+  const managedKey = scopedKey(
+    "ipxdata.card-views.v1",
+    "company-a",
+    "user-a",
+  );
+
+  await withBrowser(
+    {
+      access_token: "token-a",
+      refresh_token: "refresh-a",
+      [managedKey]: "local-session-a",
+    },
+    async ({ requests }) => {
+      let shouldApplyChecks = 0;
+      globalThis.fetch = async (url, init = {}) => {
+        requests.push(requestRecord(url, init));
+        return jsonResponse({ grid: gridDocument({}) });
+      };
+
+      assert.equal(
+        await userGrid.hydrateUserGridFromServer("user-a", {
+          expectedAccessToken: "token-a",
+          shouldApply: () => {
+            shouldApplyChecks += 1;
+            return shouldApplyChecks < 3;
+          },
+        }),
+        false,
+      );
+      assert.deepEqual(
+        requests.map((request) => request.method),
+        ["GET"],
+        "o merge obsoleto não pode iniciar um PUT depois da troca de sessão",
+      );
+    },
+  );
+});
+
 test("merge do grid isola usuários, preserva empresas e não exclui chaves ausentes", async () => {
   const companyAUserA = scopedKey(
     "ipxdata.card-views.v1",

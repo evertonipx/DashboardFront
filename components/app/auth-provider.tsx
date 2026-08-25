@@ -8,7 +8,8 @@ import {
   ApiError,
   apiFetch,
   clearStoredSession,
-  currentUserRequestWithAccessToken,
+  currentUserRequest,
+  currentUserSessionIsCurrent,
   getStoredRefreshToken,
   getStoredSession,
   loginRequest,
@@ -17,9 +18,10 @@ import {
   SESSION_UPDATED_EVENT,
   setAuthenticatedMasterAccess,
   synchronizeExternalSessionUpdate,
+  type CurrentUserSessionResponse,
 } from "@/lib/api";
 import {
-  accessTokenMatchesUserIdentity,
+  accessTokenExplicitlyMismatchesUserIdentity,
   reconcileCurrentUserWithAccessToken,
 } from "@/lib/access-token-claims";
 import { enrichAuthenticatedPermissionMetadata } from "@/lib/authenticated-permission-metadata";
@@ -95,11 +97,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsManager(resolveManagerAccess(currentUser));
       return currentUser;
     } catch (error) {
-      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-        clearStoredSession();
+      if (
+        error instanceof ApiError &&
+        (error.status === 401 || error.status === 403) &&
+        !getStoredSession()
+      ) {
         clearUserGridSync();
         setUser(null);
         setIsManager(false);
+        return null;
+      }
+
+      if (error instanceof ApiError && error.status === 409) {
         return null;
       }
 
@@ -112,7 +121,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (
         fallbackUser &&
         accessToken &&
-        accessTokenMatchesUserIdentity(accessToken, fallbackUser)
+        !accessTokenExplicitlyMismatchesUserIdentity(accessToken, fallbackUser)
       ) {
         return fallbackUser;
       }
@@ -238,15 +247,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let reconciling = false;
 
     function handleSessionUpdated() {
-      const currentUser = userRef.current;
       const accessToken = getStoredSession()?.access_token ?? "";
-      if (
-        reconciling ||
-        !currentUser ||
-        !accessTokenMatchesUserIdentity(accessToken, currentUser)
-      ) {
-        return;
-      }
+      if (reconciling || !accessToken) return;
 
       reconciling = true;
       void refreshUser().finally(() => {
@@ -339,8 +341,10 @@ export function useAuth() {
 
 async function hydrateCurrentUser(
   user: CurrentUser,
+  authenticatedSession: CurrentUserSessionResponse,
   fallbackUser: CurrentUser | null = null,
 ) {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   const preliminaryCompanyScope = getUserCompanyScope(user);
   if (hasMasterAccess(user)) {
     clearStoredCurrentCompanyScope();
@@ -358,10 +362,12 @@ async function hydrateCurrentUser(
     hydrateUserPermissions(
       user,
       user.permissions ?? fallbackUser?.permissions ?? [],
+      authenticatedSession,
     ),
-    hydrateUserCompany(user),
-    hydrateUserCompanyModules(user),
+    hydrateUserCompany(user, authenticatedSession),
+    hydrateUserCompanyModules(user, authenticatedSession),
   ]);
+  assertAuthenticatedSessionCurrent(authenticatedSession);
 
   const hydratedUser = {
     ...user,
@@ -377,7 +383,8 @@ async function hydrateCurrentUser(
   if (hasMasterAccess(hydratedUser)) {
     clearStoredCurrentCompanyScope();
     synchronizeMasterCompanyScope(getUserCompanyScope(hydratedUser));
-    await hydrateStoredMasterCompanyScope(hydratedUser);
+    await hydrateStoredMasterCompanyScope(hydratedUser, authenticatedSession);
+    assertAuthenticatedSessionCurrent(authenticatedSession);
   } else {
     clearStoredMasterCompanyScope();
     const companyScope = getUserCompanyScope(hydratedUser);
@@ -392,19 +399,13 @@ async function hydrateCurrentUser(
 }
 
 async function hydrateAuthenticatedUser(
-  user: CurrentUser,
-  authenticatedAccessToken: string,
+  authenticatedSession: CurrentUserSessionResponse,
   fallbackUser: CurrentUser | null = null,
 ) {
-  const accessToken = authenticatedAccessToken.trim();
-  if (!accessToken || getStoredSession()?.access_token !== accessToken) {
-    throw new ApiError(
-      "A sessão mudou enquanto a identidade autenticada era validada.",
-      409,
-    );
-  }
+  assertAuthenticatedSessionCurrent(authenticatedSession);
+  const accessToken = authenticatedSession.accessToken;
   const tokenEnrichedUser = reconcileCurrentUserWithAccessToken(
-    user,
+    authenticatedSession.user,
     accessToken,
   );
   if (!tokenEnrichedUser) {
@@ -414,25 +415,19 @@ async function hydrateAuthenticatedUser(
     );
   }
   setAuthenticatedMasterAccess(tokenEnrichedUser, accessToken);
-  const hydratedUser = await hydrateCurrentUser(tokenEnrichedUser, fallbackUser);
-  if (getStoredSession()?.access_token !== accessToken) {
-    throw new ApiError(
-      "A sessão mudou enquanto o perfil autenticado era hidratado.",
-      409,
-    );
-  }
+  const hydratedUser = await hydrateCurrentUser(
+    tokenEnrichedUser,
+    authenticatedSession,
+    fallbackUser,
+  );
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   const sessionIsCurrent = () =>
-    getStoredSession()?.access_token === accessToken;
+    currentUserSessionIsCurrent(authenticatedSession);
   await hydrateUserGridFromServer(hydratedUser.id, {
     expectedAccessToken: accessToken,
     shouldApply: sessionIsCurrent,
   });
-  if (!sessionIsCurrent()) {
-    throw new ApiError(
-      "A sessão mudou enquanto as configurações do usuário eram hidratadas.",
-      409,
-    );
-  }
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   const companyId = getEffectiveCompanyScopeId(hydratedUser);
   if (companyId) {
     await migrateLegacyLiveDefault({
@@ -441,12 +436,7 @@ async function hydrateAuthenticatedUser(
       shouldApply: sessionIsCurrent,
       userId: hydratedUser.id,
     }).catch(() => false);
-    if (!sessionIsCurrent()) {
-      throw new ApiError(
-        "A sessão mudou durante a migração das configurações.",
-        409,
-      );
-    }
+    assertAuthenticatedSessionCurrent(authenticatedSession);
   }
   return hydratedUser;
 }
@@ -454,20 +444,17 @@ async function hydrateAuthenticatedUser(
 async function requestAuthenticatedUser(
   fallbackUser: CurrentUser | null = null,
 ) {
-  // A refresh or another login can rotate localStorage while /auth/me is in
-  // flight. Retry once and only reconcile a response with the exact token that
-  // authenticated it.
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const response = await currentUserRequestWithAccessToken();
-    if (
-      response.accessToken &&
-      getStoredSession()?.access_token === response.accessToken
-    ) {
-      return hydrateAuthenticatedUser(
-        response.user,
-        response.accessToken,
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const authenticatedSession = await currentUserRequest();
+    try {
+      assertAuthenticatedSessionCurrent(authenticatedSession);
+      return await hydrateAuthenticatedUser(
+        authenticatedSession,
         fallbackUser,
       );
+    } catch (error) {
+      if (!currentUserSessionIsCurrent(authenticatedSession)) continue;
+      throw error;
     }
   }
 
@@ -480,7 +467,9 @@ async function requestAuthenticatedUser(
 async function hydrateUserPermissions(
   user: CurrentUser,
   fallbackPermissions: UserPermission[],
+  authenticatedSession: CurrentUserSessionResponse,
 ) {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   // When `/auth/me` was reconciled with an explicit JWT permission claim, that
   // list is the authorization source for this session (including an explicit
   // empty list). Swagger catalog responses may describe those grants, but
@@ -489,9 +478,16 @@ async function hydrateUserPermissions(
     if (!user.id || !user.permissions.length) return user.permissions;
 
     const [assignedMetadata, permissionCatalog] = await Promise.all([
-      readAuthenticatedPermissionMetadata(`/users/${user.id}/permissions`),
-      readAuthenticatedPermissionMetadata("/permissions"),
+      readAuthenticatedPermissionMetadata(
+        `/users/${user.id}/permissions`,
+        authenticatedSession,
+      ),
+      readAuthenticatedPermissionMetadata(
+        "/permissions",
+        authenticatedSession,
+      ),
     ]);
+    assertAuthenticatedSessionCurrent(authenticatedSession);
     return enrichAuthenticatedPermissionMetadata(
       user.permissions,
       [assignedMetadata, permissionCatalog],
@@ -507,18 +503,22 @@ async function hydrateUserPermissions(
     const assignedPermissions = await apiFetch<UserPermission[]>(
       `/users/${user.id}/permissions`,
       {
+        expectedAccessToken: authenticatedSession.accessToken,
         jwtCompanyScopeOnly: true,
       },
     );
     const permissionCatalog = await readAuthenticatedPermissionMetadata(
       "/permissions",
+      authenticatedSession,
     );
+    assertAuthenticatedSessionCurrent(authenticatedSession);
     return enrichAuthenticatedPermissionMetadata(
       assignedPermissions,
       [permissionCatalog],
       getCurrentUserCompanyId(user),
     );
-  } catch {
+  } catch (error) {
+    if (!currentUserSessionIsCurrent(authenticatedSession)) throw error;
     // A previous session snapshot must never keep UI authorization alive when
     // the current JWT omits grants and the documented source cannot certify
     // them. Backend enforcement still applies, and the UI fails closed.
@@ -526,7 +526,11 @@ async function hydrateUserPermissions(
   }
 }
 
-async function hydrateUserCompanyModules(user: CurrentUser) {
+async function hydrateUserCompanyModules(
+  user: CurrentUser,
+  authenticatedSession: CurrentUserSessionResponse,
+) {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   if (hasMasterAccess(user)) return user.company_modules;
 
   const companyId = getCurrentUserCompanyId(user);
@@ -534,8 +538,12 @@ async function hydrateUserCompanyModules(user: CurrentUser) {
   try {
     const rows = await apiFetch<CurrentUserCompanyModule[]>(
       "/company/modules",
-      { jwtCompanyScopeOnly: true },
+      {
+        expectedAccessToken: authenticatedSession.accessToken,
+        jwtCompanyScopeOnly: true,
+      },
     );
+    assertAuthenticatedSessionCurrent(authenticatedSession);
     if (!Array.isArray(rows)) return [];
 
     return rows.filter((assignment) => {
@@ -546,25 +554,38 @@ async function hydrateUserCompanyModules(user: CurrentUser) {
           (!assignmentCompanyId || assignmentCompanyId === companyId),
       );
     });
-  } catch {
+  } catch (error) {
+    if (!currentUserSessionIsCurrent(authenticatedSession)) throw error;
     return [];
   }
 }
 
-async function readAuthenticatedPermissionMetadata(path: string) {
+async function readAuthenticatedPermissionMetadata(
+  path: string,
+  authenticatedSession: CurrentUserSessionResponse,
+) {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   try {
-    return await apiFetch<UserPermission[]>(path, {
+    const permissions = await apiFetch<UserPermission[]>(path, {
+      expectedAccessToken: authenticatedSession.accessToken,
       // This request hydrates the authenticated principal itself. The backend
       // derives that identity from the same JWT; a company selected by a
       // superadmin must not leak into this bootstrap request.
       jwtCompanyScopeOnly: true,
     });
-  } catch {
+    assertAuthenticatedSessionCurrent(authenticatedSession);
+    return permissions;
+  } catch (error) {
+    if (!currentUserSessionIsCurrent(authenticatedSession)) throw error;
     return [];
   }
 }
 
-async function hydrateUserCompany(user: CurrentUser) {
+async function hydrateUserCompany(
+  user: CurrentUser,
+  authenticatedSession: CurrentUserSessionResponse,
+) {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   const companyId = getCurrentUserCompanyId(user);
   const declaredCompany = getDeclaredCompany(user);
   const cachedCompany = readCachedCompany(companyId);
@@ -588,8 +609,12 @@ async function hydrateUserCompany(user: CurrentUser) {
   try {
     const response = await apiFetch<CurrentUserCompany>(
       `/companies/${companyId}`,
-      { jwtCompanyScopeOnly: hasMasterAccess(user) },
+      {
+        expectedAccessToken: authenticatedSession.accessToken,
+        jwtCompanyScopeOnly: hasMasterAccess(user),
+      },
     );
+    assertAuthenticatedSessionCurrent(authenticatedSession);
     if (response.id?.trim() !== companyId) {
       throw new Error("A API retornou o cadastro de outra empresa.");
     }
@@ -601,8 +626,23 @@ async function hydrateUserCompany(user: CurrentUser) {
     if (!company) return fallbackCompany;
     writeCompanyCache([company]);
     return company;
-  } catch {
+  } catch (error) {
+    if (!currentUserSessionIsCurrent(authenticatedSession)) throw error;
     return fallbackCompany;
+  }
+}
+
+function assertAuthenticatedSessionCurrent(
+  authenticatedSession: Pick<
+    CurrentUserSessionResponse,
+    "accessToken" | "sessionRevision"
+  >,
+) {
+  if (!currentUserSessionIsCurrent(authenticatedSession)) {
+    throw new ApiError(
+      "A sessão foi atualizada durante a validação. Tente novamente.",
+      409,
+    );
   }
 }
 
@@ -673,7 +713,11 @@ function synchronizeMasterCompanyScope(
   });
 }
 
-async function hydrateStoredMasterCompanyScope(user: CurrentUser) {
+async function hydrateStoredMasterCompanyScope(
+  user: CurrentUser,
+  authenticatedSession: CurrentUserSessionResponse,
+) {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
   const storedScope = getStoredMasterCompanyScope();
   if (!storedScope) return;
   const resolution = getCompanyTimeZoneResolutionForScope(user, storedScope.id);
@@ -690,8 +734,12 @@ async function hydrateStoredMasterCompanyScope(user: CurrentUser) {
   try {
     const response = await apiFetch<CurrentUserCompany>(
       `/companies/${storedScope.id}`,
-      { companyScopeId: storedScope.id },
+      {
+        companyScopeId: storedScope.id,
+        expectedAccessToken: authenticatedSession.accessToken,
+      },
     );
+    assertAuthenticatedSessionCurrent(authenticatedSession);
     if (response.id?.trim() !== storedScope.id) return;
     const company = normalizeCompanyRecord(response);
     const timeZone = canonicalCompanyTimeZone(company.timezone);
@@ -703,7 +751,8 @@ async function hydrateStoredMasterCompanyScope(user: CurrentUser) {
       timezone: timeZone,
       trade_name: company.trade_name ?? storedScope.trade_name,
     });
-  } catch {
+  } catch (error) {
+    if (!currentUserSessionIsCurrent(authenticatedSession)) throw error;
     // The dashboards remain fail-closed and surface the certification message.
   }
 }

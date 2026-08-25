@@ -230,11 +230,14 @@ test("módulo desabilitado na empresa bloqueia grant preservado", () => {
     resolve(projectRoot, "components/app/auth-provider.tsx"),
     "utf8",
   );
-  assert.match(authSource, /hydrateUserCompanyModules\(user\)/);
+  assert.match(
+    authSource,
+    /hydrateUserCompanyModules\(user, authenticatedSession\)/,
+  );
   assert.match(authSource, /"\/company\/modules"[\s\S]*?jwtCompanyScopeOnly: true/);
   assert.match(
     authSource,
-    /async function hydrateUserCompanyModules[\s\S]*?catch \{[\s\S]*?return \[\];/,
+    /async function hydrateUserCompanyModules[\s\S]*?catch \(error\) \{[\s\S]*?currentUserSessionIsCurrent\(authenticatedSession\)[\s\S]*?return \[\];/,
   );
 });
 

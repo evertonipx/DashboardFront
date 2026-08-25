@@ -156,7 +156,9 @@ export async function hydrateUserGridFromServer(
       (!parsed.nativeDocument && localSnapshot.size) ||
       nativeDocumentNeedsMerge
     ) {
-      await persistActiveDocument(currentGeneration).catch(() => undefined);
+      await persistActiveDocument(currentGeneration, options).catch(
+        () => undefined,
+      );
     }
 
     return shouldApply();

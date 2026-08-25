@@ -52,6 +52,12 @@ export type AccessTokenContext = {
   userId: string;
 };
 
+export type AccessTokenMasterClaimState =
+  | "invalid"
+  | "master"
+  | "non-master"
+  | "unknown";
+
 type UserIdentityClaimKind = "none" | "subject" | "user-id";
 
 type UserIdentityResolution = {
@@ -84,6 +90,7 @@ export function resolveAccessTokenContext(
   const roleClaim = resolveStringAliases(claims, ["role"]);
   const timeZone = resolveCompanyTimeZoneClaims(claims, company.value);
   const master = resolveBooleanAliases(claims, ["is_master", "isMaster"]);
+  const masterState = resolveMasterClaimState(roleClaim, master);
   const expiresAt = numericDateClaim(claims, "exp");
   const issuedAt = numericDateClaim(claims, "iat");
   const notBefore = numericDateClaim(claims, "nbf");
@@ -93,6 +100,7 @@ export function resolveAccessTokenContext(
     user.conflict ||
     roleClaim.conflict ||
     master.conflict ||
+    masterState === "invalid" ||
     expiresAt.invalid ||
     issuedAt.invalid ||
     notBefore.invalid
@@ -105,7 +113,7 @@ export function resolveAccessTokenContext(
     companyId: company.value,
     expiresAt: expiresAt.value,
     issuedAt: issuedAt.value,
-    isMaster: master.value === true || role === "super-admin",
+    isMaster: masterState === "master",
     notBefore: notBefore.value,
     role,
     timeZone,
@@ -128,6 +136,50 @@ export function accessTokenDeclaresMasterAccess(
   return resolveAccessTokenContext(accessToken, nowMilliseconds)?.isMaster ?? false;
 }
 
+/**
+ * Distinguishes an explicit demotion from a JWT version that simply omits
+ * authorization metadata. The distinction keeps an `/auth/me`-certified
+ * master session stable across compatible token rotations without allowing
+ * contradictory claims to elevate it.
+ */
+export function resolveAccessTokenMasterClaimState(
+  accessToken: string,
+  nowMilliseconds = Date.now(),
+): AccessTokenMasterClaimState {
+  const claims = decodeAccessTokenClaims(accessToken);
+  if (!claims) return "unknown";
+  if (!claimsAreActive(claims, nowMilliseconds)) return "invalid";
+
+  const roleClaim = resolveStringAliases(claims, ["role"]);
+  const masterClaim = resolveBooleanAliases(claims, ["is_master", "isMaster"]);
+  return resolveMasterClaimState(roleClaim, masterClaim);
+}
+
+function resolveMasterClaimState(
+  roleClaim: ReturnType<typeof resolveStringAliases>,
+  masterClaim: ReturnType<typeof resolveBooleanAliases>,
+): AccessTokenMasterClaimState {
+  if (roleClaim.conflict || masterClaim.conflict) return "invalid";
+
+  const normalizedRole = normalizeRole(roleClaim.value) ?? roleClaim.value;
+  const roleDeclaresMaster = normalizedRole === "super-admin";
+  const roleDeclaresNonMaster = Boolean(
+    roleClaim.value && !roleDeclaresMaster,
+  );
+  const booleanDeclaresMaster = masterClaim.value === true;
+  const booleanDeclaresNonMaster = masterClaim.value === false;
+
+  if (
+    (roleDeclaresMaster || booleanDeclaresMaster) &&
+    (roleDeclaresNonMaster || booleanDeclaresNonMaster)
+  ) {
+    return "invalid";
+  }
+  if (roleDeclaresMaster || booleanDeclaresMaster) return "master";
+  if (roleDeclaresNonMaster || booleanDeclaresNonMaster) return "non-master";
+  return "unknown";
+}
+
 export function accessTokenMatchesUserIdentity(
   accessToken: string,
   user: CurrentUser,
@@ -140,6 +192,26 @@ export function accessTokenMatchesUserIdentity(
     !identity.conflict &&
       identity.value &&
       tokenIdentityMatchesCurrentUser(identity, user),
+  );
+}
+
+/**
+ * Missing or not-yet-recognized identity claims are not mismatches: `/auth/me`
+ * authenticated the exact Bearer token. A declared different identity remains
+ * fail-closed.
+ */
+export function accessTokenExplicitlyMismatchesUserIdentity(
+  accessToken: string,
+  user: CurrentUser,
+  nowMilliseconds = Date.now(),
+) {
+  const claims = decodeAccessTokenClaims(accessToken);
+  if (!claims) return false;
+  if (!claimsAreActive(claims, nowMilliseconds)) return true;
+  const identity = resolveUserIdentityClaims(claims);
+  if (identity.conflict) return true;
+  return Boolean(
+    identity.value && !tokenIdentityMatchesCurrentUser(identity, user),
   );
 }
 
@@ -425,34 +497,30 @@ function resolveStringAliases(
 }
 
 function resolveCompanyIdentityClaims(claims: AccessTokenClaims) {
-  const direct = resolveStringAliases(claims, [
+  // `company_id` is the application tenant. Migration aliases and nested
+  // objects can describe a related/selected tenant and are fallbacks only.
+  const direct = resolvePreferredStringClaim(claims, [
     "company_id",
     "companyId",
     "tenant_id",
     "tenantId",
   ]);
-  if (direct.conflict) return direct;
-  const values = new Set<string>();
-  if (direct.value) values.add(direct.value);
+  if (direct.conflict || direct.value) return direct;
 
   for (const key of ["company", "tenant"] as const) {
-    const nested = asRecord(claims[key]);
-    if (!nested) continue;
-    const resolution = resolveStringAliases(nested, [
+    const record = asRecord(claims[key]);
+    if (!record) continue;
+    const nested = resolvePreferredStringClaim(record, [
       "id",
       "company_id",
       "companyId",
       "tenant_id",
       "tenantId",
     ]);
-    if (resolution.conflict) return resolution;
-    if (resolution.value) values.add(resolution.value);
+    if (nested.conflict || nested.value) return nested;
   }
 
-  return {
-    conflict: values.size > 1,
-    value: values.size === 1 ? [...values][0] : "",
-  };
+  return { conflict: false, value: "" };
 }
 
 function resolveUserIdentityClaims(
@@ -460,17 +528,35 @@ function resolveUserIdentityClaims(
 ): UserIdentityResolution {
   // `user_id` is the application identity. `sub` is the generic JWT subject
   // and may legitimately be an e-mail, username or identity-provider key.
-  const applicationId = resolveStringAliases(claims, ["user_id", "userId"]);
+  const applicationId = resolvePreferredStringClaim(claims, [
+    "user_id",
+    "userId",
+  ]);
   if (applicationId.conflict || applicationId.value) {
     return { ...applicationId, kind: "user-id" };
   }
 
-  const subject = resolveStringAliases(claims, ["sub"]);
+  const subject = resolvePreferredStringClaim(claims, ["sub"]);
   if (subject.conflict || subject.value) {
     return { ...subject, kind: "subject" };
   }
 
   return { conflict: false, kind: "none", value: "" };
+}
+
+function resolvePreferredStringClaim(
+  claims: Record<string, unknown>,
+  keys: readonly string[],
+) {
+  for (const key of keys) {
+    const raw = claims[key];
+    if (raw === undefined || raw === null) continue;
+    const value = cleanString(raw);
+    return value
+      ? { conflict: false, value }
+      : { conflict: true, value: "" };
+  }
+  return { conflict: false, value: "" };
 }
 
 function tokenIdentityMatchesCurrentUser(

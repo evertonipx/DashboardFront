@@ -8271,6 +8271,10 @@ test("grade Bento preserva seis níveis e oferece KPI mínimo compacto", () => {
     resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
     "utf8",
   );
+  const occupancySource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
   assert.match(cardLayoutSource, /dimensionLabel: `\$\{Math\.round\(dimensions\.widthRatio \* 100\)\}% · \$\{dimensions\.pixelHeight\}px`/);
   assert.match(
     realtimeSource,
@@ -8278,7 +8282,14 @@ test("grade Bento preserva seis níveis e oferece KPI mínimo compacto", () => {
   );
   assert.match(
     realtimeSource,
-    /className="mt-2 line-clamp-2[^"]*"\s+data-live-metric-description/,
+    /className="mt-auto line-clamp-2[^"]*"\s+data-live-metric-description/,
+  );
+  assert.match(
+    occupancySource.slice(
+      occupancySource.indexOf("function MetricCard("),
+      occupancySource.indexOf("function OccupancyChartCard"),
+    ),
+    /className="mt-auto line-clamp-2/,
   );
 
   const legacy = viewPreferences.normalizeCardPreferences(

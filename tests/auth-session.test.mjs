@@ -2567,9 +2567,9 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
     accessTokenClaims.resolveAccessTokenContext(
       accessToken({ ...claims, companyId: "company-other" }),
       now,
-    ),
-    null,
-    "aliases divergentes não podem escolher um tenant arbitrariamente",
+    )?.companyId,
+    "company-jwt",
+    "company_id canônico deve vencer aliases auxiliares de migração",
   );
   assert.equal(
     accessTokenClaims.resolveAccessTokenContext(
@@ -2628,7 +2628,7 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
     "",
     "claim específico nulo não pode herdar um timezone genérico",
   );
-  assert.equal(
+  const contextWithRelatedCompany =
     accessTokenClaims.resolveAccessTokenContext(
       accessToken({
         ...claims,
@@ -2638,9 +2638,12 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
         },
       }),
       now,
-    ),
-    null,
-    "empresa flat e nested divergentes invalidam o enriquecimento",
+    );
+  assert.equal(contextWithRelatedCompany?.companyId, "company-jwt");
+  assert.equal(
+    contextWithRelatedCompany?.timeZone,
+    "",
+    "metadados nested de outro tenant não podem atravessar o company_id canônico",
   );
   assert.equal(
     accessTokenClaims.resolveAccessTokenContext(
@@ -2724,6 +2727,42 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
     ),
     authenticatedRegularUser,
     "/auth/me 200 permanece autoritativo, mas claims de outro tenant não complementam papel nem empresa",
+  );
+});
+
+test("claims master conflitantes nunca elevam o perfil autenticado", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = currentUser();
+  const contradictoryToken = accessToken({
+    company_id: user.company_id,
+    exp: now / 1000 + 900,
+    is_master: false,
+    role: "super-admin",
+    user_id: user.id,
+  });
+
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenMasterClaimState(
+      contradictoryToken,
+      now,
+    ),
+    "invalid",
+  );
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(contradictoryToken, now),
+    null,
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenDeclaresMasterAccess(contradictoryToken, now),
+    false,
+  );
+  assert.strictEqual(
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      user,
+      contradictoryToken,
+      now,
+    ),
+    user,
   );
 });
 
@@ -3189,7 +3228,7 @@ test("usuário comum consulta exclusivamente a empresa assinada no JWT", async (
   }
 });
 
-test("master confirmado por auth me escopa recursos mesmo quando o JWT omite a função", async () => {
+test("master confirmado por auth me escopa recursos com identidade JWT ainda desconhecida", async () => {
   const originalWindow = globalThis.window;
   const originalFetch = globalThis.fetch;
   const storage = memoryStorage();
@@ -3214,7 +3253,7 @@ test("master confirmado por auth me escopa recursos mesmo quando o JWT omite a f
       access_token: accessToken({
         exp: nowSeconds + 900,
         nbf: nowSeconds - 1,
-        sub: "master-with-legacy-token",
+        principal: "formato-de-identidade-ainda-desconhecido",
       }),
       expires_in: 900,
       refresh_token: "refresh-master-with-legacy-token",
@@ -3472,6 +3511,151 @@ test("confirmação master não atravessa refresh para outra identidade", async 
   }
 });
 
+test("confirmação master sobrevive ao refresh que omite role e is_master", async () => {
+  const result = await runTriStateMasterRefreshScenario({
+    currentUserId: "master-refresh-without-role",
+    refreshedClaims: { sub: "master-refresh-without-role" },
+    scopeId: "company-preserved-without-role",
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.refreshCalls, 1);
+  assert.deepEqual(result.requests, [
+    {
+      path: "/api/v1/workers",
+      companyId: "company-preserved-without-role",
+    },
+  ]);
+  assert.equal(result.storedScope?.id, "company-preserved-without-role");
+});
+
+test("refresh preserva o principal durante migração entre sub e user_id", async () => {
+  const currentUserId = "master-migrating-identity-claims";
+  const currentUserEmail = "master.migration@example.com";
+  const scenarios = [
+    {
+      initialClaims: { sub: currentUserEmail },
+      refreshedClaims: { sub: currentUserEmail, user_id: currentUserId },
+    },
+    {
+      initialClaims: { sub: currentUserEmail, user_id: currentUserId },
+      refreshedClaims: { sub: currentUserEmail },
+    },
+  ];
+
+  for (const [index, scenario] of scenarios.entries()) {
+    const scopeId = `company-identity-migration-${index}`;
+    const result = await runTriStateMasterRefreshScenario({
+      currentUserEmail,
+      currentUserId,
+      initialClaims: scenario.initialClaims,
+      refreshedClaims: scenario.refreshedClaims,
+      scopeId,
+    });
+
+    assert.equal(result.error, null);
+    assert.deepEqual(result.requests, [
+      { path: "/api/v1/workers", companyId: scopeId },
+    ]);
+    assert.equal(result.storedScope?.id, scopeId);
+  }
+});
+
+test("is_master false vence role super-admin conflitante no refresh", async () => {
+  const result = await runTriStateMasterRefreshScenario({
+    currentUserId: "master-with-conflicting-refresh-claims",
+    refreshedClaims: {
+      is_master: false,
+      role: "super-admin",
+      sub: "master-with-conflicting-refresh-claims",
+    },
+    scopeId: "company-must-not-use-conflicting-master-claims",
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.refreshCalls, 1);
+  assert.deepEqual(result.requests, [
+    { path: "/api/v1/workers", companyId: null },
+  ]);
+  assert.equal(result.storedScope, null);
+});
+
+async function runTriStateMasterRefreshScenario({
+  currentUserEmail,
+  currentUserId,
+  initialClaims,
+  refreshedClaims,
+  scopeId,
+}) {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests = [];
+  let refreshCalls = 0;
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path === "/api/v1/auth/refresh") {
+      refreshCalls += 1;
+      return jsonResponse({
+        access_token: accessToken(refreshedClaims),
+        expires_in: 900,
+        refresh_token: `refresh-${currentUserId}`,
+        token_type: "Bearer",
+      });
+    }
+    requests.push({
+      path,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+    });
+    return jsonResponse([]);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken(initialClaims ?? { sub: currentUserId }),
+      expires_at: Date.now() + 1_000,
+      expires_in: 1,
+      refresh_token: `refresh-${currentUserId}`,
+      token_type: "Bearer",
+    });
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: scopeId,
+      name: "Empresa selecionada antes do refresh",
+    });
+    api.setAuthenticatedMasterAccess({
+      email: currentUserEmail ?? `${currentUserId}@example.com`,
+      id: currentUserId,
+      is_master: true,
+      name: "Master",
+    });
+
+    let error = null;
+    try {
+      await api.apiFetch("/workers");
+    } catch (requestError) {
+      error = requestError;
+    }
+
+    return {
+      error,
+      refreshCalls,
+      requests: [...requests],
+      storedScope: masterCompanyScope.getStoredMasterCompanyScope(),
+    };
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+}
+
 test("worker sem company id só é aceito quando a resposta escopada não mistura empresas", () => {
   const target = { company_id: "company-selected", id: "worker-target" };
   const unscoped = { id: "worker-legacy" };
@@ -3667,8 +3851,13 @@ test("login é transacional e impede submissões concorrentes", () => {
   );
   assert.match(
     authProviderSource,
-    /currentUserRequestWithAccessToken\(\)[\s\S]*?response\.accessToken[\s\S]*?getStoredSession\(\)\?\.access_token === response\.accessToken[\s\S]*?hydrateAuthenticatedUser\([\s\S]*?response\.accessToken/,
-    "a resposta de /auth/me deve ser reconciliada com o JWT que foi realmente enviado",
+    /currentUserRequest\(\)[\s\S]*?assertAuthenticatedSessionCurrent\(authenticatedSession\)[\s\S]*?hydrateAuthenticatedUser\(\s*authenticatedSession/,
+    "a resposta de /auth/me deve permanecer vinculada ao token e à revisão que a autenticaram",
+  );
+  assert.match(
+    authProviderSource,
+    /hydrateUserPermissions\([\s\S]*?expectedAccessToken: authenticatedSession\.accessToken[\s\S]*?hydrateUserCompanyModules\([\s\S]*?expectedAccessToken: authenticatedSession\.accessToken/,
+    "a hidratação complementar não pode trocar de Bearer durante a sessão",
   );
 });
 
@@ -3762,7 +3951,7 @@ test("bootstrap comum evita detalhe administrativo e master mantém a hidrataç�
     navigationStart,
   );
   const userHydrationStart = authSource.indexOf(
-    "async function hydrateUserCompany(user: CurrentUser)",
+    "async function hydrateUserCompany(",
   );
   const userHydrationEnd = authSource.indexOf(
     "function getDeclaredCompany",
@@ -3799,12 +3988,12 @@ test("bootstrap comum evita detalhe administrativo e master mantém a hidrataç�
   );
   assert.match(
     authSource,
-    /reconcileCurrentUserWithAccessToken\([\s\S]*?hydrateCurrentUser\(tokenEnrichedUser/,
+    /reconcileCurrentUserWithAccessToken\([\s\S]*?hydrateCurrentUser\(\s*tokenEnrichedUser,\s*authenticatedSession/,
     "o JWT precisa ser reconciliado antes da hidratação local da empresa",
   );
   assert.match(
     authSource,
-    /await hydrateStoredMasterCompanyScope\(hydratedUser\)[\s\S]*?async function hydrateStoredMasterCompanyScope[\s\S]*?`\/companies\/\$\{storedScope\.id\}`/,
+    /await hydrateStoredMasterCompanyScope\(hydratedUser, authenticatedSession\)[\s\S]*?async function hydrateStoredMasterCompanyScope[\s\S]*?`\/companies\/\$\{storedScope\.id\}`/,
     "uma recarga direta do superadmin deve reparar o tenant salvo antes do dashboard",
   );
   assert.match(apiSource, /SESSION_UPDATED_EVENT/);
