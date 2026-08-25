@@ -25,9 +25,10 @@ import {
 import { enrichAuthenticatedPermissionMetadata } from "@/lib/authenticated-permission-metadata";
 import { hasDeclaredManagerAccess, hasMasterAccess } from "@/lib/access";
 import {
+  buildCurrentUserCompanyCacheRecord,
   normalizeCompanyRecord,
   readCachedCompany,
-  resolveCompanyRecordTimeZone,
+  resolveCurrentUserCompanyTimeZone,
   writeCompanyCache,
 } from "@/lib/company-cache";
 import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
@@ -578,6 +579,12 @@ async function hydrateUserCompany(user: CurrentUser) {
   }
   if (!companyId) return fallbackCompany;
 
+  // Swagger marks `/companies/{id}` as super-admin-only. A regular user's
+  // company metadata has already been reconciled from the exact JWT and
+  // `/auth/me`; probing this administrative route only creates a guaranteed
+  // 403 and used to leave every civil dashboard permanently blocked.
+  if (!hasMasterAccess(user)) return fallbackCompany;
+
   try {
     const response = await apiFetch<CurrentUserCompany>(
       `/companies/${companyId}`,
@@ -600,34 +607,14 @@ async function hydrateUserCompany(user: CurrentUser) {
 }
 
 function getDeclaredCompany(user: CurrentUser) {
-  const companyId = getCurrentUserCompanyId(user);
-  const declaredTimeZone =
-    resolveCompanyRecordTimeZone(user.company).timeZone ??
-    resolveCompanyRecordTimeZone(user).timeZone;
-  if (user.company?.name) {
-    return {
-      ...user.company,
-      id: user.company.id || companyId,
-      timezone: declaredTimeZone,
-    };
-  }
-  if (!companyId || !user.company_name) return null;
-
-  return {
-    id: companyId,
-    name: user.company_name,
-    timezone: declaredTimeZone,
-    trade_name: user.company_trade_name ?? null,
-  } satisfies CurrentUserCompany;
+  return buildCurrentUserCompanyCacheRecord(user);
 }
 
 function getUserCompanyScope(user: CurrentUser) {
   const id = getCurrentUserCompanyId(user);
   if (!id) return null;
 
-  const timeZone =
-    resolveCompanyRecordTimeZone(user.company).timeZone ??
-    resolveCompanyRecordTimeZone(user).timeZone;
+  const timeZone = resolveCurrentUserCompanyTimeZone(user).timeZone;
 
   return {
     id,

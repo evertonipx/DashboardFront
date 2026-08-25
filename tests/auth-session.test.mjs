@@ -1291,7 +1291,7 @@ test("auth me mantém o snapshot do JWT realmente enviado na requisição", asyn
   }
 });
 
-test("timezone efetivo acompanha a empresa selecionada e usa fallback explícito", () => {
+test("timezone efetivo prioriza a empresa e certifica a política do ambiente", () => {
   const originalWindow = globalThis.window;
   const storage = memoryStorage();
   globalThis.window = {
@@ -1360,21 +1360,126 @@ test("timezone efetivo acompanha a empresa selecionada e usa fallback explícito
       timeZone: "America/Manaus",
     });
 
+    const regularDeploymentResolution =
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution({
+        company_id: "company-without-timezone",
+        email: "user@example.com",
+        id: "user-without-timezone",
+        is_master: false,
+        name: "User without timezone",
+      });
+    assert.deepEqual(regularDeploymentResolution, {
+      fallback: false,
+      source: "deployment-default",
+      timeZone: "America/Sao_Paulo",
+    });
+    assert.equal(
+      companyTimeZone.requireCertifiedCompanyTimeZone(
+        regularDeploymentResolution,
+      ),
+      "America/Sao_Paulo",
+      "JWT e /auth/me podem omitir o IANA sem bloquear o próprio tenant",
+    );
+
     masterCompanyScope.setStoredMasterCompanyScope({
       id: "company-invalid",
       name: "Empresa sem fuso válido",
       timezone: "Mars/Olympus",
     });
-    const fallback =
+    const deploymentResolution =
       masterCompanyScope.getEffectiveCompanyTimeZoneResolution({
         email: "master@example.com",
         id: "master",
         is_master: true,
         name: "Master",
       });
-    assert.equal(fallback.timeZone, "America/Sao_Paulo");
-    assert.equal(fallback.fallback, true);
-    assert.match(fallback.warning, /inválido.*America\/Sao_Paulo/);
+    assert.deepEqual(deploymentResolution, {
+      fallback: false,
+      source: "deployment-default",
+      timeZone: "America/Sao_Paulo",
+    });
+    assert.equal(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(null).fallback,
+      true,
+      "a política não deve certificar uma consulta sem empresa autenticada",
+    );
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test("deployment-default rejeita escopo vazio ou divergente e cede ao IANA do JWT", () => {
+  const originalWindow = globalThis.window;
+  const storage = memoryStorage();
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const regularUser = {
+    company_id: "company-regular-default",
+    email: "regular-default@example.com",
+    id: "user-regular-default",
+    is_master: false,
+    name: "Regular default",
+  };
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    companyCache.writeCompanyCache([
+      {
+        id: "company-foreign-cache",
+        name: "Empresa estrangeira em cache",
+        timezone: "Asia/Tokyo",
+      },
+    ]);
+    masterCompanyScope.setStoredCurrentCompanyScope({
+      id: "company-foreign-cache",
+      name: "Empresa estrangeira salva",
+      timezone: "Europe/Lisbon",
+    });
+
+    assert.equal(
+      masterCompanyScope.getCompanyTimeZoneResolutionForScope(
+        regularUser,
+        "",
+      ).fallback,
+      true,
+      "um escopo vazio não pode transformar o padrão do ambiente em certificação",
+    );
+    assert.equal(
+      masterCompanyScope.getCompanyTimeZoneResolutionForScope(
+        regularUser,
+        "company-foreign-cache",
+      ).fallback,
+      true,
+      "localStorage/cache de outro tenant não pode certificar um escopo divergente",
+    );
+
+    const jwtUser = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      regularUser,
+      accessToken({
+        company_id: regularUser.company_id,
+        company_timezone: "America/Manaus",
+        exp: now / 1000 + 900,
+        role: "operator",
+        sub: regularUser.id,
+      }),
+      now,
+    );
+    assert.ok(jwtUser);
+    assert.deepEqual(
+      masterCompanyScope.getCompanyTimeZoneResolutionForScope(
+        jwtUser,
+        regularUser.company_id,
+      ),
+      {
+        fallback: false,
+        source: "current-user-company",
+        timeZone: "America/Manaus",
+      },
+      "um IANA same-tenant assinado no JWT deve prevalecer sobre o deployment-default",
+    );
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
@@ -1469,10 +1574,14 @@ test("superadmin usa timezone do JWT apenas quando o tenant do claim é o seleci
       id: "company-other",
       name: "Outra empresa",
     });
-    assert.equal(
-      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master).fallback,
-      true,
-      "o fuso do JWT não pode atravessar para outro tenant selecionado",
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
+      {
+        fallback: false,
+        source: "deployment-default",
+        timeZone: "America/Sao_Paulo",
+      },
+      "outro tenant usa a política do ambiente sem herdar o fuso do JWT",
     );
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
@@ -1545,9 +1654,9 @@ test("override do video wall exige empresa ativa e timezone do mesmo escopo", ()
       ),
       {
         companyScopeId: "company-without-timezone",
-        error: "Fuso da empresa do video wall não certificado.",
+        timeZone: "America/Sao_Paulo",
       },
-      "o caminho explícito não pode usar o timezone fallback",
+      "o caminho explícito pode usar a política certificada somente no mesmo escopo",
     );
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
@@ -2618,6 +2727,120 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
   );
 });
 
+test("timezone operacional same-company sobrevive a claim role em migração", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = {
+    company_id: "company-authenticated",
+    email: "regular@example.com",
+    id: "regular-operational-timezone",
+    is_master: false,
+    name: "Regular",
+  };
+
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_timezone: "America/Recife",
+      exp: now / 1000 + 900,
+      role: { legacy: "admin" },
+      user_id: user.id,
+    }),
+    now,
+  );
+
+  assert.equal(reconciled?.company_timezone, "America/Recife");
+  assert.equal(
+    reconciled?.role,
+    undefined,
+    "claim role inválido não pode conceder autorização durante a migração",
+  );
+  assert.equal(reconciled?.is_master, false);
+});
+
+test("company.timezone nested sem id usa o company_id autenticado pelo auth me", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = {
+    company_id: "company-authenticated",
+    email: "regular@example.com",
+    id: "regular-nested-timezone",
+    is_master: false,
+    name: "Regular",
+  };
+
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company: { timezone: "America/Manaus" },
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+
+  assert.equal(reconciled?.company_id, user.company_id);
+  assert.equal(reconciled?.company_timezone, "America/Manaus");
+});
+
+test("timezone IANA autenticado pelo auth me vence metadado divergente do JWT", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = {
+    company_id: "company-authenticated",
+    company_timezone: "America/Fortaleza",
+    email: "regular@example.com",
+    id: "regular-auth-me-timezone",
+    is_master: false,
+    name: "Regular",
+  };
+
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_timezone: "America/Manaus",
+      exp: now / 1000 + 900,
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+
+  assert.equal(reconciled?.company_timezone, "America/Fortaleza");
+});
+
+test("timezone do JWT não atravessa tenant divergente do auth me", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = {
+    company_id: "company-authenticated",
+    email: "regular@example.com",
+    id: "regular-foreign-timezone",
+    is_master: false,
+    name: "Regular",
+  };
+
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: "company-foreign",
+      company_timezone: "Asia/Tokyo",
+      exp: now / 1000 + 900,
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+
+  assert.equal(reconciled?.company_id, user.company_id);
+  assert.equal(reconciled?.company_timezone, undefined);
+  assert.equal(
+    reconciled?.role,
+    undefined,
+    "tenant divergente também não pode complementar autorização",
+  );
+});
+
 test("role do JWT aceito vence metadado legado sem atravessar identidade ou empresa", () => {
   const now = Date.UTC(2026, 7, 4, 12, 0, 0);
   const user = currentUser();
@@ -3512,7 +3735,7 @@ test("atualização automática só executa para catálogo habilitado e visível
   );
 });
 
-test("timezone ausente é hidratado antes da navegação e acompanha a rotação do JWT", () => {
+test("bootstrap comum evita detalhe administrativo e master mantém a hidratação autorizada", () => {
   const superAdminSource = readFileSync(
     resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
     "utf8",
@@ -3538,6 +3761,23 @@ test("timezone ausente é hidratado antes da navegação e acompanha a rotação
     'router.push("/dashboard/live")',
     navigationStart,
   );
+  const userHydrationStart = authSource.indexOf(
+    "async function hydrateUserCompany(user: CurrentUser)",
+  );
+  const userHydrationEnd = authSource.indexOf(
+    "function getDeclaredCompany",
+    userHydrationStart,
+  );
+  const userHydrationSource = authSource.slice(
+    userHydrationStart,
+    userHydrationEnd,
+  );
+  const regularReturn = userHydrationSource.indexOf(
+    "if (!hasMasterAccess(user)) return fallbackCompany",
+  );
+  const administrativeDetail = userHydrationSource.indexOf(
+    "`/companies/${companyId}`",
+  );
 
   assert.ok(ensureStart >= 0 && detailFetch > ensureStart);
   assert.ok(
@@ -3545,10 +3785,22 @@ test("timezone ausente é hidratado antes da navegação e acompanha a rotação
       certificationBeforeNavigation > navigationStart &&
       navigation > certificationBeforeNavigation,
   );
+  assert.ok(
+    userHydrationStart >= 0 &&
+      userHydrationEnd > userHydrationStart &&
+      regularReturn >= 0 &&
+      administrativeDetail > regularReturn,
+    "usuário comum deve retornar antes de qualquer GET /companies/{id}",
+  );
+  assert.doesNotMatch(
+    userHydrationSource.slice(0, regularReturn),
+    /(?:apiFetch\s*(?:<[^>]+>)?\s*\(|\bfetch\s*\()/,
+    "JWT, /auth/me, cache same-tenant ou deployment-default devem bastar no bootstrap comum",
+  );
   assert.match(
     authSource,
-    /async function hydrateUserCompany[\s\S]*?`\/companies\/\$\{companyId\}`/,
-    "/auth/me parcial deve tentar hidratar o detalhe da própria empresa",
+    /reconcileCurrentUserWithAccessToken\([\s\S]*?hydrateCurrentUser\(tokenEnrichedUser/,
+    "o JWT precisa ser reconciliado antes da hidratação local da empresa",
   );
   assert.match(
     authSource,

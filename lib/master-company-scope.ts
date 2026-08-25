@@ -6,7 +6,9 @@ import {
   readCachedCompany,
 } from "@/lib/company-cache";
 import {
+  DEFAULT_COMPANY_TIME_ZONE,
   resolveCompanyTimeZone,
+  type CompanyTimeZoneCandidate,
   type CompanyTimeZoneResolution,
 } from "@/lib/company-time-zone";
 import type { CurrentUser } from "@/lib/types";
@@ -98,10 +100,14 @@ export function getCompanyTimeZoneResolutionForScope(
     ? getStoredMasterCompanyScope()
     : getStoredCurrentCompanyScope();
   const cachedCompany = readCachedCompany(cleanCompanyScopeId);
-
-  return resolveCompanyTimeZone(
-    master
-      ? [
+  const scopeBelongsToAuthenticatedContext = Boolean(
+    cleanCompanyScopeId &&
+      (master
+        ? storedScope?.id === cleanCompanyScopeId
+        : userCompanyId === cleanCompanyScopeId),
+  );
+  const candidates: CompanyTimeZoneCandidate[] = master
+    ? [
           {
             source: "current-user-company",
             value:
@@ -125,10 +131,12 @@ export function getCompanyTimeZoneResolutionForScope(
           },
           {
             source: "company-cache",
-            value: cachedCompany?.timezone,
+            value: scopeBelongsToAuthenticatedContext
+              ? cachedCompany?.timezone
+              : undefined,
           },
-        ]
-      : [
+      ]
+    : [
           {
             source: "current-user-company",
             value:
@@ -146,22 +154,39 @@ export function getCompanyTimeZoneResolutionForScope(
           {
             source: "current-company-scope",
             value:
+              scopeBelongsToAuthenticatedContext &&
               storedScope?.id === cleanCompanyScopeId
                 ? storedScope?.timezone
                 : undefined,
           },
           {
             source: "company-cache",
-            value: cachedCompany?.timezone,
+            value: scopeBelongsToAuthenticatedContext
+              ? cachedCompany?.timezone
+              : undefined,
           },
-        ],
-  );
+      ];
+
+  return resolveCompanyTimeZone([
+    ...candidates,
+    {
+      // Swagger's `/auth/me` does not expose timezone and the only company
+      // detail route is super-admin-only. The deployment policy therefore
+      // completes only the exact authenticated/selected tenant. It never
+      // certifies an empty or divergent company scope.
+      source: "deployment-default",
+      value: scopeBelongsToAuthenticatedContext
+        ? DEFAULT_COMPANY_TIME_ZONE
+        : undefined,
+    },
+  ]);
 }
 
 /**
  * An explicit company in a video-wall URL is accepted only while it remains
  * the effective authenticated scope and has timezone metadata tied to that
- * same company. There is deliberately no timezone fallback in this path.
+ * same company, including the explicit deployment policy. Browser timezone is
+ * deliberately never accepted as a fallback in this path.
  */
 export function certifyCompanyScopeTimeZoneOverride(
   user: CurrentUser | null,

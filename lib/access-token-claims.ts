@@ -1,6 +1,7 @@
 import type { CurrentUser, UserPermission } from "@/lib/types";
 import { isMasterUser, normalizeRole } from "@/lib/user-role";
 import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
+import { resolveCurrentUserCompanyTimeZone } from "@/lib/company-time-zone-record";
 
 const JWT_CLOCK_SKEW_SECONDS = 60;
 
@@ -81,7 +82,7 @@ export function resolveAccessTokenContext(
   const company = resolveCompanyIdentityClaims(claims);
   const user = resolveUserIdentityClaims(claims);
   const roleClaim = resolveStringAliases(claims, ["role"]);
-  const timeZone = resolveCompanyTimeZoneClaims(claims);
+  const timeZone = resolveCompanyTimeZoneClaims(claims, company.value);
   const master = resolveBooleanAliases(claims, ["is_master", "isMaster"]);
   const expiresAt = numericDateClaim(claims, "exp");
   const issuedAt = numericDateClaim(claims, "iat");
@@ -194,9 +195,10 @@ export function enrichCurrentUserFromAccessToken(
   // When the same accepted JWT declares it, that signed session role must not
   // be masked by a stale compatibility field or a previous local snapshot.
   const role = context.role || cleanString(user.role);
+  const declaredUserTimeZone =
+    resolveCurrentUserCompanyTimeZone(user).timeZone ?? "";
   const companyTimeZone =
-    cleanString(user.company_timezone) ||
-    cleanString(user.company?.timezone) ||
+    declaredUserTimeZone ||
     (companyId && context.companyId && companyId !== context.companyId
       ? ""
       : context.timeZone);
@@ -223,8 +225,7 @@ export function enrichCurrentUserFromAccessToken(
     userId === cleanString(user.id) &&
     companyId === resolveUserCompanyId(user) &&
     role === cleanString(user.role) &&
-    companyTimeZone ===
-      (cleanString(user.company_timezone) || cleanString(user.company?.timezone)) &&
+    companyTimeZone === declaredUserTimeZone &&
     isMaster === user.is_master &&
     claimedPermissions === null
   ) {
@@ -249,6 +250,43 @@ export function enrichCurrentUserFromAccessToken(
 }
 
 /**
+ * Preserves same-tenant operational metadata even while unrelated JWT claims
+ * are being migrated. `/auth/me` has authenticated this exact token and binds
+ * the timezone to its explicit company_id; authorization still comes from the
+ * backend and is deliberately not inferred by this compatibility path.
+ */
+function enrichCurrentUserOperationalMetadata(
+  user: CurrentUser,
+  claims: AccessTokenClaims,
+) {
+  const companyId = resolveUserCompanyId(user);
+  const existingTimeZone =
+    resolveCurrentUserCompanyTimeZone(user).timeZone ?? "";
+  if (existingTimeZone) {
+    return cleanString(user.company_timezone) === existingTimeZone
+      ? user
+      : { ...user, company_timezone: existingTimeZone };
+  }
+
+  const claimedCompany = resolveCompanyIdentityClaims(claims);
+  const claimedTimeZone = resolveAuthenticatedCompanyTimeZoneClaims(
+    claims,
+    companyId,
+  );
+  if (
+    !companyId ||
+    claimedCompany.conflict ||
+    (claimedCompany.value &&
+      !sameIdentifier(companyId, claimedCompany.value)) ||
+    !claimedTimeZone
+  ) {
+    return user;
+  }
+
+  return { ...user, company_timezone: claimedTimeZone };
+}
+
+/**
  * Reconciles `/auth/me` with the JWT that authenticated that exact request.
  * Explicit fields from `/auth/me` win; claims only fill omissions. A declared
  * identity/company conflict invalidates the response instead of switching the
@@ -262,8 +300,12 @@ export function reconcileCurrentUserWithAccessToken(
   if (!user || typeof user !== "object" || !cleanString(user.id)) return null;
   const claims = decodeAccessTokenClaims(accessToken);
   if (!claims) return user;
+  const operationallyEnrichedUser = enrichCurrentUserOperationalMetadata(
+    user,
+    claims,
+  );
   const context = resolveAccessTokenContext(accessToken, nowMilliseconds);
-  if (!context) return user;
+  if (!context) return operationallyEnrichedUser;
   const identity = resolveUserIdentityClaims(claims);
   if (
     identity.conflict ||
@@ -272,9 +314,13 @@ export function reconcileCurrentUserWithAccessToken(
     // `/auth/me` authenticated this exact Bearer. A JWT schema migration must
     // not manufacture a logout; incompatible local claims simply cannot add
     // role, tenant or master metadata to the response.
-    return user;
+    return operationallyEnrichedUser;
   }
-  return enrichCurrentUserFromAccessToken(user, accessToken, nowMilliseconds);
+  return enrichCurrentUserFromAccessToken(
+    operationallyEnrichedUser,
+    accessToken,
+    nowMilliseconds,
+  );
 }
 
 export function decodeAccessTokenClaims(
@@ -728,9 +774,20 @@ function permissionClaimGrantSignature(permission: UserPermission) {
  * `timezone`/`tz` claims are migration fallbacks only, so a stale generic
  * alias cannot erase a valid `company_timezone` emitted by the backend.
  */
-function resolveCompanyTimeZoneClaims(claims: AccessTokenClaims) {
+function resolveCompanyTimeZoneClaims(
+  claims: AccessTokenClaims,
+  expectedCompanyId = "",
+) {
   const companyIdentity = resolveCompanyIdentityClaims(claims);
-  if (companyIdentity.conflict || !companyIdentity.value) return "";
+  const companyId = expectedCompanyId || companyIdentity.value;
+  if (
+    companyIdentity.conflict ||
+    !companyId ||
+    (companyIdentity.value &&
+      !sameIdentifier(companyIdentity.value, companyId))
+  ) {
+    return "";
+  }
 
   const sources: Record<string, unknown>[] = [
     claims,
@@ -738,8 +795,14 @@ function resolveCompanyTimeZoneClaims(claims: AccessTokenClaims) {
     asRecord(claims.metadata),
   ].filter((source): source is Record<string, unknown> => Boolean(source));
 
-  for (const key of ["company", "tenant"] as const) {
-    const nested = asRecord(claims[key]);
+  const user = asRecord(claims.user);
+  for (const nestedValue of [
+    claims.company,
+    claims.tenant,
+    user?.company,
+    user?.tenant,
+  ]) {
+    const nested = asRecord(nestedValue);
     if (!nested) continue;
     const nestedIdentity = resolveStringAliases(nested, [
       "id",
@@ -750,7 +813,8 @@ function resolveCompanyTimeZoneClaims(claims: AccessTokenClaims) {
     ]);
     if (
       nestedIdentity.conflict ||
-      nestedIdentity.value !== companyIdentity.value
+      (nestedIdentity.value &&
+        !sameIdentifier(nestedIdentity.value, companyId))
     ) {
       continue;
     }
@@ -783,6 +847,25 @@ function resolveCompanyTimeZoneClaims(claims: AccessTokenClaims) {
     if (declared) return values.size === 1 ? [...values][0] : "";
   }
   return "";
+}
+
+function resolveAuthenticatedCompanyTimeZoneClaims(
+  claims: AccessTokenClaims,
+  expectedCompanyId: string,
+) {
+  const claimedCompany = resolveCompanyIdentityClaims(claims);
+  if (
+    claimedCompany.conflict ||
+    (claimedCompany.value &&
+      expectedCompanyId &&
+      !sameIdentifier(claimedCompany.value, expectedCompanyId))
+  ) {
+    return "";
+  }
+  return resolveCompanyTimeZoneClaims(
+    claims,
+    expectedCompanyId || claimedCompany.value,
+  );
 }
 
 function resolveCompanyTimeZoneClaimGroup(
