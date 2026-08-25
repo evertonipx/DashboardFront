@@ -6,6 +6,7 @@ export type OperationalPermissionDefinition = {
   label: string;
   description: string;
   aliases?: readonly string[];
+  grantAliases?: readonly string[];
   terms: readonly string[];
 };
 
@@ -23,15 +24,16 @@ export const OPERATIONAL_PERMISSIONS = [
       "dashboard_widgets_edit",
       "counting_manage_widgets",
       "counting_widgets_manage",
-      "counting_create_scenario",
-      "counting_edit_scenario",
-      "counting_delete_scenario",
-      "counting_create_camera",
-      "counting_edit_camera",
-      "counting_delete_camera",
-      "occupancy_create_scenario",
-      "occupancy_edit_scenario",
-      "occupancy_delete_scenario",
+    ],
+    grantAliases: [
+      "widget_manage",
+      "widgets_manage",
+      "dashboard_manage",
+      "dashboard_layout_manage",
+      "dashboard_view_manage",
+      "dashboard_widgets_edit",
+      "counting_manage_widgets",
+      "counting_widgets_manage",
     ],
     terms: ["dashboard", "widget", "visual", "view", "layout"],
   },
@@ -40,6 +42,19 @@ export const OPERATIONAL_PERMISSIONS = [
     label: "Visões",
     description: "Acessar e configurar URLs de visões para exibição externa.",
     aliases: [
+      "view_manage",
+      "views_create",
+      "views_edit",
+      "dashboard_views_manage",
+      "dashboard_view_manage",
+      "dashboard_views_edit",
+      "display_views_manage",
+      "counting_manage_views",
+      "counting_views_manage",
+      "counting_create_view",
+      "counting_edit_view",
+    ],
+    grantAliases: [
       "view_manage",
       "views_create",
       "views_edit",
@@ -67,6 +82,22 @@ export const OPERATIONAL_PERMISSIONS = [
       "people_occupancy_manage",
       "counting_manage_occupancy",
       "counting_occupancy_manage",
+      "occupancy_create_scenario",
+      "occupancy_edit_scenario",
+      "occupancy_delete_scenario",
+    ],
+    grantAliases: [
+      "occupancy_create",
+      "occupancy_edit",
+      "occupancy_area_manage",
+      "occupancy_areas_manage",
+      "area_occupancy_manage",
+      "people_occupancy_manage",
+      "counting_manage_occupancy",
+      "counting_occupancy_manage",
+      "occupancy_create_scenario",
+      "occupancy_edit_scenario",
+      "occupancy_delete_scenario",
     ],
     terms: ["occupancy", "ocupacao", "ocupação", "area occupancy", "area"],
   },
@@ -87,15 +118,20 @@ export const OPERATIONAL_PERMISSIONS = [
       "counting_locations_manage",
       "counting_create_location",
       "counting_edit_location",
-      "counting_create_scenario",
-      "counting_edit_scenario",
-      "counting_delete_scenario",
-      "occupancy_create_scenario",
-      "occupancy_edit_scenario",
-      "occupancy_delete_scenario",
-      "counting_create_camera",
-      "counting_edit_camera",
-      "counting_delete_camera",
+    ],
+    grantAliases: [
+      "location_manage",
+      "locations_create",
+      "locations_edit",
+      "location_create",
+      "location_edit",
+      "sub_locations_manage",
+      "sub_location_manage",
+      "places_manage",
+      "counting_manage_locations",
+      "counting_locations_manage",
+      "counting_create_location",
+      "counting_edit_location",
     ],
     terms: ["location", "locations", "sub location", "local", "locais", "place"],
   },
@@ -103,14 +139,54 @@ export const OPERATIONAL_PERMISSIONS = [
     slug: "scenarios_manage",
     label: "Cenários",
     description: "Criar e editar regras usadas nos relatórios.",
-    aliases: ["scenarios_create", "scenarios_edit"],
+    aliases: [
+      "scenarios_create",
+      "scenarios_edit",
+      "scenarios_delete",
+      "counting_manage_scenarios",
+      "counting_scenarios_manage",
+      "counting_create_scenario",
+      "counting_edit_scenario",
+      "counting_delete_scenario",
+    ],
+    grantAliases: [
+      "scenarios_create",
+      "scenarios_edit",
+      "scenarios_delete",
+      "counting_manage_scenarios",
+      "counting_scenarios_manage",
+      "counting_create_scenario",
+      "counting_edit_scenario",
+      "counting_delete_scenario",
+    ],
     terms: ["scenario", "scenarios", "cenario", "cenarios"],
   },
   {
     slug: "cameras_manage",
     label: "Câmeras",
     description: "Criar e editar câmeras e linhas de contagem.",
-    aliases: ["cameras_create", "cameras_edit", "line_counts_manage"],
+    aliases: [
+      "cameras_create",
+      "cameras_edit",
+      "cameras_delete",
+      "line_counts_manage",
+      "counting_manage_cameras",
+      "counting_cameras_manage",
+      "counting_create_camera",
+      "counting_edit_camera",
+      "counting_delete_camera",
+    ],
+    grantAliases: [
+      "cameras_create",
+      "cameras_edit",
+      "cameras_delete",
+      "line_counts_manage",
+      "counting_manage_cameras",
+      "counting_cameras_manage",
+      "counting_create_camera",
+      "counting_edit_camera",
+      "counting_delete_camera",
+    ],
     terms: ["camera", "cameras", "line count", "line counts", "linha"],
   },
   {
@@ -118,6 +194,19 @@ export const OPERATIONAL_PERMISSIONS = [
     label: "Workers",
     description: "Criar workers, rotacionar chaves e acompanhar heartbeats.",
     aliases: [
+      "worker_manage",
+      "workers_create",
+      "workers_edit",
+      "workers_rotate_key",
+      "worker_create",
+      "worker_edit",
+      "worker_rotate_key",
+      "counting_manage_workers",
+      "counting_workers_manage",
+      "counting_create_worker",
+      "counting_edit_worker",
+    ],
+    grantAliases: [
       "worker_manage",
       "workers_create",
       "workers_edit",
@@ -154,41 +243,86 @@ export function createOperationalPermissionState(
 }
 
 export function canManageWidgets(user: CurrentUser | null) {
-  if (isPrivilegedUser(user)) return true;
-  return permissionsAllowWidgetManagement(user?.permissions);
+  if (isMasterUser(user)) return true;
+  if (!isOperationalAdmin(user)) return false;
+  return (
+    permissionsAllowWidgetManagement(user?.permissions) ||
+    userHasModuleManagementPermission(user, "counting") ||
+    userHasModuleManagementPermission(user, "occupancy")
+  );
 }
 
 export function canManageLocations(user: CurrentUser | null) {
-  if (isPrivilegedUser(user)) return true;
-  return hasAnyOperationalPermission(user);
+  return (
+    canManage(user, "locations_manage") ||
+    userHasModuleManagementPermission(user, "counting")
+  );
 }
 
 export function canManageOccupancy(user: CurrentUser | null) {
-  return canManage(user, "occupancy_manage");
+  return (
+    canManage(user, "occupancy_manage") ||
+    userHasModuleManagementPermission(user, "occupancy")
+  );
 }
 
 export function canManageScenarios(user: CurrentUser | null) {
-  return canManage(user, "scenarios_manage");
+  return (
+    canManage(user, "scenarios_manage") ||
+    userHasModuleManagementPermission(user, "counting")
+  );
+}
+
+/**
+ * Access to the shared scenario catalogue route. Keep the two product
+ * capabilities independent after the route is open: callers must still use
+ * `canManageScenarios` for Counting and `canManageOccupancy` for Occupancy.
+ */
+export function canManageScenarioCatalogs(user: CurrentUser | null) {
+  return canManageScenarios(user) || canManageOccupancy(user);
 }
 
 export function canManageCameras(user: CurrentUser | null) {
-  return canManage(user, "cameras_manage");
+  return (
+    canManage(user, "cameras_manage") ||
+    userHasModuleManagementPermission(user, "counting")
+  );
 }
 
 export function canManageWorkers(user: CurrentUser | null) {
-  return canManage(user, "workers_manage");
+  return (
+    canManage(user, "workers_manage") ||
+    userHasModuleManagementPermission(user, "counting")
+  );
 }
 
 export function canManageViews(user: CurrentUser | null) {
-  return canManage(user, "views_manage");
+  return (
+    canManage(user, "views_manage") ||
+    userHasModuleManagementPermission(user, "counting") ||
+    userHasModuleManagementPermission(user, "occupancy")
+  );
 }
 
 export function hasAnyOperationalPermission(user: CurrentUser | null) {
-  if (isPrivilegedUser(user)) return true;
+  if (isMasterUser(user)) return true;
+  if (!isOperationalAdmin(user)) return false;
 
   return OPERATIONAL_PERMISSIONS.some((permission) =>
     userHasPermission(user, permission),
-  );
+  ) ||
+    userHasModuleManagementPermission(user, "counting") ||
+    userHasModuleManagementPermission(user, "occupancy");
+}
+
+/**
+ * The catalog endpoints are read-only for this caller, but the API still
+ * protects them with the signed `admin` role. Keep that transport capability
+ * separate from resource-management grants: an Admin may read the catalogs
+ * needed by analytics without gaining edit access to every resource.
+ */
+export function canReadInfrastructureCatalogs(user: CurrentUser | null) {
+  return isMasterUser(user) || isOperationalAdmin(user);
 }
 
 export function permissionsAllowWidgetManagement(
@@ -213,12 +347,28 @@ export function permissionMatchesSlug(
   return matchesSlug(permission.slug, definition);
 }
 
+export function permissionMatchesExplicitGrant(
+  permission: Pick<UserPermission, "slug">,
+  definition: OperationalPermissionDefinition,
+) {
+  const normalizedSlug = normalizePermissionText(permission.slug);
+  return (
+    normalizedSlug === normalizePermissionText(definition.slug) ||
+    Boolean(
+      definition.grantAliases?.some(
+        (alias) => normalizePermissionText(alias) === normalizedSlug,
+      ),
+    )
+  );
+}
+
 export function getPermissionRecordId(permission: UserPermission) {
   return permission.permission_id ?? permission.id;
 }
 
 function canManage(user: CurrentUser | null, slug: string) {
-  if (isPrivilegedUser(user)) return true;
+  if (isMasterUser(user)) return true;
+  if (!isOperationalAdmin(user)) return false;
 
   const definition = OPERATIONAL_PERMISSIONS.find(
     (permission) => permission.slug === slug,
@@ -242,10 +392,12 @@ function userPermissionMatchesDefinition(
   permission: UserPermission,
   definition: OperationalPermissionDefinition,
 ) {
-  return (
-    permissionMatchesSlug(permission, definition) ||
-    permissionLooksLike(permission, definition)
-  );
+  if (!permissionAllowsManagement(permission)) return false;
+
+  // A write decision must be tied to an explicit, known slug. Descriptive
+  // module/action text is useful for display, but is too broad to authorize a
+  // different resource (for example `counting_create_view` as widgets).
+  return permissionMatchesSlug(permission, definition);
 }
 
 function matchesSlug(
@@ -263,50 +415,43 @@ function matchesSlug(
   );
 }
 
-function permissionLooksLike(
-  permission: UserPermission,
-  definition: OperationalPermissionDefinition,
-) {
-  const moduleText = normalizePermissionText(
-    [
-      permission.module?.slug,
-      permission.module?.name,
-      permission.slug,
-      permission.action,
-    ].join(" "),
+function permissionAllowsManagement(permission: UserPermission) {
+  const capabilities = [
+    permission.can_view,
+    permission.can_create,
+    permission.can_edit,
+    permission.can_delete,
+    permission.can_export,
+  ];
+  const hasExplicitCapabilities = capabilities.some(
+    (capability) => typeof capability === "boolean",
   );
 
-  return (
-    definition.terms.some((term) =>
-      moduleText.includes(normalizePermissionText(term)),
-    ) && isMutatingPermission(permission)
-  );
-}
-
-function isMutatingPermission(permission: UserPermission) {
-  if (
-    permission.can_create ||
-    permission.can_edit ||
-    permission.can_delete ||
-    permission.can_export
-  ) {
+  if (permission.can_create || permission.can_edit || permission.can_delete) {
     return true;
   }
 
-  const text = normalizePermissionText([permission.slug, permission.action].join(" "));
+  const action = normalizePermissionText(permission.action);
+  if (actionIncludesAny(action, MODULE_MUTATING_ACTIONS)) {
+    return true;
+  }
+  if (
+    actionIncludesAny(action, [
+      ...MODULE_READ_ACTIONS,
+      "get",
+      "report",
+      "analytics",
+    ])
+  ) {
+    return false;
+  }
 
-  return [
-    "manage",
-    "admin",
-    "create",
-    "edit",
-    "update",
-    "delete",
-    "write",
-    "configure",
-    "config",
-    "rotate",
-  ].some((term) => text.includes(term));
+  if (hasExplicitCapabilities || action) return false;
+
+  // Compact JWTs may omit `action`. Only an explicitly mutating action token
+  // in the slug is accepted as a safe fallback; `*_view` and opaque slugs fail
+  // closed until the Swagger catalogue enriches them.
+  return permissionSlugHasAction(permission.slug, MODULE_MUTATING_ACTIONS);
 }
 
 function normalizePermissionText(value: string | undefined) {
@@ -318,6 +463,274 @@ function normalizePermissionText(value: string | undefined) {
     .trim();
 }
 
-function isPrivilegedUser(user: CurrentUser | null) {
-  return isMasterUser(user) || normalizeRole(user?.role) === "admin";
+function isOperationalAdmin(user: CurrentUser | null) {
+  return normalizeRole(user?.role) === "admin";
+}
+
+export type OperationalModuleFamily = "counting" | "occupancy";
+
+const MODULE_FAMILY_TERMS = {
+  counting: ["counting", "contagem", "people counting", "people count"],
+  occupancy: ["occupancy", "ocupacao", "people occupancy"],
+} as const satisfies Record<OperationalModuleFamily, readonly string[]>;
+
+const MODULE_READ_ACTIONS = ["view", "read", "list", "export"] as const;
+const MODULE_MUTATING_ACTIONS = [
+  "manage",
+  "admin",
+  "create",
+  "edit",
+  "update",
+  "delete",
+  "write",
+  "configure",
+  "config",
+  "rotate",
+] as const;
+const MODULE_WIDE_MUTATING_ACTIONS = [
+  "manage",
+  "admin",
+  "configure",
+  "config",
+] as const;
+
+/**
+ * Resolves the product module represented by a permission returned by the API.
+ *
+ * The permission catalogue is the source of truth, so this deliberately does
+ * not enumerate permission slugs. The embedded module is authoritative when
+ * present; JWTs that contain only permission slugs remain compatible through
+ * the module prefix (`counting_*` / `occupancy_*`). Contradictory declarations
+ * fail closed instead of leaking one module through a grant for another.
+ */
+export function permissionModuleFamily(
+  permission: Pick<UserPermission, "slug" | "module">,
+): OperationalModuleFamily | null {
+  if (permission.module?.active === false) return null;
+
+  const declaredFamily = moduleFamilyFromText(
+    [permission.module?.slug, permission.module?.name].join(" "),
+  );
+  const slugFamily = moduleFamilyFromPermissionSlug(permission.slug);
+
+  if (declaredFamily && slugFamily && declaredFamily !== slugFamily) {
+    return null;
+  }
+
+  return declaredFamily ?? slugFamily;
+}
+
+export function canViewCounting(user: CurrentUser | null) {
+  return userCanViewModule(user, "counting");
+}
+
+export function canViewOccupancy(user: CurrentUser | null) {
+  return userCanViewModule(user, "occupancy");
+}
+
+/**
+ * Module-wide write access used to derive an Admin's management capabilities
+ * from the same Swagger permission records used for dashboard visibility.
+ * Operators never receive mutation authority from a stray write-shaped grant.
+ */
+export function userHasModuleManagementPermission(
+  user: CurrentUser | null,
+  family: OperationalModuleFamily,
+) {
+  if (isMasterUser(user)) return true;
+  if (!isOperationalAdmin(user)) return false;
+
+  return Boolean(
+    user?.permissions?.some(
+      (permission) =>
+        permissionBelongsToUserCompany(user, permission) &&
+        permissionModuleFamily(permission) === family &&
+        companyEnablesPermissionModule(user, permission, family) &&
+        permissionAllowsModuleManagement(permission),
+    ),
+  );
+}
+
+function userCanViewModule(
+  user: CurrentUser | null,
+  family: OperationalModuleFamily,
+) {
+  if (isMasterUser(user)) return true;
+
+  return Boolean(
+    user?.permissions?.some(
+      (permission) =>
+        permissionBelongsToUserCompany(user, permission) &&
+        permissionModuleFamily(permission) === family &&
+        companyEnablesPermissionModule(user, permission, family) &&
+        permissionAllowsModuleVisibility(permission),
+    ),
+  );
+}
+
+function companyEnablesPermissionModule(
+  user: CurrentUser,
+  permission: UserPermission,
+  family: OperationalModuleFamily,
+) {
+  const assignments = user.company_modules;
+  if (assignments === undefined) return true;
+
+  const rawPermissionModuleId =
+    permission.module_id?.trim() || permission.module?.id?.trim();
+  const permissionModuleId = rawPermissionModuleId?.startsWith("jwt-module:")
+    ? ""
+    : rawPermissionModuleId;
+  return assignments.some((assignment) => {
+    if (!assignment.enabled || assignment.module?.active === false) return false;
+    if (
+      assignment.company_id?.trim() &&
+      user.company_id?.trim() &&
+      assignment.company_id.trim() !== user.company_id.trim()
+    ) {
+      return false;
+    }
+
+    const assignmentModuleId =
+      assignment.module_id?.trim() || assignment.module?.id?.trim();
+    if (permissionModuleId && assignmentModuleId) {
+      return permissionModuleId === assignmentModuleId;
+    }
+
+    return moduleFamilyFromText(
+      [assignment.module?.slug, assignment.module?.name].join(" "),
+    ) === family;
+  });
+}
+
+function permissionBelongsToUserCompany(
+  user: CurrentUser,
+  permission: UserPermission,
+) {
+  const userCompanyId = user.company_id?.trim();
+  const permissionCompanyId = permission.company_id?.trim();
+  return (
+    !userCompanyId ||
+    !permissionCompanyId ||
+    userCompanyId === permissionCompanyId
+  );
+}
+
+function permissionAllowsModuleVisibility(permission: UserPermission) {
+  const capabilities = permissionCapabilities(permission);
+  if (capabilities.declared) {
+    return capabilities.read || capabilities.mutate;
+  }
+
+  const declaredAction = normalizePermissionText(permission.action);
+  if (declaredAction) return isReadableOrMutatingAction(declaredAction);
+
+  return permissionSlugHasAction(permission.slug, [
+    ...MODULE_READ_ACTIONS,
+    ...MODULE_MUTATING_ACTIONS,
+  ]);
+}
+
+function permissionAllowsModuleManagement(permission: UserPermission) {
+  const capabilities = permissionCapabilities(permission);
+  if (capabilities.declared) return capabilities.mutate;
+
+  const declaredAction = normalizePermissionText(permission.action);
+  if (declaredAction) {
+    return actionIncludesAny(declaredAction, MODULE_MUTATING_ACTIONS);
+  }
+
+  // With no action/capabilities, only the compact module-wide form is safe.
+  // A resource-shaped slug such as `counting_create_view` must not elevate the
+  // entire Counting module while catalogue metadata is unavailable.
+  return permissionSlugDeclaresModuleWideManagement(permission.slug);
+}
+
+function permissionCapabilities(permission: UserPermission) {
+  const declared = [
+    permission.can_view,
+    permission.can_create,
+    permission.can_edit,
+    permission.can_delete,
+    permission.can_export,
+  ].some((capability) => typeof capability === "boolean");
+
+  return {
+    declared,
+    mutate: Boolean(
+      permission.can_create || permission.can_edit || permission.can_delete,
+    ),
+    read: Boolean(permission.can_view || permission.can_export),
+  };
+}
+
+function isReadableOrMutatingAction(action: string) {
+  return actionIncludesAny(action, [
+    ...MODULE_READ_ACTIONS,
+    ...MODULE_MUTATING_ACTIONS,
+  ]);
+}
+
+function permissionSlugHasAction(
+  slug: string,
+  actions: readonly string[],
+) {
+  const normalizedSlug = normalizePermissionText(slug);
+  return actionIncludesAny(normalizedSlug, actions);
+}
+
+function permissionSlugDeclaresModuleWideManagement(slug: string) {
+  const normalizedSlug = normalizePermissionText(slug);
+  if (!normalizedSlug) return false;
+  const tokens = normalizedSlug.split(" ");
+  const actionIndex = tokens.findIndex((token) =>
+    MODULE_WIDE_MUTATING_ACTIONS.includes(
+      token as (typeof MODULE_WIDE_MUTATING_ACTIONS)[number],
+    ),
+  );
+  if (actionIndex < 1) return false;
+
+  const moduleText = tokens.slice(0, actionIndex).join(" ");
+  const trailingTokens = tokens.slice(actionIndex + 1);
+  return trailingTokens.length === 0 && Boolean(moduleFamilyFromText(moduleText));
+}
+
+function actionIncludesAny(action: string, candidates: readonly string[]) {
+  const tokens = new Set(action.split(" ").filter(Boolean));
+  return candidates.some((candidate) => tokens.has(candidate));
+}
+
+function moduleFamilyFromPermissionSlug(slug: string) {
+  const normalizedSlug = normalizePermissionText(slug);
+  if (!normalizedSlug) return null;
+
+  const tokens = normalizedSlug.split(" ");
+  const actionIndex = tokens.findIndex((token) =>
+    [...MODULE_READ_ACTIONS, ...MODULE_MUTATING_ACTIONS].includes(
+      token as (typeof MODULE_READ_ACTIONS)[number],
+    ),
+  );
+  const moduleText = tokens
+    .slice(0, actionIndex < 0 ? tokens.length : actionIndex)
+    .join(" ");
+
+  return moduleFamilyFromText(moduleText);
+}
+
+function moduleFamilyFromText(value: string) {
+  const text = normalizePermissionText(value);
+  if (!text) return null;
+
+  const matches = (Object.keys(MODULE_FAMILY_TERMS) as OperationalModuleFamily[])
+    .filter((family) =>
+      MODULE_FAMILY_TERMS[family].some((term) =>
+        normalizedTextContainsTerm(text, normalizePermissionText(term)),
+      ),
+    );
+
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function normalizedTextContainsTerm(text: string, term: string) {
+  return ` ${text} `.includes(` ${term} `);
 }

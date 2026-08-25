@@ -4,7 +4,7 @@ import { OccupancyScenarioDashboard } from "@/components/app/occupancy-scenario-
 
 export default function ManagerOccupancyPage() {
   return (
-    <AuthGuard requireManager>
+    <AuthGuard requireManager requireResource="occupancy">
       <AppShell
         mode="manager"
         title="Ocupação Ao Vivo"

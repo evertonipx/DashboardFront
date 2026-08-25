@@ -4,7 +4,7 @@ import { ViewsManager } from "@/components/app/views-manager";
 
 export default function ManagerViewsPage() {
   return (
-    <AuthGuard requireManager>
+    <AuthGuard requireManager requireResource="views">
       <AppShell
         mode="manager"
         title="Visões"

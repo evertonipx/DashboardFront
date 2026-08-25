@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import type { CardChartType, CardZoom } from "@/lib/view-preferences";
+import { cn } from "@/lib/utils";
 
 type WidgetAppearance = {
   chartType: CardChartType;
@@ -49,12 +50,38 @@ export function useWidgetColor(fallback = "#1267C4") {
   return React.useContext(WidgetAppearanceContext).color || fallback;
 }
 
+export function useWidgetColorOverride() {
+  return React.useContext(WidgetAppearanceContext).color;
+}
+
 export function useWidgetChartType() {
   return React.useContext(WidgetAppearanceContext).chartType;
 }
 
 export function useWidgetTitle(fallback: string) {
   return React.useContext(WidgetAppearanceContext).title || fallback;
+}
+
+export function WidgetTitleText({
+  className,
+  fallback,
+}: {
+  className?: string;
+  fallback: string;
+}) {
+  const title = useWidgetTitle(fallback);
+
+  return (
+    <span
+      className={cn(
+        "line-clamp-2 min-w-0 max-w-full break-words [overflow-wrap:anywhere]",
+        className,
+      )}
+      title={title}
+    >
+      {title}
+    </span>
+  );
 }
 
 export function useWidgetZoom() {

@@ -50,7 +50,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [effectiveTheme]);
 
   const setTheme = React.useCallback((nextTheme: Theme) => {
-    window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    } catch {
+      // Theme switching must remain usable when storage is unavailable.
+    }
     setThemeState(nextTheme);
   }, []);
 
@@ -65,7 +69,12 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 function readStoredTheme(): Theme {
   if (typeof window === "undefined") return "system";
 
-  const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  let storedTheme: string | null = null;
+  try {
+    storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  } catch {
+    return "system";
+  }
   if (storedTheme === "light" || storedTheme === "dark" || storedTheme === "system") {
     return storedTheme;
   }

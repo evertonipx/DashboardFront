@@ -13,6 +13,20 @@ export type WorkerScopePartition<T extends WorkerScopeRow> = {
   unscopedRows: T[];
 };
 
+/**
+ * Resolves rows returned by a request that was already explicitly scoped at
+ * the API boundary. Older WorkerResponse payloads omit company_id. They are
+ * safe to display only when the same response contains no evidence that the
+ * backend mixed another company into the requested tenant.
+ */
+export function workersFromExplicitCompanyScope<T extends WorkerScopeRow>(
+  partition: WorkerScopePartition<T>,
+) {
+  return partition.foreignRows.length
+    ? partition.scopedRows
+    : [...partition.scopedRows, ...partition.unscopedRows];
+}
+
 export function resolveWorkerCompanyId(worker: unknown) {
   return resolveWorkerExplicitCompanyId(worker);
 }

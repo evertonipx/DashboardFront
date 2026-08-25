@@ -41,6 +41,7 @@ import {
   upsertWidgetViewPreset,
   WIDGET_VIEW_PRESETS_UPDATED_EVENT,
   type WidgetViewPreset,
+  type WidgetViewPresetNamespace,
   type WidgetViewScope,
 } from "@/lib/widget-view-presets";
 import {
@@ -58,6 +59,7 @@ type WidgetViewPresetsDialogProps = {
   onOpenChange: (open: boolean) => void;
   open: boolean;
   preferences: CardPreference[];
+  presetNamespace?: WidgetViewPresetNamespace;
   scopes?: WidgetViewScope[];
   sourceMenuKeys?: CardMenuKey[];
   userId?: string | null;
@@ -78,6 +80,7 @@ export function WidgetViewPresetsDialog({
   onOpenChange,
   open,
   preferences,
+  presetNamespace = menuKey,
   scopes = [],
   sourceMenuKeys = [],
   userId,
@@ -118,7 +121,14 @@ export function WidgetViewPresetsDialog({
   }, [normalizedScopes, scopeFilter]);
 
   const refreshPresets = React.useCallback(() => {
-    setPresets(loadWidgetViewPresets(menuKey, companyId, userId));
+    setPresets(
+      loadWidgetViewPresets(
+        menuKey,
+        companyId,
+        userId,
+        presetNamespace,
+      ),
+    );
     setSourcePresetGroups(
       normalizedSourceMenuKeys.map((sourceMenuKey) => ({
         label: getCardMenuDefinition(sourceMenuKey).label,
@@ -126,7 +136,7 @@ export function WidgetViewPresetsDialog({
         presets: loadWidgetViewPresets(sourceMenuKey, companyId, userId),
       })),
     );
-  }, [companyId, menuKey, normalizedSourceMenuKeys, userId]);
+  }, [companyId, menuKey, normalizedSourceMenuKeys, presetNamespace, userId]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -175,6 +185,7 @@ export function WidgetViewPresetsDialog({
       companyId,
       menuKey,
       name,
+      presetNamespace,
       snapshot: currentSnapshot(),
       userId,
     });
@@ -190,6 +201,7 @@ export function WidgetViewPresetsDialog({
       id: preset.id,
       menuKey,
       name: preset.name,
+      presetNamespace,
       snapshot: currentSnapshot(),
       userId,
     });
@@ -211,6 +223,7 @@ export function WidgetViewPresetsDialog({
   function applyToCurrent(preset: WidgetViewPreset) {
     applyWidgetViewPreset(preset, {
       companyId,
+      presetNamespace,
       targetScope: currentScope,
       userId,
     });
@@ -231,6 +244,7 @@ export function WidgetViewPresetsDialog({
         "",
         companyId,
         userId,
+        presetNamespace,
       );
       setPresets(next);
       requestUserGridSync();
@@ -243,6 +257,7 @@ export function WidgetViewPresetsDialog({
       preset.id,
       companyId,
       userId,
+      presetNamespace,
     );
     const nextPreset =
       next.find((candidate) => candidate.id === preset.id) ?? preset;
@@ -260,7 +275,13 @@ export function WidgetViewPresetsDialog({
 
   function confirmDelete(presetId: string) {
     setPresets(
-      deleteWidgetViewPreset(menuKey, presetId, companyId, userId),
+      deleteWidgetViewPreset(
+        menuKey,
+        presetId,
+        companyId,
+        userId,
+        presetNamespace,
+      ),
     );
     requestUserGridSync();
     setDeleteId(null);
@@ -301,13 +322,19 @@ export function WidgetViewPresetsDialog({
     if (!targets.length) {
       applyWidgetViewPreset(preset, {
         companyId,
+        presetNamespace,
         targetScope: currentScope,
         userId,
       });
       return;
     }
     targets.forEach((targetScope) => {
-      applyWidgetViewPreset(preset, { companyId, targetScope, userId });
+      applyWidgetViewPreset(preset, {
+        companyId,
+        presetNamespace,
+        targetScope,
+        userId,
+      });
     });
   }
 

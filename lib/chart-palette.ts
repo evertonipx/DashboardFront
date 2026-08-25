@@ -20,10 +20,26 @@ export function pastelBarColor(index: number) {
   return hslToHex(hue, 66, 78);
 }
 
-export function monochromeHeatmapPalette(baseColor: string) {
+export function monochromeHeatmapPalette(
+  baseColor: string,
+  theme: "light" | "dark" = "light",
+) {
   const source = parseHexColor(baseColor) ?? [18, 103, 196];
   const white: RgbColor = [255, 255, 255];
   const black: RgbColor = [0, 0, 0];
+
+  if (theme === "dark") {
+    const canvas: RgbColor = [15, 23, 42];
+    return [
+      mixRgb(source, canvas, 0.78),
+      mixRgb(source, canvas, 0.64),
+      mixRgb(source, canvas, 0.48),
+      mixRgb(source, canvas, 0.32),
+      mixRgb(source, canvas, 0.16),
+      mixRgb(source, white, 0.1),
+      mixRgb(source, white, 0.24),
+    ].map(rgbToHex);
+  }
 
   return [
     mixRgb(source, white, 0.88),

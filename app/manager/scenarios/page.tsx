@@ -4,7 +4,7 @@ import { ScenarioManager } from "@/components/app/scenario-manager";
 
 export default function ManagerScenariosPage() {
   return (
-    <AuthGuard requireManager>
+    <AuthGuard requireManager requireResource="scenarios">
       <AppShell
         mode="manager"
         title="Cenários"

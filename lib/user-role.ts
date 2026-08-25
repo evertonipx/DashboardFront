@@ -3,11 +3,11 @@ import type { CurrentUser } from "@/lib/types";
 export function isMasterUser(user: CurrentUser | null) {
   if (!user) return false;
 
-  if (typeof user.is_master === "boolean") {
-    return user.is_master;
-  }
-
-  return normalizeRole(user.role) === "super-admin";
+  // During JWT migrations `/auth/me` may still expose a stale `false` while
+  // the role already authenticated by the API is `super-admin`. Master is an
+  // additive authority signal: either canonical declaration is sufficient;
+  // ordinary `admin` never is.
+  return user.is_master === true || normalizeRole(user.role) === "super-admin";
 }
 
 export function normalizeRole(role: string | undefined) {

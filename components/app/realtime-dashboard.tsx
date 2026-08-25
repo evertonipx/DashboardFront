@@ -36,11 +36,14 @@ import {
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
+import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
 import {
+  WidgetTitleText,
   useWidgetChartType,
   useWidgetColor,
-  useWidgetTitle,
+  useWidgetColorOverride,
 } from "@/components/app/widget-appearance";
+import { WidgetCardActions } from "@/components/app/widget-card-actions";
 import {
   MonitorModeButton,
   MonitorModeExitHint,
@@ -94,17 +97,29 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { hasVisualAdminAccess } from "@/lib/access";
+import { hasMasterAccess, hasVisualAdminAccess } from "@/lib/access";
 import { apiFetch } from "@/lib/api";
+import { canReadInfrastructureCatalogs } from "@/lib/permissions";
 import {
   aggregateBucketInRange,
   aggregateQueryIso,
   endOfAggregateBucket,
   parseAggregateBucket,
   requireAggregateGranularity,
-  requireAggregateRows,
+  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  clearHourlyAggregateCache,
+  fetchHourlyAggregateRanges,
+  type HourlyAggregateCache,
+} from "@/lib/aggregate-hour-query";
+import {
+  clearMinuteDayAggregateCache,
+  fetchMinuteDayAggregateBootstrap,
+  refreshMinuteDayAggregateCache,
+  type MinuteDayAggregateCache,
+} from "@/lib/aggregate-minute-day-query";
 import {
   reconcileAggregateRows,
   rollupAggregateRowsMany,
@@ -117,13 +132,17 @@ import {
   buildSubLocationCameraOptions,
   readCameraGroups,
   readWorkerLocationAssignments,
-  resolveCameraGroupCompanyScope,
 } from "@/lib/camera-groups";
 import {
+  certifyCompanyScopeTimeZoneOverride,
   filterScopedApiRows,
+  getCurrentUserCompanyId,
+  getEntityCompanyId,
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
+  useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
+import { requireCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
 import {
   requireCameraRows,
   requireInfrastructureRelations,
@@ -137,6 +156,11 @@ import {
   type LiveOperationalSettings,
 } from "@/lib/live-operational-settings";
 import {
+  loadDashboardFocus,
+  resolveDashboardFocus,
+  saveDashboardFocus,
+} from "@/lib/dashboard-focus";
+import {
   deleteRealtimeCustomWidget,
   loadRealtimeCustomWidgets,
   REALTIME_CUSTOM_WIDGETS_UPDATED_EVENT,
@@ -149,6 +173,8 @@ import {
   type RealtimeScenarioCustomWidget,
   type RealtimeScopeCustomWidget,
 } from "@/lib/realtime-custom-widgets";
+import { resolveWidgetBentoPreviewKindFromDataKind } from "@/lib/widget-bento-preview-content";
+import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
 import {
   monochromeHeatmapPalette,
   pastelBarColor,
@@ -168,6 +194,11 @@ import {
   latestHourlyPointHour,
 } from "@/lib/hourly-axis";
 import {
+  buildFixedMinuteDayAxis,
+  minuteDayHourAxisLabel,
+  type MinuteDayAxisSlot,
+} from "@/lib/minute-axis";
+import {
   DAY_OF_MONTH_AXIS_LABELS,
   buildCalendarAxisLabel,
   buildCalendarMarkArea,
@@ -178,19 +209,25 @@ import {
   sundayCategoryIndexesForMonth,
 } from "@/lib/chart-calendar-axis";
 import {
-  COUNTING_MONTH_LABELS,
+  buildAnnualAccumulatedComparisonChartOption,
+  buildAnnualComparisonChartOption,
+  buildCountingIntelligenceReportAssets,
+  COUNTING_INTELLIGENCE_CARD_IDS,
+  formatCountingIntelligencePeriod,
+  type CountingIntelligenceModel,
 } from "@/lib/counting-intelligence";
 import {
-  buildCurrentYearComparisonOption,
-  type CurrentYearMonthPoint,
-} from "@/lib/current-year-chart";
+  buildLiveAnnualComparisonModel,
+  resolveLiveAnnualComparisonRanges,
+  rollupLiveAnnualHistoryRows,
+} from "@/lib/live-annual-comparison";
 import type {
   ReportMetric,
   ReportPayload,
   ReportTable,
 } from "@/lib/report-export";
 import {
-  buildCombinedScenarioPoints,
+  buildScenarioCivilHourMagnitudePoints,
   buildScenarioCumulativeTotals,
   buildScenarioHourlyOccupancy,
   buildTopScenarioPeakDays,
@@ -246,6 +283,20 @@ type RealtimeChartState = {
   rows: AggregateEventRow[];
   granularity: AggregateGranularity;
   error?: string;
+};
+
+type OptionalWorkerMetadata = {
+  rows: Worker[];
+  warning: string;
+};
+
+type OptionalScenarioMetadata = {
+  rows: Scenario[];
+  warning: string;
+};
+
+type WorkerMetadataValidationOptions = {
+  requireExplicitCompanyId: boolean;
 };
 
 type ChartPoint = {
@@ -336,6 +387,10 @@ const OPERATIONAL_PREVIOUS_MONTH_ID = "live_operational_previous_month";
 const OPERATIONAL_LAST_YEAR_MONTH_ID = "live_operational_last_year_month";
 const OPERATIONAL_TREND_DAYS_ID = "live_operational_trend_days";
 const OPERATIONAL_MONTH_HOURS_ID = "live_operational_month_hours";
+const OPERATIONAL_CURRENT_HOUR_MINUTES_ID =
+  "live_operational_current_hour_minutes";
+const LIVE_DAY_MINUTES_ID = "live_chart_minute_day";
+const LIVE_ANNUAL_RECENT_MONTHS_ID = "live_annual_recent_months";
 const OCCUPANCY_HOURS_ID = "live_hourly_occupancy_data";
 const CANONICAL_HOUR_DERIVED_TARGETS: ReadonlyArray<{
   granularity: "hour" | "day" | "week" | "month";
@@ -351,6 +406,7 @@ const CANONICAL_HOUR_DERIVED_TARGETS: ReadonlyArray<{
   { id: OPERATIONAL_TREND_DAYS_ID, granularity: "day" },
   { id: "live_chart_week", granularity: "week" },
   { id: "live_chart_month", granularity: "month" },
+  { id: LIVE_ANNUAL_RECENT_MONTHS_ID, granularity: "month" },
 ];
 const CANONICAL_HOUR_DERIVED_IDS = new Set(
   CANONICAL_HOUR_DERIVED_TARGETS.map((target) => target.id),
@@ -418,19 +474,51 @@ function scenarioWidgetOption(widgetType: RealtimeScenarioWidgetType) {
 
 export function RealtimeDashboard({
   companyId: companyIdOverride,
-  initialScopeId = "",
-  initialScopeMode = "scenario",
+  initialScopeId: initialScopeIdProp,
+  initialScopeMode: initialScopeModeProp,
   manager = false,
   presentationMode = false,
 }: RealtimeDashboardProps) {
+  const initialScopeId = initialScopeIdProp?.trim() ?? "";
+  const initialScopeMode = initialScopeModeProp ?? "scenario";
+  const personalFocusEnabled =
+    !presentationMode &&
+    initialScopeIdProp === undefined &&
+    initialScopeModeProp === undefined;
   const { user } = useAuth();
+  const userId = user?.id;
   const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode({
     initialMode: presentationMode,
     requestFullscreen: !presentationMode,
   });
   const storedCompanyScopeId = useEffectiveCompanyScopeId(user);
-  const companyScopeId = companyIdOverride?.trim() || storedCompanyScopeId;
+  const companyTimeZoneResolution =
+    useEffectiveCompanyTimeZoneResolution(user);
+  const cleanCompanyIdOverride = companyIdOverride?.trim() ?? "";
+  const overrideScopeCertification = cleanCompanyIdOverride
+    ? certifyCompanyScopeTimeZoneOverride(user, cleanCompanyIdOverride)
+    : null;
+  const companyScopeId = cleanCompanyIdOverride || storedCompanyScopeId;
+  const requireExplicitWorkerCompanyId =
+    hasMasterAccess(user) &&
+    Boolean(companyScopeId) &&
+    getCurrentUserCompanyId(user) !== companyScopeId;
+  const companyTimeZone =
+    overrideScopeCertification?.timeZone ?? companyTimeZoneResolution.timeZone;
+  const companyScopeCertificationError =
+    overrideScopeCertification?.error ??
+    (!cleanCompanyIdOverride && companyTimeZoneResolution.fallback
+      ? "Fuso da empresa não certificado. Cadastre um timezone IANA válido antes de consultar dados civis."
+      : "");
+  const customGranularitySelectId = React.useId();
+  const customKindSelectId = React.useId();
+  const customModelSelectId = React.useId();
+  const customScopeModeSelectId = React.useId();
+  const customScopeSelectId = React.useId();
+  const intradayComparisonSelectId = React.useId();
+  const monthComparisonSelectId = React.useId();
   const canEditVisual = hasVisualAdminAccess(user);
+  const infrastructureCatalogsAllowed = canReadInfrastructureCatalogs(user);
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
   const [cameras, setCameras] = React.useState<Camera[]>([]);
   const [locations, setLocations] = React.useState<Location[]>([]);
@@ -445,9 +533,17 @@ export function RealtimeDashboard({
   const [chartData, setChartData] = React.useState<
     Record<string, RealtimeChartState>
   >({});
+  const [annualHistoryState, setAnnualHistoryState] =
+    React.useState<RealtimeChartState | null>(null);
   const [loadingScenarios, setLoadingScenarios] = React.useState(true);
   const [loadingCharts, setLoadingCharts] = React.useState(false);
+  const [loadingAnnualHistory, setLoadingAnnualHistory] =
+    React.useState(false);
   const [metadataError, setMetadataError] = React.useState("");
+  const [scenarioMetadataWarning, setScenarioMetadataWarning] =
+    React.useState("");
+  const [workerMetadataWarning, setWorkerMetadataWarning] =
+    React.useState("");
   const [chartLoadError, setChartLoadError] = React.useState("");
   const [hasLoadedCharts, setHasLoadedCharts] = React.useState(false);
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
@@ -479,9 +575,20 @@ export function RealtimeDashboard({
     });
 
   const requestRef = React.useRef<AbortController | null>(null);
+  const annualHistoryRequestRef = React.useRef<AbortController | null>(null);
   const runningRef = React.useRef(false);
   const hasLoadedChartsRef = React.useRef(false);
+  const annualHistoryRequestSequenceRef = React.useRef(0);
+  const annualHistoryLoadedDayRef = React.useRef("");
+  const annualHistoryAttemptMinuteRef = React.useRef("");
   const metadataRequestSequenceRef = React.useRef(0);
+  const focusRef = React.useRef({ scopeMode, selectedId });
+  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
+    new Map(),
+  );
+  const minuteDayAggregateCacheRef = React.useRef<MinuteDayAggregateCache>(
+    new Map(),
+  );
 
   const chartDefinitions = React.useMemo(
     () => buildRealtimeChartDefinitions(clock),
@@ -574,12 +681,16 @@ export function RealtimeDashboard({
       loadLiveOperationalSettings(companyScopeId, preferenceScope),
     );
   }, [companyScopeId, preferenceScope]);
+  const minuteDayState = chartData[LIVE_DAY_MINUTES_ID];
+  const minuteDayRows = minuteDayState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const hourState = chartData.live_chart_hour;
   const hourRows = hourState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const occupancyHourState = chartData[OCCUPANCY_HOURS_ID];
   const occupancyHourRows =
     occupancyHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
-  const monthRows = chartData.live_chart_month?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const annualRecentMonthState = chartData[LIVE_ANNUAL_RECENT_MONTHS_ID];
+  const annualRecentMonthRows =
+    annualRecentMonthState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const comparisonHourState = chartData[OPERATIONAL_COMPARISON_HOURS_ID];
   const comparisonHourRows =
     comparisonHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
@@ -608,12 +719,16 @@ export function RealtimeDashboard({
 
       const definition = buildOperationalMonthHoursDefinition(clock);
       return {
+        companyScopeId,
+        companyTimeZone,
         from: definition.from,
         rows: operationalMonthHourRows,
         to: definition.to,
       };
     }, [
       clock,
+      companyScopeId,
+      companyTimeZone,
       operationalMonthHourRows,
       operationalMonthHourState?.error,
       operationalMonthHourState?.granularity,
@@ -627,9 +742,12 @@ export function RealtimeDashboard({
       ? lastYearMonthDayState?.granularity ?? "hour"
       : previousMonthDayState?.granularity ?? "hour";
   const liveDataCertificationError =
+    companyScopeCertificationError ||
     metadataError ||
     chartLoadError ||
-    Object.values(chartData).find((state) => state.error)?.error;
+    Object.entries(chartData).find(
+      ([id, state]) => id !== LIVE_DAY_MINUTES_ID && state.error,
+    )?.[1].error;
   const liveComparisonDisabledReason = liveDataCertificationError
     ? `Comparativo não certificado: ${liveDataCertificationError}`
     : !liveComparisonHourlySource
@@ -638,27 +756,74 @@ export function RealtimeDashboard({
         : "Comparativo indisponível sem a fonte horária canônica certificada."
       : undefined;
 
-  const loadScenarios = React.useCallback(async () => {
+  const loadScenarios = React.useCallback(async (
+    { silent = false }: LoadOptions = {},
+  ) => {
     const requestSequence = ++metadataRequestSequenceRef.current;
-    setLoadingScenarios(true);
-    setMetadataError("");
+    if (companyScopeCertificationError) {
+      setScenarios([]);
+      setCameras([]);
+      setLocations([]);
+      setSubLocations([]);
+      setWorkers([]);
+      setSelectedId("");
+      setChartData({});
+      setMetadataError(companyScopeCertificationError);
+      setScenarioMetadataWarning("");
+      setWorkerMetadataWarning("");
+      setLoadingScenarios(false);
+      return;
+    }
+    if (!silent) {
+      setLoadingScenarios(true);
+      setMetadataError("");
+      setScenarioMetadataWarning("");
+      setWorkerMetadataWarning("");
+    }
     try {
-      const [data, cameraRows, locationRows, workerRows] = await Promise.all([
-        apiFetch<unknown>("/scenarios"),
-        apiFetch<unknown>("/cameras"),
-        apiFetch<unknown>("/locations"),
-        fetchRealtimeWorkers(companyScopeId),
-      ]);
-      const scopedScenarios = filterScopedApiRows(
-        requireScenarioRows(data),
-        companyScopeId,
-      );
+      const [scenarioResult, cameraResult, locationResult, workerResult] =
+        await Promise.allSettled([
+          fetchRealtimeScenarios(companyScopeId, {
+            requireExplicitCompanyId: requireExplicitWorkerCompanyId,
+          }),
+          infrastructureCatalogsAllowed
+            ? apiFetch<unknown>("/cameras", { companyScopeId })
+            : Promise.resolve([]),
+          infrastructureCatalogsAllowed
+            ? apiFetch<unknown>("/locations", { companyScopeId })
+            : Promise.resolve([]),
+          infrastructureCatalogsAllowed
+            ? fetchRealtimeWorkers(companyScopeId, {
+                requireExplicitCompanyId: requireExplicitWorkerCompanyId,
+              })
+            : Promise.resolve<OptionalWorkerMetadata>({
+                rows: [],
+                warning: "",
+              }),
+        ]);
+      if (cameraResult.status === "rejected") throw cameraResult.reason;
+      if (locationResult.status === "rejected") throw locationResult.reason;
+      if (
+        !infrastructureCatalogsAllowed &&
+        scenarioResult.status === "rejected"
+      ) {
+        throw scenarioResult.reason;
+      }
+
+      const scenarioMetadata =
+        scenarioResult.status === "fulfilled"
+          ? scenarioResult.value
+          : unavailableScenarioMetadata(infrastructureCatalogsAllowed);
+      const workerMetadata =
+        workerResult.status === "fulfilled"
+          ? workerResult.value
+          : unavailableWorkerMetadata(workerResult.reason);
       const scopedCameras = filterScopedApiRows(
-        requireCameraRows(cameraRows),
+        requireCameraRows(cameraResult.value, companyScopeId),
         companyScopeId,
       );
       const scopedLocations = filterScopedApiRows(
-        requireLocationRows(locationRows),
+        requireLocationRows(locationResult.value, companyScopeId),
         companyScopeId,
       );
       const subLocationRows = await fetchSubLocations(
@@ -671,16 +836,18 @@ export function RealtimeDashboard({
         subLocations: subLocationRows,
       });
       const visible = manager
-        ? scopedScenarios
-        : scopedScenarios.filter((scenario) => scenario.active);
+        ? scenarioMetadata.rows
+        : scenarioMetadata.rows.filter((scenario) => scenario.active);
 
       if (requestSequence !== metadataRequestSequenceRef.current) return;
       setMetadataError("");
+      setScenarioMetadataWarning(scenarioMetadata.warning);
+      setWorkerMetadataWarning(workerMetadata.warning);
       setScenarios(visible);
       setCameras(scopedCameras);
       setLocations(scopedLocations);
       setSubLocations(subLocationRows);
-      setWorkers(workerRows);
+      setWorkers(workerMetadata.rows);
       const modes = buildRealtimeScopeModes({
         cameras: scopedCameras,
         groups: cameraGroups,
@@ -689,33 +856,45 @@ export function RealtimeDashboard({
         scenarios: visible,
         subLocations: subLocationRows,
         workerLocationAssignments,
-        workers: workerRows,
+        workers: workerMetadata.rows,
       });
-      const nextMode = modes.some((mode) => mode.value === scopeMode)
-        ? scopeMode
-        : modes[0]?.value ?? "scenario";
-      const options = buildRealtimeScopeOptions({
-        cameras: scopedCameras,
-        groups: cameraGroups,
-        locations: scopedLocations,
-        manager,
-        mode: nextMode,
-        scenarios: visible,
-        subLocations: subLocationRows,
-        workerLocationAssignments,
-        workers: workerRows,
+      const resolvedFocus = resolveDashboardFocus<RealtimeScopeMode>({
+        availableModes: modes.map((mode) => mode.value),
+        current: focusRef.current,
+        getOptions: (mode) =>
+          buildRealtimeScopeOptions({
+            cameras: scopedCameras,
+            groups: cameraGroups,
+            locations: scopedLocations,
+            manager,
+            mode,
+            scenarios: visible,
+            subLocations: subLocationRows,
+            workerLocationAssignments,
+            workers: workerMetadata.rows,
+          }).map((option) => ({
+            active: option.scenario?.active,
+            id: option.id,
+            mode: option.mode,
+          })),
+        stored: personalFocusEnabled
+          ? loadDashboardFocus<RealtimeScopeMode>(
+              companyScopeId,
+              userId,
+              "live",
+            )
+          : null,
       });
-
-      if (nextMode !== scopeMode) setScopeMode(nextMode);
-      setSelectedId((current) => {
-        if (current && options.some((option) => option.id === current)) {
-          return current;
-        }
-
-        return options[0]?.id ?? "";
-      });
+      const nextFocus = resolvedFocus ?? {
+        scopeMode: initialScopeMode,
+        selectedId: "",
+      };
+      focusRef.current = nextFocus;
+      setScopeMode(nextFocus.scopeMode);
+      setSelectedId(nextFocus.selectedId);
     } catch (error) {
       if (requestSequence !== metadataRequestSequenceRef.current) return;
+      if (silent) return;
       const message =
         error instanceof Error
           ? error.message
@@ -728,25 +907,82 @@ export function RealtimeDashboard({
       setSelectedId("");
       setChartData({});
       setMetadataError(message);
+      setScenarioMetadataWarning("");
+      setWorkerMetadataWarning("");
       toast.error(message);
     } finally {
-      if (requestSequence === metadataRequestSequenceRef.current) {
+      if (!silent && requestSequence === metadataRequestSequenceRef.current) {
         setLoadingScenarios(false);
       }
     }
   }, [
     cameraGroups,
+    companyScopeCertificationError,
     companyScopeId,
+    initialScopeMode,
+    infrastructureCatalogsAllowed,
     manager,
-    scopeMode,
+    personalFocusEnabled,
+    requireExplicitWorkerCompanyId,
+    userId,
     workerLocationAssignments,
   ]);
 
   const loadCharts = React.useCallback(
     async ({ force = false, silent = false }: LoadOptions = {}) => {
-      if (!companyScopeId) {
+      if (companyScopeCertificationError) {
+        requestRef.current?.abort();
+        requestRef.current = null;
+        annualHistoryRequestRef.current?.abort();
+        annualHistoryRequestRef.current = null;
+        runningRef.current = false;
+        hasLoadedChartsRef.current = false;
+        clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+        clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
         setChartData({});
+        setAnnualHistoryState(null);
+        setChartLoadError(companyScopeCertificationError);
+        setHasLoadedCharts(false);
+        setLastUpdated(null);
         setLoadingCharts(false);
+        setLoadingAnnualHistory(false);
+        return;
+      }
+
+      if (!companyScopeId) {
+        hasLoadedChartsRef.current = false;
+        setChartData({});
+        setAnnualHistoryState(null);
+        setChartLoadError("");
+        setHasLoadedCharts(false);
+        setLastUpdated(null);
+        setLoadingCharts(false);
+        return;
+      }
+
+      try {
+        requireCountingRuntimeTimeZone(companyTimeZone);
+      } catch (error) {
+        requestRef.current?.abort();
+        requestRef.current = null;
+        annualHistoryRequestRef.current?.abort();
+        annualHistoryRequestRef.current = null;
+        runningRef.current = false;
+        hasLoadedChartsRef.current = false;
+        clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+        clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Fuso da empresa não disponível.";
+        setChartData({});
+        setAnnualHistoryState(null);
+        setChartLoadError(message);
+        setHasLoadedCharts(false);
+        setLastUpdated(null);
+        setLoadingCharts(false);
+        setLoadingAnnualHistory(false);
+        if (!silent) toast.error(message);
         return;
       }
 
@@ -764,6 +1000,8 @@ export function RealtimeDashboard({
 
       const now = new Date();
       const definitions = buildRealtimeChartDefinitions(now);
+      const minuteDayDefinition = buildMinuteDayDefinition(now);
+      const minuteDayCacheScope = `live-minute-day:${companyScopeId}:${companyTimeZone}`;
       const supportDefinitions = [
         buildCurrentMonthDaysDefinition(now),
         buildOperationalComparisonHoursDefinition(
@@ -774,6 +1012,8 @@ export function RealtimeDashboard({
         buildOperationalBaselineMonthDefinition(now, "last_year"),
         buildOperationalTrendDaysDefinition(now),
         buildOperationalMonthHoursDefinition(now),
+        buildLiveAnnualRecentMonthsDefinition(now),
+        buildOperationalCurrentHourMinutesDefinition(now),
         buildHourlyOccupancyDataDefinition(
           now,
           operationalSettings.occupancyStartHour,
@@ -781,58 +1021,154 @@ export function RealtimeDashboard({
       ];
       const allDefinitions = [...definitions, ...supportDefinitions];
       try {
-        const entries = await Promise.all(
-          allDefinitions.map(async (definition) => {
-            if (CANONICAL_HOUR_DERIVED_IDS.has(definition.id)) {
-              return [
-                definition.id,
-                {
+        const [entries, minuteDayBootstrapState] = await Promise.all([
+          Promise.all(
+            allDefinitions.map(async (definition) => {
+              if (CANONICAL_HOUR_DERIVED_IDS.has(definition.id)) {
+                return [
+                  definition.id,
+                  {
+                    rows: [],
+                    granularity: definition.granularity,
+                  } satisfies RealtimeChartState,
+                ] as const;
+              }
+
+              try {
+                if (definition.id === OPERATIONAL_MONTH_HOURS_ID) {
+                  const state: RealtimeChartState = {
+                    granularity: "hour",
+                    rows: await fetchHourlyAggregateRanges({
+                      cache: hourlyAggregateCacheRef.current,
+                      cacheScope: `live:${companyScopeId}:${companyTimeZone}`,
+                      companyScopeId,
+                      now,
+                      ranges: [definition],
+                      signal: controller.signal,
+                    }),
+                  };
+                  return [definition.id, state] as const;
+                }
+
+                const response = await apiFetch<AggregateEventsResponse>(
+                  aggregatePath(definition),
+                  { companyScopeId, signal: controller.signal },
+                );
+                const responseGranularity = requireAggregateGranularity(
+                  response.granularity,
+                  definition.granularity,
+                );
+                const state: RealtimeChartState = {
+                  rows: requireAggregateRowsInRange(
+                    response.data,
+                    responseGranularity,
+                    definition.from,
+                    definition.to,
+                    DEFAULT_METRIC_TYPE,
+                  ),
+                  granularity: responseGranularity,
+                };
+
+                return [definition.id, state] as const;
+              } catch (error) {
+                if (isAbortError(error)) throw error;
+                const state: RealtimeChartState = {
                   rows: [],
                   granularity: definition.granularity,
-                } satisfies RealtimeChartState,
-              ] as const;
-            }
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : "Não foi possível carregar este gráfico.",
+                };
 
-            try {
-              const response = await apiFetch<AggregateEventsResponse>(
-                aggregatePath(definition),
-                { signal: controller.signal },
-              );
-              const responseGranularity = requireAggregateGranularity(
-                response.granularity,
-                definition.granularity,
-              );
-              const state: RealtimeChartState = {
-                rows: requireAggregateRows(
-                  response.data,
-                  responseGranularity,
-                  DEFAULT_METRIC_TYPE,
-                ),
-                granularity: responseGranularity,
-              };
-
-              return [definition.id, state] as const;
-            } catch (error) {
+                return [definition.id, state] as const;
+              }
+            }),
+          ),
+          fetchMinuteDayAggregateBootstrap({
+            cache: minuteDayAggregateCacheRef.current,
+            cacheScope: minuteDayCacheScope,
+            companyScopeId,
+            from: minuteDayDefinition.from,
+            now,
+            signal: controller.signal,
+            to: minuteDayDefinition.to,
+          })
+            .then(
+              (rows): RealtimeChartState => ({
+                granularity: "minute",
+                rows,
+              }),
+            )
+            .catch((error): RealtimeChartState => {
               if (isAbortError(error)) throw error;
-              const state: RealtimeChartState = {
-                rows: [],
-                granularity: definition.granularity,
+              return {
                 error:
                   error instanceof Error
                     ? error.message
-                    : "Não foi possível carregar este gráfico.",
+                    : "Não foi possível carregar os minutos do dia.",
+                granularity: "minute",
+                rows: [],
               };
+            }),
+        ]);
 
-              return [definition.id, state] as const;
-            }
-          }),
-        );
+        if (
+          controller.signal.aborted ||
+          requestRef.current !== controller
+        ) {
+          return;
+        }
 
         const nextData = hydrateRealtimeOpenBuckets(
           Object.fromEntries(entries),
           allDefinitions,
           now,
         );
+        const rollingMinuteDefinition = definitions.find(
+          (definition) => definition.id === "live_chart_minute",
+        );
+        const rollingMinuteState = nextData.live_chart_minute;
+        let minuteDayRows = minuteDayBootstrapState.rows;
+        let minuteDayError = minuteDayBootstrapState.error;
+        if (
+          !minuteDayError &&
+          rollingMinuteDefinition &&
+          rollingMinuteState &&
+          !rollingMinuteState.error &&
+          rollingMinuteState.granularity === "minute"
+        ) {
+          try {
+            minuteDayRows =
+              (await refreshMinuteDayAggregateCache({
+              cache: minuteDayAggregateCacheRef.current,
+              cacheScope: minuteDayCacheScope,
+              companyScopeId,
+              from: minuteDayDefinition.from,
+              now,
+              signal: controller.signal,
+              sourceFrom: new Date(
+                Math.max(
+                  minuteDayDefinition.from.getTime(),
+                  rollingMinuteDefinition.from.getTime(),
+                ),
+              ),
+              sourceRows: rollingMinuteState.rows,
+              sourceTo: minuteDayDefinition.to,
+              })) ?? minuteDayRows;
+          } catch (error) {
+            if (isAbortError(error)) throw error;
+            minuteDayError =
+              error instanceof Error
+                ? error.message
+                : "Não foi possível reconciliar os minutos do dia.";
+          }
+        }
+        nextData[LIVE_DAY_MINUTES_ID] = {
+          granularity: "minute",
+          ...(minuteDayError ? { error: minuteDayError } : {}),
+          rows: minuteDayRows,
+        };
         const refreshedAt = new Date();
 
         setChartData(nextData);
@@ -842,7 +1178,11 @@ export function RealtimeDashboard({
         setHasLoadedCharts(true);
         hasLoadedChartsRef.current = true;
 
-        if (entries.some(([, state]) => state.error) && !silentLoad) {
+        if (
+          (entries.some(([, state]) => state.error) ||
+            minuteDayBootstrapState.error) &&
+          !silentLoad
+        ) {
           toast.error(
             "Alguns dados não puderam ser reconciliados; os valores afetados não estão certificados.",
           );
@@ -865,21 +1205,147 @@ export function RealtimeDashboard({
       }
     },
     [
+      companyScopeCertificationError,
       companyScopeId,
+      companyTimeZone,
       operationalSettings.intradayComparison,
       operationalSettings.occupancyStartHour,
     ],
   );
 
+  const loadAnnualHistory = React.useCallback(async () => {
+    const requestSequence = ++annualHistoryRequestSequenceRef.current;
+    annualHistoryRequestRef.current?.abort();
+    annualHistoryRequestRef.current = null;
+
+    if (!companyScopeId || companyScopeCertificationError) {
+      setAnnualHistoryState(null);
+      setLoadingAnnualHistory(false);
+      return;
+    }
+
+    try {
+      requireCountingRuntimeTimeZone(companyTimeZone);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Fuso da empresa não disponível.";
+      setAnnualHistoryState({
+        error: message,
+        granularity: "month",
+        rows: [],
+      });
+      setLoadingAnnualHistory(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    annualHistoryRequestRef.current = controller;
+    setLoadingAnnualHistory(true);
+    const now = new Date();
+    annualHistoryAttemptMinuteRef.current = [
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      now.getHours(),
+      now.getMinutes(),
+    ].join("-");
+    const range = resolveLiveAnnualComparisonRanges(now);
+
+    try {
+      const hourlyRows = await fetchHourlyAggregateRanges({
+        cache: hourlyAggregateCacheRef.current,
+        cacheScope: `live:${companyScopeId}:${companyTimeZone}`,
+        companyScopeId,
+        now,
+        ranges: [
+          {
+            from: range.historyFrom,
+            to: range.historyTo,
+          },
+        ],
+        signal: controller.signal,
+      });
+      if (requestSequence !== annualHistoryRequestSequenceRef.current) return;
+
+      setAnnualHistoryState({
+        granularity: "month",
+        rows: rollupLiveAnnualHistoryRows(hourlyRows, now),
+      });
+      annualHistoryLoadedDayRef.current = [
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+      ].join("-");
+    } catch (error) {
+      if (isAbortError(error)) return;
+      if (requestSequence !== annualHistoryRequestSequenceRef.current) return;
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Não foi possível carregar o histórico anual.";
+      setAnnualHistoryState({
+        error: message,
+        granularity: "month",
+        rows: [],
+      });
+      toast.error(message);
+    } finally {
+      if (
+        requestSequence === annualHistoryRequestSequenceRef.current &&
+        annualHistoryRequestRef.current === controller
+      ) {
+        annualHistoryRequestRef.current = null;
+        setLoadingAnnualHistory(false);
+      }
+    }
+  }, [
+    companyScopeCertificationError,
+    companyScopeId,
+    companyTimeZone,
+  ]);
+  const annualHistoryDayKey = [
+    clock.getFullYear(),
+    clock.getMonth(),
+    clock.getDate(),
+  ].join("-");
+  const annualHistoryMinuteKey = [
+    annualHistoryDayKey,
+    clock.getHours(),
+    clock.getMinutes(),
+  ].join("-");
+  const annualHistoryRetryMinuteKey = annualHistoryState?.error
+    ? annualHistoryMinuteKey
+    : "";
+
   React.useEffect(() => {
-    loadScenarios();
+    void loadScenarios();
   }, [loadScenarios]);
+
+  useResourceAutoRefresh(
+    () => loadScenarios({ silent: true }),
+    {
+      enabled:
+        Boolean(companyScopeId) &&
+        !companyScopeCertificationError &&
+        !loadingScenarios,
+      intervalMs: RESOURCE_METADATA_REFRESH_INTERVAL_MS,
+    },
+  );
 
   React.useEffect(() => {
     function syncCameraGroups() {
-      const scopeId = resolveCameraGroupCompanyScope(user);
-      setCameraGroups(readCameraGroups(scopeId));
-      setWorkerLocationAssignments(readWorkerLocationAssignments(scopeId));
+      if (!companyScopeId || companyScopeCertificationError) {
+        setCameraGroups([]);
+        setWorkerLocationAssignments({});
+        return;
+      }
+      setCameraGroups(readCameraGroups(companyScopeId));
+      setWorkerLocationAssignments(
+        readWorkerLocationAssignments(companyScopeId),
+      );
     }
 
     syncCameraGroups();
@@ -890,7 +1356,7 @@ export function RealtimeDashboard({
       window.removeEventListener(CAMERA_GROUPS_UPDATED_EVENT, syncCameraGroups);
       window.removeEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCameraGroups);
     };
-  }, [user]);
+  }, [companyScopeCertificationError, companyScopeId]);
 
   React.useEffect(() => {
     function syncCustomWidgets() {
@@ -919,19 +1385,67 @@ export function RealtimeDashboard({
 
   React.useEffect(() => {
     requestRef.current?.abort();
+    requestRef.current = null;
+    runningRef.current = false;
+    annualHistoryRequestRef.current?.abort();
+    annualHistoryRequestRef.current = null;
+    annualHistoryRequestSequenceRef.current += 1;
+    annualHistoryLoadedDayRef.current = "";
+    annualHistoryAttemptMinuteRef.current = "";
+    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+    clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
     setMetadataError("");
-    setChartLoadError("");
+    setScenarioMetadataWarning("");
+    setWorkerMetadataWarning("");
+    setChartLoadError(companyScopeCertificationError);
+    setAnnualHistoryState(null);
+    setLoadingAnnualHistory(false);
     setScenarios([]);
     setCameras([]);
     setLocations([]);
     setSubLocations([]);
     setWorkers([]);
+    focusRef.current = { scopeMode: initialScopeMode, selectedId: initialScopeId };
     setScopeMode(initialScopeMode);
     setSelectedId(initialScopeId);
     setChartData({});
     setHasLoadedCharts(false);
     hasLoadedChartsRef.current = false;
-  }, [companyScopeId, initialScopeId, initialScopeMode]);
+  }, [
+    companyScopeCertificationError,
+    companyScopeId,
+    companyTimeZone,
+    initialScopeId,
+    initialScopeMode,
+  ]);
+
+  React.useEffect(() => {
+    if (!hasLoadedCharts) return;
+    if (annualHistoryState?.error) {
+      if (
+        annualHistoryAttemptMinuteRef.current ===
+        annualHistoryRetryMinuteKey
+      ) {
+        return;
+      }
+    } else if (
+      annualHistoryLoadedDayRef.current === annualHistoryDayKey
+    ) {
+      return;
+    }
+
+    void loadAnnualHistory();
+
+    return () => {
+      annualHistoryRequestRef.current?.abort();
+    };
+  }, [
+    annualHistoryDayKey,
+    annualHistoryRetryMinuteKey,
+    annualHistoryState?.error,
+    hasLoadedCharts,
+    loadAnnualHistory,
+  ]);
 
   React.useEffect(() => {
     setCustomWidgetForm((current) => {
@@ -956,6 +1470,10 @@ export function RealtimeDashboard({
   }, [customWidgetScopeOptions]);
 
   React.useEffect(() => {
+    focusRef.current = { scopeMode, selectedId };
+  }, [scopeMode, selectedId]);
+
+  React.useEffect(() => {
     if (!availableModes.some((mode) => mode.value === scopeMode)) {
       setScopeMode(availableModes[0]?.value ?? "scenario");
     }
@@ -965,9 +1483,30 @@ export function RealtimeDashboard({
     setSelectedId((current) =>
       current && scopeOptions.some((option) => option.id === current)
         ? current
-        : scopeOptions[0]?.id ?? "",
+        : scopeMode === "scenario"
+          ? scopeOptions.find((option) => option.scenario?.active)?.id ??
+            scopeOptions[0]?.id ??
+            ""
+          : scopeOptions[0]?.id ?? "",
     );
-  }, [scopeOptions]);
+  }, [scopeMode, scopeOptions]);
+
+  React.useEffect(() => {
+    if (!personalFocusEnabled || !selectedScope) return;
+    const entityCompanyId = getEntityCompanyId(
+      selectedScope.scenario ??
+        selectedScope.location ??
+        selectedScope.subLocation ??
+        selectedScope.worker,
+    );
+    if (entityCompanyId && entityCompanyId !== companyScopeId) return;
+    saveDashboardFocus(
+      { scopeMode: selectedScope.mode, selectedId: selectedScope.id },
+      companyScopeId,
+      userId,
+      "live",
+    );
+  }, [companyScopeId, personalFocusEnabled, selectedScope, userId]);
 
   React.useEffect(() => {
     loadCharts({ force: true });
@@ -1251,24 +1790,17 @@ export function RealtimeDashboard({
   ]);
   const operationalHeatmapPoints = React.useMemo(
     () =>
-      buildCombinedScenarioPoints({
+      buildScenarioCivilHourMagnitudePoints({
+        companyTimeZone,
         from: startOfMonth(clock),
-        granularity: "hour",
         rows: operationalMonthHourRows,
         scenarios: heatmapScenarios,
         sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
         to: endOfAggregateBucket(startOfHour(clock), "hour"),
-      }).map((point) => {
-        const bucket = new Date(point.bucket);
-        return {
-          bucket: point.bucket,
-          day: bucket.getDate(),
-          hour: bucket.getHours(),
-          total: point.total,
-        };
       }),
     [
       clock,
+      companyTimeZone,
       heatmapScenarios,
       operationalMonthHourRows,
       operationalMonthHourState?.granularity,
@@ -1365,13 +1897,41 @@ export function RealtimeDashboard({
       ),
     [scenarioTableMonthPoints, scenarioTableTodayPoints],
   );
-  const currentYearMonthPoints = React.useMemo(
+  const liveAnnualComparisonModel = React.useMemo(
     () =>
-      selectedScope
-        ? buildCurrentYearMonthPoints(monthRows, selectedScope, clock)
-        : [],
-    [clock, monthRows, selectedScope],
+      selectedScope &&
+      annualHistoryState &&
+      !annualHistoryState.error &&
+      annualRecentMonthState?.granularity === "month" &&
+      !annualRecentMonthState.error &&
+      operationalMonthHourState?.granularity === "hour" &&
+      !operationalMonthHourState.error
+        ? buildLiveAnnualComparisonModel({
+            historicalMonthRows: annualHistoryState.rows,
+            hourlyRows: operationalMonthHourRows,
+            now: clock,
+            recentMonthRows: annualRecentMonthRows,
+            scenarios,
+            scope: selectedScope,
+          })
+        : null,
+    [
+      annualHistoryState,
+      annualRecentMonthRows,
+      annualRecentMonthState,
+      clock,
+      operationalMonthHourRows,
+      operationalMonthHourState,
+      scenarios,
+      selectedScope,
+    ],
   );
+  const liveAnnualComparisonError =
+    annualHistoryState?.error ||
+    annualRecentMonthState?.error ||
+    operationalMonthHourState?.error;
+  const liveAnnualComparisonLoading =
+    initialLoading || (!annualHistoryState && !liveAnnualComparisonError);
   const peakDayPoints = React.useMemo(
     () =>
       buildTopScenarioPeakDays({
@@ -1391,6 +1951,7 @@ export function RealtimeDashboard({
   const hourlyOccupancyPoints = React.useMemo(
     () =>
       buildScenarioHourlyOccupancy({
+        companyTimeZone,
         day: clock,
         entryScenarios: occupancyEntryScenarios,
         exitScenarios: occupancyExitScenarios,
@@ -1401,6 +1962,7 @@ export function RealtimeDashboard({
       }),
     [
       clock,
+      companyTimeZone,
       occupancyEntryScenarios,
       occupancyExitScenarios,
       occupancyHourRows,
@@ -1894,7 +2456,13 @@ export function RealtimeDashboard({
         />
       ),
     },
-  ].map((card) => ({ ...card, titleEditable: true as const }));
+  ].map((card) => ({
+    ...card,
+    condensed: true,
+    defaultHeight: "short" as const,
+    defaultHeightLevel: 1 as const,
+    titleEditable: true as const,
+  }));
 
   const operationalComparisonDefinition =
     buildOperationalComparisonHoursDefinition(
@@ -1904,12 +2472,37 @@ export function RealtimeDashboard({
   const hourlyDefinition = chartDefinitions.find(
     (definition) => definition.id === "live_chart_hour",
   );
+  const minuteDayDefinition = buildMinuteDayDefinition(clock);
   const operationalCards = [
+    {
+      id: LIVE_DAY_MINUTES_ID,
+      label: "Minuto a minuto · Hoje",
+      previewChartType: "line" as const,
+      defaultHeight: "tall" as const,
+      defaultSize: "full" as const,
+      className: "sm:col-span-2 xl:col-span-4",
+      titleEditable: true as const,
+      zoomEnabled: true as const,
+      node: selectedScope ? (
+        <MinuteDayChartCard
+          clock={clock}
+          companyTimeZone={companyTimeZone}
+          definition={minuteDayDefinition}
+          loading={initialLoading}
+          rows={minuteDayRows}
+          scope={selectedScope}
+          state={minuteDayState}
+        />
+      ) : (
+        <EmptyRealtimeCard title="Minuto a minuto · Hoje" />
+      ),
+    },
     {
       id: "live_chart_hour",
       chartTypeEnabled: true,
       label: "Hora a Hora",
       defaultHeight: "standard" as const,
+      defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node:
@@ -1939,6 +2532,7 @@ export function RealtimeDashboard({
       chartTypeEnabled: true,
       label: "Tendência 7 x 30 dias",
       defaultHeight: "standard" as const,
+      defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: (
@@ -1956,6 +2550,7 @@ export function RealtimeDashboard({
       chartTypeEnabled: true,
       label: "Ocupação hora a hora",
       defaultHeight: "standard" as const,
+      defaultHeightLevel: 5 as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
       node: (
@@ -2067,8 +2662,6 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      standardHeightClassName: "row-span-4 sm:row-span-2",
-      tallHeightClassName: "row-span-4 sm:row-span-3",
       node: (
         <ScenarioTotalsTableCard
           canConfigure={canEditVisual}
@@ -2091,16 +2684,17 @@ export function RealtimeDashboard({
       id: "live_current_year_monthly",
       chartTypeEnabled: true,
       label: "Comparativo mensal por ano",
-      defaultHeight: "standard" as const,
-      defaultSize: "wide" as const,
-      className: "sm:col-span-2 xl:col-span-2",
+      defaultHeight: "tall" as const,
+      defaultSize: "full" as const,
+      className: "sm:col-span-2 xl:col-span-4",
       node: (
-        <CurrentYearComparisonCard
+        <LiveAnnualComparisonCard
           accumulated={false}
-          loading={initialLoading}
-          points={currentYearMonthPoints}
+          error={liveAnnualComparisonError}
+          loading={liveAnnualComparisonLoading}
+          model={liveAnnualComparisonModel}
+          refreshing={loadingAnnualHistory && Boolean(annualHistoryState)}
           scopeName={selectedScope?.name ?? "Visão selecionada"}
-          year={clock.getFullYear()}
         />
       ),
     },
@@ -2108,21 +2702,23 @@ export function RealtimeDashboard({
       id: "live_current_year_accumulated",
       chartTypeEnabled: true,
       label: "Comparativo acumulado por ano",
-      defaultHeight: "standard" as const,
-      defaultSize: "wide" as const,
-      className: "sm:col-span-2 xl:col-span-2",
+      defaultHeight: "tall" as const,
+      defaultSize: "full" as const,
+      className: "sm:col-span-2 xl:col-span-4",
       node: (
-        <CurrentYearComparisonCard
+        <LiveAnnualComparisonCard
           accumulated
-          loading={initialLoading}
-          points={currentYearMonthPoints}
+          error={liveAnnualComparisonError}
+          loading={liveAnnualComparisonLoading}
+          model={liveAnnualComparisonModel}
+          refreshing={loadingAnnualHistory && Boolean(annualHistoryState)}
           scopeName={selectedScope?.name ?? "Visão selecionada"}
-          year={clock.getFullYear()}
         />
       ),
     },
     {
       id: "live_month_hour_heatmap",
+      colorPreview: "gradient" as const,
       label: "Mapa de calor dia x hora",
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
@@ -2156,6 +2752,7 @@ export function RealtimeDashboard({
       id: "live_month_access_ranking",
       label: "Ranking dos acessos do mês",
       defaultHeight: "standard" as const,
+      defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: (
@@ -2180,6 +2777,7 @@ export function RealtimeDashboard({
       id: "live_month_peak_days",
       label: "Top 5 dias de pico",
       defaultHeight: "standard" as const,
+      defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: (
@@ -2205,6 +2803,7 @@ export function RealtimeDashboard({
       chartTypes: ["rose", "treemap"] as const,
       label: "Composição por cenário",
       defaultHeight: "standard" as const,
+      defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: (
@@ -2261,6 +2860,7 @@ export function RealtimeDashboard({
     },
   ].map((card) => ({
     ...card,
+    colorEditable: card.id !== "live_scenario_totals_table",
     titleEditable: true as const,
     zoomEnabled: card.id !== "live_scenario_totals_table",
   }));
@@ -2326,6 +2926,7 @@ export function RealtimeDashboard({
     .filter((card): card is NonNullable<typeof card> => Boolean(card))
     .map((card) => ({
       ...card,
+      defaultHeightLevel: 4 as const,
       titleEditable: true as const,
       zoomEnabled: true as const,
     }));
@@ -2338,6 +2939,7 @@ export function RealtimeDashboard({
         titleEditable: true,
         zoomEnabled: true,
         label: widget.title,
+        defaultHeightLevel: 5 as const,
         defaultSize: "full" as const,
         className: "sm:col-span-2 xl:col-span-4",
         node: (
@@ -2353,6 +2955,7 @@ export function RealtimeDashboard({
             }
             autoRefresh
             companyId={companyScopeId}
+            companyTimeZone={companyTimeZone}
             disabledReason={liveComparisonDisabledReason}
             hourlySource={liveComparisonHourlySource}
             monitorMode={monitorMode}
@@ -2372,29 +2975,31 @@ export function RealtimeDashboard({
           widget.widgetType === "rose"
             ? (["rose", "treemap"] as const)
             : undefined,
+        colorEditable: widget.widgetType !== "totals_table",
+        colorPreview:
+          widget.widgetType === "heatmap" ? ("gradient" as const) : undefined,
         label: widget.title,
+        previewKind: resolveWidgetBentoPreviewKindFromDataKind(
+          widget.widgetType,
+        ),
         titleEditable: true,
         zoomEnabled: widget.widgetType !== "totals_table",
         defaultHeight:
           widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
             ? ("tall" as const)
             : ("standard" as const),
+        ...(widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
+          ? {}
+          : { defaultHeightLevel: 4 as const }),
         defaultSize:
           widget.widgetType === "heatmap" || widget.widgetType === "totals_table"
             ? ("full" as const)
             : ("wide" as const),
-        standardHeightClassName:
-          widget.widgetType === "totals_table"
-            ? "row-span-4 sm:row-span-2"
-            : undefined,
-        tallHeightClassName:
-          widget.widgetType === "totals_table"
-            ? "row-span-4 sm:row-span-3"
-            : undefined,
         node: (
           <CustomScenarioWidgetCard
             canConfigure={canEditVisual}
             clock={clock}
+            companyTimeZone={companyTimeZone}
             currentMonthDayGranularity={
               currentMonthDayState?.granularity ?? "day"
             }
@@ -2451,6 +3056,7 @@ export function RealtimeDashboard({
       titleEditable: true,
       zoomEnabled: true,
       label: widget.title,
+      defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: scope ? (
@@ -2625,6 +3231,17 @@ export function RealtimeDashboard({
   > = [];
   if (selectedScope && hourlyDefinition) {
     liveChartEntries.push([
+      LIVE_DAY_MINUTES_ID,
+      buildMinuteDayReportChart({
+        clock,
+        companyTimeZone,
+        definition: minuteDayDefinition,
+        rows: minuteDayRows,
+        scope: selectedScope,
+        widgetColor: liveColorByCardId.get(LIVE_DAY_MINUTES_ID),
+      }),
+    ]);
+    liveChartEntries.push([
       "live_chart_hour",
       buildOperationalHourlyReportChart({
         averageDescription: averageBaseDescription(
@@ -2690,26 +3307,36 @@ export function RealtimeDashboard({
         liveColorByCardId.get("live_moving_average_trend"),
       ),
     ]);
-    liveChartEntries.push([
-      "live_current_year_monthly",
-      buildCurrentYearComparisonReportChart({
-        accumulated: false,
-        points: currentYearMonthPoints,
-        scopeName: selectedScope.name,
-        widgetColor: liveColorByCardId.get("live_current_year_monthly"),
-        year: clock.getFullYear(),
-      }),
-    ]);
-    liveChartEntries.push([
-      "live_current_year_accumulated",
-      buildCurrentYearComparisonReportChart({
-        accumulated: true,
-        points: currentYearMonthPoints,
-        scopeName: selectedScope.name,
-        widgetColor: liveColorByCardId.get("live_current_year_accumulated"),
-        year: clock.getFullYear(),
-      }),
-    ]);
+    if (liveAnnualComparisonModel) {
+      const annualAssets = buildCountingIntelligenceReportAssets(
+        liveAnnualComparisonModel,
+        {
+          [COUNTING_INTELLIGENCE_CARD_IDS.annualComparison]:
+            liveColorByCardId.get("live_current_year_monthly"),
+          [COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison]:
+            liveColorByCardId.get("live_current_year_accumulated"),
+        },
+      );
+      const monthly = annualAssets.charts.find(
+        (entry) =>
+          entry.cardId === COUNTING_INTELLIGENCE_CARD_IDS.annualComparison,
+      );
+      const accumulated = annualAssets.charts.find(
+        (entry) =>
+          entry.cardId ===
+          COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison,
+      );
+
+      if (monthly) {
+        liveChartEntries.push(["live_current_year_monthly", monthly.value]);
+      }
+      if (accumulated) {
+        liveChartEntries.push([
+          "live_current_year_accumulated",
+          accumulated.value,
+        ]);
+      }
+    }
   }
   liveChartEntries.push([
     "live_hourly_occupancy",
@@ -2895,21 +3522,13 @@ export function RealtimeDashboard({
       }
 
       if (widget.widgetType === "heatmap") {
-        const points = buildCombinedScenarioPoints({
+        const points = buildScenarioCivilHourMagnitudePoints({
+          companyTimeZone,
           from: monthStart,
-          granularity: "hour",
           rows: operationalMonthHourRows,
           scenarios: selectedScenarios,
           sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
           to: endOfAggregateBucket(startOfHour(clock), "hour"),
-        }).map((point) => {
-          const bucket = new Date(point.bucket);
-          return {
-            bucket: point.bucket,
-            day: bucket.getDate(),
-            hour: bucket.getHours(),
-            total: point.total,
-          };
         });
         liveChartEntries.push([
           cardId,
@@ -3035,6 +3654,14 @@ export function RealtimeDashboard({
 
   async function buildConfiguredLiveReportPayload() {
     const chartByCardId = new Map(configuredLiveChartEntries);
+    if (
+      visibleLiveCardIds.includes(LIVE_DAY_MINUTES_ID) &&
+      minuteDayState?.error
+    ) {
+      throw new Error(
+        `O widget minuto a minuto não está certificado: ${minuteDayState.error}`,
+      );
+    }
     const visibleComparisonWidgets = customWidgets.filter(
       (widget) =>
         widget.kind === "scenario_comparison" &&
@@ -3063,13 +3690,15 @@ export function RealtimeDashboard({
             const rows = await fetchScenarioComparisonRows(
               definition,
               liveComparisonHourlySource,
+              companyTimeZone,
+              companyScopeId,
             );
             const reportChart = buildScenarioComparisonReportChart({
               definition,
               rows,
               scenarios,
               settings,
-              title: widget.title,
+              title: resolveLiveTitle(cardId, widget.title),
               widgetColor: liveColorByCardId.get(cardId),
             });
             chartByCardId.set(cardId, {
@@ -3112,17 +3741,34 @@ export function RealtimeDashboard({
     <section
       id="ao-vivo"
       className={cn(
+        "min-w-0 [&_[data-card-description]]:[overflow-wrap:anywhere] [&_[data-card-header]_h3]:[overflow-wrap:anywhere] [&_[data-card-header]_h3_svg]:shrink-0",
         monitorMode
-          ? "fixed inset-0 z-[100] h-screen overflow-y-auto bg-background p-3 text-foreground lg:p-4"
+          ? "fixed inset-0 z-[100] h-[100dvh] overflow-y-auto bg-background p-3 text-foreground lg:p-4"
           : "scroll-mt-6 space-y-4",
       )}
     >
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
       {liveDataCertificationError && !initialLoading ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
-          Dados não certificados: {liveDataCertificationError} Os widgets e as
-          exportações foram bloqueados para não apresentar um total
-          potencialmente incorreto.
+          Consulta bloqueada: {liveDataCertificationError}
+        </div>
+      ) : null}
+      {scenarioMetadataWarning && !initialLoading ? (
+        <div
+          aria-live="polite"
+          className="rounded-md border border-amber-300/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 [overflow-wrap:anywhere] dark:text-amber-200"
+          role="status"
+        >
+          {scenarioMetadataWarning}
+        </div>
+      ) : null}
+      {workerMetadataWarning && !initialLoading ? (
+        <div
+          aria-live="polite"
+          className="rounded-md border border-amber-300/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 [overflow-wrap:anywhere] dark:text-amber-200"
+          role="status"
+        >
+          {workerMetadataWarning}
         </div>
       ) : null}
 
@@ -3132,11 +3778,11 @@ export function RealtimeDashboard({
             <div className="text-xs font-medium uppercase text-muted-foreground">
               Ao vivo
             </div>
-            <div className="truncate text-lg font-semibold">
+            <div className="break-words text-lg font-semibold [overflow-wrap:anywhere]">
               {selectedScope?.name ?? "Visão selecionada"}
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <Badge
               variant="outline"
               className="gap-1 border-primary/30 bg-primary/10 text-primary"
@@ -3157,19 +3803,21 @@ export function RealtimeDashboard({
           </div>
         </div>
       ) : (
-      <div className="rounded-md border border-border bg-card p-4 shadow-soft">
+      <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
         {loadingScenarios ? (
-          <div className="grid gap-3 lg:grid-cols-[1fr_auto_auto]">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-32" />
-            <Skeleton className="h-10 w-32" />
+          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(140px,170px)_minmax(180px,220px)_minmax(0,1fr)]">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full @xl:col-span-2 @4xl:col-span-1 @4xl:w-48 @4xl:justify-self-end" />
           </div>
         ) : scopeOptions.length ? (
           <div className="space-y-3">
-            <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-end 2xl:justify-between">
-            <div className="grid min-w-0 flex-1 gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
-              <div className="space-y-2">
-                <div className="text-sm font-medium">Visão</div>
+            <div
+              aria-label="Controles da visão ao vivo de Contagem"
+              className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-[minmax(140px,170px)_minmax(180px,220px)_minmax(0,1fr)] @4xl:items-center"
+              role="group"
+            >
+              <div className="min-w-0">
                 <Select
                   value={scopeMode}
                   onValueChange={(value) => {
@@ -3177,7 +3825,10 @@ export function RealtimeDashboard({
                     setSelectedId("");
                   }}
                 >
-                  <SelectTrigger className="bg-card">
+                  <SelectTrigger
+                    aria-label="Tipo da visão de Contagem"
+                    className="h-8 w-full min-w-0 bg-card"
+                  >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -3189,10 +3840,12 @@ export function RealtimeDashboard({
                   </SelectContent>
                 </Select>
               </div>
-              <div className="min-w-0 space-y-2">
-                <div className="text-sm font-medium">{scopeModeLabel(scopeMode)}</div>
+              <div className="min-w-0">
                 <Select value={selectedId} onValueChange={setSelectedId}>
-                  <SelectTrigger className="bg-card">
+                  <SelectTrigger
+                    aria-label={`${scopeModeLabel(scopeMode)} em foco`}
+                    className="h-8 w-full min-w-0 bg-card"
+                  >
                     <SelectValue placeholder="Selecione uma visão" />
                   </SelectTrigger>
                   <SelectContent>
@@ -3204,26 +3857,19 @@ export function RealtimeDashboard({
                   </SelectContent>
                 </Select>
               </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge
-                variant="outline"
-                className="gap-1 border-primary/30 bg-primary/10 text-primary"
+              <div
+                aria-label="Ações da visão ao vivo de Contagem"
+                className="flex min-w-0 flex-wrap items-center gap-2 @xl:col-span-2 @xl:justify-end @4xl:col-span-1 @4xl:flex-nowrap @4xl:justify-self-end"
+                role="group"
               >
-                <Zap className="h-3.5 w-3.5" />
-                5 segundos
-              </Badge>
-              {lastUpdated ? (
-                <Badge variant="outline" className="gap-1 bg-card">
-                  <Clock3 className="h-3.5 w-3.5" />
-                  {formatTime(lastUpdated)}
-                </Badge>
-              ) : null}
               <ReportExportActions
+                compact
                 disabled={
                   initialLoading ||
+                  loadingAnnualHistory ||
                   !selectedScope ||
-                  Boolean(liveDataCertificationError)
+                  Boolean(liveDataCertificationError) ||
+                  Boolean(liveAnnualComparisonError)
                 }
                 getPayload={buildConfiguredLiveReportPayload}
                 payload={liveReportPayload}
@@ -3231,6 +3877,7 @@ export function RealtimeDashboard({
               {canEditVisual ? (
                 <>
                   <ReorderModeButton
+                    className="h-8 w-8"
                     enabled={layoutReorderMode}
                     onChange={setLayoutReorderMode}
                   />
@@ -3238,6 +3885,7 @@ export function RealtimeDashboard({
                     type="button"
                     variant="outline"
                     size="icon"
+                    className="h-8 w-8"
                     onClick={() => setLayoutOrganizerOpen(true)}
                     aria-label="Configurar widgets"
                     title="Configurar widgets"
@@ -3249,23 +3897,43 @@ export function RealtimeDashboard({
               <Button
                 type="button"
                 variant={operationalSettingsOpen ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
                 onClick={() =>
                   setOperationalSettingsOpen((current) => !current)
                 }
+                aria-label="Bases de comparação"
+                title="Bases de comparação"
               >
                 <Target className="h-4 w-4" />
-                Bases de comparação
               </Button>
+              {lastUpdated ? (
+                <span
+                  aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
+                    className="inline-flex h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs text-muted-foreground"
+                  title={`Última atualização às ${formatTime(lastUpdated)}`}
+                >
+                  <Clock3 className="h-3.5 w-3.5" />
+                  {formatTime(lastUpdated)}
+                </span>
+              ) : null}
               <MonitorModeButton
+                compact
                 onClick={enterMonitorMode}
                 disabled={!scopeOptions.length}
               />
-            </div>
+              </div>
             </div>
             {operationalSettingsOpen ? (
-              <div className="grid gap-3 rounded-md border bg-muted/15 p-3 md:grid-cols-2 md:items-end">
+              <div
+                aria-label="Bases de comparação da Contagem"
+                className="grid gap-3 rounded-xl border bg-muted/15 p-3 md:grid-cols-2 md:items-end"
+                role="group"
+              >
                 <div className="space-y-1.5">
-                  <Label>Comparação intradiária</Label>
+                  <Label htmlFor={intradayComparisonSelectId}>
+                    Comparação intradiária
+                  </Label>
                   <Select
                     value={operationalSettings.intradayComparison}
                     onValueChange={(value) =>
@@ -3275,7 +3943,9 @@ export function RealtimeDashboard({
                       })
                     }
                   >
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger id={intradayComparisonSelectId}>
+                      <SelectValue />
+                    </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="yesterday">Ontem</SelectItem>
                       <SelectItem value="last_week">
@@ -3285,7 +3955,9 @@ export function RealtimeDashboard({
                   </Select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Base das médias e comparativos</Label>
+                  <Label htmlFor={monthComparisonSelectId}>
+                    Base das médias e comparativos
+                  </Label>
                   <Select
                     value={operationalSettings.monthComparison}
                     onValueChange={(value) =>
@@ -3295,7 +3967,9 @@ export function RealtimeDashboard({
                       })
                     }
                   >
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger id={monthComparisonSelectId}>
+                      <SelectValue />
+                    </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="previous_month">Mês anterior</SelectItem>
                       <SelectItem value="last_year">
@@ -3303,16 +3977,6 @@ export function RealtimeDashboard({
                       </SelectItem>
                     </SelectContent>
                   </Select>
-                </div>
-                <div className="flex justify-end md:col-span-2">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setOperationalSettingsOpen(false)}
-                  >
-                    Concluir
-                  </Button>
                 </div>
               </div>
             ) : null}
@@ -3381,12 +4045,12 @@ export function RealtimeDashboard({
 
           <div className="grid gap-4">
             <div className="space-y-2">
-              <Label>Tipo de widget</Label>
+              <Label htmlFor={customKindSelectId}>Tipo de widget</Label>
               <Select
                 value={customWidgetForm.kind}
                 onValueChange={handleCustomWidgetKindChange}
               >
-                <SelectTrigger>
+                <SelectTrigger id={customKindSelectId}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -3426,12 +4090,14 @@ export function RealtimeDashboard({
               <>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label>Tipo de visão</Label>
+                    <Label htmlFor={customScopeModeSelectId}>
+                      Tipo de visão
+                    </Label>
                     <Select
                       value={customWidgetForm.scopeMode}
                       onValueChange={handleCustomWidgetModeChange}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger id={customScopeModeSelectId}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -3445,13 +4111,15 @@ export function RealtimeDashboard({
                   </div>
 
                   <div className="space-y-2">
-                    <Label>{scopeModeLabel(customWidgetForm.scopeMode)}</Label>
+                    <Label htmlFor={customScopeSelectId}>
+                      {scopeModeLabel(customWidgetForm.scopeMode)}
+                    </Label>
                     <Select
                       value={customWidgetForm.scopeId}
                       onValueChange={handleCustomWidgetScopeChange}
                       disabled={!customWidgetScopeOptions.length}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger id={customScopeSelectId}>
                         <SelectValue placeholder="Selecione" />
                       </SelectTrigger>
                       <SelectContent>
@@ -3466,12 +4134,12 @@ export function RealtimeDashboard({
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Gráfico</Label>
+                  <Label htmlFor={customGranularitySelectId}>Gráfico</Label>
                   <Select
                     value={customWidgetForm.granularity}
                     onValueChange={handleCustomWidgetGranularityChange}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id={customGranularitySelectId}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -3503,12 +4171,12 @@ export function RealtimeDashboard({
             ) : (
               <div className="space-y-4 rounded-md border bg-muted/20 p-3">
                 <div className="space-y-2">
-                  <Label>Modelo</Label>
+                  <Label htmlFor={customModelSelectId}>Modelo</Label>
                   <Select
                     value={customWidgetForm.scenarioWidgetType}
                     onValueChange={handleScenarioWidgetTypeChange}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id={customModelSelectId}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -3591,12 +4259,16 @@ function MetricCard({
   comparison?: string;
   description: string;
   error?: string;
-  icon: React.ComponentType<{ className?: string }>;
+  icon: React.ComponentType<{
+    className?: string;
+    style?: React.CSSProperties;
+  }>;
   label: string;
   loading: boolean;
   tone: "primary" | "sky" | "indigo" | "slate";
   value: number | string;
 }) {
+  const widgetColorOverride = useWidgetColorOverride();
   const iconToneClass = {
     primary: "text-primary",
     sky: "text-sky-700 dark:text-sky-300",
@@ -3605,12 +4277,19 @@ function MetricCard({
   }[tone];
 
   return (
-    <Card className="h-full overflow-hidden">
+    <Card className="@container h-full min-w-0 overflow-hidden">
       <CardContent className="h-full min-h-0 p-4">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium uppercase text-muted-foreground">
-            <Icon className={cn("h-3.5 w-3.5 shrink-0", iconToneClass)} />
-            <ResolvedWidgetTitle fallback={label} />
+        <div className="flex h-full min-h-0 min-w-0 flex-col">
+          <div className="flex min-w-0 items-start gap-1.5 break-words text-xs font-medium uppercase text-muted-foreground [overflow-wrap:anywhere]">
+            <Icon
+              className={cn("h-3.5 w-3.5 shrink-0", iconToneClass)}
+              style={
+                widgetColorOverride
+                  ? { color: widgetColorOverride }
+                  : undefined
+              }
+            />
+            <WidgetTitleText fallback={label} />
           </div>
           {loading ? (
             <Skeleton className="mt-3 h-8 w-24" />
@@ -3619,14 +4298,14 @@ function MetricCard({
               Não certificado
             </div>
           ) : (
-            <div className="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <div className="text-3xl font-semibold leading-none tabular-nums">
+            <div className="mt-1.5 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+              <div className="max-w-full break-all text-[clamp(1.35rem,12cqi,1.875rem)] font-semibold leading-none tabular-nums">
                 {typeof value === "number" ? formatNumber(value) : value}
               </div>
               {comparison ? (
                 <div
                   className={cn(
-                    "text-sm font-semibold tabular-nums",
+                    "max-w-full break-all text-sm font-semibold tabular-nums",
                     metricComparisonClassName(comparison),
                   )}
                 >
@@ -3635,17 +4314,17 @@ function MetricCard({
               ) : null}
             </div>
           )}
-          <div className="mt-1 line-clamp-2 text-xs leading-4 text-muted-foreground">
+          <div
+            className="mt-2 line-clamp-2 break-words pt-1 text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
+            data-live-metric-description
+            title={description}
+          >
             {description}
           </div>
         </div>
       </CardContent>
     </Card>
   );
-}
-
-function ResolvedWidgetTitle({ fallback }: { fallback: string }) {
-  return <>{useWidgetTitle(fallback)}</>;
 }
 
 function metricComparisonClassName(value: string) {
@@ -3657,6 +4336,91 @@ function metricComparisonClassName(value: string) {
     return "text-rose-700 dark:text-rose-300";
   }
   return "text-muted-foreground";
+}
+
+function MinuteDayChartCard({
+  clock,
+  companyTimeZone,
+  definition,
+  loading,
+  rows,
+  scope,
+  state,
+}: {
+  clock: Date;
+  companyTimeZone: string;
+  definition: RealtimeChartDefinition;
+  loading: boolean;
+  rows: AggregateEventRow[];
+  scope: RealtimeScopeOption;
+  state?: RealtimeChartState;
+}) {
+  const widgetColor = useWidgetColor();
+  const points = React.useMemo(
+    () => buildScopePoints(definition, rows, scope),
+    [definition, rows, scope],
+  );
+  const slots = React.useMemo(
+    () =>
+      buildFixedMinuteDayAxis({
+        day: clock,
+        points,
+        referenceTime: clock,
+        timeZone: companyTimeZone,
+      }),
+    [clock, companyTimeZone, points],
+  );
+  const option = React.useMemo(
+    () => buildMinuteDayChartOption(slots, widgetColor),
+    [slots, widgetColor],
+  );
+  const currentSlot = slots.find((slot) => slot.status === "current");
+
+  return (
+    <Card className="@container min-w-0 overflow-hidden">
+      <CardHeader className="pb-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Activity className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={definition.label} />
+            </CardTitle>
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
+              {definition.description}
+            </CardDescription>
+          </div>
+          <div className="col-span-full flex min-w-0 flex-wrap items-center gap-2">
+            <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
+              {scope.name}
+            </Badge>
+            {currentSlot ? (
+              <Badge variant="outline" className="w-fit bg-card">
+                Em andamento · {currentSlot.label}
+              </Badge>
+            ) : null}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <Skeleton className="h-full min-h-0 w-full" />
+        ) : state?.error ? (
+          <EmptyChartState text={state.error} />
+        ) : (
+          <div className="h-full min-h-0 w-full">
+            <EChart
+              ariaDescription="Fluxo certificado minuto a minuto do dia atual; minutos futuros permanecem vazios."
+              ariaLabel="Fluxo minuto a minuto de hoje"
+              className="h-full min-h-0"
+              mergeUpdates
+              option={option}
+              valueLabels="none"
+            />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function RealtimeChartCard({
@@ -3688,33 +4452,33 @@ function RealtimeChartCard({
   const hasData = points.some((point) => point.total !== 0);
 
   return (
-    <Card>
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={definition.label} />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={definition.label} />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {definition.description}
             </CardDescription>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center gap-2">
             <Badge variant="outline" className="w-fit bg-primary/10 text-primary">
               {scope.name}
             </Badge>
-            {action}
           </div>
         </div>
       </CardHeader>
       <CardContent>
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : state?.error ? (
           <EmptyChartState text={state.error} />
         ) : hasData ? (
-          <div className="h-[300px] w-full">
+          <div className="h-full min-h-0 w-full">
             <EChart option={option} />
           </div>
         ) : (
@@ -3781,33 +4545,36 @@ function OperationalHourlyChartCard({
   );
 
   return (
-    <Card>
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Hora a Hora" />
+        <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback="Hora a Hora" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               Base histórica à esquerda e hoje à direita. Linha tracejada: {averageDescription.toLowerCase()} convertida em média horária.
             </CardDescription>
           </div>
-          <Badge variant="outline" className="bg-primary/10 text-primary">
+          <Badge
+            variant="outline"
+            className="max-w-full whitespace-normal break-words bg-primary/10 text-left leading-5 text-primary [overflow-wrap:anywhere] @sm:justify-self-end"
+          >
             {scope.name}
           </Badge>
         </div>
       </CardHeader>
       <CardContent>
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : state?.error ? (
           <EmptyChartState text={state.error} />
         ) : hasData ? (
-          <EChart option={option} className="h-[300px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
-            className="h-[300px]"
+            className="h-full min-h-0"
             text="Sem eventos para a comparação horária."
           />
         )}
@@ -3819,6 +4586,7 @@ function OperationalHourlyChartCard({
 function CustomScenarioWidgetCard({
   canConfigure,
   clock,
+  companyTimeZone,
   currentMonthDayGranularity,
   currentMonthDayRows,
   error,
@@ -3836,6 +4604,7 @@ function CustomScenarioWidgetCard({
 }: {
   canConfigure: boolean;
   clock: Date;
+  companyTimeZone: string;
   currentMonthDayGranularity: AggregateGranularity;
   currentMonthDayRows: AggregateEventRow[];
   error?: string;
@@ -3916,23 +4685,22 @@ function CustomScenarioWidgetCard({
   );
   const heatmapPoints = React.useMemo(
     () =>
-      buildCombinedScenarioPoints({
+      buildScenarioCivilHourMagnitudePoints({
+        companyTimeZone,
         from: monthStart,
-        granularity: "hour",
         rows: monthHourRows,
         scenarios: selectedScenarios,
         sourceGranularity: monthHourGranularity,
         to: endOfAggregateBucket(startOfHour(clock), "hour"),
-      }).map((point) => {
-        const bucket = new Date(point.bucket);
-        return {
-          bucket: point.bucket,
-          day: bucket.getDate(),
-          hour: bucket.getHours(),
-          total: point.total,
-        };
       }),
-    [clock, monthHourGranularity, monthHourRows, monthStart, selectedScenarios],
+    [
+      clock,
+      companyTimeZone,
+      monthHourGranularity,
+      monthHourRows,
+      monthStart,
+      selectedScenarios,
+    ],
   );
   const cumulativePoints = React.useMemo(
     () =>
@@ -4056,7 +4824,7 @@ function CustomWidgetActions({
   title: string;
 }) {
   return (
-    <div className="flex items-center gap-0.5">
+    <WidgetCardActions label={`Ações do widget ${title}`}>
       <Button
         type="button"
         variant="ghost"
@@ -4085,7 +4853,7 @@ function CustomWidgetActions({
       >
         <Trash2 className="h-4 w-4" />
       </Button>
-    </div>
+    </WidgetCardActions>
   );
 }
 
@@ -4138,19 +4906,23 @@ function OperationalHeatmapCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Grid3X3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Grid3X3 className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Intensidade do fluxo nas 24 faixas horárias e nos dias 1 a 31
               do mês atual; fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Badge variant="outline" className="max-w-full truncate">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere]"
+            >
               {selectionLabel}
             </Badge>
             {canConfigure && !monitorMode ? (
@@ -4166,7 +4938,6 @@ function OperationalHeatmapCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -4186,11 +4957,11 @@ function OperationalHeatmapCard({
             text="Selecione ao menos um cenário para montar o mapa de calor."
           />
         ) : loading ? (
-          <Skeleton className="h-[500px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : error ? (
           <EmptyChartState className="h-[260px]" text={error} />
         ) : hasData ? (
-          <EChart option={option} className="h-[500px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[260px]"
@@ -4238,6 +5009,7 @@ function HourlyOccupancyCard({
   startHour: number;
 }) {
   const widgetColor = useWidgetColor();
+  const startHourSelectId = React.useId();
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const option = React.useMemo(
     () => buildHourlyOccupancyOption(points, widgetColor),
@@ -4254,21 +5026,21 @@ function HourlyOccupancyCard({
   }, [monitorMode]);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <DoorOpen className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Ocupação hora a hora" />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <DoorOpen className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback="Ocupação hora a hora" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               Saldo acumulado diariamente a partir de
               {` ${formatOccupancyStartHour(startHour)}`}: entradas menos saídas.
               Antes desse horário, o saldo permanece zerado.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               E {entryScenarios.length} · S {exitScenarios.length}
             </Badge>
@@ -4294,7 +5066,7 @@ function HourlyOccupancyCard({
                 variant={settingsOpen ? "default" : "outline"}
                 size="icon"
                 className="h-8 w-8"
-                onClick={() => setSettingsOpen((current) => !current)}
+                onClick={() => setSettingsOpen(true)}
                 aria-label="Configurar ocupação"
                 title="Configurar ocupação"
               >
@@ -4304,92 +5076,21 @@ function HourlyOccupancyCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 space-y-3">
-        {settingsOpen && !monitorMode ? (
-          <div className="space-y-3 rounded-md border bg-muted/10 p-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <div className="text-xs font-medium uppercase text-muted-foreground">
-                  Associação direcional
-                </div>
-                <div className="text-sm font-semibold">
-                  {selectionMode === "auto"
-                    ? "Detectada pelos nomes e linhas"
-                    : "Seleção manual por cenário"}
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-2 sm:w-[240px]">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={selectionMode === "auto" ? "default" : "outline"}
-                  onClick={() => onSelectionModeChange("auto")}
-                >
-                  Automático
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={selectionMode === "custom" ? "default" : "outline"}
-                  onClick={() => onSelectionModeChange("custom")}
-                >
-                  Manual
-                </Button>
-              </div>
-            </div>
-            <div className="max-w-[220px] space-y-1.5">
-              <Label>Início da contagem</Label>
-              <Select
-                value={String(startHour)}
-                onValueChange={(value) => onStartHourChange(Number(value))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {OCCUPANCY_START_HOURS.map((hour) => (
-                    <SelectItem key={hour} value={String(hour)}>
-                      {formatOccupancyStartHour(hour)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {selectionMode === "custom" ? (
-              <div className="grid gap-3 xl:grid-cols-2">
-                <ScenarioPicker
-                  allowAll={false}
-                  label="Cenários de entrada"
-                  mode="custom"
-                  onModeChange={() => undefined}
-                  onSelectedIdsChange={onEntryScenarioIdsChange}
-                  scenarios={scenarios}
-                  selectedIds={entryScenarioIds}
-                />
-                <ScenarioPicker
-                  allowAll={false}
-                  label="Cenários de saída"
-                  mode="custom"
-                  onModeChange={() => undefined}
-                  onSelectedIdsChange={onExitScenarioIdsChange}
-                  scenarios={scenarios}
-                  selectedIds={exitScenarioIds}
-                />
-              </div>
-            ) : null}
-          </div>
-        ) : null}
+      <CardContent
+        className="min-h-0 min-w-0 flex-1 overflow-hidden"
+        data-echart-layout="natural"
+      >
         {!hasSelection ? (
           <EmptyChartState
             className="h-[220px]"
             text="Configure ao menos um cenário de entrada ou de saída."
           />
         ) : loading ? (
-          <Skeleton className="h-[320px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : error ? (
           <EmptyChartState className="h-[220px]" text={error} />
         ) : hasData ? (
-          <EChart option={option} className="h-[320px]" />
+          <EChart option={option} className="h-full min-h-0 flex-1" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -4397,6 +5098,100 @@ function HourlyOccupancyCard({
           />
         )}
       </CardContent>
+      <Dialog open={settingsOpen && !monitorMode} onOpenChange={setSettingsOpen}>
+        <DialogContent className="@container grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Configurar ocupação hora a hora</DialogTitle>
+            <DialogDescription>
+              Defina a associação direcional e o início da contagem sem reduzir a
+              área útil do gráfico.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+            <div className="space-y-3 rounded-md border bg-muted/10 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium uppercase text-muted-foreground">
+                    Associação direcional
+                  </div>
+                  <div className="break-words text-sm font-semibold [overflow-wrap:anywhere]">
+                    {selectionMode === "auto"
+                      ? "Detectada pelos nomes e linhas"
+                      : "Seleção manual por cenário"}
+                  </div>
+                </div>
+                <div
+                  aria-label="Modo de associação direcional"
+                  className="grid w-full grid-cols-2 gap-2 @sm:w-[240px]"
+                  role="group"
+                >
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={selectionMode === "auto" ? "default" : "outline"}
+                    onClick={() => onSelectionModeChange("auto")}
+                  >
+                    Automático
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={selectionMode === "custom" ? "default" : "outline"}
+                    onClick={() => onSelectionModeChange("custom")}
+                  >
+                    Manual
+                  </Button>
+                </div>
+              </div>
+              <div className="w-full space-y-1.5 @sm:max-w-[220px]">
+                <Label htmlFor={startHourSelectId}>Início da contagem</Label>
+                <Select
+                  value={String(startHour)}
+                  onValueChange={(value) => onStartHourChange(Number(value))}
+                >
+                  <SelectTrigger id={startHourSelectId}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {OCCUPANCY_START_HOURS.map((hour) => (
+                      <SelectItem key={hour} value={String(hour)}>
+                        {formatOccupancyStartHour(hour)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {selectionMode === "custom" ? (
+                <div className="grid min-w-0 gap-3 @xl:grid-cols-2">
+                  <ScenarioPicker
+                    allowAll={false}
+                    label="Cenários de entrada"
+                    mode="custom"
+                    onModeChange={() => undefined}
+                    onSelectedIdsChange={onEntryScenarioIdsChange}
+                    scenarios={scenarios}
+                    selectedIds={entryScenarioIds}
+                  />
+                  <ScenarioPicker
+                    allowAll={false}
+                    label="Cenários de saída"
+                    mode="custom"
+                    onModeChange={() => undefined}
+                    onSelectedIdsChange={onExitScenarioIdsChange}
+                    scenarios={scenarios}
+                    selectedIds={exitScenarioIds}
+                  />
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button type="button" onClick={() => setSettingsOpen(false)}>
+              Concluir
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
@@ -4458,20 +5253,21 @@ function ScenarioCumulativeTotalsCard({
   }, [monitorMode]);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Sigma className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Sigma className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Total combinado e acumulado individual de hoje. A hora atual é
               parcial e atualiza a cada 5 segundos.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -4491,7 +5287,6 @@ function ScenarioCumulativeTotalsCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -4511,9 +5306,9 @@ function ScenarioCumulativeTotalsCard({
             text="Selecione ao menos um cenário para calcular o acumulado."
           />
         ) : loading ? (
-          <Skeleton className="h-[320px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : orderedPoints.some((point) => point.total > 0) ? (
-          <EChart option={option} className="h-[320px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -4566,18 +5361,19 @@ function ScenarioTotalsTableCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Table2 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Table2 className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Totais de hoje e do mês atual, linha por linha, incluindo os
               períodos parciais.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -4600,7 +5396,6 @@ function ScenarioTotalsTableCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -4623,7 +5418,10 @@ function ScenarioTotalsTableCard({
           <Skeleton className="h-[240px] w-full" />
         ) : (
           <div className="max-h-[440px] overflow-auto rounded-md border sm:max-h-[460px]">
-            <Table className="min-w-[640px]">
+            <Table
+              className="min-w-[640px]"
+              scrollRegionLabel="Resultados por cenário; role horizontalmente para ver todas as colunas"
+            >
               <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
                   <TableHead>Cenário</TableHead>
@@ -4635,8 +5433,11 @@ function ScenarioTotalsTableCard({
               <TableBody>
                 {rows.map((row) => (
                   <TableRow key={row.id}>
-                    <TableCell className="max-w-[360px] font-medium">
-                      <span className="block truncate" title={row.name}>
+                    <TableCell className="min-w-[12rem] max-w-[360px] font-medium">
+                      <span
+                        className="block break-words [overflow-wrap:anywhere]"
+                        title={row.name}
+                      >
                         {row.name}
                       </span>
                     </TableCell>
@@ -4663,71 +5464,123 @@ function ScenarioTotalsTableCard({
   );
 }
 
-function CurrentYearComparisonCard({
+function LiveAnnualComparisonCard({
   accumulated,
+  error,
   loading,
-  points,
+  model,
+  refreshing,
   scopeName,
-  year,
 }: {
   accumulated: boolean;
+  error?: string;
   loading: boolean;
-  points: CurrentYearMonthPoint[];
+  model: CountingIntelligenceModel | null;
+  refreshing: boolean;
   scopeName: string;
-  year: number;
 }) {
   const widgetColor = useWidgetColor();
   const option = React.useMemo(
-    () => buildCurrentYearComparisonOption(points, accumulated, year, widgetColor),
-    [accumulated, points, widgetColor, year],
+    () =>
+      model
+        ? accumulated
+          ? buildAnnualAccumulatedComparisonChartOption(model, widgetColor)
+          : buildAnnualComparisonChartOption(model, widgetColor)
+        : {},
+    [accumulated, model, widgetColor],
   );
-  const values = points.flatMap((point) => {
-    const value = accumulated ? point.accumulated : point.value;
-    return value === null ? [] : [value];
-  });
-  const total = accumulated
-    ? values.at(-1) ?? 0
-    : values.reduce((sum, value) => sum + value, 0);
+  const currentYearRow = model?.yearRows.find(
+    (row) => row.year === model.currentYear,
+  );
+  const insightLabel = accumulated ? "Ano atual" : "Mês atual";
+  const insightValue = accumulated
+    ? currentYearRow?.total ?? 0
+    : model?.currentMonthValue ?? 0;
+  const hasData =
+    model?.yearRows.some((row) =>
+      row.months.some((value) => value !== null && value !== 0),
+    ) ?? false;
   const title = accumulated
     ? "Comparativo acumulado por ano"
     : "Comparativo mensal por ano";
+  const periodLabel = model
+    ? formatCountingIntelligencePeriod(model)
+    : "Histórico anual";
 
   return (
-    <Card className="min-w-0 overflow-hidden">
-      <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
+    <Card className="h-full min-w-0 overflow-hidden">
+      <CardHeader className="border-b px-4 py-3">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
               {accumulated ? (
-                <TrendingUp className="h-4 w-4 text-primary" />
+                <TrendingUp className="h-4 w-4 shrink-0 text-primary" />
               ) : (
-                <CalendarDays className="h-4 w-4 text-primary" />
+                <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
               )}
-              <ResolvedWidgetTitle fallback={title} />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {accumulated
-                ? "Soma progressiva dos meses do ano atual."
-                : "Meses do ano atual com média mensal tracejada."} {scopeName}.
+                ? "Soma progressiva mês a mês para comparar a trajetória acumulada de cada ano."
+                : `Anos lado a lado. Linha tracejada: média mensal de ${
+                    (model?.currentYear ?? new Date().getFullYear()) - 1
+                  } como base comparável.`}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline">{year}</Badge>
-            <Badge variant="secondary" className="tabular-nums">
-              Total {formatNumber(total)}
+        </div>
+        <div className="min-w-0 pt-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere]"
+              title={scopeName}
+            >
+              {scopeName}
             </Badge>
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere]"
+              title={periodLabel}
+            >
+              {periodLabel}
+            </Badge>
+            {model ? (
+              <Badge
+                variant="secondary"
+                className="max-w-full gap-1 bg-primary/10 tabular-nums text-primary"
+                title={`${insightLabel}: ${formatNumber(insightValue)}`}
+              >
+                <span className="font-normal opacity-75">{insightLabel}</span>
+                <span className="max-w-full break-all font-semibold">
+                  {formatNumber(insightValue)}
+                </span>
+              </Badge>
+            ) : null}
+            {refreshing ? (
+              <Badge variant="secondary">Atualizando histórico…</Badge>
+            ) : null}
+            {currentYearRow?.ytdYoy !== null &&
+            currentYearRow?.ytdYoy !== undefined ? (
+              <Badge variant="outline" className="tabular-nums">
+                vs {model?.currentYear ? model.currentYear - 1 : "-"}{" "}
+                {formatDelta(currentYearRow.ytdYoy)}
+              </Badge>
+            ) : null}
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0">
+      <CardContent className="min-w-0 px-3 pb-3 pt-2">
         {loading ? (
-          <Skeleton className="h-[320px] w-full" />
-        ) : values.length ? (
-          <EChart option={option} className="h-[320px]" />
+          <Skeleton className="h-full min-h-0 w-full" />
+        ) : error ? (
+          <EmptyChartState className="h-full min-h-0" text={error} />
+        ) : hasData ? (
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
-            className="h-[220px]"
-            text={`Sem valores mensais em ${year} para esta visão.`}
+            className="h-full min-h-0"
+            text="Sem valores mensais no histórico desta visão."
           />
         )}
       </CardContent>
@@ -4758,19 +5611,22 @@ function OperationalMonthComparisonCard({
   );
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <CalendarDays className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Dias x meses" />
+        <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <CalendarDays className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback="Dias x meses" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {monthComparisonLabel(mode)} à esquerda e mês atual à direita. Linha tracejada: {averageBaseDescription(mode).toLowerCase()}. Fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
-          <Badge variant="outline" className="max-w-full truncate">
+          <Badge
+            variant="outline"
+            className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere] @sm:justify-self-end"
+          >
             {scopeName}
           </Badge>
         </div>
@@ -4814,19 +5670,22 @@ function OperationalMonthCumulativeCard({
   );
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <TrendingUp className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Acumulado diário x mês-base" />
+        <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <TrendingUp className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback="Acumulado diário x mês-base" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               Evolução acumulada nos mesmos dias: {monthComparisonLabel(mode).toLowerCase()} à esquerda e mês atual à direita. Fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
-          <Badge variant="outline" className="max-w-full truncate">
+          <Badge
+            variant="outline"
+            className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere] @sm:justify-self-end"
+          >
             {scopeName}
           </Badge>
         </div>
@@ -4877,22 +5736,25 @@ function OperationalTrendCard({
   const hasData = points.some((point) => point.average7 !== null);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <TrendingUp className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback="Tendência 7 x 30 dias" />
+        <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <TrendingUp className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback="Tendência 7 x 30 dias" />
             </CardTitle>
-            <CardDescription className="mt-1">
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               Dia atual parcial incluído e atualizado a cada 5 segundos. Eixo de 1 a 31; fins de semana e feriados nacionais e de São Paulo destacados.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 @sm:justify-end">
             <TrendBadge label="MM7" trend={trend7} />
             <TrendBadge label="MM30" trend={trend30} />
-            <Badge variant="outline" className="max-w-full truncate">
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-words text-left leading-5 [overflow-wrap:anywhere]"
+            >
               {scopeName}
             </Badge>
           </div>
@@ -4900,14 +5762,14 @@ function OperationalTrendCard({
       </CardHeader>
       <CardContent className="min-w-0">
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : error ? (
           <EmptyChartState
             className="h-[200px]"
             text="Não foi possível certificar a base horária da tendência."
           />
         ) : hasData ? (
-          <EChart option={option} className="h-[300px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
@@ -5000,17 +5862,18 @@ function ScenarioRoseCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <ChartPie className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <ChartPie className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               {scenarioCompositionDescription(chartType)}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -5030,7 +5893,6 @@ function ScenarioRoseCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -5050,9 +5912,9 @@ function ScenarioRoseCard({
             text="Selecione ao menos um cenário para montar a composição."
           />
         ) : loading ? (
-          <Skeleton className="h-[320px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : visiblePoints.length ? (
-          <EChart option={option} className="h-[320px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[220px]"
@@ -5112,17 +5974,18 @@ function MonthlyAccessRankingCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Volume e representatividade de cada cenário no mês em andamento.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -5139,7 +6002,6 @@ function MonthlyAccessRankingCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -5159,9 +6021,9 @@ function MonthlyAccessRankingCard({
             text="Selecione ao menos um cenário para montar o ranking."
           />
         ) : loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : rankedPoints.length ? (
-          <EChart option={option} className="h-[300px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
@@ -5217,18 +6079,19 @@ function PeakDaysRankingCard({
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Trophy className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle fallback={title} />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <Trophy className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1">
               Dias com maior volume acumulado nos cenários escolhidos; o dia
               atual é parcial e acompanha a atualização ao vivo.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          {action}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">
               {scenarioSelectionSummary(scenarios, selectionMode, selectedIds)}
             </Badge>
@@ -5250,7 +6113,6 @@ function PeakDaysRankingCard({
                 <Settings2 className="h-4 w-4" />
               </Button>
             ) : null}
-            {action}
           </div>
         </div>
       </CardHeader>
@@ -5270,9 +6132,9 @@ function PeakDaysRankingCard({
             text="Selecione ao menos um cenário para calcular os dias de pico."
           />
         ) : loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : points.length ? (
-          <EChart option={option} className="h-[300px]" />
+          <EChart option={option} className="h-full min-h-0" />
         ) : (
           <EmptyChartState
             className="h-[200px]"
@@ -5294,13 +6156,13 @@ function MissingCustomWidgetCard({
   title: string;
 }) {
   return (
-    <Card>
+    <Card className="@container min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              <ResolvedWidgetTitle
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText
                 fallback={title || "Widget personalizado"}
               />
             </CardTitle>
@@ -5344,19 +6206,21 @@ function TodayComparisonCard({
   );
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2">
-          <BarChart3 className="h-4 w-4 text-primary" />
-          <ResolvedWidgetTitle fallback={title} />
+        <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+          <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
+          <WidgetTitleText fallback={title} />
         </CardTitle>
-        <CardDescription>{description}</CardDescription>
+        <CardDescription className="[overflow-wrap:anywhere]">
+          {description}
+        </CardDescription>
       </CardHeader>
       <CardContent>
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : points.length ? (
-          <div className="h-[300px] w-full">
+          <div className="h-full min-h-0 w-full">
             <EChart option={option} />
           </div>
         ) : (
@@ -5369,12 +6233,14 @@ function TodayComparisonCard({
 
 function EmptyRealtimeCard({ title }: { title: string }) {
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader>
-        <CardTitle>
-          <ResolvedWidgetTitle fallback={title} />
+        <CardTitle className="[overflow-wrap:anywhere]">
+          <WidgetTitleText fallback={title} />
         </CardTitle>
-        <CardDescription>Selecione um cenário para ver o ao vivo.</CardDescription>
+        <CardDescription className="[overflow-wrap:anywhere]">
+          Selecione um cenário para ver o ao vivo.
+        </CardDescription>
       </CardHeader>
       <CardContent>
         <EmptyChartState text="Nenhum cenário selecionado." />
@@ -5393,7 +6259,7 @@ function EmptyChartState({
   return (
     <div
       className={cn(
-        "flex h-[300px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground",
+        "flex h-full min-h-0 items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground",
         className,
       )}
     >
@@ -5451,6 +6317,18 @@ function buildRealtimeChartDefinitions(now: Date): RealtimeChartDefinition[] {
       to: addMonths(currentMonthStart, 1),
     },
   ];
+}
+
+function buildMinuteDayDefinition(now: Date): RealtimeChartDefinition {
+  return {
+    id: LIVE_DAY_MINUTES_ID,
+    label: "Minuto a minuto · Hoje",
+    description:
+      "Fluxo do dia em resolução de minuto, com horários futuros vazios.",
+    granularity: "minute",
+    from: startOfDay(now),
+    to: addMinutes(startOfMinute(now), 1),
+  };
 }
 
 function buildCurrentMonthDaysDefinition(now: Date): RealtimeChartDefinition {
@@ -5531,6 +6409,36 @@ function buildOperationalMonthHoursDefinition(
     granularity: "hour",
     from: historyStart,
     to: endOfAggregateBucket(startOfHour(now), "hour"),
+  };
+}
+
+function buildLiveAnnualRecentMonthsDefinition(
+  now: Date,
+): RealtimeChartDefinition {
+  const currentMonthStart = startOfMonth(now);
+
+  return {
+    id: LIVE_ANNUAL_RECENT_MONTHS_ID,
+    label: "Meses recentes do comparativo anual",
+    description:
+      "Rollup canônico do mês atual e dos 12 meses anteriores.",
+    granularity: "month",
+    from: addMonths(currentMonthStart, -12),
+    to: addMonths(currentMonthStart, 1),
+  };
+}
+
+function buildOperationalCurrentHourMinutesDefinition(
+  now: Date,
+): RealtimeChartDefinition {
+  return {
+    id: OPERATIONAL_CURRENT_HOUR_MINUTES_ID,
+    label: "Minutos da hora atual",
+    description:
+      "Base canônica para reconciliar a hora civil ainda aberta.",
+    granularity: "minute",
+    from: startOfHour(now),
+    to: addMinutes(startOfMinute(now), 1),
   };
 }
 
@@ -5641,11 +6549,31 @@ function hydrateRealtimeOpenBuckets(
   const definitionById = new Map(
     definitions.map((definition) => [definition.id, definition] as const),
   );
-  const minuteState = next.live_chart_minute;
+  const minuteState = next[OPERATIONAL_CURRENT_HOUR_MINUTES_ID];
+  const visibleMinuteState = next.live_chart_minute;
   const canonicalDefinition = definitionById.get(
     OPERATIONAL_MONTH_HOURS_ID,
   );
   const canonicalState = next[OPERATIONAL_MONTH_HOURS_ID];
+
+  if (
+    minuteState &&
+    !minuteState.error &&
+    minuteState.granularity === "minute" &&
+    visibleMinuteState &&
+    !visibleMinuteState.error &&
+    visibleMinuteState.granularity === "minute"
+  ) {
+    const currentHourStart = startOfHour(now);
+    visibleMinuteState.rows = reconcileAggregateRows(
+      visibleMinuteState.rows,
+      "minute",
+      minuteState.rows,
+      "minute",
+      currentHourStart,
+      addMinutes(startOfMinute(now), 1),
+    );
+  }
 
   if (
     canonicalDefinition &&
@@ -5708,24 +6636,90 @@ async function fetchSubLocations(
   locations: Location[],
   companyScopeId?: string | null,
 ) {
+  const expectedCompanyId = companyScopeId?.trim() || undefined;
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<unknown>(`/locations/${location.id}/sub-locations`).then(
-        requireSubLocationRows,
-      ),
+      apiFetch<unknown>(`/locations/${location.id}/sub-locations`, {
+        companyScopeId: expectedCompanyId,
+      }).then((value) => requireSubLocationRows(value, expectedCompanyId)),
     ),
   );
 
   return filterScopedApiRows(
-    requireSubLocationRows(rows.flat()),
+    requireSubLocationRows(rows.flat(), expectedCompanyId),
     companyScopeId,
   );
 }
 
-async function fetchRealtimeWorkers(companyId?: string | null) {
-  const rows = await apiFetch<unknown>("/workers").then(requireWorkerRows);
-  const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
-  return sortWorkersByActivity(collapseWorkerIdentityChains(scopedRows));
+async function fetchRealtimeWorkers(
+  companyId: string | null | undefined,
+  { requireExplicitCompanyId }: WorkerMetadataValidationOptions,
+): Promise<OptionalWorkerMetadata> {
+  const companyScopeId = companyId?.trim() || undefined;
+  const rows = await apiFetch<unknown>("/workers", { companyScopeId }).then(
+    (value) =>
+      requireWorkerRows(
+        value,
+        requireExplicitCompanyId ? undefined : companyScopeId,
+      ),
+  );
+  const { foreignRows, scopedRows } = partitionWorkersByCompanyScope(
+    rows,
+    companyId,
+  );
+
+  return {
+    rows: sortWorkersByActivity(collapseWorkerIdentityChains(scopedRows)),
+    warning: foreignRows.length
+      ? `${formatNumber(foreignRows.length)} worker(s) fora da empresa selecionada foram ocultados. Os cenários, câmeras e locais continuam disponíveis.`
+      : "",
+  };
+}
+
+async function fetchRealtimeScenarios(
+  companyId: string | null | undefined,
+  { requireExplicitCompanyId }: WorkerMetadataValidationOptions,
+): Promise<OptionalScenarioMetadata> {
+  const companyScopeId = companyId?.trim() || undefined;
+  const rows = await apiFetch<unknown>("/scenarios", { companyScopeId }).then(
+    (value) =>
+      requireScenarioRows(
+        value,
+        requireExplicitCompanyId ? undefined : companyScopeId,
+      ),
+  );
+  const scopedRows = filterScopedApiRows(rows, companyId);
+  const foreignRowCount = rows.length - scopedRows.length;
+
+  return {
+    rows: scopedRows,
+    warning: foreignRowCount
+      ? `${formatNumber(foreignRowCount)} cenário(s) de Contagem fora da empresa selecionada foram ocultados. Locations e sub-locations continuam disponíveis.`
+      : "",
+  };
+}
+
+function unavailableScenarioMetadata(
+  infrastructureCatalogsAllowed = true,
+): OptionalScenarioMetadata {
+  return {
+    rows: [],
+    warning: infrastructureCatalogsAllowed
+      ? "Cenários de Contagem indisponíveis para a empresa selecionada. Locations e sub-locations continuam disponíveis."
+      : "Cenários de Contagem indisponíveis para a empresa selecionada.",
+  };
+}
+
+function unavailableWorkerMetadata(error: unknown): OptionalWorkerMetadata {
+  const detail =
+    error instanceof Error
+      ? error.message
+      : "A API não certificou os workers desta empresa.";
+
+  return {
+    rows: [],
+    warning: `Vínculos de workers indisponíveis: ${detail}`,
+  };
 }
 
 function buildRealtimeScopeOptions({
@@ -6175,33 +7169,6 @@ function buildScenarioTotalsTableRows(
     );
 }
 
-function buildCurrentYearMonthPoints(
-  rows: AggregateEventRow[],
-  scope: RealtimeScopeOption,
-  clock: Date,
-): CurrentYearMonthPoint[] {
-  const totals = aggregateScopeRowsByBucket(rows, scope, "month");
-  const year = clock.getFullYear();
-  const currentMonth = clock.getMonth();
-  let accumulated = 0;
-
-  return COUNTING_MONTH_LABELS.map((label, month) => {
-    const key = Date.UTC(year, month, 1);
-    const value = month <= currentMonth && totals.has(key)
-      ? totals.get(key) ?? 0
-      : null;
-
-    if (value !== null) accumulated += value;
-
-    return {
-      accumulated: value === null ? null : accumulated,
-      label,
-      month,
-      value,
-    };
-  });
-}
-
 function sumScopeRowsInRange(
   rows: AggregateEventRow[],
   scope: RealtimeScopeOption,
@@ -6251,6 +7218,12 @@ function listBucketStarts(definition: RealtimeChartDefinition) {
     starts.push(bucketStart);
     cursor = addGranularity(bucketStart, definition.granularity);
     guard += 1;
+  }
+
+  if (cursor < end) {
+    throw new RangeError(
+      `O período de ${definition.label} excede ${MAX_REALTIME_BUCKETS} pontos e não pode ser exibido sem perda de dados.`,
+    );
   }
 
   return starts;
@@ -6962,6 +7935,131 @@ function isSingleDayHourlyDefinition(definition: RealtimeChartDefinition) {
   );
 }
 
+function buildMinuteDayChartOption(
+  slots: readonly MinuteDayAxisSlot[],
+  widgetColor = "#1267C4",
+): EnterpriseChartOption {
+  return {
+    animation: false,
+    color: [widgetColor],
+    dataZoom: [],
+    grid: {
+      bottom: 4,
+      containLabel: true,
+      left: 4,
+      right: 10,
+      top: 18,
+    },
+    tooltip: {
+      axisPointer: {
+        lineStyle: {
+          color: widgetColor,
+          opacity: 0.35,
+          width: 1,
+        },
+        type: "line",
+      },
+      backgroundColor: "#ffffff",
+      borderColor: "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      formatter: (parameters: unknown) => {
+        const first = Array.isArray(parameters) ? parameters[0] : parameters;
+        const dataIndex =
+          first && typeof first === "object"
+            ? Number((first as { dataIndex?: unknown }).dataIndex)
+            : -1;
+        const slot = Number.isSafeInteger(dataIndex)
+          ? slots[dataIndex]
+          : undefined;
+        if (!slot) return "";
+        if (slot.status === "future") {
+          return `${slot.label}<br/>Aguardando este horário`;
+        }
+        if (slot.status === "unavailable") {
+          return `${slot.label}<br/>Horário inexistente por mudança de fuso`;
+        }
+        const suffix =
+          slot.status === "current" ? " · minuto em andamento" : "";
+        return `${slot.label}<br/><strong>${formatNumber(
+          slot.value ?? 0,
+        )} eventos</strong>${suffix}`;
+      },
+      padding: [10, 12],
+      textStyle: {
+        color: "#13233A",
+        fontSize: 12,
+      },
+      trigger: "axis",
+    },
+    xAxis: {
+      axisLabel: {
+        color: "#66758A",
+        fontSize: 10,
+        formatter: (_value: string, index: number) =>
+          minuteDayHourAxisLabel(index),
+        hideOverlap: true,
+        interval: 59,
+      },
+      axisLine: {
+        lineStyle: {
+          color: "#D8E3F2",
+        },
+      },
+      axisTick: {
+        alignWithLabel: true,
+        interval: 59,
+        length: 3,
+      },
+      boundaryGap: false,
+      data: slots.map((slot) => slot.label),
+      type: "category",
+    },
+    yAxis: {
+      axisLabel: {
+        color: "#66758A",
+        fontSize: 11,
+      },
+      min: 0,
+      minInterval: 1,
+      splitLine: {
+        lineStyle: {
+          color: "#E8EEF6",
+        },
+      },
+      type: "value",
+    },
+    series: [
+      {
+        areaStyle: {
+          color: widgetColor,
+          opacity: 0.1,
+        },
+        connectNulls: false,
+        data: slots.map((slot) => slot.value),
+        emphasis: {
+          focus: "series",
+        },
+        label: {
+          show: false,
+        },
+        lineStyle: {
+          color: widgetColor,
+          width: 1.75,
+        },
+        name: "Fluxo por minuto",
+        progressive: 2_000,
+        progressiveThreshold: 1_000,
+        sampling: "lttb",
+        showSymbol: false,
+        smooth: 0.12,
+        symbol: "none",
+        type: "line",
+      },
+    ],
+  };
+}
+
 function buildChartOption(
   definition: RealtimeChartDefinition,
   points: ChartPoint[],
@@ -7124,6 +8222,61 @@ function buildScenarioComparisonOption(
   widgetColor = "#1267C4",
 ): EnterpriseChartOption {
   return buildScopeTotalsComparisonOption(points, widgetColor, "Hoje");
+}
+
+function buildMinuteDayReportChart({
+  clock,
+  companyTimeZone,
+  definition,
+  rows,
+  scope,
+  widgetColor = "#1267C4",
+}: {
+  clock: Date;
+  companyTimeZone: string;
+  definition: RealtimeChartDefinition;
+  rows: AggregateEventRow[];
+  scope: RealtimeScopeOption;
+  widgetColor?: string;
+}): ReportPayload["charts"][number] {
+  const points = buildScopePoints(definition, rows, scope);
+  const slots = buildFixedMinuteDayAxis({
+    day: clock,
+    points,
+    referenceTime: clock,
+    timeZone: companyTimeZone,
+  });
+
+  return {
+    description: `${definition.description} Visão: ${scope.name}. O eixo preserva as 24 horas e mantém o futuro vazio.`,
+    option: buildMinuteDayChartOption(slots, widgetColor),
+    table: {
+      title: "Dados - Minuto a minuto · Hoje",
+      columns: [
+        { key: "minute", label: "Horário", width: 14 },
+        { key: "status", label: "Situação", width: 24 },
+        { key: "total", label: "Total", numeric: true, width: 18 },
+      ],
+      rows: slots
+        .filter(
+          (slot) =>
+            slot.status === "elapsed" ||
+            slot.status === "current" ||
+            slot.status === "unavailable",
+        )
+        .map((slot) => ({
+          minute: slot.label,
+          status:
+            slot.status === "current"
+              ? "Em andamento"
+              : slot.status === "unavailable"
+                ? "Horário inexistente"
+                : "Concluído",
+          total: slot.value,
+        })),
+    },
+    title: definition.label,
+  };
 }
 
 function buildRealtimeScopeReportChart(
@@ -7401,63 +8554,6 @@ function buildScenarioTotalsReportTable(
       })),
     ],
     title: "Tabela acumulada por cenário",
-  };
-}
-
-function buildCurrentYearComparisonReportChart({
-  accumulated,
-  points,
-  scopeName,
-  widgetColor = "#1267C4",
-  year,
-}: {
-  accumulated: boolean;
-  points: CurrentYearMonthPoint[];
-  scopeName: string;
-  widgetColor?: string;
-  year: number;
-}): ReportPayload["charts"][number] {
-  const title = accumulated
-    ? "Comparativo acumulado por ano"
-    : "Comparativo mensal por ano";
-  const values = points.flatMap((point) => {
-    const value = accumulated ? point.accumulated : point.value;
-    return value === null ? [] : [value];
-  });
-  const total = accumulated
-    ? values.at(-1) ?? 0
-    : values.reduce((sum, value) => sum + value, 0);
-
-  return {
-    comparison: `${year}: ${formatNumber(total)} eventos até o mês atual`,
-    description: `${
-      accumulated
-        ? "Soma progressiva dos meses"
-        : "Valores mensais do ano atual"
-    }. Visão: ${scopeName}.`,
-    option: buildCurrentYearComparisonOption(
-      points,
-      accumulated,
-      year,
-      widgetColor,
-    ),
-    table: {
-      title: `Dados - ${title}`,
-      columns: [
-        { key: "month", label: "Mês", width: 18 },
-        {
-          key: "value",
-          label: accumulated ? "Acumulado" : String(year),
-          numeric: true,
-          width: 22,
-        },
-      ],
-      rows: points.map((point) => ({
-        month: point.label,
-        value: accumulated ? point.accumulated : point.value,
-      })),
-    },
-    title,
   };
 }
 

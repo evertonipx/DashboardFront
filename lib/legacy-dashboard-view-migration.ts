@@ -1,7 +1,11 @@
 "use client";
 
-import { getStoredSession } from "@/lib/api";
-import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import { apiFetch } from "@/lib/api";
+import {
+  getStoredCurrentCompanyScope,
+  getStoredMasterCompanyScope,
+  getUserViewScopedStorageKey,
+} from "@/lib/master-company-scope";
 import { requestUserGridSync } from "@/lib/user-grid";
 import {
   loadSavedScopedCardPreferences,
@@ -35,28 +39,43 @@ export async function migrateLegacyLiveDefault({
   companyId: string;
   userId: string;
 }) {
-  if (typeof window === "undefined" || !companyId || !userId) return false;
+  const requestedCompanyId = companyId.trim();
+  const requestedUserId = userId.trim();
+  if (typeof window === "undefined" || !requestedCompanyId || !requestedUserId) {
+    return false;
+  }
+
+  const initialStoredCompanyId = currentStoredCompanyScopeId();
+  if (initialStoredCompanyId && initialStoredCompanyId !== requestedCompanyId) {
+    return false;
+  }
 
   const migrationKey = getUserViewScopedStorageKey(
     LEGACY_MIGRATION_KEY,
-    companyId,
-    userId,
+    requestedCompanyId,
+    requestedUserId,
   );
   if (window.localStorage.getItem(migrationKey)) return false;
 
-  const currentPresets = loadWidgetViewPresets("live", companyId, userId);
+  const currentPresets = loadWidgetViewPresets(
+    "live",
+    requestedCompanyId,
+    requestedUserId,
+  );
   if (currentPresets.some((preset) => preset.isDefault)) {
     markMigrationComplete(migrationKey, "existing-default");
     requestUserGridSync();
     return false;
   }
 
-  const legacyView = await fetchLegacyLiveView();
+  const legacyView = await fetchLegacyLiveView(requestedCompanyId);
+  if (currentStoredCompanyScopeId() !== initialStoredCompanyId) return false;
+
   const responseCompanyId = legacyView?.company_id?.trim() ?? "";
   if (
     !legacyView?.found ||
     !responseCompanyId ||
-    responseCompanyId !== companyId ||
+    responseCompanyId !== requestedCompanyId ||
     !Array.isArray(legacyView.preferences) ||
     !legacyView.preferences.length
   ) {
@@ -108,28 +127,25 @@ export async function migrateLegacyLiveDefault({
         )
       : [...currentPresets, defaultPreset],
     responseCompanyId,
-    userId,
+    requestedUserId,
   );
   markMigrationComplete(migrationKey, "imported");
   requestUserGridSync();
   return true;
 }
 
-async function fetchLegacyLiveView() {
-  const session = getStoredSession();
-  if (!session?.access_token) return null;
-
-  const response = await fetch("/api/v1/dashboard-views/live", {
-    cache: "no-store",
-    headers: {
-      Authorization: `${session.token_type || "Bearer"} ${session.access_token}`,
-    },
+async function fetchLegacyLiveView(companyScopeId: string) {
+  return apiFetch<LegacyDashboardViewResponse>("/dashboard-views/live", {
+    companyScopeId,
   }).catch(() => null);
-  if (!response?.ok) return null;
+}
 
-  return (await response.json().catch(() => null)) as
-    | LegacyDashboardViewResponse
-    | null;
+function currentStoredCompanyScopeId() {
+  return (
+    getStoredMasterCompanyScope()?.id.trim() ||
+    getStoredCurrentCompanyScope()?.id.trim() ||
+    ""
+  );
 }
 
 function migrateLegacyPreferences(preferences: CardPreference[]) {

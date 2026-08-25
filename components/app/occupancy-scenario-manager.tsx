@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,11 +55,13 @@ import {
 } from "@/lib/master-company-scope";
 import {
   buildOccupancyAreaKey,
+  resolveOccupancyAreaSelectionLabel,
   type OccupancyAreaOption,
 } from "@/lib/occupancy-areas";
 import { fetchOccupancyAreaOptions } from "@/lib/occupancy-area-options";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
-import { canManageOccupancy, canManageScenarios } from "@/lib/permissions";
+import { canManageOccupancy } from "@/lib/permissions";
+import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
 import type {
   OccupancyScenario,
   OccupancyScenarioArea,
@@ -83,7 +86,7 @@ const HOUR_MS = 60 * MINUTE_MS;
 
 export function OccupancyScenarioManager() {
   const { user } = useAuth();
-  const canEdit = canManageOccupancy(user) || canManageScenarios(user);
+  const canEdit = canManageOccupancy(user);
   const companyScopeId = useEffectiveCompanyScopeId(user);
   const [scenarios, setScenarios] = React.useState<OccupancyScenario[]>([]);
   const [areaOptions, setAreaOptions] = React.useState<AreaOption[]>([]);
@@ -113,25 +116,32 @@ export function OccupancyScenarioManager() {
   const catalogsReady =
     scenarioCatalogCertified && areaCatalogCertified;
 
-  const loadScenarios = React.useCallback(async () => {
+  const loadScenarios = React.useCallback(async (
+    { silent = false }: { silent?: boolean } = {},
+  ) => {
     const requestSequence = ++scenarioRequestSequenceRef.current;
-    setLoading(true);
-    setScenarioCatalogReady(false);
-    setScenarioCatalogCompanyId("");
-    setScenarioCatalogError("");
+    if (!silent) {
+      setLoading(true);
+      setScenarioCatalogReady(false);
+      setScenarioCatalogCompanyId("");
+      setScenarioCatalogError("");
+    }
     try {
       if (!companyScopeId) {
         throw new Error(
           "Empresa ativa não definida para carregar cenários de ocupação.",
         );
       }
-      const response = await apiFetch<unknown>("/occupancy/scenarios");
+      const response = await apiFetch<unknown>("/occupancy/scenarios", {
+        companyScopeId,
+      });
       const rows = filterScopedApiRows(
-        requireOccupancyScenarioRows(response),
+        requireOccupancyScenarioRows(response, companyScopeId),
         companyScopeId,
       );
       if (requestSequence !== scenarioRequestSequenceRef.current) return;
       setScenarios(rows);
+      setScenarioCatalogError("");
       setScenarioCatalogCompanyId(companyScopeId);
       setScenarioCatalogReady(true);
     } catch (error) {
@@ -140,26 +150,32 @@ export function OccupancyScenarioManager() {
         error instanceof Error
           ? error.message
           : "Não foi possível carregar cenários de ocupação.";
-      setScenarios([]);
-      setScenarioCatalogCompanyId("");
-      setScenarioCatalogError(message);
-      setScenarioCatalogReady(false);
-      toast.error(message);
+      if (!silent) {
+        setScenarios([]);
+        setScenarioCatalogCompanyId("");
+        setScenarioCatalogError(message);
+        setScenarioCatalogReady(false);
+        toast.error(message);
+      }
     } finally {
-      if (requestSequence === scenarioRequestSequenceRef.current) {
+      if (!silent && requestSequence === scenarioRequestSequenceRef.current) {
         setLoading(false);
       }
     }
   }, [companyScopeId]);
 
-  const loadAreaOptions = React.useCallback(async () => {
+  const loadAreaOptions = React.useCallback(async (
+    { silent = false }: { silent?: boolean } = {},
+  ) => {
     const requestSequence = ++areaRequestSequenceRef.current;
     const now = new Date();
-    setLoadingAreas(true);
-    setAreaOptions([]);
-    setAreaCatalogReady(false);
-    setAreaCatalogCompanyId("");
-    setAreaCatalogError("");
+    if (!silent) {
+      setLoadingAreas(true);
+      setAreaOptions([]);
+      setAreaCatalogReady(false);
+      setAreaCatalogCompanyId("");
+      setAreaCatalogError("");
+    }
     try {
       if (!companyScopeId) {
         throw new Error(
@@ -169,10 +185,13 @@ export function OccupancyScenarioManager() {
       const options = await fetchOccupancyAreaOptions({
         companyId: companyScopeId,
         from: new Date(now.getTime() - 4 * HOUR_MS),
+        request: <T,>(path: string) =>
+          apiFetch<T>(path, { companyScopeId }),
         to: now,
       });
       if (requestSequence !== areaRequestSequenceRef.current) return;
       setAreaOptions(options);
+      setAreaCatalogError("");
       setAreaCatalogCompanyId(companyScopeId);
       setAreaCatalogReady(true);
     } catch (error) {
@@ -181,13 +200,15 @@ export function OccupancyScenarioManager() {
         error instanceof Error
           ? error.message
           : "Não foi possível certificar o catálogo de áreas de ocupação.";
-      setAreaOptions([]);
-      setAreaCatalogCompanyId("");
-      setAreaCatalogError(message);
-      setAreaCatalogReady(false);
-      toast.error(message);
+      if (!silent) {
+        setAreaOptions([]);
+        setAreaCatalogCompanyId("");
+        setAreaCatalogError(message);
+        setAreaCatalogReady(false);
+        toast.error(message);
+      }
     } finally {
-      if (requestSequence === areaRequestSequenceRef.current) {
+      if (!silent && requestSequence === areaRequestSequenceRef.current) {
         setLoadingAreas(false);
       }
     }
@@ -203,6 +224,19 @@ export function OccupancyScenarioManager() {
     void loadScenarios();
     void loadAreaOptions();
   }, [loadAreaOptions, loadScenarios]);
+
+  useResourceAutoRefresh(
+    async () => {
+      await Promise.all([
+        loadScenarios({ silent: true }),
+        loadAreaOptions({ silent: true }),
+      ]);
+    },
+    {
+      enabled: Boolean(companyScopeId) && !loading && !loadingAreas,
+      intervalMs: RESOURCE_METADATA_REFRESH_INTERVAL_MS,
+    },
+  );
 
   function openCreateDialog() {
     if (!canEdit) {
@@ -265,7 +299,10 @@ export function OccupancyScenarioManager() {
 
     const requestedCompanyId = companyScopeId;
     try {
-      await apiFetch(`/occupancy/scenarios/${scenario.id}`, { method: "DELETE" });
+      await apiFetch(`/occupancy/scenarios/${scenario.id}`, {
+        companyScopeId: requestedCompanyId,
+        method: "DELETE",
+      });
       requireUnchangedCompanyScope(
         requestedCompanyId,
         companyScopeIdRef.current,
@@ -433,6 +470,7 @@ export function OccupancyScenarioManager() {
         areaCatalogError={areaCatalogError}
         areaCatalogReady={areaCatalogCertified}
         areaOptions={areaOptions}
+        canEdit={canEdit}
         companyId={companyScopeId}
         onOpenChange={setDialogOpen}
         onSaved={handleSaved}
@@ -447,6 +485,7 @@ function OccupancyScenarioDialog({
   areaCatalogError,
   areaCatalogReady,
   areaOptions,
+  canEdit,
   companyId,
   onOpenChange,
   onSaved,
@@ -456,6 +495,7 @@ function OccupancyScenarioDialog({
   areaCatalogError: string;
   areaCatalogReady: boolean;
   areaOptions: AreaOption[];
+  canEdit: boolean;
   companyId: string;
   onOpenChange: (open: boolean) => void;
   onSaved: (companyId: string) => Promise<void>;
@@ -515,6 +555,11 @@ function OccupancyScenarioDialog({
   }
 
   async function saveScenario() {
+    if (!canEdit) {
+      toast.error("Seu usuário não pode alterar cenários de ocupação.");
+      return;
+    }
+
     if (!areaCatalogReady || !companyId) {
       toast.error(
         areaCatalogError ||
@@ -546,6 +591,7 @@ function OccupancyScenarioDialog({
               ...payload,
               active: draft.active,
             },
+            companyScopeId: companyId,
           },
         );
         requireUnchangedCompanyScope(companyId, companyIdRef.current);
@@ -560,6 +606,7 @@ function OccupancyScenarioDialog({
         const response = await apiFetch<unknown>("/occupancy/scenarios", {
           method: "POST",
           body: payload,
+          companyScopeId: companyId,
         });
         requireUnchangedCompanyScope(companyId, companyIdRef.current);
         requireSavedScenario(response, { companyId, payload });
@@ -660,7 +707,7 @@ function OccupancyScenarioDialog({
                     }))
                   }
                   className={cn(
-                    "flex h-10 w-full items-center justify-between rounded-md border px-3 text-sm transition",
+                    "flex h-10 w-full items-center justify-between rounded-md border px-3 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                     draft.active
                       ? "border-primary/30 bg-primary/10 text-primary"
                       : "border-border bg-background text-muted-foreground",
@@ -737,7 +784,7 @@ function OccupancyScenarioDialog({
           <Button
             type="button"
             onClick={saveScenario}
-            disabled={saving || !areaCatalogReady}
+            disabled={saving || !canEdit || !areaCatalogReady}
           >
             <Save className="h-4 w-4" />
             {saving ? "Salvando..." : "Salvar cenário"}
@@ -759,11 +806,11 @@ function ScenarioAreaEditor({
   onPatch: (patch: Partial<OccupancyScenarioArea>) => void;
   onRemove: () => void;
 }) {
-  const selectedOptionKey =
-    areaOptions.find(
-      (option) =>
-        option.area_id === area.area_id && option.camera_id === area.camera_id,
-    )?.key ?? MANUAL_AREA_OPTION;
+  const selectedOption = areaOptions.find(
+    (option) =>
+      option.area_id === area.area_id && option.camera_id === area.camera_id,
+  );
+  const selectedOptionKey = selectedOption?.key ?? MANUAL_AREA_OPTION;
 
   return (
     <div className="grid gap-3 rounded-md border bg-card p-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
@@ -778,7 +825,11 @@ function ScenarioAreaEditor({
             onPatch({
               area_id: option.area_id,
               camera_id: option.camera_id,
-              label: area.label?.trim() ? area.label : option.label,
+              label: resolveOccupancyAreaSelectionLabel({
+                currentLabel: area.label,
+                currentOptionLabel: selectedOption?.label,
+                nextOptionLabel: option.label,
+              }),
             });
           }}
         >
@@ -946,7 +997,7 @@ function requireSavedScenario(
     payload: ReturnType<typeof buildScenarioPayload>;
   },
 ) {
-  const [scenario] = requireOccupancyScenarioRows([value]);
+  const [scenario] = requireOccupancyScenarioRows([value], companyId);
   if (scenario.company_id !== companyId) {
     throw new Error(
       `A API salvou o cenário na empresa "${scenario.company_id}", não na empresa ativa "${companyId}".`,

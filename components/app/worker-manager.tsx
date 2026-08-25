@@ -14,6 +14,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -46,6 +47,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { apiFetch } from "@/lib/api";
 import { useEffectiveCompanyScopeId } from "@/lib/master-company-scope";
 import { canManageWorkers } from "@/lib/permissions";
+import { PROVISIONED_RESOURCE_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
 import type {
   CreateWorkerResponse,
   RotateWorkerKeyResponse,
@@ -58,6 +60,7 @@ import {
   partitionWorkersByCompanyScope,
   resolveWorkerCompanyId,
   sortWorkersByActivity,
+  workersFromExplicitCompanyScope,
   workerScopeDisplay,
   type WorkerScopeRow,
 } from "@/lib/worker-scope";
@@ -75,6 +78,10 @@ type ApiKeyNotice = {
 };
 
 type WorkerRow = WorkerScopeRow;
+
+type ResourceLoadOptions = {
+  silent?: boolean;
+};
 
 const emptyWorkerForm: WorkerFormState = {
   name: "",
@@ -101,24 +108,49 @@ export function WorkerManager() {
   const activeWorkers = workers.filter((worker) => worker.active).length;
   const effectiveCompanyId = useEffectiveCompanyScopeId(user);
   const canViewWorkers = Boolean(user && effectiveCompanyId);
+  const effectiveCompanyIdRef = React.useRef(effectiveCompanyId);
+  const workerMutationSequenceRef = React.useRef(0);
+  const workerLoadSequenceRef = React.useRef(0);
 
-  const loadWorkers = React.useCallback(async () => {
+  React.useEffect(() => {
+    effectiveCompanyIdRef.current = effectiveCompanyId;
+  }, [effectiveCompanyId]);
+
+  const loadWorkers = React.useCallback(async (
+    { silent = false }: ResourceLoadOptions = {},
+  ) => {
     if (!canViewWorkers) {
       setWorkers([]);
       setScopeWarning("");
       setLoading(false);
       return;
     }
+    const requestedCompanyId = effectiveCompanyId;
+    const loadSequence = ++workerLoadSequenceRef.current;
 
-    setLoading(true);
-    setScopeWarning("");
+    if (!silent) {
+      setLoading(true);
+      setScopeWarning("");
+    }
     try {
-      const rows = await fetchCompanyWorkers();
-      if (effectiveCompanyId) {
+      const rows = await fetchCompanyWorkers(requestedCompanyId);
+      if (
+        effectiveCompanyIdRef.current !== requestedCompanyId ||
+        loadSequence !== workerLoadSequenceRef.current
+      ) return;
+      if (requestedCompanyId) {
         const { scopedRows, foreignRows, unscopedRows } =
-          partitionWorkersByCompanyScope(rows, effectiveCompanyId);
+          partitionWorkersByCompanyScope(rows, requestedCompanyId);
 
-        setWorkers(sortWorkersByActivity(scopedRows));
+        setWorkers(
+          sortWorkersByActivity(
+            workersFromExplicitCompanyScope({
+              foreignRows,
+              scopedRows,
+              unscopedRows,
+            }),
+          ),
+        );
         setScopeWarning(
           buildWorkerScopeWarning(
             foreignRows.length,
@@ -132,19 +164,50 @@ export function WorkerManager() {
         );
       }
     } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar workers.",
-      );
+      if (
+        !silent &&
+        effectiveCompanyIdRef.current === requestedCompanyId &&
+        loadSequence === workerLoadSequenceRef.current
+      ) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : "Não foi possível carregar workers.",
+        );
+      }
     } finally {
-      setLoading(false);
+      if (
+        !silent &&
+        effectiveCompanyIdRef.current === requestedCompanyId &&
+        loadSequence === workerLoadSequenceRef.current
+      ) {
+        setLoading(false);
+      }
     }
   }, [canViewWorkers, effectiveCompanyId]);
 
   React.useEffect(() => {
-    loadWorkers();
+    void loadWorkers();
   }, [loadWorkers]);
+
+  React.useEffect(() => {
+    workerMutationSequenceRef.current += 1;
+    workerLoadSequenceRef.current += 1;
+    setWorkers([]);
+    setScopeWarning("");
+    setSaving(false);
+    setWorkerDialog(false);
+    setEditingWorker(null);
+    setKeyNotice(null);
+  }, [effectiveCompanyId]);
+
+  useResourceAutoRefresh(
+    () => loadWorkers({ silent: true }),
+    {
+      enabled: canViewWorkers && !loading,
+      intervalMs: PROVISIONED_RESOURCE_REFRESH_INTERVAL_MS,
+    },
+  );
 
   function openWorker(worker?: Worker) {
     if (!canEditWorkers) {
@@ -165,6 +228,10 @@ export function WorkerManager() {
   }
 
   async function saveWorker() {
+    if (!canEditWorkers) {
+      toast.error("Seu usuário não pode alterar workers.");
+      return;
+    }
     const name = workerForm.name.trim();
     if (!name) {
       toast.error("Nome obrigatório.");
@@ -174,6 +241,10 @@ export function WorkerManager() {
       toast.error("Selecione uma empresa antes de salvar workers.");
       return;
     }
+
+    const requestedCompanyId = effectiveCompanyId;
+    const mutationSequence = ++workerMutationSequenceRef.current;
+    workerLoadSequenceRef.current += 1;
 
     setSaving(true);
     try {
@@ -187,15 +258,19 @@ export function WorkerManager() {
           `/workers/${editingWorker.id}`,
           "PUT",
           body,
+          requestedCompanyId,
         );
+        if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
         toast.success("Worker atualizado.");
       } else {
         const created = await mutateWorker<CreateWorkerResponse>(
           "/workers",
           "POST",
           body,
+          requestedCompanyId,
         );
-        await ensureCreatedWorkerScope(created, effectiveCompanyId);
+        await ensureCreatedWorkerScope(created, requestedCompanyId);
+        if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
         setKeyNotice({
           title: "Chave criada",
           workerName: created.name || name,
@@ -208,27 +283,45 @@ export function WorkerManager() {
       setWorkerDialog(false);
       await loadWorkers();
     } catch (error) {
+      if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
       toast.error(error instanceof Error ? error.message : "Falha ao salvar worker.");
     } finally {
-      setSaving(false);
+      if (isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) {
+        setSaving(false);
+      }
     }
   }
 
   async function removeWorker(worker: Worker) {
+    if (!canEditWorkers) {
+      toast.error("Seu usuário não pode excluir workers.");
+      return;
+    }
     if (!window.confirm(`Excluir o worker "${worker.name}"?`)) return;
+    const requestedCompanyId = effectiveCompanyId;
+    if (!requestedCompanyId) return;
+    const mutationSequence = ++workerMutationSequenceRef.current;
+    workerLoadSequenceRef.current += 1;
 
     try {
       await apiFetch(`/workers/${worker.id}`, {
+        companyScopeId: requestedCompanyId,
         method: "DELETE",
       });
+      if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
       toast.success("Worker excluído.");
       await loadWorkers();
     } catch (error) {
+      if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
       toast.error(error instanceof Error ? error.message : "Falha ao excluir worker.");
     }
   }
 
   async function rotateWorkerKey(worker: Worker) {
+    if (!canEditWorkers) {
+      toast.error("Seu usuário não pode rotacionar chaves de workers.");
+      return;
+    }
     if (
       !window.confirm(
         `Rotacionar a chave do worker "${worker.name}"? A chave anterior deixará de funcionar.`,
@@ -237,13 +330,20 @@ export function WorkerManager() {
       return;
     }
 
+    const requestedCompanyId = effectiveCompanyId;
+    if (!requestedCompanyId) return;
+    const mutationSequence = ++workerMutationSequenceRef.current;
+    workerLoadSequenceRef.current += 1;
+
     try {
       const response = await apiFetch<RotateWorkerKeyResponse>(
         `/workers/${worker.id}/rotate-key`,
         {
+          companyScopeId: requestedCompanyId,
           method: "POST",
         },
       );
+      if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
       setKeyNotice({
         title: "Chave rotacionada",
         workerName: worker.name,
@@ -253,10 +353,21 @@ export function WorkerManager() {
       toast.success("Chave rotacionada.");
       await loadWorkers();
     } catch (error) {
+      if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
       toast.error(
         error instanceof Error ? error.message : "Falha ao rotacionar chave.",
       );
     }
+  }
+
+  function isCurrentWorkerMutation(
+    mutationSequence: number,
+    companyId: string,
+  ) {
+    return (
+      mutationSequence === workerMutationSequenceRef.current &&
+      effectiveCompanyIdRef.current === companyId
+    );
   }
 
   if (!canViewWorkers) {
@@ -310,7 +421,7 @@ export function WorkerManager() {
               type="button"
               variant="outline"
               className="w-full sm:w-auto"
-              onClick={loadWorkers}
+              onClick={() => void loadWorkers()}
               disabled={loading}
             >
               <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
@@ -521,16 +632,19 @@ function WorkerScopeBadge({
   );
 }
 
-async function fetchCompanyWorkers() {
-  return apiFetch<unknown>("/workers").then(normalizeWorkerRows);
+async function fetchCompanyWorkers(companyScopeId: string) {
+  return apiFetch<unknown>("/workers", { companyScopeId }).then(
+    normalizeWorkerRows,
+  );
 }
 
 async function mutateWorker<T>(
   path: string,
   method: "POST" | "PUT",
   body: { name: string; description?: string },
+  companyScopeId: string,
 ) {
-  return apiFetch<T>(path, { method, body });
+  return apiFetch<T>(path, { body, companyScopeId, method });
 }
 
 async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId: string) {
@@ -545,7 +659,7 @@ async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId:
     return;
   }
 
-  const rows = await fetchCompanyWorkers().catch(() => []);
+  const rows = await fetchCompanyWorkers(companyId).catch(() => []);
   const { scopedRows, foreignRows, unscopedRows } =
     partitionWorkersByCompanyScope(rows, companyId);
   const workerId = worker.id?.trim();
@@ -567,9 +681,13 @@ async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId:
     );
   }
 
+  if (unscopedRows.some(matchesWorker) && !foreignRows.length) {
+    return;
+  }
+
   if (unscopedRows.some(matchesWorker)) {
     throw new Error(
-      "A API criou o worker, mas o GET /workers não retornou company_id. O vínculo não pode ser considerado válido sem esse campo explícito.",
+      "A API criou o worker sem company_id em uma resposta que também contém outra empresa; o vínculo não pode ser comprovado.",
     );
   }
 
@@ -590,7 +708,9 @@ function buildWorkerScopeWarning(
   }
   if (unscopedCount) {
     messages.push(
-      `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram ocultados porque o vínculo não pode ser comprovado.`,
+      foreignCount
+        ? `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram ocultados porque a resposta também contém outra empresa.`
+        : `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram mantidos no escopo autenticado solicitado.`,
     );
   }
 

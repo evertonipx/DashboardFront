@@ -1,10 +1,8 @@
 "use client";
 
-import * as React from "react";
-
+import { DashboardModuleTabs } from "@/components/app/dashboard-module-tabs";
 import { OccupancyScenarioDashboard } from "@/components/app/occupancy-scenario-dashboard";
 import { RealtimeDashboard } from "@/components/app/realtime-dashboard";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 type LiveDashboardTabsProps = {
   manager?: boolean;
@@ -12,17 +10,9 @@ type LiveDashboardTabsProps = {
 
 export function LiveDashboardTabs({ manager = false }: LiveDashboardTabsProps) {
   return (
-    <Tabs defaultValue="counting" className="space-y-4">
-      <TabsList>
-        <TabsTrigger value="counting">Contagem</TabsTrigger>
-        <TabsTrigger value="occupancy">Ocupação</TabsTrigger>
-      </TabsList>
-      <TabsContent value="counting">
-        <RealtimeDashboard manager={manager} />
-      </TabsContent>
-      <TabsContent value="occupancy">
-        <OccupancyScenarioDashboard />
-      </TabsContent>
-    </Tabs>
+    <DashboardModuleTabs
+      counting={<RealtimeDashboard manager={manager} />}
+      occupancy={<OccupancyScenarioDashboard />}
+    />
   );
 }

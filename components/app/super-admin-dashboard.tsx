@@ -62,9 +62,37 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApiError, apiFetch } from "@/lib/api";
-import { writeCompanyCache } from "@/lib/company-cache";
+import {
+  discoverCompanyUserResource,
+  mutateCompanyUserResource,
+  readCompanyUserResourceAtRoute,
+  type CompanyUserResourceRoute,
+} from "@/lib/company-user-resource";
+import {
+  buildCompanyUserProfileUpdate,
+  certifyCompanyUserMutationIdentity,
+} from "@/lib/company-user-profile-update";
+import {
+  normalizeCompanyRecord,
+  writeCompanyCache,
+} from "@/lib/company-cache";
+import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
+import {
+  enabledCompanyAdminGrantSlugs,
+  enabledCompanyAdminOperationalSlugs,
+  enabledPermissionGrantSlugs,
+  isCertifiedCompanyAdminState,
+  missingCompanyAdminPermissionSlugs,
+  resolvePermissionMutation,
+} from "@/lib/company-admin-permission-policy";
+import {
+  promoteCompanyUserToAdminAdditively,
+  readCertifiedCompanyUserMembership,
+  type AdditiveCompanyAdminGrant,
+} from "@/lib/company-user-additive-admin";
 import {
   clearStoredMasterCompanyScope,
+  getCompanyTimeZoneResolutionForScope,
   getCurrentUserCompanyId,
   getScopedRowCompanyId,
   getStoredMasterCompanyScope,
@@ -78,10 +106,6 @@ import {
   requireWorkerRows,
 } from "@/lib/metadata-validation";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
-import {
-  OPERATIONAL_PERMISSIONS,
-  type OperationalPermissionDefinition,
-} from "@/lib/permissions";
 import { requireScenarioRows } from "@/lib/scenario-validation";
 import type {
   Location,
@@ -96,6 +120,7 @@ import {
   partitionWorkersByCompanyScope,
   resolveWorkerCompanyId,
   sortWorkersByActivity,
+  workersFromExplicitCompanyScope,
   workerScopeDisplay,
   type WorkerScopeRow,
 } from "@/lib/worker-scope";
@@ -168,8 +193,11 @@ type PermissionGroup = {
 
 type PermissionOption = {
   id: string;
-  module_id?: string;
+  module_id: string;
+  module_name: string;
+  module_slug: string;
   slug: string;
+  action: string;
   label: string;
   description: string;
   slugs: string[];
@@ -187,13 +215,28 @@ type WorkerRow = WorkerScopeRow;
 
 type CompanyTab = "users" | "workers" | "modules" | "masters";
 
+type CompanyOperationalResource =
+  | "workers"
+  | "locations"
+  | "subLocations"
+  | "cameras"
+  | "countingScenarios"
+  | "occupancyScenarios";
+
+type CompanyOperationalWarning = {
+  resource: CompanyOperationalResource;
+  label: string;
+  message: string;
+};
+
 type CompanyOperationalStats = {
   algorithms: number;
-  cameras: number;
-  locations: number;
-  subLocations: number;
-  countingScenarios: number;
-  occupancyScenarios: number;
+  cameras: number | null;
+  locations: number | null;
+  subLocations: number | null;
+  countingScenarios: number | null;
+  occupancyScenarios: number | null;
+  workers: number | null;
 };
 
 const emptyCompanyForm: CompanyFormState = {
@@ -276,6 +319,8 @@ export function SuperAdminDashboard() {
   const [companyStats, setCompanyStats] =
     React.useState<CompanyOperationalStats | null>(null);
   const [companyDetailsError, setCompanyDetailsError] = React.useState("");
+  const [companyOperationalWarnings, setCompanyOperationalWarnings] =
+    React.useState<CompanyOperationalWarning[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [loadingDetails, setLoadingDetails] = React.useState(false);
   const [companyDialog, setCompanyDialog] = React.useState(false);
@@ -288,13 +333,24 @@ export function SuperAdminDashboard() {
   const [companyForm, setCompanyForm] =
     React.useState<CompanyFormState>(emptyCompanyForm);
   const [userForm, setUserForm] = React.useState<UserFormState>(emptyUserForm);
+  const [userProfileDirty, setUserProfileDirty] = React.useState(false);
   const [masterUserForm, setMasterUserForm] =
     React.useState<UserFormState>(emptyUserForm);
-  const [userProfileDirty, setUserProfileDirty] = React.useState(false);
   const [permissionCatalog, setPermissionCatalog] = React.useState<Permission[]>([]);
   const [userPermissions, setUserPermissions] = React.useState<Record<string, boolean>>(
     {},
   );
+  const [userPermissionBaseline, setUserPermissionBaseline] = React.useState<
+    Record<string, boolean>
+  >({});
+  const [userPermissionBaselineCertified, setUserPermissionBaselineCertified] =
+    React.useState(false);
+  const [touchedUserPermissionSlugs, setTouchedUserPermissionSlugs] =
+    React.useState<Set<string>>(() => new Set());
+  const [companyAdminPromotionRequested, setCompanyAdminPromotionRequested] =
+    React.useState(false);
+  const [additiveAdminPromotionContext, setAdditiveAdminPromotionContext] =
+    React.useState<{ companyId: string; userId: string } | null>(null);
   const [loadingUserPermissions, setLoadingUserPermissions] =
     React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -302,6 +358,70 @@ export function SuperAdminDashboard() {
   const [deletingUserId, setDeletingUserId] = React.useState("");
   const [updatingModuleId, setUpdatingModuleId] = React.useState("");
   const [workerScopeWarning, setWorkerScopeWarning] = React.useState("");
+  const companyDetailsRequestSequenceRef = React.useRef(0);
+  const selectedCompanyIdRef = React.useRef(selectedCompanyId);
+  const userPermissionRequestSequenceRef = React.useRef(0);
+  const userPermissionRequestContextRef = React.useRef<{
+    companyId: string;
+    userId: string;
+  } | null>(null);
+
+  const invalidateUserPermissionRequest = React.useCallback(
+    ({ closeDialog = false }: { closeDialog?: boolean } = {}) => {
+      userPermissionRequestSequenceRef.current += 1;
+      userPermissionRequestContextRef.current = null;
+      setLoadingUserPermissions(false);
+      setUserPermissions({});
+      setUserPermissionBaseline({});
+      setUserPermissionBaselineCertified(false);
+      setTouchedUserPermissionSlugs(new Set());
+      setCompanyAdminPromotionRequested(false);
+      setAdditiveAdminPromotionContext(null);
+
+      if (closeDialog) {
+        setUserDialog(false);
+        setEditingUser(null);
+        setUserProfileDirty(false);
+      }
+    },
+    [],
+  );
+
+  const closeUserDialog = React.useCallback(() => {
+    invalidateUserPermissionRequest({ closeDialog: true });
+  }, [invalidateUserPermissionRequest]);
+
+  const handleUserDialogOpenChange = React.useCallback(
+    (open: boolean) => {
+      if (open) {
+        setUserDialog(true);
+        return;
+      }
+
+      closeUserDialog();
+    },
+    [closeUserDialog],
+  );
+
+  const selectCompanyId = React.useCallback(
+    (companyId: string) => {
+      const nextCompanyId = companyId.trim();
+      if (selectedCompanyIdRef.current === nextCompanyId) return;
+
+      selectedCompanyIdRef.current = nextCompanyId;
+      companyDetailsRequestSequenceRef.current += 1;
+      invalidateUserPermissionRequest({ closeDialog: true });
+      setSelectedCompanyId(nextCompanyId);
+    },
+    [invalidateUserPermissionRequest],
+  );
+
+  const canPublishCompanyDetails = React.useCallback(
+    (requestSequence: number, companyId: string) =>
+      requestSequence === companyDetailsRequestSequenceRef.current &&
+      selectedCompanyIdRef.current === companyId,
+    [],
+  );
 
   const selectedCompany = React.useMemo(
     () => companies.find((company) => company.id === selectedCompanyId) ?? null,
@@ -347,8 +467,8 @@ export function SuperAdminDashboard() {
   );
 
   const operationalPermissionOptions = React.useMemo(
-    () => resolveOperationalPermissionOptions(permissionCatalog),
-    [permissionCatalog],
+    () => resolveOperationalPermissionOptions(permissionCatalog, modules),
+    [modules, permissionCatalog],
   );
   const enabledCompanyModuleIds = React.useMemo(
     () =>
@@ -382,20 +502,27 @@ export function SuperAdminDashboard() {
     () => groupPermissionCatalog(visiblePermissionOptions),
     [visiblePermissionOptions],
   );
+  const additiveAdminPromotionMode = Boolean(
+    editingUser &&
+      !userPermissionBaselineCertified &&
+      additiveAdminPromotionContext?.companyId === selectedCompanyId &&
+      additiveAdminPromotionContext?.userId === editingUser.id,
+  );
 
   const loadCompanies = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [companyRows, moduleRows, permissionRows] = await Promise.all([
+      const [companyPayload, moduleRows, permissionRows] = await Promise.all([
         apiFetch<Company[]>("/companies"),
         apiFetch<IpxModule[]>("/modules").catch(() => []),
         apiFetch<Permission[]>("/permissions").catch(() => []),
       ]);
+      const companyRows = companyPayload.map(normalizeCompanyRecord);
       const companyUserRows = await Promise.all(
         companyRows.map((company) =>
-          apiFetch<ManagedUser[]>(`/companies/${company.id}/users`).catch(
-            () => [],
-          ),
+          apiFetch<ManagedUser[]>(`/companies/${company.id}/users`, {
+            companyScopeId: company.id,
+          }).catch(() => []),
         ),
       );
 
@@ -408,20 +535,23 @@ export function SuperAdminDashboard() {
       );
       const storedScope = getStoredMasterCompanyScope();
       const declaredCompanyId = getCurrentUserCompanyId(currentUser);
-      setSelectedCompanyId((current) =>
-        current && companyRows.some((company) => company.id === current)
-          ? current
+      const currentCompanyId = selectedCompanyIdRef.current;
+      const nextCompanyId =
+        currentCompanyId &&
+        companyRows.some((company) => company.id === currentCompanyId)
+          ? currentCompanyId
           : storedScope &&
               companyRows.some((company) => company.id === storedScope.id)
             ? storedScope.id
             : declaredCompanyId &&
                 companyRows.some((company) => company.id === declaredCompanyId)
               ? declaredCompanyId
-              : companyRows[0]?.id ?? "",
-      );
+              : companyRows[0]?.id ?? "";
+      selectCompanyId(nextCompanyId);
     } catch (error) {
       setWorkers([]);
       setWorkerScopeWarning("");
+      setCompanyOperationalWarnings([]);
       toast.error(
         error instanceof Error
           ? error.message
@@ -430,16 +560,22 @@ export function SuperAdminDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [currentUser]);
+  }, [currentUser, selectCompanyId]);
 
-  const loadCompanyDetails = React.useCallback(async () => {
-    if (!selectedCompanyId) {
+  const loadCompanyDetails = React.useCallback(async (expectedCompanyId: string) => {
+    const companyId = expectedCompanyId.trim();
+    if (selectedCompanyIdRef.current !== companyId) return;
+
+    const requestSequence = ++companyDetailsRequestSequenceRef.current;
+    if (!companyId) {
       setUsers([]);
       setCompanyModules([]);
       setWorkers([]);
       setWorkerScopeWarning("");
+      setCompanyOperationalWarnings([]);
       setCompanyStats(null);
       setCompanyDetailsError("");
+      setLoadingDetails(false);
       return;
     }
 
@@ -447,59 +583,150 @@ export function SuperAdminDashboard() {
     setCompanyStats(null);
     setCompanyDetailsError("");
     setWorkerScopeWarning("");
+    setCompanyOperationalWarnings([]);
+    let administrativeDetailsCertified = false;
+    let certifiedModuleRows: CompanyModule[] = [];
     try {
       const [userRows, moduleRows] = await Promise.all([
-        apiFetch<ManagedUser[]>(`/companies/${selectedCompanyId}/users`),
+        apiFetch<ManagedUser[]>(`/companies/${companyId}/users`, {
+          companyScopeId: companyId,
+        }),
         apiFetch<CompanyModule[]>(
-          `/companies/${selectedCompanyId}/modules`,
+          `/companies/${companyId}/modules`,
+          { companyScopeId: companyId },
         ),
       ]);
-      const companyScopeIds = uniqueScopeIds(selectedCompanyId);
+      const companyScopeIds = uniqueScopeIds(companyId);
       const scopedUserRows = userRows.filter((user) => {
         const userCompanyId = getScopedRowCompanyId(user);
         return !userCompanyId || companyScopeIds.includes(userCompanyId);
       });
+      if (!canPublishCompanyDetails(requestSequence, companyId)) return;
+
+      // Administrative data is certified independently from the operational
+      // resources below. A broken tenant scope in Workers or Scenarios must not
+      // erase users and modules that came from company-scoped routes.
+      administrativeDetailsCertified = true;
+      certifiedModuleRows = moduleRows;
+      setUsers(scopedUserRows.filter((user) => !user.is_master));
+      setCompanyModules(moduleRows);
+      const authenticatedCompanyId = getCurrentUserCompanyId(currentUser);
+      const canQueryJwtBoundCatalogs =
+        !authenticatedCompanyId || authenticatedCompanyId === companyId;
       const [
-        workerRows,
-        locationRows,
-        cameraRows,
-        scenarioRows,
-        occupancyScenarioRows,
-      ] = await Promise.all([
-        fetchScopedWorkers(),
-        fetchValidatedRows("/locations", requireLocationRows),
-        fetchValidatedRows("/cameras", requireCameraRows),
-        fetchValidatedRows("/scenarios", requireScenarioRows),
-        fetchScopedOccupancyScenarios(),
+        workerResult,
+        locationResult,
+        cameraResult,
+        scenarioResult,
+        occupancyScenarioResult,
+      ] = await Promise.allSettled([
+        canQueryJwtBoundCatalogs
+          ? fetchScopedWorkers(companyId)
+          : Promise.resolve([]),
+        fetchValidatedRows("/locations", requireLocationRows, companyId),
+        fetchValidatedRows("/cameras", requireCameraRows, companyId),
+        canQueryJwtBoundCatalogs
+          ? fetchValidatedRows("/scenarios", requireScenarioRows, companyId)
+          : Promise.resolve([]),
+        fetchScopedOccupancyScenarios(companyId),
       ]);
+      const operationalWarnings: CompanyOperationalWarning[] = [];
+      // These two legacy endpoints derive tenant exclusively from the JWT.
+      // Calling them while a Master selected another company returns valid
+      // rows from the token's home tenant, which must not be presented as an
+      // operational failure (or, worse, as data from the selected company).
+      const workerRows = canQueryJwtBoundCatalogs
+        ? certifiedSettledRows(
+            workerResult,
+            "workers",
+            "Workers",
+            operationalWarnings,
+          )
+        : null;
+      const locationRows = certifiedSettledRows(
+        locationResult,
+        "locations",
+        "Locations",
+        operationalWarnings,
+      );
+      const cameraRows = certifiedSettledRows(
+        cameraResult,
+        "cameras",
+        "Câmeras",
+        operationalWarnings,
+      );
+      const scenarioRows = canQueryJwtBoundCatalogs
+        ? certifiedSettledRows(
+            scenarioResult,
+            "countingScenarios",
+            "Cenários de Contagem",
+            operationalWarnings,
+          )
+        : null;
+      const occupancyScenarioRows = certifiedSettledRows(
+        occupancyScenarioResult,
+        "occupancyScenarios",
+        "Cenários de Ocupação",
+        operationalWarnings,
+      );
       const workerScopePartition = partitionWorkersByCompanyScope(
-        workerRows,
+        workerRows ?? [],
         companyScopeIds,
       );
-      const scopedLocations = filterRowsByCompanyScopes(
-        locationRows,
-        companyScopeIds,
-      );
-      const scopedScenarios = filterRowsByCompanyScopes(
-        scenarioRows,
-        companyScopeIds,
-      );
-      const scopedOccupancyScenarios = filterRowsByCompanyScopes(
-        occupancyScenarioRows,
-        companyScopeIds,
-      );
-      const subLocationRows = await fetchCompanySubLocations(
-        scopedLocations,
-        companyScopeIds,
-      );
-      const scopedCameras = filterRowsByCompanyScopes(cameraRows, companyScopeIds);
-      requireInfrastructureRelations({
-        cameras: scopedCameras,
-        locations: scopedLocations,
-        subLocations: subLocationRows,
-      });
+      const scopedLocations = locationRows
+        ? filterRowsByCompanyScopes(locationRows, companyScopeIds)
+        : null;
+      const scopedScenarios = scenarioRows
+        ? filterRowsByCompanyScopes(scenarioRows, companyScopeIds)
+        : null;
+      const scopedOccupancyScenarios = occupancyScenarioRows
+        ? filterRowsByCompanyScopes(occupancyScenarioRows, companyScopeIds)
+        : null;
+      let subLocationRows: Awaited<
+        ReturnType<typeof fetchCompanySubLocations>
+      > | null = null;
+      if (scopedLocations) {
+        try {
+          subLocationRows = await fetchCompanySubLocations(
+            scopedLocations,
+            companyScopeIds,
+            companyId,
+          );
+          requireInfrastructureRelations({
+            cameras: [],
+            locations: scopedLocations,
+            subLocations: subLocationRows,
+          });
+        } catch (error) {
+          subLocationRows = null;
+          operationalWarnings.push(
+            operationalResourceWarning(
+              "subLocations",
+              "Sublocations",
+              error,
+            ),
+          );
+        }
+      }
+      let scopedCameras = cameraRows
+        ? filterRowsByCompanyScopes(cameraRows, companyScopeIds)
+        : null;
+      if (scopedCameras && scopedLocations) {
+        try {
+          requireInfrastructureRelations({
+            cameras: scopedCameras,
+            locations: scopedLocations,
+            subLocations: subLocationRows ?? undefined,
+          });
+        } catch (error) {
+          scopedCameras = null;
+          operationalWarnings.push(
+            operationalResourceWarning("cameras", "Câmeras", error),
+          );
+        }
+      }
       const collapsedWorkerRows = collapseWorkerIdentityChains(
-        workerScopePartition.scopedRows,
+        workersFromExplicitCompanyScope(workerScopePartition),
       );
       const collapsedWorkerDuplicateCount = collapsedWorkerRows.reduce(
         (count, worker) =>
@@ -507,66 +734,200 @@ export function SuperAdminDashboard() {
         0,
       );
 
-      setUsers(scopedUserRows.filter((user) => !user.is_master));
-      setCompanyModules(moduleRows);
+      if (!canPublishCompanyDetails(requestSequence, companyId)) return;
+
       setWorkers(
-        sortWorkersByActivity(collapsedWorkerRows),
+        workerRows ? sortWorkersByActivity(collapsedWorkerRows) : [],
       );
       setCompanyStats({
         algorithms: enabledOperationalModuleCount(moduleRows, modules),
-        cameras: scopedCameras.length,
-        locations: scopedLocations.length,
-        subLocations: subLocationRows.length,
-        countingScenarios: scopedScenarios.length,
-        occupancyScenarios: scopedOccupancyScenarios.length,
+        cameras: scopedCameras?.length ?? null,
+        locations: scopedLocations?.length ?? null,
+        subLocations: subLocationRows?.length ?? null,
+        countingScenarios: scopedScenarios?.length ?? null,
+        occupancyScenarios: scopedOccupancyScenarios?.length ?? null,
+        workers: workerRows ? collapsedWorkerRows.length : null,
       });
+      setCompanyOperationalWarnings(operationalWarnings);
       setWorkerScopeWarning(
-        buildWorkerScopeWarning(
-          workerScopePartition.foreignRows.length,
-          workerScopePartition.unscopedRows.length,
-          collapsedWorkerDuplicateCount,
-          selectedCompanyId,
-          uniqueScopeIds(
-            workerScopePartition.foreignRows.map(resolveWorkerCompanyId),
-          ),
-        ),
+        workerRows
+          ? buildWorkerScopeWarning(
+              workerScopePartition.foreignRows.length,
+              workerScopePartition.unscopedRows.length,
+              collapsedWorkerDuplicateCount,
+              companyId,
+              uniqueScopeIds(
+                workerScopePartition.foreignRows.map(resolveWorkerCompanyId),
+              ),
+            )
+          : "",
       );
     } catch (error) {
+      if (!canPublishCompanyDetails(requestSequence, companyId)) return;
       const message =
         error instanceof Error
           ? error.message
           : "Não foi possível carregar dados da empresa.";
-      setUsers([]);
-      setCompanyModules([]);
       setWorkers([]);
-      setCompanyStats(null);
-      setCompanyDetailsError(message);
-      toast.error(message);
+      setWorkerScopeWarning("");
+      if (administrativeDetailsCertified) {
+        setCompanyStats({
+          algorithms: enabledOperationalModuleCount(certifiedModuleRows, modules),
+          cameras: null,
+          locations: null,
+          subLocations: null,
+          countingScenarios: null,
+          occupancyScenarios: null,
+          workers: null,
+        });
+        setCompanyOperationalWarnings(
+          allOperationalResourceWarnings(
+            message,
+            !getCurrentUserCompanyId(currentUser) ||
+              getCurrentUserCompanyId(currentUser) === companyId,
+          ),
+        );
+        toast.warning(
+          "Dados operacionais parciais. Usuários e módulos certificados foram preservados.",
+        );
+      } else {
+        setUsers([]);
+        setCompanyModules([]);
+        setCompanyOperationalWarnings([]);
+        setCompanyStats(null);
+        setCompanyDetailsError(message);
+        toast.error(message);
+      }
     } finally {
-      setLoadingDetails(false);
+      if (canPublishCompanyDetails(requestSequence, companyId)) {
+        setLoadingDetails(false);
+      }
     }
-  }, [modules, selectedCompanyId]);
+  }, [canPublishCompanyDetails, currentUser, modules]);
 
   React.useEffect(() => {
     loadCompanies();
   }, [loadCompanies]);
 
-  React.useEffect(() => {
-    loadCompanyDetails();
-  }, [loadCompanyDetails]);
+  const ensureCompanyTimeZone = React.useCallback(async (
+    company: Company,
+    notifyFailure = false,
+  ) => {
+    const normalizedCompany = normalizeCompanyRecord(company);
+    const currentResolution = getCompanyTimeZoneResolutionForScope(
+      currentUser,
+      company.id,
+    );
+    const declaredTimeZone = canonicalCompanyTimeZone(
+      normalizedCompany.timezone,
+    );
+    const currentTimeZone =
+      declaredTimeZone ??
+      (!currentResolution.fallback &&
+      currentResolution.source === "current-user-company"
+        ? currentResolution.timeZone
+        : null);
+    if (currentTimeZone) {
+      return { ...normalizedCompany, timezone: currentTimeZone };
+    }
+
+    try {
+      const response = await apiFetch<Company>(`/companies/${company.id}`, {
+        companyScopeId: company.id,
+      });
+      if (response.id?.trim() !== company.id) {
+        throw new Error("A API retornou o cadastro de outra empresa.");
+      }
+      const detailedCompany = normalizeCompanyRecord(response);
+      const timeZone = canonicalCompanyTimeZone(detailedCompany.timezone);
+      if (!timeZone) {
+        throw new Error(
+          "O detalhe da empresa não informou um timezone IANA válido.",
+        );
+      }
+      const certifiedCompany = {
+        ...normalizedCompany,
+        ...detailedCompany,
+        id: company.id,
+        timezone: timeZone,
+      };
+      setCompanies((current) =>
+        current.map((row) =>
+          row.id === certifiedCompany.id ? certifiedCompany : row,
+        ),
+      );
+      writeCompanyCache([certifiedCompany]);
+      return certifiedCompany;
+    } catch (error) {
+      if (notifyFailure) {
+        toast.error(
+          error instanceof Error
+            ? `Não foi possível certificar o fuso da empresa: ${error.message}`
+            : "Não foi possível certificar o fuso da empresa.",
+        );
+      }
+      return null;
+    }
+  }, [currentUser]);
 
   React.useEffect(() => {
     if (!selectedCompany) return;
 
     const storedScope = getStoredMasterCompanyScope();
-    if (storedScope?.id === selectedCompany.id) return;
+    const resolution = getCompanyTimeZoneResolutionForScope(
+      currentUser,
+      selectedCompany.id,
+    );
+    const selectedTimezone =
+      canonicalCompanyTimeZone(selectedCompany.timezone) ??
+      (!resolution.fallback ? resolution.timeZone : null);
+    const requiresDetailHydration =
+      !canonicalCompanyTimeZone(selectedCompany.timezone) &&
+      resolution.source !== "current-user-company";
+    if (
+      selectedTimezone &&
+      !requiresDetailHydration &&
+      storedScope?.id === selectedCompany.id &&
+      storedScope.name === selectedCompany.name &&
+      (storedScope.trade_name ?? null) ===
+        (selectedCompany.trade_name ?? null) &&
+      (storedScope.timezone ?? null) === selectedTimezone
+    ) {
+      return;
+    }
 
     setStoredMasterCompanyScope({
       id: selectedCompany.id,
       name: selectedCompany.name,
+      timezone: selectedTimezone,
       trade_name: selectedCompany.trade_name ?? null,
     });
-  }, [selectedCompany]);
+
+    if (!requiresDetailHydration && selectedTimezone) return;
+    let active = true;
+    void ensureCompanyTimeZone(selectedCompany).then((certifiedCompany) => {
+      if (
+        !active ||
+        !certifiedCompany ||
+        selectedCompanyIdRef.current !== certifiedCompany.id
+      ) {
+        return;
+      }
+      setStoredMasterCompanyScope({
+        id: certifiedCompany.id,
+        name: certifiedCompany.name,
+        timezone: certifiedCompany.timezone,
+        trade_name: certifiedCompany.trade_name ?? null,
+      });
+    });
+    return () => {
+      active = false;
+    };
+  }, [currentUser, ensureCompanyTimeZone, selectedCompany]);
+
+  React.useEffect(() => {
+    void loadCompanyDetails(selectedCompanyId);
+  }, [loadCompanyDetails, selectedCompanyId]);
 
   function openCompany(company?: Company) {
     setEditingCompany(company ?? null);
@@ -577,7 +938,7 @@ export function SuperAdminDashboard() {
             trade_name: company.trade_name ?? "",
             cnpj: company.cnpj ?? "",
             plan: company.plan ?? "pro",
-            timezone: company.timezone ?? "America/Sao_Paulo",
+            timezone: canonicalCompanyTimeZone(company.timezone) ?? "",
             user_limit: String(company.user_limit ?? 10),
             active: String(company.active),
           }
@@ -587,13 +948,14 @@ export function SuperAdminDashboard() {
   }
 
   function openUser(user?: ManagedUser) {
-    if (!selectedCompanyId) {
+    const companyId = selectedCompanyIdRef.current;
+    if (!companyId) {
       toast.error("Selecione uma empresa antes de criar usuário.");
       return;
     }
 
+    invalidateUserPermissionRequest();
     setEditingUser(user ?? null);
-    setUserPermissions({});
     setUserProfileDirty(false);
     setUserForm(
       user
@@ -610,7 +972,10 @@ export function SuperAdminDashboard() {
     setUserDialog(true);
 
     if (user) {
-      void loadUserPermissions(user.id);
+      void loadUserPermissions(user.id, companyId);
+    } else {
+      setUserPermissionBaseline({});
+      setUserPermissionBaselineCertified(true);
     }
   }
 
@@ -634,15 +999,92 @@ export function SuperAdminDashboard() {
   function setCompanyAdminAccess(enabled: boolean) {
     if (userForm.isMaster) return;
 
-    setUserForm((form) => ({ ...form, isCompanyAdmin: enabled }));
+    if (
+      editingUser &&
+      !userPermissionBaselineCertified &&
+      !additiveAdminPromotionMode
+    ) {
+      toast.error(
+        "A API não confirmou o vínculo do usuário com a empresa selecionada. Nenhum acesso pode ser alterado.",
+      );
+      return;
+    }
+
+    if (!enabled) {
+      if (companyAdminPromotionRequested) {
+        setCompanyAdminPromotionRequested(false);
+        setTouchedUserPermissionSlugs(new Set());
+        setUserPermissions(userPermissionBaseline);
+        setUserForm((form) => ({
+          ...form,
+          isCompanyAdmin: isCertifiedCompanyAdminState(
+            userPermissionBaseline,
+            visiblePermissionOptions,
+            enabledCompanyModuleIds,
+          ),
+        }));
+        return;
+      }
+
+      toast.info(
+        "Para retirar acesso administrativo com segurança, desmarque apenas os acessos operacionais desejados.",
+      );
+      return;
+    }
+
+    const uncertifiablePermissionSlugs = missingCompanyAdminPermissionSlugs(
+      visiblePermissionOptions,
+      enabledCompanyModuleIds,
+    );
+    if (uncertifiablePermissionSlugs.length) {
+      toast.error(
+        companyAdminCertificationErrorMessage(
+          uncertifiablePermissionSlugs,
+          visiblePermissionOptions,
+        ),
+      );
+      return;
+    }
+
+    const companyAdminOptions = visiblePermissionOptions.filter(
+      (option) =>
+        enabledCompanyAdminGrantSlugs(option, enabledCompanyModuleIds).length > 0,
+    );
+    if (!companyAdminOptions.length) {
+      toast.error(
+        "Nenhuma permissão operacional publicada está disponível nos módulos habilitados desta empresa.",
+      );
+      return;
+    }
+    setCompanyAdminPromotionRequested(true);
+    setTouchedUserPermissionSlugs(
+      additiveAdminPromotionMode
+        ? new Set()
+        : new Set(
+            companyAdminOptions
+              .filter(
+                (option) =>
+                  enabledPermissionGrantSlugs(option, enabledCompanyModuleIds)
+                    .length > 0,
+              )
+              .map((option) => option.slug),
+          ),
+    );
+    setUserForm((form) => ({ ...form, isCompanyAdmin: true }));
     setUserPermissions((current) => ({
       ...current,
       ...Object.fromEntries(
-        visiblePermissionOptions
-          .filter((option) => !option.unavailable)
-        .map((option) => [option.slug, enabled]),
+        companyAdminOptions.map((option) => [option.slug, true]),
       ),
     }));
+  }
+
+  function setUserProfileField(
+    field: "name" | "email" | "password" | "active",
+    value: string,
+  ) {
+    setUserProfileDirty(true);
+    setUserForm((form) => ({ ...form, [field]: value }));
   }
 
   function setSuperAdminAccess(enabled: boolean) {
@@ -654,67 +1096,199 @@ export function SuperAdminDashboard() {
   }
 
   function selectCompanyScope(company: Company) {
-    setSelectedCompanyId(company.id);
+    selectCompanyId(company.id);
+    const resolution = getCompanyTimeZoneResolutionForScope(
+      currentUser,
+      company.id,
+    );
     setStoredMasterCompanyScope({
       id: company.id,
       name: company.name,
+      timezone:
+        canonicalCompanyTimeZone(company.timezone) ??
+        (!resolution.fallback ? resolution.timeZone : null),
       trade_name: company.trade_name ?? null,
     });
   }
 
-  function openCompanyDashboard(company: Company) {
-    selectCompanyScope(company);
+  async function openCompanyDashboard(company: Company) {
+    const certifiedCompany = await ensureCompanyTimeZone(company, true);
+    if (!certifiedCompany) return;
+    selectCompanyScope(certifiedCompany);
     router.push("/dashboard/live");
   }
 
-  function openCompanySection(tab: CompanyTab) {
+  async function openCompanySection(tab: CompanyTab) {
     if (!selectedCompany) {
       toast.error("Selecione uma empresa para gerenciar.");
       return;
     }
 
-    selectCompanyScope(selectedCompany);
+    const certifiedCompany = await ensureCompanyTimeZone(selectedCompany, true);
+    if (!certifiedCompany) return;
+    selectCompanyScope(certifiedCompany);
     setActiveCompanyTab(tab);
   }
 
-  function openCompanyRoute(path: string) {
+  async function openCompanyRoute(path: string) {
     if (!selectedCompany) {
       toast.error("Selecione uma empresa para gerenciar.");
       return;
     }
 
-    selectCompanyScope(selectedCompany);
+    const certifiedCompany = await ensureCompanyTimeZone(selectedCompany, true);
+    if (!certifiedCompany) return;
+    selectCompanyScope(certifiedCompany);
     router.push(path);
   }
 
-  async function loadUserPermissions(userId: string) {
+  async function loadUserPermissions(userId: string, companyId: string) {
+    const requestedUserId = userId.trim();
+    const requestedCompanyId = companyId.trim();
+    const expectedEmail =
+      users.find((user) => user.id === requestedUserId)?.email ?? "";
+    if (
+      !requestedUserId ||
+      !requestedCompanyId ||
+      selectedCompanyIdRef.current !== requestedCompanyId
+    ) {
+      return;
+    }
+
+    const requestSequence = ++userPermissionRequestSequenceRef.current;
+    userPermissionRequestContextRef.current = {
+      companyId: requestedCompanyId,
+      userId: requestedUserId,
+    };
     setLoadingUserPermissions(true);
     try {
-      const permissions = await apiFetch<UserPermission[]>(
-        `/users/${userId}/permissions`,
+      const { value: permissions } = await discoverCompanyUserResource<
+        UserPermission[]
+      >(
+        requestedCompanyId,
+        requestedUserId,
+        "/permissions",
       );
+      if (
+        !isCurrentUserPermissionRequest(
+          requestSequence,
+          requestedUserId,
+          requestedCompanyId,
+        )
+      ) {
+        return;
+      }
       const permissionState = createPermissionState(
         permissions,
         visiblePermissionOptions,
       );
       setUserPermissions(permissionState);
+      setUserPermissionBaseline(permissionState);
+      setUserPermissionBaselineCertified(true);
+      setTouchedUserPermissionSlugs(new Set());
+      setCompanyAdminPromotionRequested(false);
+      setAdditiveAdminPromotionContext(null);
       setUserForm((form) => ({
         ...form,
-        isCompanyAdmin: hasAllAvailablePermissions(
+        isCompanyAdmin: isCertifiedCompanyAdminState(
           permissionState,
           visiblePermissionOptions,
+          enabledCompanyModuleIds,
         ),
       }));
     } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar acessos do usuário.",
-      );
+      if (
+        !isCurrentUserPermissionRequest(
+          requestSequence,
+          requestedUserId,
+          requestedCompanyId,
+        )
+      ) {
+        return;
+      }
+      let additiveMembershipCertified = false;
+      if (error instanceof ApiError && error.status === 404) {
+        try {
+          await readCertifiedCompanyUserMembership({
+            companyId: requestedCompanyId,
+            expectedEmail,
+            userId: requestedUserId,
+          });
+          additiveMembershipCertified = true;
+        } catch {
+          additiveMembershipCertified = false;
+        }
+      }
+      if (
+        !isCurrentUserPermissionRequest(
+          requestSequence,
+          requestedUserId,
+          requestedCompanyId,
+        )
+      ) {
+        return;
+      }
+
+      if (additiveMembershipCertified) {
+        toast.warning(
+          "A API não disponibilizou a leitura granular dos acessos. Está disponível apenas a promoção aditiva para Administrador da empresa; nenhum acesso existente poderá ser removido.",
+        );
+      } else {
+        toast.error(
+          error instanceof ApiError && error.status === 404
+            ? `A API não disponibilizou a leitura de permissões nem confirmou o vínculo deste usuário com a empresa selecionada (${requestedCompanyId}). Os acessos permanecem inalterados.`
+            : error instanceof Error
+              ? error.message
+              : "Não foi possível carregar acessos do usuário.",
+        );
+      }
       setUserPermissions({});
+      setUserPermissionBaseline({});
+      setUserPermissionBaselineCertified(false);
+      setTouchedUserPermissionSlugs(new Set());
+      setCompanyAdminPromotionRequested(false);
+      setAdditiveAdminPromotionContext(
+        additiveMembershipCertified
+          ? { companyId: requestedCompanyId, userId: requestedUserId }
+          : null,
+      );
+      const membershipUser = users.find((user) => user.id === requestedUserId);
+      if (additiveMembershipCertified && membershipUser) {
+        setUserProfileDirty(false);
+        setUserForm({
+          name: membershipUser.name,
+          email: membershipUser.email,
+          password: "",
+          active: String(membershipUser.active),
+          isMaster: false,
+          isCompanyAdmin: false,
+        });
+      }
     } finally {
-      setLoadingUserPermissions(false);
+      if (
+        isCurrentUserPermissionRequest(
+          requestSequence,
+          requestedUserId,
+          requestedCompanyId,
+        )
+      ) {
+        setLoadingUserPermissions(false);
+      }
     }
+  }
+
+  function isCurrentUserPermissionRequest(
+    requestSequence: number,
+    userId: string,
+    companyId: string,
+  ) {
+    const context = userPermissionRequestContextRef.current;
+    return (
+      requestSequence === userPermissionRequestSequenceRef.current &&
+      selectedCompanyIdRef.current === companyId &&
+      context?.companyId === companyId &&
+      context.userId === userId
+    );
   }
 
   async function saveCompany() {
@@ -730,6 +1304,12 @@ export function SuperAdminDashboard() {
       return;
     }
 
+    const timeZone = canonicalCompanyTimeZone(companyForm.timezone);
+    if (!timeZone) {
+      toast.error("Informe um timezone IANA válido para a empresa.");
+      return;
+    }
+
     setSaving(true);
     try {
       const body = {
@@ -737,7 +1317,7 @@ export function SuperAdminDashboard() {
         trade_name: companyForm.trade_name.trim() || undefined,
         cnpj: companyForm.cnpj.trim() || undefined,
         plan: companyForm.plan,
-        timezone: companyForm.timezone.trim() || "America/Sao_Paulo",
+        timezone: timeZone,
         user_limit: Math.trunc(userLimit),
         ...(editingCompany
           ? { active: companyForm.active === "true" }
@@ -746,6 +1326,7 @@ export function SuperAdminDashboard() {
 
       if (editingCompany) {
         await apiFetch(`/companies/${editingCompany.id}`, {
+          companyScopeId: editingCompany.id,
           method: "PUT",
           body,
         });
@@ -755,7 +1336,7 @@ export function SuperAdminDashboard() {
           method: "POST",
           body,
         });
-        setSelectedCompanyId(company.id);
+        selectCompanyId(company.id);
         toast.success("Empresa criada.");
       }
 
@@ -786,6 +1367,7 @@ export function SuperAdminDashboard() {
     setDeletingCompanyId(company.id);
     try {
       await apiFetch(`/companies/${company.id}`, {
+        companyScopeId: company.id,
         method: "DELETE",
       });
       toast.success("Empresa excluída.");
@@ -794,12 +1376,13 @@ export function SuperAdminDashboard() {
       if (storedScope?.id === company.id) {
         clearStoredMasterCompanyScope();
       }
-      if (selectedCompanyId === company.id) {
-        setSelectedCompanyId("");
+      if (selectedCompanyIdRef.current === company.id) {
+        selectCompanyId("");
         setUsers([]);
         setCompanyModules([]);
         setWorkers([]);
         setWorkerScopeWarning("");
+        setCompanyOperationalWarnings([]);
         setCompanyStats(null);
         setCompanyDetailsError("");
       }
@@ -816,6 +1399,7 @@ export function SuperAdminDashboard() {
     const name = userForm.name.trim();
     const email = userForm.email.trim();
     const password = userForm.password;
+    const companyId = selectedCompanyIdRef.current.trim();
 
     if (!name || !email) {
       toast.error("Nome e e-mail são obrigatórios.");
@@ -832,15 +1416,71 @@ export function SuperAdminDashboard() {
       return;
     }
 
-    if (!selectedCompanyId) {
+    if (!companyId) {
       toast.error("Selecione uma empresa antes de salvar o usuário.");
       return;
     }
 
+    const editingUserCompanyId = editingUser
+      ? getScopedRowCompanyId(editingUser)
+      : "";
+    if (editingUserCompanyId && editingUserCompanyId !== companyId) {
+      toast.error(
+        "O usuário aberto não pertence mais à empresa selecionada. Reabra o cadastro pela empresa correta.",
+      );
+      return;
+    }
+
+    if (userForm.isCompanyAdmin) {
+      const uncertifiablePermissionSlugs = missingCompanyAdminPermissionSlugs(
+        visiblePermissionOptions,
+        enabledCompanyModuleIds,
+      );
+      if (uncertifiablePermissionSlugs.length) {
+        toast.error(
+          companyAdminCertificationErrorMessage(
+            uncertifiablePermissionSlugs,
+            visiblePermissionOptions,
+          ),
+        );
+        return;
+      }
+    }
+
     setSaving(true);
     try {
+      if (additiveAdminPromotionMode) {
+        if (
+          !editingUser ||
+          userForm.isMaster ||
+          userProfileDirty ||
+          touchedUserPermissionSlugs.size > 0 ||
+          !companyAdminPromotionRequested ||
+          !userForm.isCompanyAdmin
+        ) {
+          throw new Error(
+            "Neste modo restrito somente a promoção aditiva para Administrador da empresa pode ser salva. Nenhum acesso foi alterado.",
+          );
+        }
+
+        await promoteCompanyUserToAdminAdditively({
+          companyId,
+          expectedEmail: editingUser.email,
+          grants: additiveCompanyAdminGrants(
+            visiblePermissionOptions,
+            enabledCompanyModuleIds,
+          ),
+          userId: editingUser.id,
+        });
+        toast.success(
+          "Administrador da empresa promovido de forma aditiva. Todas as respostas de permissão foram certificadas.",
+        );
+        closeUserDialog();
+        await loadCompanyDetails(companyId);
+        return;
+      }
+
       if (userForm.isMaster) {
-        const companyId = selectedCompanyId.trim();
         const body = {
           name,
           email,
@@ -853,47 +1493,78 @@ export function SuperAdminDashboard() {
           await apiFetch(`/users/${editingUser.id}`, {
             method: "PUT",
             body,
+            companyScopeId: companyId,
           });
           toast.success("Usuário promovido a super-admin.");
         } else {
           await apiFetch(`/companies/${companyId}/users`, {
             method: "POST",
             body,
+            companyScopeId: companyId,
           });
           toast.success("Super-admin criado.");
         }
 
-        setUserDialog(false);
+        closeUserDialog();
         await loadCompanies();
-        await loadCompanyDetails();
+        await loadCompanyDetails(companyId);
         return;
       }
 
       let savedUser: ManagedUser | undefined;
-      const profileChanged = editingUser ? userProfileDirty : true;
+      let profileUpdateWarning = "";
+      const hasAccessMutation =
+        companyAdminPromotionRequested || touchedUserPermissionSlugs.size > 0;
 
       if (editingUser) {
         savedUser = editingUser;
-        if (profileChanged) {
-          savedUser = await apiFetch<ManagedUser>(
-            `/users/${editingUser.id}`,
-            {
-              method: "PUT",
-              body: {
-                name,
-                email,
-                is_master: false,
-                active: userForm.active === "true",
-                ...(password ? { password } : undefined),
-              },
-            },
-          );
+        const profileUpdate = buildCompanyUserProfileUpdate(
+          editingUser,
+          {
+            name,
+            email,
+            password,
+            active: userForm.active === "true",
+          },
+          { profileTouched: userProfileDirty },
+        );
+        if (profileUpdate) {
+          try {
+            const { route } = await discoverCompanyUserResource<ManagedUser>(
+              companyId,
+              editingUser.id,
+              "",
+            );
+            savedUser = await mutateCompanyUserResource<
+              ManagedUser | undefined
+            >(
+              route,
+              "",
+              { method: "PUT", body: profileUpdate },
+            );
+          } catch (error) {
+            if (
+              !(error instanceof ApiError) ||
+              error.status !== 404 ||
+              !hasAccessMutation
+            ) {
+              throw error;
+            }
+
+            // A falha da rota de perfil não pode impedir uma alteração de
+            // acesso que usa a identidade já certificada pela listagem da
+            // empresa. A sincronização abaixo continua de forma independente.
+            profileUpdateWarning =
+              "Os acessos foram processados separadamente, mas os dados cadastrais não puderam ser atualizados pela API.";
+            savedUser = editingUser;
+          }
         }
       } else {
         savedUser = await apiFetch<ManagedUser | undefined>(
-          `/companies/${selectedCompanyId}/users`,
+          `/companies/${companyId}/users`,
           {
             method: "POST",
+            companyScopeId: companyId,
             body: {
               name,
               email,
@@ -905,19 +1576,45 @@ export function SuperAdminDashboard() {
       }
 
       let permissionSyncError = "";
-      const savedUserId = await resolveSavedCompanyUserId(savedUser, email);
-      if (savedUserId) {
-        try {
-          await syncUserPermissions(savedUserId);
-        } catch (error) {
+      if (hasAccessMutation) {
+        const savedUserId = await resolveSavedCompanyUserId(
+          savedUser,
+          email,
+          companyId,
+          editingUser?.id,
+        );
+        if (savedUserId) {
+          try {
+            await syncUserPermissions(savedUserId, companyId);
+          } catch (error) {
+            permissionSyncError =
+              error instanceof ApiError
+                ? `API respondeu ${error.status}: ${error.message}`
+                : error instanceof Error
+                  ? error.message
+                  : "Não foi possível sincronizar os acessos do usuário.";
+          }
+        } else {
           permissionSyncError =
-            error instanceof Error
-              ? error.message
-              : "Não foi possível sincronizar os acessos do usuário.";
+            "A API salvou o usuário, mas não retornou nem permitiu localizar o ID para aplicar os acessos.";
         }
-      } else {
-        permissionSyncError =
-          "A API salvou o usuário, mas não retornou nem permitiu localizar o ID para aplicar os acessos.";
+      }
+
+      if (permissionSyncError) {
+        toast.error(
+          `${editingUser ? "Não foi possível concluir a sincronização dos acessos" : "Usuário criado, mas os acessos não foram sincronizados"}: ${permissionSyncError}${profileUpdateWarning ? ` ${profileUpdateWarning}` : ""}`,
+        );
+        if (editingUser) return;
+        closeUserDialog();
+        await loadCompanyDetails(companyId);
+        return;
+      }
+
+      if (profileUpdateWarning) {
+        toast.warning(profileUpdateWarning);
+        closeUserDialog();
+        await loadCompanyDetails(companyId);
+        return;
       }
 
       toast.success(
@@ -929,20 +1626,13 @@ export function SuperAdminDashboard() {
             ? "Usuário atualizado."
             : "Usuário criado.",
       );
-      if (permissionSyncError) {
-        toast(
-          `Usuário salvo, mas os acessos não foram sincronizados: ${permissionSyncError}`,
-        );
-      }
-      setUserDialog(false);
-      await loadCompanyDetails();
+      closeUserDialog();
+      await loadCompanyDetails(companyId);
     } catch (error) {
       toast.error(
         userForm.isMaster
-          ? masterSaveErrorMessage(error, selectedCompanyId)
-          : error instanceof Error
-            ? error.message
-            : "Falha ao salvar usuário.",
+          ? masterSaveErrorMessage(error, companyId)
+          : companyUserSaveErrorMessage(error, companyId),
       );
     } finally {
       setSaving(false);
@@ -952,20 +1642,25 @@ export function SuperAdminDashboard() {
   async function deleteCompanyUser(user: ManagedUser) {
     if (!window.confirm(`Excluir o usuário "${user.name}"?`)) return;
 
+    const companyId = selectedCompanyIdRef.current;
+    if (!companyId) return;
     setDeletingUserId(user.id);
     try {
-      await apiFetch(`/users/${user.id}`, {
-        method: "DELETE",
-      });
+      const { route } = await discoverCompanyUserResource(
+        companyId,
+        user.id,
+      );
+      await mutateCompanyUserResource(route, "", { method: "DELETE" });
+      if (selectedCompanyIdRef.current !== companyId) return;
       toast.success("Usuário excluído.");
       if (editingUser?.id === user.id) {
-        setUserDialog(false);
-        setEditingUser(null);
+        closeUserDialog();
       }
-      await loadCompanyDetails();
+      await loadCompanyDetails(companyId);
     } catch (error) {
+      if (selectedCompanyIdRef.current !== companyId) return;
       toast.error(
-        userDeleteErrorMessage(error, user.name, selectedCompanyId),
+        userDeleteErrorMessage(error, user.name, companyId),
       );
     } finally {
       setDeletingUserId("");
@@ -1011,12 +1706,14 @@ export function SuperAdminDashboard() {
       };
       if (editingMasterUser) {
         await apiFetch(`/users/${editingMasterUser.id}`, {
+          companyScopeId: companyId,
           method: "PUT",
           body,
         });
         toast.success("Super-admin atualizado.");
       } else {
         await apiFetch(`/companies/${companyId}/users`, {
+          companyScopeId: companyId,
           method: "POST",
           body,
         });
@@ -1045,6 +1742,7 @@ export function SuperAdminDashboard() {
     setDeletingUserId(user.id);
     try {
       await apiFetch(`/users/${user.id}`, {
+        companyScopeId: selectedCompanyId,
         method: "DELETE",
       });
       toast.success("Super-admin excluído.");
@@ -1076,7 +1774,7 @@ export function SuperAdminDashboard() {
     companyId: string,
   ) {
     if (error instanceof ApiError && error.status === 404) {
-      return `Não foi possível excluir "${userName}". A API não encontrou o usuário dentro da empresa selecionada (${companyId}); isso costuma acontecer quando o backend ignora o escopo master.`;
+      return `Não foi possível excluir "${userName}". O usuário não foi localizado pelas rotas compatíveis da empresa selecionada (${companyId}); nenhuma exclusão foi simulada localmente.`;
     }
 
     return error instanceof Error ? error.message : "Falha ao excluir usuário.";
@@ -1102,64 +1800,103 @@ export function SuperAdminDashboard() {
       : "Falha ao salvar super-admin.";
   }
 
+  function companyUserSaveErrorMessage(error: unknown, companyId: string) {
+    if (error instanceof ApiError && error.status === 404) {
+      return `A API não disponibilizou uma rota de permissões para este usuário na empresa selecionada (${companyId}). Nenhum acesso foi alterado.`;
+    }
+
+    return error instanceof Error ? error.message : "Falha ao salvar usuário.";
+  }
+
   async function resolveSavedCompanyUserId(
     savedUser: ManagedUser | undefined,
     email: string,
+    companyId: string,
+    editingUserId?: string,
   ) {
-    if (savedUser?.id) return savedUser.id;
-    if (editingUser?.id) return editingUser.id;
+    if (savedUser?.id) {
+      return certifyCompanyUserMutationIdentity(savedUser, {
+        companyId,
+        userId: editingUserId,
+      });
+    }
+    if (editingUserId) return editingUserId;
 
     const normalizedEmail = email.trim().toLowerCase();
-    if (!normalizedEmail || !selectedCompanyId) return "";
+    if (!normalizedEmail || !companyId) return "";
 
     const rows = await apiFetch<ManagedUser[]>(
-      `/companies/${selectedCompanyId}/users`,
-    ).catch(() => []);
+      `/companies/${companyId}/users`,
+      { companyScopeId: companyId },
+    );
     const found = rows.find(
       (user) => user.email.trim().toLowerCase() === normalizedEmail,
     );
 
-    return found?.id ?? "";
+    return certifyCompanyUserMutationIdentity(found, { companyId });
   }
 
-  async function syncUserPermissions(userId: string) {
+  async function syncUserPermissions(userId: string, companyId: string) {
     const availableOptions = visiblePermissionOptions.filter(
-      (option) => !option.unavailable,
+      (option) =>
+        enabledPermissionGrantSlugs(option, enabledCompanyModuleIds).length > 0,
     );
-    if (!availableOptions.length) return;
+    if (!availableOptions.length && !companyAdminPromotionRequested) return;
 
-    const currentPermissions = await apiFetch<UserPermission[]>(
-      `/users/${userId}/permissions`,
-    ).catch(() => []);
+    const permissionResource = await discoverCompanyUserResource<
+      UserPermission[]
+    >(companyId, userId, "/permissions");
+    const currentPermissions = permissionResource.value;
+    const permissionRoute = permissionResource.route;
     const grantedSlugs = new Set(
       currentPermissions
         .filter((permission) => permission.slug && permissionIsEnabled(permission))
         .map((permission) => permission.slug),
     );
+    if (companyAdminPromotionRequested) {
+      await grantCompanyAdminOperationalPermissions(
+        permissionRoute,
+        visiblePermissionOptions,
+        grantedSlugs,
+        enabledCompanyModuleIds,
+      );
+    }
     const selectedOptions = availableOptions.filter(
-      (option) =>
-        isBackendGrantablePermissionOption(option) &&
-        Boolean(userPermissions[option.slug]),
+      (option) => Boolean(userPermissions[option.slug]),
     );
+    const syncPlan = availableOptions.map((option) => ({
+      action: resolvePermissionMutation({
+        baselineCertified: userPermissionBaselineCertified,
+        companyAdminPromotion: companyAdminPromotionRequested,
+        desired: Boolean(userPermissions[option.slug]),
+        enabledModuleIds: enabledCompanyModuleIds,
+        option,
+        permissionTouched: touchedUserPermissionSlugs.has(option.slug),
+      }),
+      option,
+    }));
+    if (syncPlan.some((item) => item.action === "blocked-revoke")) {
+      throw new Error(
+        "Os acessos atuais não foram certificados pela API. Reabra o usuário antes de remover permissões; nenhum acesso foi revogado.",
+      );
+    }
 
-    for (const option of availableOptions) {
-      if (!isBackendGrantablePermissionOption(option)) continue;
-
-      const shouldGrant = Boolean(userPermissions[option.slug]);
+    for (const { action, option } of syncPlan) {
+      const shouldGrant = action === "grant";
       const matchingPermissions = currentPermissions.filter((permission) =>
         userPermissionMatchesOption(permission, option),
       );
 
       if (shouldGrant) {
         await grantUserPermission(
-          userId,
+          permissionRoute,
           option,
           grantedSlugs,
           enabledCompanyModuleIds,
         );
       }
 
-      if (!shouldGrant) {
+      if (action === "revoke") {
         for (const permission of matchingPermissions) {
           const isNeededBySelectedOption = selectedOptions.some(
             (selectedOption) =>
@@ -1170,43 +1907,97 @@ export function SuperAdminDashboard() {
 
           const permissionId = getPermissionRecordId(permission);
           if (!permissionId) continue;
-          await revokeUserPermission(userId, permissionId);
+          await revokeUserPermission(permissionRoute, permissionId);
           if (permission.slug) {
             grantedSlugs.delete(permission.slug);
           }
         }
       }
     }
+
+    const verifiedPermissions = await readCompanyUserResourceAtRoute<
+      UserPermission[]
+    >(
+      permissionRoute,
+      "/permissions",
+    );
+    const verifiedState = createPermissionState(
+      verifiedPermissions,
+      visiblePermissionOptions,
+    );
+    const certifiedAsCompanyAdmin = isCertifiedCompanyAdminState(
+      verifiedState,
+      visiblePermissionOptions,
+      enabledCompanyModuleIds,
+    );
+    setUserPermissions(verifiedState);
+    setUserPermissionBaseline(verifiedState);
+    setUserPermissionBaselineCertified(true);
+    setUserForm((form) => ({
+      ...form,
+      isCompanyAdmin: certifiedAsCompanyAdmin,
+    }));
+
+    if (
+      (companyAdminPromotionRequested || userForm.isCompanyAdmin) &&
+      !certifiedAsCompanyAdmin
+    ) {
+      const uncertifiablePermissionSlugs = missingCompanyAdminPermissionSlugs(
+        visiblePermissionOptions,
+        enabledCompanyModuleIds,
+      );
+      throw new Error(
+        uncertifiablePermissionSlugs.length
+          ? companyAdminCertificationErrorMessage(
+              uncertifiablePermissionSlugs,
+              visiblePermissionOptions,
+            )
+          : "A API não confirmou todos os acessos operacionais solicitados. O usuário não foi anunciado como administrador da empresa.",
+      );
+    }
   }
 
   async function toggleCompanyModule(module: IpxModule) {
-    if (!selectedCompanyId) return;
+    const companyId = selectedCompanyIdRef.current;
+    if (!companyId) return;
 
     const assignment = companyModules.find((row) => row.module_id === module.id);
     setUpdatingModuleId(module.id);
 
     try {
       if (!assignment) {
-        await apiFetch(`/companies/${selectedCompanyId}/modules`, {
+        await apiFetch(`/companies/${companyId}/modules`, {
+          companyScopeId: companyId,
           method: "POST",
           body: { module_id: module.id, enabled: true },
         });
         toast.success("Módulo habilitado.");
       } else {
-        await apiFetch(`/companies/${selectedCompanyId}/modules/${module.id}`, {
+        await apiFetch(`/companies/${companyId}/modules/${module.id}`, {
+          companyScopeId: companyId,
           method: "PUT",
           body: { enabled: !assignment.enabled },
         });
         toast.success(assignment.enabled ? "Módulo desabilitado." : "Módulo habilitado.");
       }
 
-      await loadCompanyDetails();
+      await loadCompanyDetails(companyId);
     } catch (error) {
+      if (selectedCompanyIdRef.current !== companyId) return;
       toast.error(error instanceof Error ? error.message : "Falha ao alterar módulo.");
     } finally {
       setUpdatingModuleId("");
     }
   }
+
+  const workerOperationalWarning = companyOperationalWarnings.find(
+    (warning) => warning.resource === "workers",
+  );
+  const authenticatedCompanyId = getCurrentUserCompanyId(currentUser);
+  const canEnumerateSelectedCompanyWorkers = Boolean(
+    selectedCompanyId &&
+      (!authenticatedCompanyId || authenticatedCompanyId === selectedCompanyId),
+  );
 
   return (
     <section className="space-y-4">
@@ -1234,8 +2025,18 @@ export function SuperAdminDashboard() {
         <MetricCard
           icon={ServerCog}
           label="Workers"
-          value={formatNumber(workers.length)}
-          detail="Vinculados à empresa"
+          value={
+            companyStats?.workers === null || workerOperationalWarning
+              ? "—"
+              : formatNumber(companyStats?.workers ?? 0)
+          }
+          detail={
+            workerOperationalWarning
+              ? "Dados não certificados"
+              : companyStats?.workers === null
+                ? "Catálogo vinculado à sessão"
+                : "Vinculados à empresa"
+          }
         />
       </div>
 
@@ -1253,7 +2054,7 @@ export function SuperAdminDashboard() {
             className="w-full sm:w-auto"
             onClick={() => {
               loadCompanies();
-              loadCompanyDetails();
+              loadCompanyDetails(selectedCompanyId);
             }}
             disabled={loading || loadingDetails}
           >
@@ -1389,12 +2190,12 @@ export function SuperAdminDashboard() {
             company={selectedCompany}
             error={companyDetailsError}
             loading={loadingDetails}
+            warnings={companyOperationalWarnings}
             stats={
               companyStats
                 ? {
                     ...companyStats,
                     users: users.length,
-                    workers: workers.length,
                   }
                 : null
             }
@@ -1693,7 +2494,7 @@ export function SuperAdminDashboard() {
                     type="button"
                     variant="outline"
                     className="w-full sm:w-auto"
-                    onClick={() => loadCompanyDetails()}
+                    onClick={() => loadCompanyDetails(selectedCompanyId)}
                     disabled={!selectedCompanyId || loadingDetails}
                   >
                     <RefreshCw
@@ -1703,6 +2504,11 @@ export function SuperAdminDashboard() {
                   </Button>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  {workerOperationalWarning ? (
+                    <OperationalResourceWarningNotice
+                      warning={workerOperationalWarning}
+                    />
+                  ) : null}
                   {workerScopeWarning ? (
                     <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
                       {workerScopeWarning}
@@ -1710,6 +2516,8 @@ export function SuperAdminDashboard() {
                   ) : null}
                   {loadingDetails ? (
                     <TableSkeleton />
+                  ) : !canEnumerateSelectedCompanyWorkers ? (
+                    <EmptyState text="A lista detalhada de Workers é disponibilizada somente para a empresa assinada na sessão. Os demais dados certificados da empresa selecionada permanecem acessíveis." />
                   ) : workers.length ? (
                     <Table>
                       <TableHeader>
@@ -1775,6 +2583,8 @@ export function SuperAdminDashboard() {
                         })}
                       </TableBody>
                     </Table>
+                  ) : workerOperationalWarning ? (
+                    <EmptyState text="Workers não certificados para esta empresa." />
                   ) : (
                     <EmptyState text="Nenhum worker retornado para esta empresa." />
                   )}
@@ -1898,7 +2708,7 @@ export function SuperAdminDashboard() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={userDialog} onOpenChange={setUserDialog}>
+      <Dialog open={userDialog} onOpenChange={handleUserDialogOpenChange}>
         <DialogContent className="max-h-[92vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>
@@ -1913,21 +2723,21 @@ export function SuperAdminDashboard() {
             <div className="grid gap-4 md:grid-cols-2">
               <FormField label="Nome">
                 <Input
+                  disabled={additiveAdminPromotionMode}
                   value={userForm.name}
-                  onChange={(event) => {
-                    setUserProfileDirty(true);
-                    setUserForm((form) => ({ ...form, name: event.target.value }));
-                  }}
+                  onChange={(event) =>
+                    setUserProfileField("name", event.target.value)
+                  }
                 />
               </FormField>
               <FormField label="E-mail">
                 <Input
+                  disabled={additiveAdminPromotionMode}
                   type="email"
                   value={userForm.email}
-                  onChange={(event) => {
-                    setUserProfileDirty(true);
-                    setUserForm((form) => ({ ...form, email: event.target.value }));
-                  }}
+                  onChange={(event) =>
+                    setUserProfileField("email", event.target.value)
+                  }
                 />
               </FormField>
             </div>
@@ -1935,25 +2745,23 @@ export function SuperAdminDashboard() {
             <div className="grid gap-4 md:grid-cols-2">
               <FormField label={editingUser ? "Nova senha" : "Senha"}>
                 <Input
+                  disabled={additiveAdminPromotionMode}
                   type="password"
+                  autoComplete="new-password"
                   value={userForm.password}
                   placeholder={editingUser ? "Deixe em branco para manter" : ""}
-                  onChange={(event) => {
-                    setUserProfileDirty(true);
-                    setUserForm((form) => ({
-                      ...form,
-                      password: event.target.value,
-                    }));
-                  }}
+                  onChange={(event) =>
+                    setUserProfileField("password", event.target.value)
+                  }
                 />
               </FormField>
               {editingUser ? (
                 <StatusSelect
+                  disabled={additiveAdminPromotionMode}
                   value={userForm.active}
-                  onValueChange={(active) => {
-                    setUserProfileDirty(true);
-                    setUserForm((form) => ({ ...form, active }));
-                  }}
+                  onValueChange={(active) =>
+                    setUserProfileField("active", active)
+                  }
                 />
               ) : (
                 <div className="hidden md:block" />
@@ -1966,12 +2774,14 @@ export function SuperAdminDashboard() {
                 userForm.isMaster
                   ? "border-primary/30 bg-primary/10"
                   : "border-border bg-card",
+                additiveAdminPromotionMode && "cursor-default opacity-60",
               )}
             >
               <input
                 type="checkbox"
                 className="mt-1 h-4 w-4 accent-primary"
                 checked={userForm.isMaster}
+                disabled={additiveAdminPromotionMode}
                 onChange={(event) => setSuperAdminAccess(event.target.checked)}
               />
               <span className="min-w-0">
@@ -1989,7 +2799,12 @@ export function SuperAdminDashboard() {
             <label
               className={cn(
                 "flex cursor-pointer items-start gap-3 rounded-md border px-3 py-3 transition",
-                userForm.isMaster && "cursor-default opacity-60",
+                (userForm.isMaster ||
+                  loadingUserPermissions ||
+                  (Boolean(editingUser) &&
+                    !userPermissionBaselineCertified &&
+                    !additiveAdminPromotionMode)) &&
+                  "cursor-default opacity-60",
                 userForm.isCompanyAdmin
                   ? "border-primary/30 bg-primary/10"
                   : "border-border bg-card",
@@ -1999,7 +2814,13 @@ export function SuperAdminDashboard() {
                 type="checkbox"
                 className="mt-1 h-4 w-4 accent-primary"
                 checked={userForm.isCompanyAdmin}
-                disabled={userForm.isMaster}
+                disabled={
+                  userForm.isMaster ||
+                  loadingUserPermissions ||
+                  (Boolean(editingUser) &&
+                    !userPermissionBaselineCertified &&
+                    !additiveAdminPromotionMode)
+                }
                 onChange={(event) => setCompanyAdminAccess(event.target.checked)}
               />
               <span className="min-w-0">
@@ -2008,8 +2829,8 @@ export function SuperAdminDashboard() {
                   Administrador da empresa
                 </span>
                 <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                  Usuário da empresa com todos os acessos operacionais
-                  disponíveis. Não é superadmin.
+                  Concede, de forma aditiva, todas as permissões publicadas dos
+                  módulos operacionais habilitados. Não é superadmin.
                 </span>
               </span>
             </label>
@@ -2021,7 +2842,7 @@ export function SuperAdminDashboard() {
                     Acessos operacionais
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Selecione o que este usuário pode configurar.
+                    Selecione individualmente as ações publicadas pela API.
                   </div>
                 </div>
                 {loadingUserPermissions ? (
@@ -2033,6 +2854,25 @@ export function SuperAdminDashboard() {
                 <div className="mt-3 rounded-md border border-border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
                   Super-admin usa is_master=true. O frontend não chama
                   {` /users/{id}/permissions `}para este tipo de usuário.
+                </div>
+              ) : additiveAdminPromotionMode ? (
+                <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-sm text-foreground">
+                  A API confirmou este usuário em
+                  {` GET /companies/{companyId}/users`}, mas não disponibilizou
+                  a leitura de suas permissões. Neste modo, somente o controle
+                  <strong> Administrador da empresa</strong> está disponível.
+                  Ao salvar, o vínculo será relido e todos os acessos dos
+                  módulos habilitados serão concedidos de forma aditiva. Dados
+                  cadastrais, acessos granulares e permissões existentes não
+                  serão alterados ou removidos.
+                </div>
+              ) : editingUser &&
+                !loadingUserPermissions &&
+                !userPermissionBaselineCertified ? (
+                <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-sm text-foreground">
+                  Os acessos deste usuário não foram certificados pela API para
+                  a empresa selecionada. A edição de permissões foi bloqueada
+                  para evitar uma alteração parcial ou em outro tenant.
                 </div>
               ) : permissionGroups.length ? (
                 <div className="mt-3 space-y-3">
@@ -2068,7 +2908,13 @@ export function SuperAdminDashboard() {
                               className="mt-1 h-4 w-4 accent-primary"
                               checked={Boolean(userPermissions[permission.slug])}
                               disabled={loadingUserPermissions || permission.unavailable}
-                              onChange={(event) =>
+                              onChange={(event) => {
+                                setCompanyAdminPromotionRequested(false);
+                                setTouchedUserPermissionSlugs((current) => {
+                                  const next = new Set(current);
+                                  next.add(permission.slug);
+                                  return next;
+                                });
                                 setUserPermissions((current) => {
                                   const next = {
                                     ...current,
@@ -2076,14 +2922,15 @@ export function SuperAdminDashboard() {
                                   };
                                   setUserForm((form) => ({
                                     ...form,
-                                    isCompanyAdmin: hasAllAvailablePermissions(
+                                    isCompanyAdmin: isCertifiedCompanyAdminState(
                                       next,
                                       visiblePermissionOptions,
+                                      enabledCompanyModuleIds,
                                     ),
                                   }));
                                   return next;
-                                })
-                              }
+                                });
+                              }}
                             />
                             <span className="min-w-0">
                               <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
@@ -2094,6 +2941,14 @@ export function SuperAdminDashboard() {
                               </span>
                               <span className="mt-1 block break-words text-xs leading-5 text-muted-foreground">
                                 {permission.description}
+                              </span>
+                              <span className="mt-2 grid min-w-0 gap-1 text-[11px] leading-4 text-muted-foreground">
+                                <span className="min-w-0 break-all">
+                                  Slug: <code>{permission.slug}</code>
+                                </span>
+                                <span className="min-w-0 break-all">
+                                  Módulo: <code>{permission.module_id}</code>
+                                </span>
                               </span>
                             </span>
                           </label>
@@ -2114,14 +2969,19 @@ export function SuperAdminDashboard() {
             <Button
               type="button"
               variant="outline"
-              onClick={() => setUserDialog(false)}
+              onClick={closeUserDialog}
             >
               Cancelar
             </Button>
             <Button
               type="button"
               onClick={saveUser}
-              disabled={saving || (!userForm.isMaster && loadingUserPermissions)}
+              disabled={
+                saving ||
+                (!userForm.isMaster && loadingUserPermissions) ||
+                (additiveAdminPromotionMode &&
+                  !companyAdminPromotionRequested)
+              }
             >
               <Save className="h-4 w-4" />
               Salvar
@@ -2171,6 +3031,7 @@ export function SuperAdminDashboard() {
             <FormField label={editingMasterUser ? "Nova senha" : "Senha"}>
               <Input
                 type="password"
+                autoComplete="new-password"
                 value={masterUserForm.password}
                 placeholder={editingMasterUser ? "Deixe em branco para manter" : ""}
                 onChange={(event) =>
@@ -2294,25 +3155,30 @@ function CompanyManagementFlow({
   error,
   loading,
   stats,
+  warnings,
   onOpenRoute,
   onOpenTab,
 }: {
   company: Company | null;
   error: string;
   loading: boolean;
+  warnings: CompanyOperationalWarning[];
   stats:
     | (CompanyOperationalStats & {
         users: number;
-        workers: number;
+        workers: number | null;
       })
     | null;
   onOpenRoute: (path: string) => void;
   onOpenTab: (tab: CompanyTab) => void;
 }) {
   const disabled = !company || loading || !stats;
-  const scenarioTotal = stats
-    ? stats.countingScenarios + stats.occupancyScenarios
-    : 0;
+  const scenarioTotal =
+    stats?.countingScenarios !== null &&
+    stats?.countingScenarios !== undefined &&
+    stats.occupancyScenarios !== null
+      ? stats.countingScenarios + stats.occupancyScenarios
+      : null;
   const steps = stats
     ? [
     {
@@ -2366,7 +3232,9 @@ function CompanyManagementFlow({
     {
       index: "07",
       label: "Cenários",
-      detail: `${formatNumber(stats.countingScenarios)} contagem / ${formatNumber(
+      detail: `${formatCertifiedOperationalCount(
+        stats.countingScenarios,
+      )} contagem / ${formatCertifiedOperationalCount(
         stats.occupancyScenarios,
       )} ocupação`,
       count: scenarioTotal,
@@ -2384,55 +3252,98 @@ function CompanyManagementFlow({
           {company ? company.name : "Selecione uma empresa para ver a hierarquia."}
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
         {error ? (
           <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm font-medium text-destructive">
             Totais operacionais não certificados: {error}
           </div>
         ) : (
-        <div className="grid gap-2 md:grid-cols-2">
-          {steps.map((step) => {
-            const Icon = step.icon;
+          <>
+            {warnings.length ? (
+              <div className="space-y-2 rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-3 text-xs leading-5 text-amber-800 dark:text-amber-200">
+                <div className="font-semibold">Dados operacionais parciais.</div>
+                <div className="space-y-1">
+                  {warnings.map((warning) => (
+                    <OperationalResourceWarningNotice
+                      key={warning.resource}
+                      warning={warning}
+                      embedded
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <div className="grid gap-2 md:grid-cols-2">
+              {steps.map((step) => {
+                const Icon = step.icon;
 
-            return (
-              <button
-                key={step.index}
-                type="button"
-                className={cn(
-                  "group flex min-h-20 items-center gap-3 rounded-md border border-border bg-background px-3 py-3 text-left transition",
-                  "hover:border-primary/30 hover:bg-primary/5 disabled:cursor-not-allowed disabled:opacity-60",
-                )}
-                onClick={step.onClick}
-                disabled={disabled}
-                data-premium-hover
-              >
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  <Icon className="h-4 w-4" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-semibold text-muted-foreground">
-                      {step.index}
-                    </span>
-                    <span className="truncate text-sm font-medium text-foreground">
-                      {step.label}
-                    </span>
-                  </div>
-                  <div className="mt-1 truncate text-xs text-muted-foreground">
-                    {step.detail}
-                  </div>
-                </div>
-                <div className="rounded-md border border-border bg-card px-2 py-1 text-xs font-semibold text-foreground">
-                  {loading ? "..." : formatNumber(step.count)}
-                </div>
-              </button>
-            );
-          })}
-        </div>
+                return (
+                  <button
+                    key={step.index}
+                    type="button"
+                    className={cn(
+                      "group flex min-h-20 items-center gap-3 rounded-md border border-border bg-background px-3 py-3 text-left transition",
+                      "hover:border-primary/30 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60",
+                    )}
+                    onClick={step.onClick}
+                    disabled={disabled || step.count === null}
+                    data-premium-hover
+                  >
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                      <Icon className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-semibold text-muted-foreground">
+                          {step.index}
+                        </span>
+                        <span className="truncate text-sm font-medium text-foreground">
+                          {step.label}
+                        </span>
+                      </div>
+                      <div className="mt-1 truncate text-xs text-muted-foreground">
+                        {step.detail}
+                      </div>
+                    </div>
+                    <div className="rounded-md border border-border bg-card px-2 py-1 text-xs font-semibold text-foreground">
+                      {loading
+                        ? "..."
+                        : formatCertifiedOperationalCount(step.count)}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </>
         )}
       </CardContent>
     </Card>
   );
+}
+
+function OperationalResourceWarningNotice({
+  warning,
+  embedded = false,
+}: {
+  warning: CompanyOperationalWarning;
+  embedded?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "break-words",
+        !embedded &&
+          "rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300",
+      )}
+    >
+      <span className="font-semibold">{warning.label}:</span>{" "}
+      {warning.message}
+    </div>
+  );
+}
+
+function formatCertifiedOperationalCount(value: number | null) {
+  return value === null ? "—" : formatNumber(value);
 }
 
 function Detail({ label, value }: { label: string; value: string }) {
@@ -2460,15 +3371,17 @@ function FormField({
 }
 
 function StatusSelect({
+  disabled = false,
   value,
   onValueChange,
 }: {
+  disabled?: boolean;
   value: string;
   onValueChange: (value: string) => void;
 }) {
   return (
     <FormField label="Status">
-      <Select value={value} onValueChange={onValueChange}>
+      <Select disabled={disabled} value={value} onValueChange={onValueChange}>
         <SelectTrigger>
           <SelectValue />
         </SelectTrigger>
@@ -2543,7 +3456,9 @@ function buildWorkerScopeWarning(
   }
   if (unscopedCount) {
     messages.push(
-      `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram ocultados porque o vínculo não pode ser comprovado.`,
+      foreignCount
+        ? `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram ocultados porque a resposta também contém outra empresa.`
+        : `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram mantidos no escopo autenticado solicitado.`,
     );
   }
   if (duplicateCount) {
@@ -2555,39 +3470,98 @@ function buildWorkerScopeWarning(
   return messages.join(" ");
 }
 
+function certifiedSettledRows<T>(
+  result: PromiseSettledResult<T[]>,
+  resource: CompanyOperationalResource,
+  label: string,
+  warnings: CompanyOperationalWarning[],
+) {
+  if (result.status === "fulfilled") return result.value;
+
+  warnings.push(operationalResourceWarning(resource, label, result.reason));
+  return null;
+}
+
+function operationalResourceWarning(
+  resource: CompanyOperationalResource,
+  label: string,
+  error: unknown,
+): CompanyOperationalWarning {
+  const errorMessage =
+    error instanceof Error
+      ? error.message.trim()
+      : typeof error === "string"
+        ? error.trim()
+        : "";
+  return {
+    resource,
+    label,
+    message:
+      errorMessage ||
+      "A API não retornou dados certificados para este recurso.",
+  };
+}
+
+function allOperationalResourceWarnings(
+  error: unknown,
+  includeJwtBoundCatalogs = true,
+) {
+  const resources: Array<readonly [CompanyOperationalResource, string]> = [
+    ...(includeJwtBoundCatalogs
+      ? ([
+          ["workers", "Workers"],
+          ["countingScenarios", "Cenários de Contagem"],
+        ] as const)
+      : []),
+    ["locations", "Locations"],
+    ["subLocations", "Sublocations"],
+    ["cameras", "Câmeras"],
+    ["occupancyScenarios", "Cenários de Ocupação"],
+  ];
+
+  return resources.map(([resource, label]) =>
+    operationalResourceWarning(resource, label, error),
+  );
+}
+
 async function fetchCompanySubLocations(
   locations: Location[],
   companyScopeIds: string[],
+  companyScopeId: string,
 ) {
   const rows = await Promise.all(
     locations.map((location) => {
       return apiFetch<unknown>(
         `/locations/${location.id}/sub-locations`,
-      ).then(requireSubLocationRows);
+        { companyScopeId },
+      ).then((value) => requireSubLocationRows(value, companyScopeId));
     }),
   );
 
   return filterRowsByCompanyScopes(
-    requireSubLocationRows(rows.flat()),
+    requireSubLocationRows(rows.flat(), companyScopeId),
     companyScopeIds,
   );
 }
 
 async function fetchValidatedRows<T>(
   path: string,
-  validate: (value: unknown) => T[],
+  validate: (value: unknown, expectedCompanyId?: string | null) => T[],
+  companyScopeId: string,
 ) {
-  return apiFetch<unknown>(path).then(validate);
+  return apiFetch<unknown>(path, { companyScopeId }).then((value) =>
+    validate(value, companyScopeId),
+  );
 }
 
-async function fetchScopedWorkers() {
-  return apiFetch<unknown>("/workers")
-    .then(requireWorkerRows);
+async function fetchScopedWorkers(companyScopeId: string) {
+  return apiFetch<unknown>("/workers", { companyScopeId })
+    .then((value) => requireWorkerRows(value, companyScopeId));
 }
 
-async function fetchScopedOccupancyScenarios() {
-  return apiFetch<unknown>("/occupancy/scenarios").then(
-    requireOccupancyScenarioRows,
+async function fetchScopedOccupancyScenarios(companyScopeId: string) {
+  return apiFetch<unknown>("/occupancy/scenarios", { companyScopeId }).then(
+    (value) => requireOccupancyScenarioRows(value, companyScopeId),
   );
 }
 
@@ -2725,17 +3699,6 @@ function createPermissionState(
   );
 }
 
-function hasAllAvailablePermissions(
-  state: Record<string, boolean>,
-  options: PermissionOption[],
-) {
-  const availableOptions = options.filter((option) => !option.unavailable);
-  return (
-    availableOptions.length > 0 &&
-    availableOptions.every((option) => Boolean(state[option.slug]))
-  );
-}
-
 function getPermissionRecordId(permission: UserPermission) {
   return permission.permission_id ?? permission.id;
 }
@@ -2758,14 +3721,6 @@ function permissionIsEnabled(permission: UserPermission) {
   return flags.length ? flags.some(Boolean) : true;
 }
 
-function isBackendGrantablePermissionOption(option: PermissionOption) {
-  return (
-    option.grants.length > 0 &&
-    option.slug !== "dashboard_widgets_manage" &&
-    option.slug !== "locations_manage"
-  );
-}
-
 function userPermissionMatchesOption(
   permission: UserPermission,
   option: PermissionOption,
@@ -2775,83 +3730,242 @@ function userPermissionMatchesOption(
 
   return Boolean(
     (permissionId && option.grants.some((grant) => grant.id === permissionId)) ||
-      (permissionSlug && option.slugs.includes(permissionSlug)),
+      (permissionSlug &&
+        option.grants.some((grant) => grant.slug === permissionSlug)),
   );
 }
 
+function additiveCompanyAdminGrants(
+  options: readonly PermissionOption[],
+  enabledModuleIds: ReadonlySet<string>,
+) {
+  return options.flatMap((option): AdditiveCompanyAdminGrant[] => {
+    if (option.unavailable) return [];
+    return option.grants
+      .filter(
+        (grant) =>
+          Boolean(grant.module_id) &&
+          enabledModuleIds.has(grant.module_id!) &&
+          (!option.module_id || grant.module_id === option.module_id),
+      )
+      .map((grant) => ({ permissionId: grant.id, slug: grant.slug }));
+  });
+}
+
 async function grantUserPermission(
-  userId: string,
+  route: CompanyUserResourceRoute,
   option: PermissionOption,
   existingSlugs: Set<string>,
   enabledModuleIds: Set<string>,
 ) {
-  const grantSlugs = uniqueStrings(
-    option.grants
-      .filter((grant) => grant.module_id && enabledModuleIds.has(grant.module_id))
-      .map((grant) => grant.slug),
+  const grantSlugs = enabledPermissionGrantSlugs(option, enabledModuleIds);
+
+  return grantPermissionSlugs(
+    route,
+    grantSlugs,
+    existingSlugs,
+    option.label,
+  );
+}
+
+async function grantCompanyAdminOperationalPermissions(
+  route: CompanyUserResourceRoute,
+  options: PermissionOption[],
+  existingSlugs: Set<string>,
+  enabledModuleIds: Set<string>,
+) {
+  const grantSlugs = enabledCompanyAdminOperationalSlugs(
+    options,
+    enabledModuleIds,
   );
 
-  for (const slug of grantSlugs) {
-    if (existingSlugs.has(slug)) continue;
+  return grantPermissionSlugs(
+    route,
+    grantSlugs,
+    existingSlugs,
+    "Administrador da empresa",
+  );
+}
 
-    try {
-      await apiFetch(`/users/${userId}/permissions`, {
-        method: "POST",
-        body: { slug },
-      });
-      existingSlugs.add(slug);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
+async function grantPermissionSlugs(
+  route: CompanyUserResourceRoute,
+  grantSlugs: string[],
+  existingSlugs: Set<string>,
+  accessLabel: string,
+) {
+  const createdSlugs: string[] = [];
+
+  try {
+    for (const slug of grantSlugs) {
+      if (existingSlugs.has(slug)) continue;
+
+      try {
+        await mutateCompanyUserResource(
+          route,
+          "/permissions",
+          {
+            method: "POST",
+            body: { slug },
+          },
+        );
         existingSlugs.add(slug);
+        createdSlugs.push(slug);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409) {
+          existingSlugs.add(slug);
+          continue;
+        }
+
+        throw permissionGrantError(error, accessLabel, slug);
+      }
+    }
+  } catch (error) {
+    const rollbackErrors = await rollbackGrantedPermissionSlugs(
+      route,
+      createdSlugs,
+    );
+    createdSlugs.forEach((slug) => existingSlugs.delete(slug));
+    const detail = error instanceof Error ? error.message : "erro desconhecido";
+    if (rollbackErrors.length) {
+      throw new Error(
+        `${detail} A promoção ficou incompleta e a reversão também falhou para: ${rollbackErrors.join(
+          ", ",
+        )}.`,
+      );
+    }
+    throw new Error(
+      createdSlugs.length
+        ? `${detail} As permissões concedidas nesta tentativa foram revertidas.`
+        : detail,
+    );
+  }
+}
+
+function permissionGrantError(
+  error: unknown,
+  accessLabel: string,
+  slug: string,
+) {
+  if (error instanceof ApiError && error.status === 404) {
+    return error;
+  }
+
+  if (error instanceof Error && error.message.includes("module not enabled")) {
+    return new Error(
+      `Habilite o módulo da permissão "${accessLabel}" para esta empresa antes de salvar o acesso.`,
+    );
+  }
+
+  if (error instanceof ApiError && error.status === 500) {
+    return new Error(
+      `Falha ao conceder "${accessLabel}" (${slug}). A API retornou erro interno na rota de acesso previamente certificada para a empresa selecionada.`,
+    );
+  }
+
+  const detail = error instanceof Error ? error.message : "erro desconhecido";
+  return new Error(
+    `Falha ao conceder "${accessLabel}" (${slug}). Backend retornou: ${detail}`,
+  );
+}
+
+async function rollbackGrantedPermissionSlugs(
+  route: CompanyUserResourceRoute,
+  slugs: string[],
+) {
+  if (!slugs.length) return [];
+
+  const rollbackErrors: string[] = [];
+  try {
+    const permissions = await readCompanyUserResourceAtRoute<UserPermission[]>(
+      route,
+      "/permissions",
+    );
+    const createdSlugSet = new Set(slugs);
+    for (const permission of permissions) {
+      if (!createdSlugSet.has(permission.slug)) continue;
+      const permissionId = getPermissionRecordId(permission);
+      if (!permissionId) {
+        rollbackErrors.push(permission.slug);
         continue;
       }
 
-      if (error instanceof Error && error.message.includes("module not enabled")) {
-        throw new Error(
-          `Habilite o módulo da permissão "${option.label}" para esta empresa antes de salvar o acesso.`,
-        );
+      try {
+        await revokeUserPermission(route, permissionId);
+      } catch {
+        rollbackErrors.push(permission.slug);
       }
-
-      if (error instanceof ApiError && error.status === 500) {
-        throw new Error(
-          `Falha ao conceder "${option.label}" (${slug}). Esta rota usa a empresa assinada no JWT e não possui operação cross-company documentada para o superadmin.`,
-        );
-      }
-
-      const detail = error instanceof Error ? error.message : "erro desconhecido";
-      throw new Error(
-        `Falha ao conceder "${option.label}" (${slug}). Backend retornou: ${detail}`,
-      );
     }
+  } catch {
+    return [...slugs];
   }
+
+  return Array.from(new Set(rollbackErrors));
 }
 
 async function revokeUserPermission(
-  userId: string,
+  route: CompanyUserResourceRoute,
   permissionId: string,
 ) {
-  try {
-    return await apiFetch(`/users/${userId}/permissions/${permissionId}`, {
-      method: "DELETE",
-    });
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) return;
-    throw error;
-  }
+  return mutateCompanyUserResource(
+    route,
+    `/permissions/${encodeURIComponent(permissionId)}`,
+    { method: "DELETE" },
+  );
 }
 
 function groupPermissionCatalog(permissions: PermissionOption[]): PermissionGroup[] {
-  return [
-    {
-      key: "operational",
-      name: "Acessos operacionais",
-      permissions,
-    },
-  ];
+  const groups = new Map<string, PermissionGroup>();
+
+  permissions.forEach((permission) => {
+    const current = groups.get(permission.module_id);
+    if (current) {
+      current.permissions.push(permission);
+      return;
+    }
+
+    groups.set(permission.module_id, {
+      key: permission.module_id,
+      name: permission.module_name,
+      permissions: [permission],
+    });
+  });
+
+  return Array.from(groups.values())
+    .map((group) => ({
+      ...group,
+      permissions: [...group.permissions].sort((left, right) =>
+        `${left.action}\u0000${left.slug}`.localeCompare(
+          `${right.action}\u0000${right.slug}`,
+          "pt-BR",
+        ),
+      ),
+    }))
+    .sort((left, right) => {
+      const leftFamily = algorithmModuleFamily(left.name);
+      const rightFamily = algorithmModuleFamily(right.name);
+      if (leftFamily && rightFamily) {
+        return algorithmFamilyOrder(leftFamily) - algorithmFamilyOrder(rightFamily);
+      }
+      return left.name.localeCompare(right.name, "pt-BR");
+    });
+}
+
+function companyAdminCertificationErrorMessage(
+  slugs: readonly string[],
+  options: readonly PermissionOption[],
+) {
+  const labels = slugs.map(
+    (slug) => options.find((option) => option.slug === slug)?.label ?? slug,
+  );
+  return `Não foi possível certificar o perfil de administrador da empresa. O catálogo ou os módulos habilitados não oferecem acesso explícito para: ${labels.join(
+    ", ",
+  )}. Nenhuma permissão existente foi removida.`;
 }
 
 function formatPermissionAction(permission: PermissionOption) {
-  return permission.label;
+  return permission.action
+    ? `Ação: ${permission.action}`
+    : "Ação não informada pela API";
 }
 
 function normalizeSlug(value: string) {
@@ -2932,105 +4046,68 @@ function isBetterAlgorithmModule(
   return candidate.name.localeCompare(current.name, "pt-BR") < 0;
 }
 
-function isSupportedModule(module: IpxModule | string | null | undefined) {
-  return Boolean(algorithmModuleFamily(module));
-}
-
 function resolveOperationalPermissionOptions(
   catalog: Permission[],
+  modules: IpxModule[],
 ): PermissionOption[] {
-  return OPERATIONAL_PERMISSIONS.map((definition) => {
-    const matches = catalog.filter((permission) =>
-      permissionMatchesOperationalDefinition(permission, definition),
-    );
-    const supportedMatches = matches.filter((permission) =>
-      isSupportedModule(permission.module?.slug ?? permission.module_id),
-    );
-    const selectedMatches = supportedMatches.length ? supportedMatches : matches;
-    const slugs = Array.from(
-      new Set(selectedMatches.map((permission) => permission.slug).filter(Boolean)),
-    );
-    const grants = uniquePermissionGrants(
-      selectedMatches.map((permission) => ({
-        id: permission.id,
-        module_id: getPermissionModuleId(permission) || undefined,
-        slug: permission.slug,
-      })),
-    );
-    const primary = selectedMatches[0];
-    const moduleId = primary ? getPermissionModuleId(primary) : "";
+  const modulesById = new Map(modules.map((module) => [module.id, module]));
+  const options = catalog.flatMap((permission): PermissionOption[] => {
+    const id = permission.id?.trim();
+    const moduleId = getPermissionModuleId(permission).trim();
+    const slug = permission.slug?.trim();
+    const catalogModule = permission.module;
+    const permissionModule = modulesById.get(moduleId) ??
+      (catalogModule
+        ? {
+            id: catalogModule.id,
+            name: catalogModule.name,
+            slug: catalogModule.slug,
+            description: catalogModule.description,
+            active: catalogModule.active !== false,
+          }
+        : undefined);
 
-    return {
-      id: definition.slug,
-      module_id: moduleId || undefined,
-      slug: definition.slug,
-      label: definition.label,
-      description: moduleId
-        ? definition.description
-        : `${definition.description} Módulo não encontrado no catálogo da API.`,
-      slugs: slugs.length ? slugs : [definition.slug],
-      grants,
-      unavailable: !moduleId,
+    if (
+      !id ||
+      !moduleId ||
+      !slug ||
+      !permissionModule ||
+      !algorithmModuleFamily(permissionModule)
+    ) {
+      return [];
+    }
+
+    const action = permission.action?.trim() ?? "";
+    const moduleName = algorithmModuleLabel(permissionModule);
+    const grant = {
+      id,
+      module_id: moduleId,
+      slug,
     };
+
+    return [
+      {
+        id,
+        module_id: moduleId,
+        module_name: moduleName,
+        module_slug: permissionModule.slug,
+        slug,
+        action,
+        label: action || slug,
+        description: `Permissão publicada pela API para o módulo ${moduleName}.`,
+        slugs: [slug],
+        grants: [grant],
+        unavailable: permissionModule.active === false,
+      },
+    ];
   });
-}
 
-function uniquePermissionGrants(grants: PermissionGrantOption[]) {
-  const bySlug = new Map<string, PermissionGrantOption>();
-  grants.forEach((grant) => {
-    if (!grant.slug || bySlug.has(grant.slug)) return;
-    bySlug.set(grant.slug, grant);
+  const optionsByPermission = new Map<string, PermissionOption>();
+  options.forEach((option) => {
+    if (!optionsByPermission.has(option.id)) {
+      optionsByPermission.set(option.id, option);
+    }
   });
-  return Array.from(bySlug.values());
-}
 
-function uniqueStrings(values: string[]) {
-  return Array.from(new Set(values.filter(Boolean)));
-}
-
-function permissionMatchesOperationalDefinition(
-  permission: Permission,
-  definition: OperationalPermissionDefinition,
-) {
-  if (permission.slug === definition.slug) return true;
-  if (
-    definition.aliases?.some(
-      (alias) => normalizeSlug(alias) === normalizeSlug(permission.slug),
-    )
-  ) {
-    return true;
-  }
-
-  const permissionText = normalizeSlug(
-    [
-      permission.slug,
-      permission.action,
-      permission.module?.slug,
-      permission.module?.name,
-    ]
-      .filter(Boolean)
-      .join(" "),
-  );
-
-  return (
-    definition.terms.some((term) => permissionText.includes(normalizeSlug(term))) &&
-    (isMutatingPermission(permission) || Boolean(getPermissionModuleId(permission)))
-  );
-}
-
-function isMutatingPermission(permission: Permission) {
-  const text = normalizeSlug([permission.slug, permission.action].join(" "));
-
-  return [
-    "manage",
-    "admin",
-    "create",
-    "edit",
-    "update",
-    "delete",
-    "write",
-    "configure",
-    "config",
-    "rotate",
-  ].some((term) => text.includes(term));
+  return Array.from(optionsByPermission.values());
 }

@@ -232,7 +232,7 @@ export function buildOccupancyAreaOptions(
 
     const areaLabel = row.area_label?.trim();
     const cameraLabel = row.camera_name?.trim();
-    const areaText = areaLabel || areaId;
+    const areaText = areaLabel || regionNameFromAreaId(areaId) || areaId;
     const cameraText = cameraLabel || compactOccupancyId(cameraId);
     const detail =
       areaText !== areaId || cameraLabel
@@ -253,8 +253,37 @@ export function buildOccupancyAreaOptions(
   );
 }
 
+function regionNameFromAreaId(areaId: string) {
+  const parts = areaId.split("|").map((part) => part.trim());
+  if (parts.length < 2 || parts.at(-1)?.toLowerCase() !== "region") {
+    return "";
+  }
+  return parts.at(-2) ?? "";
+}
+
 export function buildOccupancyAreaKey(cameraId: string, areaId: string) {
   return `${cameraId}::${areaId}`;
+}
+
+export function resolveOccupancyAreaSelectionLabel({
+  currentLabel,
+  currentOptionLabel,
+  nextOptionLabel,
+}: {
+  currentLabel?: string;
+  currentOptionLabel?: string;
+  nextOptionLabel: string;
+}) {
+  const normalizedCurrent = currentLabel?.trim();
+  if (
+    normalizedCurrent &&
+    currentOptionLabel &&
+    normalizedCurrent !== currentOptionLabel
+  ) {
+    return normalizedCurrent;
+  }
+
+  return nextOptionLabel;
 }
 
 function occupancyResponseRows(

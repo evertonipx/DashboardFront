@@ -35,7 +35,7 @@ import {
 import {
   canManageCameras,
   canManageLocations,
-  canManageScenarios,
+  canManageScenarioCatalogs,
   canManageViews,
   canManageWorkers,
 } from "@/lib/permissions";
@@ -102,7 +102,7 @@ const managerNavItems: NavItem[] = [
     href: "/manager/scenarios",
     label: "Cenários",
     icon: Filter,
-    canShow: canManageScenarios,
+    canShow: canManageScenarioCatalogs,
   },
 ];
 
@@ -166,9 +166,14 @@ export function AppShell({
   }, [isMaster, user]);
 
   React.useEffect(() => {
-    const storedPreference = window.localStorage.getItem(
-      SIDEBAR_COLLAPSED_STORAGE_KEY,
-    );
+    let storedPreference: string | null = null;
+    try {
+      storedPreference = window.localStorage.getItem(
+        SIDEBAR_COLLAPSED_STORAGE_KEY,
+      );
+    } catch {
+      // The responsive default remains available when storage is blocked.
+    }
     setSidebarCollapsed(
       storedPreference === null
         ? window.matchMedia("(max-width: 1279px)").matches
@@ -179,10 +184,14 @@ export function AppShell({
   function toggleSidebar() {
     setSidebarCollapsed((collapsed) => {
       const next = !collapsed;
-      window.localStorage.setItem(
-        SIDEBAR_COLLAPSED_STORAGE_KEY,
-        String(next),
-      );
+      try {
+        window.localStorage.setItem(
+          SIDEBAR_COLLAPSED_STORAGE_KEY,
+          String(next),
+        );
+      } catch {
+        // Keep the in-memory preference for the current session.
+      }
       return next;
     });
   }
@@ -203,6 +212,12 @@ export function AppShell({
 
   return (
     <div ref={shellRef} className="min-h-screen bg-background">
+      <a
+        href="#main-content"
+        className="sr-only z-[110] rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground shadow-lg focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+      >
+        Pular para o conteúdo principal
+      </a>
       <aside
         id="app-sidebar"
         className={cn(
@@ -277,6 +292,8 @@ export function AppShell({
               <Link
                 key={item.href}
                 href={item.href}
+                aria-current={active ? "page" : undefined}
+                aria-label={item.label}
                 onClick={() => {
                   if (liveItem) requestLiveRefresh();
                 }}
@@ -351,6 +368,7 @@ export function AppShell({
               !sidebarCollapsed && "lg:justify-start lg:px-4",
             )}
             onClick={logout}
+            aria-label="Sair"
             title="Sair"
           >
             <LogOut className="h-4 w-4" />
@@ -397,7 +415,10 @@ export function AppShell({
             </Button>
           </div>
         </div>
-        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+        <nav
+          aria-label="Navegação principal em telas estreitas"
+          className="enterprise-horizontal-scroll mt-3 flex gap-2 overflow-x-auto pb-1"
+        >
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = pathname === item.href;
@@ -407,6 +428,8 @@ export function AppShell({
               <Link
                 key={item.href}
                 href={item.href}
+                aria-current={active ? "page" : undefined}
+                aria-label={item.label}
                 onClick={() => {
                   if (liveItem) requestLiveRefresh();
                 }}
@@ -422,10 +445,12 @@ export function AppShell({
               </Link>
             );
           })}
-        </div>
+        </nav>
       </header>
 
       <main
+        id="main-content"
+        tabIndex={-1}
         className={cn(
           "min-w-0 transition-[padding] duration-200 lg:pl-20",
           !sidebarCollapsed && "lg:pl-64",

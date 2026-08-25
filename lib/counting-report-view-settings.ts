@@ -1,4 +1,7 @@
-import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  getUserViewScopedStorageKey,
+  readUserViewScopedStorageEntry,
+} from "@/lib/master-company-scope";
 
 export type CountingReportViewSettings = {
   includeOpenPeriod: boolean;
@@ -28,12 +31,17 @@ export function loadCountingReportViewSettings(
   if (typeof window === "undefined") return defaultSettings;
 
   try {
-    const stored = window.localStorage.getItem(
-      getCountingReportViewSettingsKey(companyId, scope),
+    const stored = readUserViewScopedStorageEntry(
+      STORAGE_KEY,
+      companyId,
+      scope.userId,
+      scope.viewId,
     );
-    if (!stored) return defaultSettings;
+    if (!stored?.value) return defaultSettings;
 
-    const parsed = JSON.parse(stored) as Partial<CountingReportViewSettings>;
+    const parsed = JSON.parse(
+      stored.value,
+    ) as Partial<CountingReportViewSettings>;
     return normalizeCountingReportViewSettings(parsed);
   } catch {
     return defaultSettings;

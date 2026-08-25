@@ -1,5 +1,9 @@
 import type { EnterpriseChartOption } from "@/components/app/echart";
-import { parseAggregateBucket } from "@/lib/aggregate-time";
+import {
+  aggregateBucketInRange,
+  parseAggregateBucket,
+  startOfAggregateBucket,
+} from "@/lib/aggregate-time";
 import { pastelBarColor } from "@/lib/chart-palette";
 import {
   inferDirectionFromText,
@@ -50,6 +54,21 @@ export const COUNTING_INTELLIGENCE_CARD_IDS = {
   directionalFlow: "report_counting_directional_flow",
   accessRanking: "report_counting_access_ranking",
 } as const;
+
+export const COUNTING_INTELLIGENCE_COMPACT_CARD_IDS = [
+  COUNTING_INTELLIGENCE_CARD_IDS.periodTotal,
+  COUNTING_INTELLIGENCE_CARD_IDS.endMonth,
+  COUNTING_INTELLIGENCE_CARD_IDS.monthlyAverage,
+  COUNTING_INTELLIGENCE_CARD_IDS.accessLeader,
+] as const;
+
+const COUNTING_INTELLIGENCE_COMPACT_CARD_ID_SET = new Set<string>(
+  COUNTING_INTELLIGENCE_COMPACT_CARD_IDS,
+);
+
+export function isCountingIntelligenceCompactCard(cardId: string) {
+  return COUNTING_INTELLIGENCE_COMPACT_CARD_ID_SET.has(cardId);
+}
 
 export type CountingIntelligenceCardId =
   (typeof COUNTING_INTELLIGENCE_CARD_IDS)[keyof typeof COUNTING_INTELLIGENCE_CARD_IDS];
@@ -114,6 +133,8 @@ export type CountingMonthlyComparisonYearRow = {
 
 export type CountingMonthlyComparison = {
   comparisonYear: number;
+  comparisonMonths: Array<number | null>;
+  currentMonths: Array<number | null>;
   latestYear: number;
   rows: CountingMonthlyComparisonYearRow[];
   variation: {
@@ -201,6 +222,45 @@ export function buildCountingIntelligenceModel({
   const currentYear = periodEnd.getFullYear();
   const currentMonth = periodEnd.getMonth();
   const selectedMonthTotals = aggregateScopeMonths(monthlyRows, scope);
+  const comparableCurrentMonthTotals = new Map(selectedMonthTotals);
+  const comparablePreviousMonthTotals = new Map(selectedMonthTotals);
+  const openMonthStart = startOfCalendarMonth(now);
+  const hasOpenMonth =
+    includeOpenPeriod &&
+    openMonthStart >= periodFrom &&
+    openMonthStart < periodTo;
+  if (hasOpenMonth) {
+    const comparableCurrentTo = startOfAggregateBucket(now, "hour");
+    const comparablePreviousFrom = shiftCalendarYearsClamped(
+      openMonthStart,
+      -1,
+    );
+    const comparablePreviousTo = shiftCalendarYearsClamped(
+      comparableCurrentTo,
+      -1,
+    );
+    comparableCurrentMonthTotals.set(
+      monthKey(openMonthStart.getFullYear(), openMonthStart.getMonth()),
+      sumScopeHourlyRange(
+        hourlyRows,
+        scope,
+        openMonthStart,
+        comparableCurrentTo,
+      ),
+    );
+    comparablePreviousMonthTotals.set(
+      monthKey(
+        comparablePreviousFrom.getFullYear(),
+        comparablePreviousFrom.getMonth(),
+      ),
+      sumScopeHourlyRange(
+        hourlyRows,
+        scope,
+        comparablePreviousFrom,
+        comparablePreviousTo,
+      ),
+    );
+  }
   const firstYear = periodFrom.getFullYear();
   const yearRows: CountingYearRow[] = Array.from(
     { length: currentYear - firstYear + 1 },
@@ -210,18 +270,33 @@ export function buildCountingIntelligenceModel({
       const bucket = new Date(year, month, 1);
       if (bucket < periodFrom || bucket >= periodTo) return null;
       const key = monthKey(year, month);
-      return selectedMonthTotals.has(key) ? selectedMonthTotals.get(key) ?? 0 : null;
+      return selectedMonthTotals.get(key) ?? 0;
     });
     const selectedMonthIndexes = months.flatMap((value, month) =>
       value === null ? [] : [month],
     );
-    const recordedMonthIndexes = selectedMonthIndexes.filter((month) =>
-      selectedMonthTotals.has(monthKey(year, month)),
-    );
+    const recordedMonthIndexes = selectedMonthIndexes;
     const selectedTotal = sumValues(months);
+    const comparableSelectedTotal = selectedMonthIndexes.reduce(
+      (sum, month) =>
+        sum +
+        (rowUsesOpenMonthComparison(
+          year,
+          month,
+          currentYear,
+          currentMonth,
+          hasOpenMonth,
+        )
+          ? comparableCurrentMonthTotals.get(monthKey(year, month)) ?? 0
+          : selectedMonthTotals.get(monthKey(year, month)) ?? 0),
+      0,
+    );
     const previousComparable = selectedMonthIndexes.reduce(
       (sum, month) =>
-        sum + (selectedMonthTotals.get(monthKey(year - 1, month)) ?? 0),
+        sum +
+        (comparablePreviousMonthTotals.get(
+          monthKey(year - 1, month),
+        ) ?? 0),
       0,
     );
 
@@ -234,15 +309,30 @@ export function buildCountingIntelligenceModel({
         value === null
           ? null
           : percentageDelta(
-              value,
-              selectedMonthTotals.get(monthKey(year - 1, month)) ?? 0,
+              rowUsesOpenMonthComparison(
+                year,
+                month,
+                currentYear,
+                currentMonth,
+                hasOpenMonth,
+              )
+                ? comparableCurrentMonthTotals.get(
+                    monthKey(year, month),
+                  ) ?? 0
+                : value,
+              comparablePreviousMonthTotals.get(
+                monthKey(year - 1, month),
+              ) ?? 0,
             ),
       ),
       selectedMonthCount: recordedMonthIndexes.length,
       total: selectedTotal,
       year,
       ytd: selectedTotal,
-      ytdYoy: percentageDelta(selectedTotal, previousComparable),
+      ytdYoy: percentageDelta(
+        comparableSelectedTotal,
+        previousComparable,
+      ),
     } satisfies CountingYearRow;
   }).filter((row) => row.selectedMonthCount > 0 || row.year === currentYear);
 
@@ -254,31 +344,47 @@ export function buildCountingIntelligenceModel({
   const previousPeriodFrom = addCalendarYears(periodFrom, -1);
   const previousPeriodTo = addCalendarYears(periodTo, -1);
   const previousPeriodValue = sumMonthRange(
-    selectedMonthTotals,
+    comparablePreviousMonthTotals,
     previousPeriodFrom,
     previousPeriodTo,
   );
-  const periodMonthCount = countRecordedMonths(
-    selectedMonthTotals,
+  const comparablePeriodValue = sumMonthRange(
+    comparableCurrentMonthTotals,
     periodFrom,
     periodTo,
   );
-  const previousPeriodMonthCount = countRecordedMonths(
-    selectedMonthTotals,
+  const periodMonthCount = countCalendarMonths(periodFrom, periodTo);
+  const previousPeriodMonthCount = countCalendarMonths(
     previousPeriodFrom,
     previousPeriodTo,
   );
   const currentMonthValue =
     selectedMonthTotals.get(monthKey(currentYear, currentMonth)) ?? 0;
   const previousCurrentMonthValue =
-    selectedMonthTotals.get(monthKey(currentYear - 1, currentMonth)) ?? 0;
+    comparablePreviousMonthTotals.get(
+      monthKey(currentYear - 1, currentMonth),
+    ) ?? 0;
+  const comparableCurrentMonthValue =
+    comparableCurrentMonthTotals.get(
+      monthKey(currentYear, currentMonth),
+    ) ?? 0;
   const monthlyScenarioTotals = aggregateScenarioDirections(
     monthlyRows.filter((row) =>
       isMonthlyBucketInRange(row.bucket, periodFrom, periodTo),
     ),
     scenarios,
   );
-  const hourlyScenarioTotals = aggregateScenarioDirections(hourlyRows, scenarios);
+  const hourlyScenarioTotals = aggregateScenarioDirections(
+    hourlyRows.filter((row) =>
+      aggregateBucketInRange(
+        row.bucket,
+        "hour",
+        periodFrom,
+        periodTo,
+      ),
+    ),
+    scenarios,
+  );
   const accesses = filterAndRankAccessRows(
     buildAccessRows(scenarios, monthlyScenarioTotals, hourlyScenarioTotals),
     rankingSelectionMode,
@@ -299,12 +405,12 @@ export function buildCountingIntelligenceModel({
 
     const currentKey = monthKey(currentYear, month);
     const previousKey = monthKey(currentYear - 1, month);
-    const current = selectedMonthTotals.has(currentKey)
-      ? selectedMonthTotals.get(currentKey) ?? 0
-      : null;
-    const previous = selectedMonthTotals.has(previousKey)
-      ? selectedMonthTotals.get(previousKey) ?? 0
-      : null;
+    const current =
+      hasOpenMonth && month === currentMonth
+        ? comparableCurrentMonthTotals.get(currentKey) ?? 0
+        : selectedMonthTotals.get(currentKey) ?? 0;
+    const previous =
+      comparablePreviousMonthTotals.get(previousKey) ?? 0;
     return [
       {
         current,
@@ -324,14 +430,17 @@ export function buildCountingIntelligenceModel({
     accessHours,
     currentMonth,
     currentMonthDelta: percentageDelta(
-      currentMonthValue,
+      comparableCurrentMonthValue,
       previousCurrentMonthValue,
     ),
     currentMonthValue,
     currentYear,
     directionalHours,
     periodAverage: periodMonthCount ? periodValue / periodMonthCount : 0,
-    periodDelta: percentageDelta(periodValue, previousPeriodValue),
+    periodDelta: percentageDelta(
+      comparablePeriodValue,
+      previousPeriodValue,
+    ),
     periodFrom,
     periodMonthCount,
     periodTo,
@@ -345,7 +454,10 @@ export function buildCountingIntelligenceModel({
     scopeName: scope.name,
     yearOverYearMonths,
     yearRows,
-    ytdDelta: percentageDelta(periodValue, previousPeriodValue),
+    ytdDelta: percentageDelta(
+      comparablePeriodValue,
+      previousPeriodValue,
+    ),
     ytdValue: periodValue,
   };
 }
@@ -381,7 +493,7 @@ export function buildCountingIntelligenceReportAssets(
     {
       cardId: COUNTING_INTELLIGENCE_CARD_IDS.annualComparison,
       value: {
-        description: `Comparação mensal da visão selecionada em ${periodLabel}.`,
+        description: `Comparação mensal da visão selecionada em ${periodLabel}. No mês aberto, a variação usa somente horas fechadas equivalentes.`,
         option: buildAnnualComparisonChartOption(
           model,
           colors[COUNTING_INTELLIGENCE_CARD_IDS.annualComparison],
@@ -515,6 +627,8 @@ export function buildCountingMonthlyComparison(
   const latestYear = model.currentYear;
   const comparisonYear = latestYear - 1;
   const rowsByYear = new Map<number, CountingMonthlyComparisonYearRow>();
+  let supplementalComparisonRow: CountingMonthlyComparisonYearRow | null =
+    null;
 
   model.yearRows.forEach((row) => {
     const values = [...row.months];
@@ -534,19 +648,25 @@ export function buildCountingMonthlyComparison(
       null,
   );
   const existingComparison = rowsByYear.get(comparisonYear);
-  const mergedComparisonMonths = comparisonMonths.map(
-    (value, month) => existingComparison?.months[month] ?? value,
-  );
 
-  if (mergedComparisonMonths.some((value) => value !== null)) {
-    const stats = summarizeMonthValues(mergedComparisonMonths);
-    rowsByYear.set(comparisonYear, {
+  if (
+    (!existingComparison ||
+      comparisonMonths.some(
+        (value, month) =>
+          value !== null && existingComparison.months[month] !== value,
+      )) &&
+    comparisonMonths.some((value) => value !== null)
+  ) {
+    const stats = summarizeMonthValues(comparisonMonths);
+    const baselineRow = {
       accumulated: stats.total,
       average: stats.average,
-      baselineOnly: !existingComparison,
-      months: mergedComparisonMonths,
+      baselineOnly: true,
+      months: comparisonMonths,
       year: comparisonYear,
-    });
+    } satisfies CountingMonthlyComparisonYearRow;
+    if (existingComparison) supplementalComparisonRow = baselineRow;
+    else rowsByYear.set(comparisonYear, baselineRow);
   }
 
   const currentValues = COUNTING_MONTH_LABELS.map(
@@ -554,14 +674,29 @@ export function buildCountingMonthlyComparison(
       model.yearOverYearMonths.find((row) => row.month === month)?.current ??
       null,
   );
-  const currentStats = summarizeMonthValues(currentValues);
-  const previousStats = summarizeMonthValues(comparisonMonths);
+  const comparableCurrentValues: number[] = [];
+  const comparablePreviousValues: number[] = [];
+  currentValues.forEach((current, month) => {
+    const previous = comparisonMonths[month];
+    if (current === null || previous === null) return;
+    comparableCurrentValues.push(current);
+    comparablePreviousValues.push(previous);
+  });
+  const currentStats = summarizeMonthValues(comparableCurrentValues);
+  const previousStats = summarizeMonthValues(comparablePreviousValues);
 
   return {
     comparisonYear,
+    comparisonMonths,
+    currentMonths: currentValues,
     latestYear,
-    rows: Array.from(rowsByYear.values()).sort(
-      (left, right) => right.year - left.year,
+    rows: [
+      ...Array.from(rowsByYear.values()),
+      ...(supplementalComparisonRow ? [supplementalComparisonRow] : []),
+    ].sort(
+      (left, right) =>
+        right.year - left.year ||
+        Number(left.baselineOnly) - Number(right.baselineOnly),
     ),
     variation: {
       accumulated:
@@ -598,15 +733,15 @@ export function buildAnnualComparisonChartOption(
 ): EnterpriseChartOption {
   const rows = annualComparisonRows(model);
   const comparisonYear = model.currentYear - 1;
-  const comparisonRow = rows.find((row) => row.year === comparisonYear);
-  const latestRow = rows.find((row) => row.year === model.currentYear);
-  const comparisonAverage = comparisonRow?.average ?? 0;
   const comparison = buildCountingMonthlyComparison(model);
+  const comparisonAverage = summarizeMonthValues(
+    comparison.comparisonMonths,
+  ).average;
   const variationSeriesName = `Variação ${model.currentYear}/${comparisonYear}`;
   const variationData = COUNTING_MONTH_LABELS.map((_, month) => {
     const delta = comparison.variation.months[month];
-    const current = latestRow?.months[month];
-    const previous = comparisonRow?.months[month];
+    const current = comparison.currentMonths[month];
+    const previous = comparison.comparisonMonths[month];
     if (delta === null || current == null || previous == null) return null;
 
     return {
@@ -636,7 +771,7 @@ export function buildAnnualComparisonChartOption(
     },
     legend: {
       data: [
-        ...rows.map((row) => String(row.year)),
+        ...rows.map((row) => row.name),
         ...(comparisonAverage > 0 ? [thresholdName] : []),
       ],
       itemGap: 12,
@@ -708,7 +843,7 @@ export function buildAnnualComparisonChartOption(
           show: rows.length <= 5,
           verticalAlign: "middle",
         },
-        name: String(row.year),
+        name: row.name,
         type: "bar",
       })),
       ...(comparisonAverage > 0
@@ -793,13 +928,16 @@ export function buildAnnualAccumulatedComparisonChartOption(
     ...row,
     accumulatedMonths: cumulativeMonthValues(row.months),
   }));
-  const latestRow = rows.find((row) => row.year === model.currentYear);
   const comparisonYear = model.currentYear - 1;
-  const comparisonRow = rows.find((row) => row.year === comparisonYear);
+  const comparison = buildCountingMonthlyComparison(model);
+  const comparableAccumulatedMonths = cumulativeComparableMonthValues(
+    comparison.currentMonths,
+    comparison.comparisonMonths,
+  );
   const variationSeriesName = `Variação acumulada ${model.currentYear}/${comparisonYear}`;
   const variationData = COUNTING_MONTH_LABELS.map((_, month) => {
-    const current = latestRow?.accumulatedMonths[month];
-    const previous = comparisonRow?.accumulatedMonths[month];
+    const current = comparableAccumulatedMonths.current[month];
+    const previous = comparableAccumulatedMonths.previous[month];
     if (current == null || previous == null) return null;
     const delta = percentageDelta(current, previous);
     if (delta === null) return null;
@@ -826,7 +964,7 @@ export function buildAnnualAccumulatedComparisonChartOption(
       top: showVariation ? 82 : 70,
     },
     legend: {
-      data: rows.map((row) => String(row.year)),
+      data: rows.map((row) => row.name),
       itemGap: 12,
       itemHeight: 9,
       itemWidth: 9,
@@ -896,7 +1034,7 @@ export function buildAnnualAccumulatedComparisonChartOption(
           show: rows.length <= 5,
           verticalAlign: "middle",
         },
-        name: String(row.year),
+        name: row.name,
         type: "bar",
       })),
       ...(showVariation
@@ -956,7 +1094,11 @@ export function buildAnnualAccumulatedComparisonChartOption(
 function annualComparisonRows(model: CountingIntelligenceModel) {
   const rows = buildCountingMonthlyComparison(model).rows.map((row) => ({
     average: row.average,
+    baselineOnly: row.baselineOnly,
     months: row.months,
+    name: row.baselineOnly
+      ? `${row.year} (base comparável)`
+      : String(row.year),
     year: row.year,
   }));
 
@@ -971,6 +1113,33 @@ function cumulativeMonthValues(months: Array<number | null>) {
     accumulated += value;
     return accumulated;
   });
+}
+
+function cumulativeComparableMonthValues(
+  currentMonths: Array<number | null>,
+  previousMonths: Array<number | null>,
+) {
+  let currentAccumulated = 0;
+  let previousAccumulated = 0;
+  const current: Array<number | null> = [];
+  const previous: Array<number | null> = [];
+
+  COUNTING_MONTH_LABELS.forEach((_, month) => {
+    const currentValue = currentMonths[month] ?? null;
+    const previousValue = previousMonths[month] ?? null;
+    if (currentValue === null || previousValue === null) {
+      current.push(null);
+      previous.push(null);
+      return;
+    }
+
+    currentAccumulated += currentValue;
+    previousAccumulated += previousValue;
+    current.push(currentAccumulated);
+    previous.push(previousAccumulated);
+  });
+
+  return { current, previous };
 }
 
 export function buildDirectionalHourlyChartOption(
@@ -1162,6 +1331,52 @@ function aggregateScopeMonths(
   });
 
   return totals;
+}
+
+function sumScopeHourlyRange(
+  rows: AggregateEventRow[],
+  scope: CountingIntelligenceScope,
+  from: Date,
+  to: Date,
+) {
+  if (from >= to) return 0;
+
+  const cameraIds = new Set(scope.cameraIds);
+  const multipliers = new Map(
+    scope.scenario?.lines
+      .filter((line) => line.action_multiplier !== 0)
+      .map((line) => [line.line_count_id, line.action_multiplier]) ?? [],
+  );
+
+  return rows.reduce((total, row) => {
+    if (!aggregateBucketInRange(row.bucket, "hour", from, to)) {
+      return total;
+    }
+    if (scope.scenario) {
+      if (!row.line_count_id) return total;
+      const multiplier = multipliers.get(row.line_count_id);
+      return multiplier === undefined
+        ? total
+        : total + finiteTotal(row.total) * multiplier;
+    }
+    return row.camera_id && cameraIds.has(row.camera_id)
+      ? total + finiteTotal(row.total)
+      : total;
+  }, 0);
+}
+
+function rowUsesOpenMonthComparison(
+  year: number,
+  month: number,
+  currentYear: number,
+  currentMonth: number,
+  hasOpenMonth: boolean,
+) {
+  return (
+    hasOpenMonth &&
+    year === currentYear &&
+    month === currentMonth
+  );
 }
 
 function aggregateScenarioDirections(
@@ -1403,15 +1618,18 @@ function buildAnnualAccumulatedReportTable(
     ...row,
     accumulatedMonths: cumulativeMonthValues(row.months),
   }));
-  const latest = rows.find((row) => row.year === model.currentYear);
-  const previous = rows.find((row) => row.year === model.currentYear - 1);
+  const comparison = buildCountingMonthlyComparison(model);
+  const comparableAccumulatedMonths = cumulativeComparableMonthValues(
+    comparison.currentMonths,
+    comparison.comparisonMonths,
+  );
 
   return {
     columns: [
       { key: "month", label: "Mês", width: 14 },
       ...rows.map((row) => ({
-        key: `year_${row.year}`,
-        label: String(row.year),
+        key: `year_${row.year}${row.baselineOnly ? "_baseline" : ""}`,
+        label: row.name,
         numeric: true,
         width: 18,
       })),
@@ -1425,8 +1643,10 @@ function buildAnnualAccumulatedReportTable(
       model,
     )}. A variação compara o acumulado do ano mais recente com o anterior.`,
     rows: COUNTING_MONTH_LABELS.map((month, monthIndex) => {
-      const currentValue = latest?.accumulatedMonths[monthIndex] ?? null;
-      const previousValue = previous?.accumulatedMonths[monthIndex] ?? null;
+      const currentValue =
+        comparableAccumulatedMonths.current[monthIndex] ?? null;
+      const previousValue =
+        comparableAccumulatedMonths.previous[monthIndex] ?? null;
 
       return {
         month,
@@ -1436,7 +1656,7 @@ function buildAnnualAccumulatedReportTable(
             : formatDelta(percentageDelta(currentValue, previousValue)),
         ...Object.fromEntries(
           rows.map((row) => [
-            `year_${row.year}`,
+            `year_${row.year}${row.baselineOnly ? "_baseline" : ""}`,
             row.accumulatedMonths[monthIndex] === null
               ? ""
               : Math.round(row.accumulatedMonths[monthIndex] ?? 0),
@@ -1626,20 +1846,14 @@ function sumMonthRange(
   return total;
 }
 
-function countRecordedMonths(
-  totals: Map<string, number>,
-  from: Date,
-  to: Date,
-) {
+function countCalendarMonths(from: Date, to: Date) {
   let count = 0;
   for (
     let cursor = startOfCalendarMonth(from);
     cursor < to;
     cursor = addCalendarMonths(cursor, 1)
   ) {
-    if (totals.has(monthKey(cursor.getFullYear(), cursor.getMonth()))) {
-      count += 1;
-    }
+    count += 1;
   }
   return count;
 }
@@ -1658,6 +1872,24 @@ function addCalendarMonths(date: Date, amount: number) {
 
 function addCalendarYears(date: Date, amount: number) {
   return new Date(date.getFullYear() + amount, date.getMonth(), 1);
+}
+
+function shiftCalendarYearsClamped(date: Date, amount: number) {
+  const targetYear = date.getFullYear() + amount;
+  const lastDay = new Date(
+    targetYear,
+    date.getMonth() + 1,
+    0,
+  ).getDate();
+  return new Date(
+    targetYear,
+    date.getMonth(),
+    Math.min(date.getDate(), lastDay),
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+    date.getMilliseconds(),
+  );
 }
 
 function isValidDate(date: Date) {

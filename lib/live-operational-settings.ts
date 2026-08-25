@@ -1,5 +1,8 @@
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
-import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  getUserViewScopedStorageKey,
+  readUserViewScopedStorageEntry,
+} from "@/lib/master-company-scope";
 
 export type LiveOperationalSettings = {
   heatmapScenarioIds: string[];
@@ -52,13 +55,18 @@ export function loadLiveOperationalSettings(
   if (typeof window === "undefined") return defaultSettings;
 
   try {
-    const stored = window.localStorage.getItem(storageKey(companyId, scope));
-    if (!stored) return defaultSettings;
+    const storedEntry = readUserViewScopedStorageEntry(
+      STORAGE_KEY,
+      companyId,
+      scope.userId,
+      scope.viewId,
+    );
+    if (!storedEntry?.value) return defaultSettings;
     const normalized = normalizeLiveOperationalSettings(
-      JSON.parse(stored) as unknown,
+      JSON.parse(storedEntry.value) as unknown,
     );
     window.localStorage.setItem(
-      storageKey(companyId, scope),
+      storedEntry.key,
       JSON.stringify(normalized),
     );
     return normalized;

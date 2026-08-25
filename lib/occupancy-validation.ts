@@ -4,6 +4,7 @@ import type {
   OccupancyScenario,
   OccupancyScenarioHistoryResponse,
 } from "@/lib/types";
+import { createTenantCompanyIdResolver } from "@/lib/tenant-scope-validation";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -42,12 +43,16 @@ const OCCUPANCY_ROW_COLLECTION_KEYS = [
   "items",
 ] as const;
 
-export function requireOccupancyScenarioRows(value: unknown): OccupancyScenario[] {
+export function requireOccupancyScenarioRows(
+  value: unknown,
+  expectedCompanyId?: string | null,
+): OccupancyScenario[] {
   const rows = requireSingleArrayEnvelope(
     value,
     ["data"],
     "cenários de ocupação",
   );
+  const resolveCompanyId = createTenantCompanyIdResolver(expectedCompanyId);
   const scenarioIds = new Set<string>();
 
   return Array.from(rows, (candidate, scenarioIndex) => {
@@ -66,7 +71,7 @@ export function requireOccupancyScenarioRows(value: unknown): OccupancyScenario[
     }
     scenarioIds.add(id);
 
-    const companyId = requireId(
+    const companyId = resolveCompanyId(
       row.company_id,
       `company_id do cenário de ocupação "${id}"`,
     );
@@ -599,7 +604,7 @@ function requireId(value: unknown, context: string) {
 }
 
 function requireOptionalId(value: unknown, context: string) {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
   return requireId(value, context);
 }
 
@@ -608,7 +613,7 @@ function requireText(value: unknown, context: string) {
 }
 
 function requireOptionalText(value: unknown, context: string) {
-  if (value === undefined) return;
+  if (value === undefined || value === null) return;
   requireText(value, context);
 }
 

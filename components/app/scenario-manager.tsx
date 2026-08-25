@@ -61,7 +61,7 @@ import {
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
 import { isOccupancyAreaLineCount } from "@/lib/occupancy-area-options";
-import { canManageScenarios } from "@/lib/permissions";
+import { canManageOccupancy, canManageScenarios } from "@/lib/permissions";
 import type {
   Camera,
   CameraLineCount,
@@ -88,7 +88,11 @@ type FormLine = {
 export function ScenarioManager() {
   const { user } = useAuth();
   const canEditScenarios = canManageScenarios(user);
+  const canEditOccupancy = canManageOccupancy(user);
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const [activeTab, setActiveTab] = React.useState<"flow" | "occupancy">(
+    canEditScenarios ? "flow" : "occupancy",
+  );
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
   const [results, setResults] = React.useState<ResultMap>({});
   const [loading, setLoading] = React.useState(true);
@@ -97,19 +101,46 @@ export function ScenarioManager() {
   const [editingScenario, setEditingScenario] = React.useState<Scenario | null>(
     null,
   );
+  const companyScopeIdRef = React.useRef(companyScopeId);
+  const scenarioRequestSequenceRef = React.useRef(0);
+  const resolvedActiveTab =
+    (activeTab === "flow" && canEditScenarios) ||
+    (activeTab === "occupancy" && canEditOccupancy)
+      ? activeTab
+      : canEditScenarios
+        ? "flow"
+        : "occupancy";
 
   const loadScenarios = React.useCallback(async () => {
+    const requestedCompanyScopeId = companyScopeId.trim();
+    const requestSequence = ++scenarioRequestSequenceRef.current;
+    const isCurrentRequest = () =>
+      requestSequence === scenarioRequestSequenceRef.current &&
+      companyScopeIdRef.current.trim() === requestedCompanyScopeId;
+
+    if (!canEditScenarios || !requestedCompanyScopeId) {
+      setScenarios([]);
+      setResults({});
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
-      const data = await apiFetch<Scenario[]>("/scenarios");
-      const scopedScenarios = filterScopedApiRows(data, companyScopeId);
-      setScenarios(scopedScenarios);
+      const data = await apiFetch<Scenario[]>("/scenarios", {
+        companyScopeId: requestedCompanyScopeId,
+      });
+      const scopedScenarios = filterScopedApiRows(
+        data,
+        requestedCompanyScopeId,
+      );
 
       const entries = await Promise.all(
         scopedScenarios.map(async (scenario) => {
           try {
             const result = await apiFetch<ScenarioResult>(
               `/scenarios/${scenario.id}/result`,
+              { companyScopeId: requestedCompanyScopeId },
             );
             return [scenario.id, result] as const;
           } catch {
@@ -117,20 +148,51 @@ export function ScenarioManager() {
           }
         }),
       );
+      if (!isCurrentRequest()) return;
+
+      setScenarios(scopedScenarios);
       setResults(Object.fromEntries(entries));
     } catch (error) {
+      if (!isCurrentRequest()) return;
       const message =
         error instanceof Error
           ? error.message
           : "Não foi possível carregar os cenários.";
+      setScenarios([]);
+      setResults({});
       toast.error(message);
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) setLoading(false);
     }
+  }, [canEditScenarios, companyScopeId]);
+
+  React.useEffect(() => {
+    companyScopeIdRef.current = companyScopeId;
+    setDialogOpen(false);
+    setBulkDialogOpen(false);
+    setEditingScenario(null);
   }, [companyScopeId]);
 
   React.useEffect(() => {
-    loadScenarios();
+    if (activeTab === "flow" && !canEditScenarios && canEditOccupancy) {
+      setActiveTab("occupancy");
+    } else if (
+      activeTab === "occupancy" &&
+      !canEditOccupancy &&
+      canEditScenarios
+    ) {
+      setActiveTab("flow");
+    }
+
+    if (!canEditScenarios) {
+      setDialogOpen(false);
+      setBulkDialogOpen(false);
+      setEditingScenario(null);
+    }
+  }, [activeTab, canEditOccupancy, canEditScenarios]);
+
+  React.useEffect(() => {
+    void loadScenarios();
   }, [loadScenarios]);
 
   function openCreateDialog() {
@@ -161,11 +223,23 @@ export function ScenarioManager() {
 
     if (!window.confirm(`Excluir o cenário "${scenario.name}"?`)) return;
 
+    const requestedCompanyScopeId = companyScopeId.trim();
+    if (!requestedCompanyScopeId) {
+      toast.error("Selecione uma empresa antes de excluir o cenário.");
+      return;
+    }
+
     try {
-      await apiFetch(`/scenarios/${scenario.id}`, { method: "DELETE" });
+      await apiFetch(`/scenarios/${scenario.id}`, {
+        companyScopeId: requestedCompanyScopeId,
+        method: "DELETE",
+      });
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
+
       toast.success("Cenário excluído");
       await loadScenarios();
     } catch (error) {
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
       const message =
         error instanceof Error ? error.message : "Não foi possível excluir.";
       toast.error(message);
@@ -177,15 +251,38 @@ export function ScenarioManager() {
     await loadScenarios();
   }
 
+  if (!canEditScenarios && !canEditOccupancy) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Cenários indisponíveis</CardTitle>
+          <CardDescription>
+            Seu usuário não possui acesso administrativo aos cenários de
+            Contagem ou de Ocupação.
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
+
   return (
     <section className="space-y-4">
-      <Tabs defaultValue="flow" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="flow">Contagem</TabsTrigger>
-          <TabsTrigger value="occupancy">Ocupação</TabsTrigger>
-        </TabsList>
+      <Tabs
+        value={resolvedActiveTab}
+        onValueChange={(value) => {
+          if (value === "flow" && canEditScenarios) setActiveTab(value);
+          if (value === "occupancy" && canEditOccupancy) setActiveTab(value);
+        }}
+        className="space-y-4"
+      >
+        {canEditScenarios && canEditOccupancy ? (
+          <TabsList>
+            <TabsTrigger value="flow">Contagem</TabsTrigger>
+            <TabsTrigger value="occupancy">Ocupação</TabsTrigger>
+          </TabsList>
+        ) : null}
 
-        <TabsContent value="flow">
+        {canEditScenarios ? <TabsContent value="flow">
           <Card id="config-cenarios" className="scroll-mt-6">
             <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
               <div>
@@ -316,38 +413,46 @@ export function ScenarioManager() {
               )}
             </CardContent>
           </Card>
-        </TabsContent>
+        </TabsContent> : null}
 
-        <TabsContent value="occupancy">
+        {canEditOccupancy ? <TabsContent value="occupancy">
           <OccupancyScenarioManager />
-        </TabsContent>
+        </TabsContent> : null}
       </Tabs>
 
-      <ScenarioDialog
-        open={dialogOpen}
-        scenario={editingScenario}
-        companyScopeId={companyScopeId}
-        onOpenChange={setDialogOpen}
-        onSaved={handleSaved}
-      />
-      <BulkScenarioDialog
-        companyScopeId={companyScopeId}
-        onOpenChange={setBulkDialogOpen}
-        onSaved={loadScenarios}
-        open={bulkDialogOpen}
-        scenarios={scenarios}
-      />
+      {canEditScenarios ? (
+        <>
+          <ScenarioDialog
+            canEdit={canEditScenarios}
+            open={dialogOpen}
+            scenario={editingScenario}
+            companyScopeId={companyScopeId}
+            onOpenChange={setDialogOpen}
+            onSaved={handleSaved}
+          />
+          <BulkScenarioDialog
+            canEdit={canEditScenarios}
+            companyScopeId={companyScopeId}
+            onOpenChange={setBulkDialogOpen}
+            onSaved={loadScenarios}
+            open={bulkDialogOpen}
+            scenarios={scenarios}
+          />
+        </>
+      ) : null}
     </section>
   );
 }
 
 function ScenarioDialog({
+  canEdit,
   open,
   scenario,
   companyScopeId,
   onOpenChange,
   onSaved,
 }: {
+  canEdit: boolean;
   open: boolean;
   scenario: Scenario | null;
   companyScopeId: string;
@@ -362,6 +467,11 @@ function ScenarioDialog({
   const [lineSearch, setLineSearch] = React.useState("");
   const [loadingOptions, setLoadingOptions] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const companyScopeIdRef = React.useRef(companyScopeId);
+
+  React.useEffect(() => {
+    companyScopeIdRef.current = companyScopeId;
+  }, [companyScopeId]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -445,6 +555,17 @@ function ScenarioDialog({
   }
 
   async function saveScenario() {
+    if (!canEdit) {
+      toast.error("Seu usuário não pode alterar cenários de contagem.");
+      return;
+    }
+
+    const requestedCompanyScopeId = companyScopeId.trim();
+    if (!requestedCompanyScopeId) {
+      toast.error("Selecione uma empresa antes de salvar o cenário.");
+      return;
+    }
+
     const cleanName = name.trim();
     const cleanLines = lines
       .filter((line) => line.line_count_id)
@@ -479,20 +600,25 @@ function ScenarioDialog({
     try {
       if (scenario) {
         await apiFetch(`/scenarios/${scenario.id}`, {
-          method: "PUT",
           body: payload,
+          companyScopeId: requestedCompanyScopeId,
+          method: "PUT",
         });
+        if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
         toast.success("Cenário atualizado");
       } else {
         await apiFetch("/scenarios", {
-          method: "POST",
           body: payload,
+          companyScopeId: requestedCompanyScopeId,
+          method: "POST",
         });
+        if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
         toast.success("Cenário criado");
       }
 
       await onSaved();
     } catch (error) {
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
       const message =
         error instanceof Error ? error.message : "Não foi possível salvar.";
       toast.error(message);
@@ -718,7 +844,7 @@ function ScenarioDialog({
           >
             Cancelar
           </Button>
-          <Button type="button" onClick={saveScenario} disabled={saving}>
+          <Button type="button" onClick={saveScenario} disabled={saving || !canEdit}>
             <Save className="h-4 w-4" />
             {saving ? "Salvando..." : "Salvar cenário"}
           </Button>
@@ -729,12 +855,14 @@ function ScenarioDialog({
 }
 
 function BulkScenarioDialog({
+  canEdit,
   companyScopeId,
   onOpenChange,
   onSaved,
   open,
   scenarios,
 }: {
+  canEdit: boolean;
   companyScopeId: string;
   onOpenChange: (open: boolean) => void;
   onSaved: () => Promise<void>;
@@ -751,6 +879,7 @@ function BulkScenarioDialog({
   );
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
   const [createdCount, setCreatedCount] = React.useState(0);
+  const companyScopeIdRef = React.useRef(companyScopeId);
   const individualScenarioLineIds = React.useMemo(
     () =>
       new Set(
@@ -772,6 +901,10 @@ function BulkScenarioDialog({
   const availableOptions = lineOptions.filter(
     (option) => !individualScenarioLineIds.has(option.id),
   );
+
+  React.useEffect(() => {
+    companyScopeIdRef.current = companyScopeId;
+  }, [companyScopeId]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -822,6 +955,17 @@ function BulkScenarioDialog({
   }
 
   async function createScenarios() {
+    if (!canEdit) {
+      toast.error("Seu usuário não pode alterar cenários de contagem.");
+      return;
+    }
+
+    const requestedCompanyScopeId = companyScopeId.trim();
+    if (!requestedCompanyScopeId) {
+      toast.error("Selecione uma empresa antes de criar os cenários.");
+      return;
+    }
+
     const selectedOptions = lineOptions.filter(
       (option) =>
         selectedSet.has(option.id) && !individualScenarioLineIds.has(option.id),
@@ -863,6 +1007,7 @@ function BulkScenarioDialog({
             };
             return apiFetch("/scenarios", {
               body: payload,
+              companyScopeId: requestedCompanyScopeId,
               method: "POST",
             });
           }),
@@ -872,10 +1017,13 @@ function BulkScenarioDialog({
           if (result.status === "fulfilled") created += 1;
           else if (chunk[resultIndex]) failedIds.push(chunk[resultIndex].id);
         });
+        if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
         setCreatedCount(created);
       }
 
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
       await onSaved();
+      if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
       if (failedIds.length) {
         setSelectedIds(failedIds);
         toast.error(
@@ -1045,7 +1193,7 @@ function BulkScenarioDialog({
           <Button
             type="button"
             onClick={createScenarios}
-            disabled={saving || !selectedIds.length}
+            disabled={saving || !canEdit || !selectedIds.length}
           >
             <ListPlus className="h-4 w-4" />
             {saving
@@ -1059,20 +1207,30 @@ function BulkScenarioDialog({
 }
 
 async function loadCountingLineOptions(companyScopeId: string) {
+  const requestedCompanyScopeId = companyScopeId.trim();
+  if (!requestedCompanyScopeId) {
+    throw new Error("Selecione uma empresa antes de carregar as linhas.");
+  }
+
   const cameras = filterScopedApiRows(
-    await apiFetch<Camera[]>("/cameras"),
-    companyScopeId,
+    await apiFetch<Camera[]>("/cameras", {
+      companyScopeId: requestedCompanyScopeId,
+    }),
+    requestedCompanyScopeId,
   );
   const lineGroups = await Promise.all(
     cameras.map(async (camera) => {
       try {
         const cameraLines = await apiFetch<CameraLineCount[]>(
           `/cameras/${camera.id}/line-counts`,
+          { companyScopeId: requestedCompanyScopeId },
         );
-        return filterScopedApiRows(cameraLines, companyScopeId).map((line) => ({
-          ...line,
-          cameraName: camera.name,
-        }));
+        return filterScopedApiRows(cameraLines, requestedCompanyScopeId).map(
+          (line) => ({
+            ...line,
+            cameraName: camera.name,
+          }),
+        );
       } catch {
         return [];
       }

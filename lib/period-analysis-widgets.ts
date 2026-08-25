@@ -1,6 +1,9 @@
 "use client";
 
-import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  getUserViewScopedStorageKey,
+  readUserViewScopedStorageEntry,
+} from "@/lib/master-company-scope";
 import type {
   ScenarioAnalyticsGranularity,
   ScenarioSelectionMode,
@@ -252,17 +255,19 @@ export function loadPeriodAnalysisWidgets(
   if (typeof window === "undefined") return createDefaultPeriodAnalysisWidgets();
 
   try {
-    const stored = window.localStorage.getItem(
-      scopedKey(WIDGETS_STORAGE_KEY, companyId, userId),
+    const stored = readUserViewScopedStorageEntry(
+      WIDGETS_STORAGE_KEY,
+      companyId,
+      userId,
     );
-    if (stored === null) {
+    if (!stored) {
       return migratePeriodAnalysisWidgets(
         createDefaultPeriodAnalysisWidgets(),
         companyId,
         userId,
       );
     }
-    const parsed = JSON.parse(stored) as unknown;
+    const parsed = JSON.parse(stored.value) as unknown;
     if (!Array.isArray(parsed)) return createDefaultPeriodAnalysisWidgets();
     const normalized = parsed
       .map(normalizeWidget)
@@ -352,11 +357,15 @@ export function loadPeriodAnalysisSettings(
   if (typeof window === "undefined") return defaults;
 
   try {
-    const stored = window.localStorage.getItem(
-      scopedKey(SETTINGS_STORAGE_KEY, companyId, userId),
+    const stored = readUserViewScopedStorageEntry(
+      SETTINGS_STORAGE_KEY,
+      companyId,
+      userId,
     );
-    if (!stored) return defaults;
-    const parsed = JSON.parse(stored) as Partial<PeriodAnalysisSettings>;
+    if (!stored?.value) return defaults;
+    const parsed = JSON.parse(
+      stored.value,
+    ) as Partial<PeriodAnalysisSettings>;
     const from = isDateInput(parsed.from) ? parsed.from : defaults.from;
     const to = isDateInput(parsed.to) ? parsed.to : defaults.to;
     const storedMode =

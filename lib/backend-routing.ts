@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 const DEFAULT_BACKEND_PORT = "8080";
 const DEFAULT_BACKEND_PROTOCOL = "http";
+const BACKEND_TIMEOUT_MS = 60_000;
 const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
 const BODYLESS_STATUSES = new Set([204, 205, 304]);
 const HOP_BY_HOP_HEADERS = [
@@ -16,10 +17,27 @@ const HOP_BY_HOP_HEADERS = [
   "transfer-encoding",
   "upgrade",
 ];
+const FORWARDED_REQUEST_HEADERS = [
+  "accept",
+  "accept-language",
+  "authorization",
+  "content-type",
+  "if-match",
+  "if-none-match",
+  "range",
+  "x-company-id",
+  "x-request-id",
+];
 
 export function resolveBackendBaseUrl(request: NextRequest) {
   const configuredUrl = process.env.IPXDATA_API_URL?.trim();
   if (configuredUrl) return normalizeConfiguredUrl(configuredUrl);
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "IPXDATA_API_URL é obrigatório em produção para impedir destino de proxy controlado por headers.",
+    );
+  }
 
   const protocol = resolveBackendProtocol();
   const port = resolveBackendPort();
@@ -43,31 +61,32 @@ export async function proxyBackendRequest(
     );
   }
 
-  const requestHeaders = new Headers(request.headers);
-  HOP_BY_HOP_HEADERS.forEach((header) => requestHeaders.delete(header));
+  const requestHeaders = new Headers();
+  FORWARDED_REQUEST_HEADERS.forEach((header) => {
+    const value = request.headers.get(header);
+    if (value) requestHeaders.set(header, value);
+  });
   requestHeaders.set("accept-encoding", "identity");
   requestHeaders.set(
     "x-forwarded-host",
-    firstHeaderValue(request.headers.get("x-forwarded-host")) ||
-      request.headers.get("host") ||
-      request.nextUrl.host,
+    request.nextUrl.host,
   );
   requestHeaders.set(
     "x-forwarded-proto",
-    firstHeaderValue(request.headers.get("x-forwarded-proto")) ||
-      request.nextUrl.protocol.replace(/:$/, ""),
+    request.nextUrl.protocol.replace(/:$/, ""),
   );
 
   const body = BODYLESS_METHODS.has(request.method)
     ? undefined
     : await request.arrayBuffer();
-  const response = await fetch(targetUrl, {
+  const response = await fetchBackendWithTimeout(targetUrl, {
     body,
     cache: "no-store",
     headers: requestHeaders,
     method: request.method,
     redirect: "manual",
-  }).catch(() => null);
+    signal: request.signal,
+  });
 
   if (!response) {
     return NextResponse.json(
@@ -91,6 +110,24 @@ export async function proxyBackendRequest(
       statusText: response.statusText,
     },
   );
+}
+
+async function fetchBackendWithTimeout(targetUrl: string, init: RequestInit) {
+  const controller = new AbortController();
+  const sourceSignal = init.signal;
+  const forwardAbort = () => controller.abort(sourceSignal?.reason);
+  if (sourceSignal?.aborted) forwardAbort();
+  else sourceSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
+
+  try {
+    return await fetch(targetUrl, { ...init, signal: controller.signal }).catch(
+      () => null,
+    );
+  } finally {
+    clearTimeout(timeout);
+    sourceSignal?.removeEventListener("abort", forwardAbort);
+  }
 }
 
 function normalizeConfiguredUrl(value: string) {

@@ -2,21 +2,24 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
-const Card = React.forwardRef<
-  HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
->(({ className, ...props }, ref) => (
-  <div
-    ref={ref}
-    data-premium-card
-    data-premium-hover
-    className={cn(
-      "rounded-md border border-border bg-card text-card-foreground shadow-soft",
-      className,
-    )}
-    {...props}
-  />
-));
+type CardProps = React.HTMLAttributes<HTMLDivElement> & {
+  interactive?: boolean;
+};
+
+const Card = React.forwardRef<HTMLDivElement, CardProps>(
+  ({ className, interactive = false, ...props }, ref) => (
+    <div
+      ref={ref}
+      data-premium-card
+      data-premium-hover={interactive ? "true" : undefined}
+      className={cn(
+        "min-w-0 max-w-full rounded-md border border-border bg-card text-card-foreground shadow-soft",
+        className,
+      )}
+      {...props}
+    />
+  ),
+);
 Card.displayName = "Card";
 
 const CardHeader = React.forwardRef<
@@ -33,7 +36,7 @@ const CardHeader = React.forwardRef<
 CardHeader.displayName = "CardHeader";
 
 const CardTitle = React.forwardRef<
-  HTMLParagraphElement,
+  HTMLHeadingElement,
   React.HTMLAttributes<HTMLHeadingElement>
 >(({ className, ...props }, ref) => (
   <h3
@@ -70,7 +73,10 @@ const CardContent = React.forwardRef<
   <div
     ref={ref}
     data-card-content
-    className={cn("min-w-0 max-w-full p-4 pt-0", className)}
+    className={cn(
+      "min-w-0 max-w-full break-words p-4 pt-0 [overflow-wrap:anywhere]",
+      className,
+    )}
     {...props}
   />
 ));

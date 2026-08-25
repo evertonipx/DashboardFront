@@ -4,7 +4,7 @@ import { InfrastructureManager } from "@/components/app/infrastructure-manager";
 
 export default function ManagerCamerasPage() {
   return (
-    <AuthGuard requireManager>
+    <AuthGuard requireManager requireResource="cameras">
       <AppShell
         mode="manager"
         title="Câmeras"

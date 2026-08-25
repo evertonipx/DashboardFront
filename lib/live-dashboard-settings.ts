@@ -1,5 +1,8 @@
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
-import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  getUserViewScopedStorageKey,
+  readUserViewScopedStorageEntry,
+} from "@/lib/master-company-scope";
 
 export type LiveDashboardSettings = {
   showPreviousPeriod: boolean;
@@ -22,12 +25,15 @@ export function loadLiveDashboardSettings(
   if (typeof window === "undefined") return defaultSettings;
 
   try {
-    const stored = window.localStorage.getItem(
-      getLiveDashboardSettingsKey(companyId, scope),
+    const stored = readUserViewScopedStorageEntry(
+      LIVE_DASHBOARD_SETTINGS_KEY,
+      companyId,
+      scope.userId,
+      scope.viewId,
     );
-    if (!stored) return defaultSettings;
+    if (!stored?.value) return defaultSettings;
 
-    const parsed = JSON.parse(stored) as Partial<LiveDashboardSettings>;
+    const parsed = JSON.parse(stored.value) as Partial<LiveDashboardSettings>;
     return {
       intradayComparison: isIntradayComparisonMode(parsed.intradayComparison)
         ? parsed.intradayComparison

@@ -19,17 +19,34 @@ export type CurrentUser = {
   email: string;
   company_id?: string;
   company_name?: string;
+  company_timezone?: string | null;
   company_trade_name?: string | null;
   company?: CurrentUserCompany;
   is_master: boolean;
   role?: "super-admin" | "admin" | "operator" | string;
   permissions?: UserPermission[];
+  company_modules?: CurrentUserCompanyModule[];
 };
 
 export type CurrentUserCompany = {
   id: string;
   name: string;
+  timezone?: string | null;
   trade_name?: string | null;
+};
+
+export type CurrentUserCompanyModule = {
+  id?: string;
+  company_id?: string;
+  module_id: string;
+  enabled: boolean;
+  module?: {
+    id: string;
+    slug: string;
+    name: string;
+    description?: string;
+    active?: boolean;
+  };
 };
 
 export type Permission = {
@@ -338,20 +355,28 @@ export type OccupancyScenarioListResponse =
 
 export type OccupancyScenarioBucketRow = {
   area_avg?: number;
+  area_final?: number;
   area_id?: string;
   area_max?: number;
   area_min?: number;
   bucket: string;
   camera_id?: string;
+  complete?: boolean;
   scenario_total_avg?: number;
+  scenario_total_final?: number;
   scenario_total_max?: number;
   scenario_total_min?: number;
+  status?: string;
 };
 
 export type OccupancyScenarioAggregateResponse = {
+  as_of?: string;
+  complete?: boolean;
   data?: OccupancyScenarioBucketRow[];
   granularity?: AggregateGranularity | string;
   scenario_id?: string;
+  status?: string;
+  timezone?: string;
 };
 
 export type OccupancyScenarioHistoryAreaRow = {

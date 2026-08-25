@@ -111,9 +111,11 @@ export function buildLiveAnalysisImport({
       chartType: sourcePreference.chartType,
       color: sourcePreference.color,
       height: sourcePreference.height,
+      heightLevel: sourcePreference.heightLevel,
       id,
       size: sourcePreference.size,
       visible: true,
+      widthLevel: sourcePreference.widthLevel,
       zoom: sourcePreference.zoom,
     });
   };
@@ -164,6 +166,14 @@ export function buildLiveAnalysisImport({
           granularity: "hour",
           kind: "timeline",
           title: "Hora a Hora",
+        });
+        return;
+      case "live_chart_minute_day":
+        add(preference, {
+          ...common,
+          granularity: "minute",
+          kind: "timeline",
+          title: "Minuto a minuto · Hoje",
         });
         return;
       case "live_chart_minute":

@@ -4,6 +4,7 @@ import type {
   SubLocation,
   Worker,
 } from "@/lib/types";
+import { createTenantCompanyIdResolver } from "@/lib/tenant-scope-validation";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -12,11 +13,15 @@ export type ValidatedWorker = Worker & {
   __identity_alias_ids?: string[];
 };
 
-export function requireCameraRows(value: unknown): Camera[] {
+export function requireCameraRows(
+  value: unknown,
+  expectedCompanyId?: string | null,
+): Camera[] {
+  const resolveCompanyId = createTenantCompanyIdResolver(expectedCompanyId);
   return requireEntityRows(value, "câmeras", (row, index) => ({
     ...row,
     id: requireId(row.id, `id da câmera na posição ${index}`),
-    company_id: requireId(
+    company_id: resolveCompanyId(
       row.company_id,
       `company_id da câmera na posição ${index}`,
     ),
@@ -36,11 +41,15 @@ export function requireCameraRows(value: unknown): Camera[] {
   })) as Camera[];
 }
 
-export function requireLocationRows(value: unknown): Location[] {
+export function requireLocationRows(
+  value: unknown,
+  expectedCompanyId?: string | null,
+): Location[] {
+  const resolveCompanyId = createTenantCompanyIdResolver(expectedCompanyId);
   return requireEntityRows(value, "locais", (row, index) => ({
     ...row,
     id: requireId(row.id, `id do local na posição ${index}`),
-    company_id: requireId(
+    company_id: resolveCompanyId(
       row.company_id,
       `company_id do local na posição ${index}`,
     ),
@@ -52,11 +61,15 @@ export function requireLocationRows(value: unknown): Location[] {
   })) as Location[];
 }
 
-export function requireSubLocationRows(value: unknown): SubLocation[] {
+export function requireSubLocationRows(
+  value: unknown,
+  expectedCompanyId?: string | null,
+): SubLocation[] {
+  const resolveCompanyId = createTenantCompanyIdResolver(expectedCompanyId);
   return requireEntityRows(value, "sublocais", (row, index) => ({
     ...row,
     id: requireId(row.id, `id do sublocal na posição ${index}`),
-    company_id: requireId(
+    company_id: resolveCompanyId(
       row.company_id,
       `company_id do sublocal na posição ${index}`,
     ),
@@ -72,7 +85,11 @@ export function requireSubLocationRows(value: unknown): SubLocation[] {
   })) as SubLocation[];
 }
 
-export function requireWorkerRows(value: unknown): ValidatedWorker[] {
+export function requireWorkerRows(
+  value: unknown,
+  expectedCompanyId?: string | null,
+): ValidatedWorker[] {
+  const resolveCompanyId = createTenantCompanyIdResolver(expectedCompanyId);
   const rows = requireSingleArrayEnvelope(
     value,
     ["data", "workers", "items", "results"],
@@ -82,7 +99,7 @@ export function requireWorkerRows(value: unknown): ValidatedWorker[] {
   return requireEntityRows(rows, "workers", (row, index) => ({
     ...row,
     id: requireId(row.id, `id do worker na posição ${index}`),
-    company_id: requireId(
+    company_id: resolveCompanyId(
       row.company_id,
       `company_id do worker na posição ${index}`,
     ),
@@ -251,7 +268,7 @@ function requireId(value: unknown, context: string) {
 }
 
 function requireOptionalId(value: unknown, context: string) {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
   return requireId(value, context);
 }
 

@@ -161,7 +161,7 @@ export function CountingReportPeriodControl({
             disabled={disabled}
             onClick={() => onIncludeOpenPeriodChange(!includeOpenPeriod)}
             className={cn(
-              "h-5 w-9 shrink-0 rounded-full p-0.5 transition disabled:cursor-not-allowed disabled:opacity-50",
+              "h-5 w-9 shrink-0 rounded-full p-0.5 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
               includeOpenPeriod ? "bg-primary" : "bg-muted-foreground/30",
             )}
           >

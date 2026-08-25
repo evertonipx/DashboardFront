@@ -36,6 +36,7 @@ export default function LoginPage() {
   const [password, setPassword] = React.useState("");
   const [showPassword, setShowPassword] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
+  const submittingRef = React.useRef(false);
   const isDefaultBrand = branding.key === DEFAULT_LOGIN_BRANDING.key;
 
   React.useEffect(() => {
@@ -58,6 +59,8 @@ export default function LoginPage() {
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
 
     try {
@@ -69,6 +72,7 @@ export default function LoginPage() {
         error instanceof Error ? error.message : "Não foi possível autenticar.";
       toast.error(message);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
@@ -176,7 +180,7 @@ export default function LoginPage() {
                 </div>
               </div>
 
-              <Button className="w-full" disabled={submitting}>
+              <Button className="w-full" disabled={submitting} type="submit">
                 {submitting ? "Entrando..." : "Entrar"}
                 <ArrowRight className="h-4 w-4" />
               </Button>

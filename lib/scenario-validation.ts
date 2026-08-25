@@ -1,4 +1,5 @@
 import type { Scenario, ScenarioLine } from "@/lib/types";
+import { createTenantCompanyIdResolver } from "@/lib/tenant-scope-validation";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -8,11 +9,15 @@ type UnknownRecord = Record<string, unknown>;
  * IDs com padding são rejeitados antes da verificação de unicidade para
  * impedir que identidades diferentes convirjam silenciosamente.
  */
-export function requireScenarioRows(value: unknown): Scenario[] {
+export function requireScenarioRows(
+  value: unknown,
+  expectedCompanyId?: string | null,
+): Scenario[] {
   if (!Array.isArray(value)) {
     throw new Error("A API retornou uma lista de cenários inválida.");
   }
 
+  const resolveCompanyId = createTenantCompanyIdResolver(expectedCompanyId);
   const scenarioIds = new Set<string>();
 
   return Array.from(value, (candidate, scenarioIndex) => {
@@ -32,9 +37,9 @@ export function requireScenarioRows(value: unknown): Scenario[] {
     }
     scenarioIds.add(id);
 
-    const companyId = requireCanonicalId(
+    const companyId = resolveCompanyId(
       candidate.company_id,
-      `empresa do cenário "${id}"`,
+      `company_id do cenário "${id}"`,
     );
     requireCanonicalString(
       candidate.name,

@@ -11,6 +11,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -66,6 +67,7 @@ import {
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
 import { canManageCameras, canManageLocations } from "@/lib/permissions";
+import { PROVISIONED_RESOURCE_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
 import type {
   Camera,
   CameraLineCount,
@@ -78,6 +80,7 @@ import {
   normalizeWorkerRows,
   partitionWorkersByCompanyScope,
   sortWorkersByActivity,
+  workersFromExplicitCompanyScope,
 } from "@/lib/worker-scope";
 
 type LocationFormState = {
@@ -105,6 +108,10 @@ type LineCountFormState = {
   name: string;
   line_code: string;
   active: string;
+};
+
+type ResourceLoadOptions = {
+  silent?: boolean;
 };
 
 type CameraGroupFormState = {
@@ -156,6 +163,9 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
   const canEditLocations = canManageLocations(user);
   const canEditCameras = canManageCameras(user);
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const companyScopeIdRef = React.useRef(companyScopeId);
+  const subLocationRequestSequenceRef = React.useRef(0);
+  const lineCountRequestSequenceRef = React.useRef(0);
   const [locations, setLocations] = React.useState<Location[]>([]);
   const [subLocations, setSubLocations] = React.useState<SubLocation[]>([]);
   const [cameras, setCameras] = React.useState<Camera[]>([]);
@@ -209,6 +219,10 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
     [workers],
   );
 
+  React.useEffect(() => {
+    companyScopeIdRef.current = companyScopeId;
+  }, [companyScopeId]);
+
   const selectedLocation = React.useMemo(
     () => locations.find((location) => location.id === selectedLocationId) ?? null,
     [locations, selectedLocationId],
@@ -251,19 +265,67 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
     };
   }, [user]);
 
-  const loadBase = React.useCallback(async () => {
-    setLoading(true);
+  React.useEffect(() => {
+    setLocations([]);
+    setSubLocations([]);
+    setCameras([]);
+    setWorkers([]);
+    setLineCounts([]);
+    setCameraSubLocations([]);
+    setSelectedLocationId("");
+    setSelectedSubLocationId("");
+    setSelectedCameraId("");
+    setLocationDialog(false);
+    setSubLocationDialog(false);
+    setCameraGroupDialog(false);
+    setCameraDialog(false);
+    setLineDialog(false);
+  }, [companyScopeId]);
+
+  const loadBase = React.useCallback(async (
+    { silent = false }: ResourceLoadOptions = {},
+  ) => {
+    if (!companyScopeId) {
+      setLocations([]);
+      setCameras([]);
+      setWorkers([]);
+      setLoading(false);
+      return;
+    }
+    const requestedCompanyScopeId = companyScopeId;
+    if (!silent) setLoading(true);
     try {
-      const [locationRows, cameraRows, workerRows] = await Promise.all([
-        apiFetch<Location[]>("/locations"),
-        apiFetch<Camera[]>("/cameras"),
-        fetchInfrastructureWorkers(companyScopeId).catch(() => []),
+      const [locationsResult, camerasResult, workersResult] = await Promise.allSettled([
+        apiFetch<Location[]>("/locations", {
+          companyScopeId: requestedCompanyScopeId,
+        }),
+        apiFetch<Camera[]>("/cameras", {
+          companyScopeId: requestedCompanyScopeId,
+        }),
+        fetchInfrastructureWorkers(requestedCompanyScopeId),
       ]);
-      const scopedLocations = filterScopedApiRows(locationRows, companyScopeId);
-      const scopedCameras = filterScopedApiRows(cameraRows, companyScopeId);
+      if (companyScopeIdRef.current !== requestedCompanyScopeId) return;
+      if (locationsResult.status === "rejected") throw locationsResult.reason;
+      if (camerasResult.status === "rejected") throw camerasResult.reason;
+      const locationRows = locationsResult.value;
+      const cameraRows = camerasResult.value;
+      const scopedLocations = filterScopedApiRows(
+        locationRows,
+        requestedCompanyScopeId,
+      );
+      const scopedCameras = filterScopedApiRows(
+        cameraRows,
+        requestedCompanyScopeId,
+      );
       setLocations(scopedLocations);
       setCameras(scopedCameras);
-      setWorkers(workerRows);
+      if (workersResult.status === "fulfilled") {
+        setWorkers(workersResult.value);
+      } else if (!silent) {
+        toast.warning(
+          "A infraestrutura foi atualizada, mas os workers não puderam ser sincronizados.",
+        );
+      }
       setSelectedLocationId((current) =>
         current && scopedLocations.some((row) => row.id === current)
           ? current
@@ -275,29 +337,42 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
           : scopedCameras[0]?.id ?? "",
       );
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar a infraestrutura.";
-      toast.error(message);
+      if (!silent && companyScopeIdRef.current === requestedCompanyScopeId) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Não foi possível carregar a infraestrutura.";
+        toast.error(message);
+      }
     } finally {
-      setLoading(false);
+      if (!silent && companyScopeIdRef.current === requestedCompanyScopeId) {
+        setLoading(false);
+      }
     }
   }, [companyScopeId]);
 
   const loadSubLocations = React.useCallback(async () => {
-    if (!selectedLocationId) {
+    const requestSequence = ++subLocationRequestSequenceRef.current;
+    if (!companyScopeId || !selectedLocationId) {
       setSubLocations([]);
       setSelectedSubLocationId("");
       return;
     }
 
+    const requestedCompanyScopeId = companyScopeId;
+    const requestedLocationId = selectedLocationId;
+    setSubLocations([]);
     setLoadingChildren(true);
     try {
       const rows = await apiFetch<SubLocation[]>(
         `/locations/${selectedLocationId}/sub-locations`,
+        { companyScopeId: requestedCompanyScopeId },
       );
-      const scopedRows = filterScopedApiRows(rows, companyScopeId);
+      if (
+        requestSequence !== subLocationRequestSequenceRef.current ||
+        companyScopeIdRef.current !== requestedCompanyScopeId
+      ) return;
+      const scopedRows = filterScopedApiRows(rows, requestedCompanyScopeId);
       setSubLocations(scopedRows);
       setSelectedSubLocationId((current) =>
         current && scopedRows.some((row) => row.id === current)
@@ -305,43 +380,70 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
           : scopedRows[0]?.id ?? "",
       );
     } catch (error) {
+      if (companyScopeIdRef.current !== requestedCompanyScopeId) return;
       const message =
         error instanceof Error
           ? error.message
           : "Não foi possível carregar sub-locations.";
       toast.error(message);
     } finally {
-      setLoadingChildren(false);
+      if (
+        requestSequence === subLocationRequestSequenceRef.current &&
+        companyScopeIdRef.current === requestedCompanyScopeId &&
+        requestedLocationId === selectedLocationId
+      ) {
+        setLoadingChildren(false);
+      }
     }
   }, [companyScopeId, selectedLocationId]);
 
-  const loadLineCounts = React.useCallback(async () => {
-    if (!selectedCameraId) {
+  const loadLineCounts = React.useCallback(async (
+    { silent = false }: ResourceLoadOptions = {},
+  ) => {
+    const requestSequence = ++lineCountRequestSequenceRef.current;
+    if (!companyScopeId || !selectedCameraId) {
       setLineCounts([]);
       return;
     }
 
-    setLoadingChildren(true);
+    const requestedCompanyScopeId = companyScopeId;
+    const requestedCameraId = selectedCameraId;
+    setLineCounts([]);
+    if (!silent) setLoadingChildren(true);
     try {
       const rows = await apiFetch<CameraLineCount[]>(
         `/cameras/${selectedCameraId}/line-counts`,
+        { companyScopeId: requestedCompanyScopeId },
       );
+      if (
+        requestSequence !== lineCountRequestSequenceRef.current ||
+        companyScopeIdRef.current !== requestedCompanyScopeId
+      ) return;
       setLineCounts(
-        filterScopedApiRows(rows, companyScopeId),
+        filterScopedApiRows(rows, requestedCompanyScopeId),
       );
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar line counts.";
-      toast.error(message);
+      if (!silent && companyScopeIdRef.current === requestedCompanyScopeId) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Não foi possível carregar line counts.";
+        toast.error(message);
+      }
     } finally {
-      setLoadingChildren(false);
+      if (
+        !silent &&
+        requestSequence === lineCountRequestSequenceRef.current &&
+        companyScopeIdRef.current === requestedCompanyScopeId &&
+        requestedCameraId === selectedCameraId
+      ) {
+        setLoadingChildren(false);
+      }
     }
   }, [companyScopeId, selectedCameraId]);
 
   React.useEffect(() => {
-    loadBase();
+    void loadBase();
   }, [loadBase]);
 
   React.useEffect(() => {
@@ -349,8 +451,21 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
   }, [loadSubLocations]);
 
   React.useEffect(() => {
-    loadLineCounts();
+    void loadLineCounts();
   }, [loadLineCounts]);
+
+  useResourceAutoRefresh(
+    async () => {
+      await Promise.all([
+        loadBase({ silent: true }),
+        loadLineCounts({ silent: true }),
+      ]);
+    },
+    {
+      enabled: Boolean(companyScopeId) && !loading && !loadingChildren,
+      intervalMs: PROVISIONED_RESOURCE_REFRESH_INTERVAL_MS,
+    },
+  );
 
   React.useEffect(() => {
     if (view !== "all") {
@@ -405,12 +520,20 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
     let mounted = true;
 
     async function loadCameraSubLocations() {
+      const requestedCompanyScopeId = companyScopeId;
+      if (!requestedCompanyScopeId) return;
       try {
         const rows = await apiFetch<SubLocation[]>(
           `/locations/${cameraForm.location_id}/sub-locations`,
+          { companyScopeId: requestedCompanyScopeId },
         );
-        if (mounted) {
-          setCameraSubLocations(filterScopedApiRows(rows, companyScopeId));
+        if (
+          mounted &&
+          companyScopeIdRef.current === requestedCompanyScopeId
+        ) {
+          setCameraSubLocations(
+            filterScopedApiRows(rows, requestedCompanyScopeId),
+          );
         }
       } catch {
         if (mounted) setCameraSubLocations([]);
@@ -595,6 +718,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
         const updated = await apiFetch<Partial<Location> | null>(
           `/locations/${editingLocation.id}`,
           {
+            companyScopeId,
             method: "PUT",
             body,
           },
@@ -603,6 +727,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
         toast.success("Location atualizada");
       } else {
         const created = await apiFetch<Partial<Location> | null>("/locations", {
+          companyScopeId,
           method: "POST",
           body: {
             name,
@@ -654,6 +779,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
         await apiFetch(
           `/locations/${selectedLocationId}/sub-locations/${editingSubLocation.id}`,
           {
+            companyScopeId,
             method: "PUT",
             body: {
               name,
@@ -664,6 +790,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
         toast.success("Sub-location atualizada");
       } else {
         await apiFetch(`/locations/${selectedLocationId}/sub-locations`, {
+          companyScopeId,
           method: "POST",
           body: { name },
         });
@@ -731,6 +858,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
 
       if (editingCamera) {
         await apiFetch(`/cameras/${editingCamera.id}`, {
+          companyScopeId,
           method: "PUT",
           body: {
             ...sharedBody,
@@ -740,6 +868,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
         toast.success("Câmera atualizada");
       } else {
         await apiFetch("/cameras", {
+          companyScopeId,
           method: "POST",
           body: {
             ...sharedBody,
@@ -781,6 +910,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
         await apiFetch(
           `/cameras/${selectedCameraId}/line-counts/${editingLine.id}`,
           {
+            companyScopeId,
             method: "PUT",
             body: {
               name,
@@ -792,6 +922,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
         toast.success("Line count atualizada");
       } else {
         await apiFetch(`/cameras/${selectedCameraId}/line-counts`, {
+          companyScopeId,
           method: "POST",
           body: { name, line_code: lineCode },
         });
@@ -866,7 +997,7 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
     reload: () => Promise<void>,
   ) {
     try {
-      await apiFetch(path, { method: "DELETE" });
+      await apiFetch(path, { companyScopeId, method: "DELETE" });
       toast.success(message);
       await reload();
     } catch (error) {
@@ -921,7 +1052,9 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
           type="button"
           variant="outline"
           className="w-full sm:w-auto"
-          onClick={loadBase}
+          onClick={() => {
+            void Promise.all([loadBase(), loadLineCounts()]);
+          }}
           disabled={loading}
         >
           <RefreshCw className={loading ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
@@ -1741,11 +1874,15 @@ export function InfrastructureManager({ view = "all" }: { view?: InfrastructureV
 }
 
 async function fetchInfrastructureWorkers(companyId?: string | null) {
-  const rows = await apiFetch<unknown>("/workers").then((response) =>
-    normalizeWorkerRows(response),
+  const companyScopeId = companyId?.trim();
+  if (!companyScopeId) return [];
+  const rows = await apiFetch<unknown>("/workers", { companyScopeId }).then(
+    (response) => normalizeWorkerRows(response),
   );
-  const { scopedRows } = partitionWorkersByCompanyScope(rows, companyId);
-  return sortWorkersByActivity(scopedRows);
+  const partition = partitionWorkersByCompanyScope(rows, companyScopeId);
+  return sortWorkersByActivity(
+    workersFromExplicitCompanyScope(partition),
+  );
 }
 
 function FormField({

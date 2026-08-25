@@ -4,7 +4,7 @@ import { InfrastructureManager } from "@/components/app/infrastructure-manager";
 
 export default function ManagerLocationsPage() {
   return (
-    <AuthGuard requireManager>
+    <AuthGuard requireManager requireResource="locations">
       <AppShell
         mode="manager"
         title="Locations"

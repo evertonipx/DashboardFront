@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   BarChart,
+  CustomChart,
   EffectScatterChart,
   HeatmapChart,
   LineChart,
@@ -25,7 +26,7 @@ import {
 } from "echarts/components";
 import * as echarts from "echarts/core";
 import type { EChartsCoreOption, EChartsType } from "echarts/core";
-import { LabelLayout } from "echarts/features";
+import { LabelLayout, LegacyGridContainLabel } from "echarts/features";
 import { CanvasRenderer } from "echarts/renderers";
 
 import { useTheme } from "@/components/app/theme-provider";
@@ -38,6 +39,7 @@ import { cn } from "@/lib/utils";
 
 echarts.use([
   BarChart,
+  CustomChart,
   EffectScatterChart,
   HeatmapChart,
   LineChart,
@@ -53,6 +55,7 @@ echarts.use([
   TooltipComponent,
   VisualMapComponent,
   LabelLayout,
+  LegacyGridContainLabel,
   CanvasRenderer,
 ]);
 
@@ -64,24 +67,53 @@ export type EnterpriseChartOption = EChartsCoreOption & {
 
 type EChartProps = {
   option: EnterpriseChartOption;
+  ariaDescription?: string;
+  ariaLabel?: string;
   className?: string;
+  mergeUpdates?: boolean;
+  themeMode?: "auto" | "explicit";
+  valueLabels?: "auto" | "always" | "none";
 };
 
-export function EChart({ option, className }: EChartProps) {
+export function EChart({
+  option,
+  ariaDescription,
+  ariaLabel,
+  className,
+  mergeUpdates = false,
+  themeMode = "auto",
+  valueLabels = "auto",
+}: EChartProps) {
   const { effectiveTheme } = useTheme();
   const chartType = useWidgetChartType();
   const zoom = useWidgetZoom();
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const descriptionId = React.useId();
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const chartRef = React.useRef<EChartsType | null>(null);
-  const themedOption = React.useMemo(
-    () =>
-      applyChartTheme(
-        enhanceInteractiveChartOption(
-          applyChartTypePreference(option, chartType),
-        ),
-        effectiveTheme === "dark",
-      ),
-    [chartType, effectiveTheme, option],
+  const themedOption = React.useMemo(() => {
+    const interactiveOption = enhanceInteractiveChartOption(
+      applyChartTypePreference(option, chartType),
+      effectiveTheme === "dark",
+      valueLabels,
+    );
+    const visualOption = themeMode === "explicit"
+      ? interactiveOption
+      : applyChartTheme(interactiveOption, effectiveTheme === "dark");
+    return prefersReducedMotion
+      ? disableChartMotion(visualOption)
+      : visualOption;
+  }, [
+    chartType,
+    effectiveTheme,
+    option,
+    prefersReducedMotion,
+    themeMode,
+    valueLabels,
+  ]);
+  const accessibility = React.useMemo(
+    () => resolveChartAccessibility(option, ariaLabel, ariaDescription),
+    [ariaDescription, ariaLabel, option],
   );
 
   React.useEffect(() => {
@@ -101,15 +133,15 @@ export function EChart({ option, className }: EChartProps) {
       chart.dispose();
       chartRef.current = null;
     };
-  }, [chartType]);
+  }, [chartType, prefersReducedMotion]);
 
   React.useEffect(() => {
     const chart = chartRef.current;
     chart?.setOption(themedOption, {
       lazyUpdate: false,
-      notMerge: true,
+      notMerge: !mergeUpdates,
     });
-  }, [themedOption]);
+  }, [mergeUpdates, themedOption]);
 
   React.useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -120,11 +152,24 @@ export function EChart({ option, className }: EChartProps) {
 
   return (
     <div
-      className={cn("relative h-full w-full overflow-hidden", className)}
+      aria-describedby={descriptionId}
+      aria-label={accessibility.label}
+      className={cn(
+        "relative h-full w-full overflow-hidden rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        className,
+      )}
       data-echart
       data-chart-type={chartType}
+      data-chart-theme-mode={themeMode}
+      data-chart-update-mode={mergeUpdates ? "merge" : "replace"}
+      data-chart-value-labels={valueLabels}
       data-chart-zoom={Math.round(zoom * 100)}
+      role="group"
+      tabIndex={0}
     >
+      <span id={descriptionId} className="sr-only">
+        {accessibility.description}
+      </span>
       <div
         ref={containerRef}
         className="absolute left-1/2 top-1/2"
@@ -137,6 +182,142 @@ export function EChart({ option, className }: EChartProps) {
       />
     </div>
   );
+}
+
+function resolveChartAccessibility(
+  option: EnterpriseChartOption,
+  explicitLabel?: string,
+  explicitDescription?: string,
+) {
+  const series = chartSeriesRecords(option);
+  const seriesNames = Array.from(
+    new Set(
+      series.flatMap((item) =>
+        typeof item.name === "string" && item.name.trim()
+          ? [item.name.trim()]
+          : [],
+      ),
+    ),
+  );
+  const title = chartOptionTitle(option);
+  const label =
+    nonEmptyText(explicitLabel) ??
+    title ??
+    (seriesNames.length === 1
+      ? `Gráfico de ${seriesNames[0]}`
+      : seriesNames.length > 1
+        ? `Gráfico com ${seriesNames.length} séries`
+        : "Gráfico de dados");
+  const description =
+    nonEmptyText(explicitDescription) ??
+    chartOptionAriaDescription(option) ??
+    (seriesNames.length
+      ? `${label}. Séries apresentadas: ${seriesNames.join(", ")}.`
+      : `${label}. A descrição detalhada dos dados está disponível no contexto deste widget.`);
+
+  return { description, label };
+}
+
+function chartSeriesRecords(option: EnterpriseChartOption) {
+  const rawSeries = option.series;
+  const series = Array.isArray(rawSeries)
+    ? rawSeries
+    : rawSeries
+      ? [rawSeries]
+      : [];
+  return series.filter(
+    (item): item is Record<string, unknown> =>
+      Boolean(item) && typeof item === "object",
+  );
+}
+
+function chartOptionTitle(option: EnterpriseChartOption) {
+  const rawTitle = option.title;
+  const titles = Array.isArray(rawTitle) ? rawTitle : rawTitle ? [rawTitle] : [];
+  for (const title of titles) {
+    if (!title || typeof title !== "object") continue;
+    const text = nonEmptyText((title as { text?: unknown }).text);
+    if (text) return text;
+  }
+  return undefined;
+}
+
+function chartOptionAriaDescription(option: EnterpriseChartOption) {
+  if (!option.aria || typeof option.aria !== "object") return undefined;
+  const label = (option.aria as { label?: unknown }).label;
+  if (!label || typeof label !== "object") return undefined;
+  return nonEmptyText((label as { description?: unknown }).description);
+}
+
+function nonEmptyText(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text || undefined;
+}
+
+function usePrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = React.useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+
+  React.useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const syncPreference = () => setPrefersReducedMotion(mediaQuery.matches);
+
+    syncPreference();
+    mediaQuery.addEventListener("change", syncPreference);
+    return () => mediaQuery.removeEventListener("change", syncPreference);
+  }, []);
+
+  return prefersReducedMotion;
+}
+
+function disableChartMotion(
+  option: EnterpriseChartOption,
+): EnterpriseChartOption {
+  const disableSeriesMotion = (series: unknown) => {
+    if (!series || typeof series !== "object") return series;
+    return {
+      ...(series as Record<string, unknown>),
+      animation: false,
+      animationDelay: 0,
+      animationDelayUpdate: 0,
+      animationDuration: 0,
+      animationDurationUpdate: 0,
+      universalTransition: false,
+    };
+  };
+  const tooltip =
+    option.tooltip &&
+    !Array.isArray(option.tooltip) &&
+    typeof option.tooltip === "object"
+      ? { ...option.tooltip, transitionDuration: 0 }
+      : option.tooltip;
+  const stateAnimation =
+    option.stateAnimation && typeof option.stateAnimation === "object"
+      ? option.stateAnimation
+      : {};
+
+  return {
+    ...option,
+    animation: false,
+    animationDelay: 0,
+    animationDelayUpdate: 0,
+    animationDuration: 0,
+    animationDurationUpdate: 0,
+    series: Array.isArray(option.series)
+      ? option.series.map(disableSeriesMotion)
+      : disableSeriesMotion(option.series),
+    stateAnimation: {
+      ...stateAnimation,
+      duration: 0,
+    },
+    tooltip,
+  } as EnterpriseChartOption;
 }
 
 export function applyChartTypePreference(
@@ -282,6 +463,8 @@ export function applyChartTypePreference(
 
 function enhanceInteractiveChartOption(
   option: EnterpriseChartOption,
+  dark = false,
+  valueLabels: "auto" | "always" | "none" = "auto",
 ): EnterpriseChartOption {
   const rawSeries = option.series;
   const series = Array.isArray(rawSeries)
@@ -289,6 +472,10 @@ function enhanceInteractiveChartOption(
     : rawSeries
       ? [rawSeries]
       : [];
+  const pointCount = chartPointCount(option, series);
+  const showAutomaticValueLabels =
+    valueLabels === "always" ||
+    (valueLabels === "auto" && pointCount > 0 && pointCount <= 24);
   const horizontal =
     firstAxisType(option.xAxis) === "value" &&
     firstAxisType(option.yAxis) === "category";
@@ -311,12 +498,13 @@ function enhanceInteractiveChartOption(
     const verticalBarLabel = seriesOption.type === "bar" && !horizontal;
     const lineValueLabel = seriesOption.type === "line";
     const anchoredValueLabel = verticalBarLabel || lineValueLabel;
-    const valueLabel = supportsValueLabels
+    const valueLabel = supportsValueLabels &&
+      (existingLabel || showAutomaticValueLabels)
       ? {
           // A 90-degree label needs a left anchor: after rotation its whole
           // height grows upward from the bar top instead of crossing it.
           align: horizontal || verticalBarLabel ? "left" : "center",
-          color: "#334155",
+          color: dark ? "#D4D4D8" : "#334155",
           distance: horizontal ? 6 : verticalBarLabel ? 5 : 6,
           fontSize: 10,
           fontWeight: 600,
@@ -328,6 +516,7 @@ function enhanceInteractiveChartOption(
           verticalAlign:
             horizontal || verticalBarLabel ? "middle" : "bottom",
           ...(existingLabel ?? {}),
+          ...(valueLabels === "none" ? { show: false } : {}),
           // A bar-to-line conversion can carry a 90-degree bar label over to
           // the line. Point labels are always horizontal and above the point.
           ...(lineValueLabel
@@ -370,7 +559,7 @@ function enhanceInteractiveChartOption(
         : {}),
     };
   });
-  const categoryCount = categoryXAxisLength(option.xAxis);
+  const categoryCount = categoryAxisLength(option.xAxis);
   const tooltip =
     option.tooltip &&
     !Array.isArray(option.tooltip) &&
@@ -532,14 +721,30 @@ function numericGridOffset(value: unknown, minimum: number) {
   return Number.isFinite(numeric) ? Math.max(numeric, minimum) : minimum;
 }
 
-function categoryXAxisLength(xAxis: unknown) {
-  const axes = Array.isArray(xAxis) ? xAxis : xAxis ? [xAxis] : [];
+function categoryAxisLength(axis: unknown) {
+  const axes = Array.isArray(axis) ? axis : axis ? [axis] : [];
 
   return axes.reduce((largest, axis) => {
     if (!axis || typeof axis !== "object") return largest;
     const data = (axis as { data?: unknown }).data;
     return Array.isArray(data) ? Math.max(largest, data.length) : largest;
   }, 0);
+}
+
+function chartPointCount(
+  option: EnterpriseChartOption,
+  series: unknown[],
+) {
+  const axisCount = Math.max(
+    categoryAxisLength(option.xAxis),
+    categoryAxisLength(option.yAxis),
+  );
+  const seriesCount = series.reduce<number>((largest, item) => {
+    if (!item || typeof item !== "object") return largest;
+    const data = (item as { data?: unknown }).data;
+    return Array.isArray(data) ? Math.max(largest, data.length) : largest;
+  }, 0);
+  return Math.max(axisCount, seriesCount);
 }
 
 function applyChartTheme(option: EnterpriseChartOption, dark: boolean) {
@@ -643,36 +848,37 @@ export async function renderEChartToDataUrl(
   container.style.pointerEvents = "none";
   container.style.background = "#ffffff";
   document.body.appendChild(container);
+  let chart: EChartsType | null = null;
 
-  const chart = echarts.init(container, null, {
-    height,
-    renderer: "canvas",
-    width,
-  });
+  try {
+    chart = echarts.init(container, null, {
+      height,
+      renderer: "canvas",
+      width,
+    });
 
-  chart.setOption(
-    {
-      ...option,
-      animation: false,
-      animationDuration: 0,
-      animationDurationUpdate: 0,
-    },
-    true,
-  );
-  chart.resize({ height, width });
-  await waitForChartRender(chart);
-  flushChartRenderer(chart);
+    chart.setOption(
+      {
+        ...option,
+        animation: false,
+        animationDuration: 0,
+        animationDurationUpdate: 0,
+      },
+      true,
+    );
+    chart.resize({ height, width });
+    await waitForChartRender(chart);
+    flushChartRenderer(chart);
 
-  const dataUrl = chart.getDataURL({
-    backgroundColor: "#ffffff",
-    pixelRatio: 2,
-    type: "png",
-  });
-
-  chart.dispose();
-  container.remove();
-
-  return dataUrl;
+    return chart.getDataURL({
+      backgroundColor: "#ffffff",
+      pixelRatio: 2,
+      type: "png",
+    });
+  } finally {
+    chart?.dispose();
+    container.remove();
+  }
 }
 
 async function waitForChartRender(chart: EChartsType) {

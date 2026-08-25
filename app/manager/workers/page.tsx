@@ -4,7 +4,7 @@ import { WorkerManager } from "@/components/app/worker-manager";
 
 export default function ManagerWorkersPage() {
   return (
-    <AuthGuard requireManager>
+    <AuthGuard requireManager requireResource="workers">
       <AppShell
         mode="manager"
         title="Workers"

@@ -1,13 +1,28 @@
 "use client";
 
 import * as React from "react";
+import {
+  COMPANY_CACHE_EVENT,
+  readCachedCompany,
+} from "@/lib/company-cache";
+import {
+  resolveCompanyTimeZone,
+  type CompanyTimeZoneResolution,
+} from "@/lib/company-time-zone";
 import type { CurrentUser } from "@/lib/types";
 import { isMasterUser } from "@/lib/user-role";
 
 export type MasterCompanyScope = {
   id: string;
   name: string;
+  timezone?: string | null;
   trade_name?: string | null;
+};
+
+export type CompanyScopeTimeZoneCertification = {
+  companyScopeId: string;
+  error?: string;
+  timeZone?: string;
 };
 
 export const MASTER_COMPANY_SCOPE_EVENT = "ipxdata:master-company-scope";
@@ -53,6 +68,136 @@ export function getCurrentUserCompanyId(user: CurrentUser | null) {
   return getEntityCompanyId(user);
 }
 
+export function getEffectiveCompanyTimeZoneResolution(
+  user: CurrentUser | null,
+): CompanyTimeZoneResolution {
+  const master = isMasterUser(user);
+  const userCompanyId = getCurrentUserCompanyId(user);
+  const storedScope = master
+    ? getStoredMasterCompanyScope()
+    : getStoredCurrentCompanyScope();
+  return getCompanyTimeZoneResolutionForScope(
+    user,
+    master ? storedScope?.id ?? "" : userCompanyId || storedScope?.id || "",
+  );
+}
+
+/**
+ * Resolves timezone metadata only from records whose identity matches the
+ * requested company. This prevents a cached/selected timezone from one
+ * tenant being paired with another tenant's explicit API scope.
+ */
+export function getCompanyTimeZoneResolutionForScope(
+  user: CurrentUser | null,
+  companyScopeId: string | null | undefined,
+): CompanyTimeZoneResolution {
+  const cleanCompanyScopeId = companyScopeId?.trim() ?? "";
+  const master = isMasterUser(user);
+  const userCompanyId = getCurrentUserCompanyId(user);
+  const storedScope = master
+    ? getStoredMasterCompanyScope()
+    : getStoredCurrentCompanyScope();
+  const cachedCompany = readCachedCompany(cleanCompanyScopeId);
+
+  return resolveCompanyTimeZone(
+    master
+      ? [
+          {
+            source: "current-user-company",
+            value:
+              userCompanyId === cleanCompanyScopeId
+                ? user?.company?.timezone
+                : undefined,
+          },
+          {
+            source: "current-user-company",
+            value:
+              userCompanyId === cleanCompanyScopeId
+                ? user?.company_timezone
+                : undefined,
+          },
+          {
+            source: "selected-company",
+            value:
+              storedScope?.id === cleanCompanyScopeId
+                ? storedScope.timezone
+                : undefined,
+          },
+          {
+            source: "company-cache",
+            value: cachedCompany?.timezone,
+          },
+        ]
+      : [
+          {
+            source: "current-user-company",
+            value:
+              userCompanyId === cleanCompanyScopeId
+                ? user?.company?.timezone
+                : undefined,
+          },
+          {
+            source: "current-user-company",
+            value:
+              userCompanyId === cleanCompanyScopeId
+                ? user?.company_timezone
+                : undefined,
+          },
+          {
+            source: "current-company-scope",
+            value:
+              storedScope?.id === cleanCompanyScopeId
+                ? storedScope?.timezone
+                : undefined,
+          },
+          {
+            source: "company-cache",
+            value: cachedCompany?.timezone,
+          },
+        ],
+  );
+}
+
+/**
+ * An explicit company in a video-wall URL is accepted only while it remains
+ * the effective authenticated scope and has timezone metadata tied to that
+ * same company. There is deliberately no timezone fallback in this path.
+ */
+export function certifyCompanyScopeTimeZoneOverride(
+  user: CurrentUser | null,
+  companyIdOverride: string | null | undefined,
+): CompanyScopeTimeZoneCertification {
+  const companyScopeId = companyIdOverride?.trim() ?? "";
+  const effectiveCompanyScopeId = getEffectiveCompanyScopeId(user);
+
+  if (!companyScopeId || companyScopeId !== effectiveCompanyScopeId) {
+    return {
+      companyScopeId,
+      error: "Empresa do video wall não corresponde à empresa ativa.",
+    };
+  }
+
+  const resolution = getCompanyTimeZoneResolutionForScope(
+    user,
+    companyScopeId,
+  );
+  if (resolution.fallback) {
+    return {
+      companyScopeId,
+      error: "Fuso da empresa do video wall não certificado.",
+    };
+  }
+
+  return {
+    companyScopeId,
+    timeZone: resolution.timeZone,
+  };
+}
+
+export function getEffectiveCompanyTimeZone(user: CurrentUser | null) {
+  return getEffectiveCompanyTimeZoneResolution(user).timeZone;
+}
+
 export function useEffectiveCompanyScopeId(user: CurrentUser | null) {
   const [companyScopeId, setCompanyScopeId] = React.useState(() =>
     getEffectiveCompanyScopeId(user),
@@ -76,6 +221,37 @@ export function useEffectiveCompanyScopeId(user: CurrentUser | null) {
   return companyScopeId;
 }
 
+export function useEffectiveCompanyTimeZoneResolution(
+  user: CurrentUser | null,
+) {
+  const [resolution, setResolution] = React.useState(() =>
+    getEffectiveCompanyTimeZoneResolution(user),
+  );
+
+  React.useEffect(() => {
+    function syncTimeZone() {
+      setResolution(getEffectiveCompanyTimeZoneResolution(user));
+    }
+
+    syncTimeZone();
+    window.addEventListener(MASTER_COMPANY_SCOPE_EVENT, syncTimeZone);
+    window.addEventListener(COMPANY_CACHE_EVENT, syncTimeZone);
+    window.addEventListener("storage", syncTimeZone);
+
+    return () => {
+      window.removeEventListener(MASTER_COMPANY_SCOPE_EVENT, syncTimeZone);
+      window.removeEventListener(COMPANY_CACHE_EVENT, syncTimeZone);
+      window.removeEventListener("storage", syncTimeZone);
+    };
+  }, [user]);
+
+  return resolution;
+}
+
+export function useEffectiveCompanyTimeZone(user: CurrentUser | null) {
+  return useEffectiveCompanyTimeZoneResolution(user).timeZone;
+}
+
 export function getScopedStorageKey(baseKey: string, companyId?: string | null) {
   const cleanCompanyId = companyId?.trim();
   return cleanCompanyId ? `${baseKey}.${cleanCompanyId}` : baseKey;
@@ -96,6 +272,68 @@ export function getUserViewScopedStorageKey(
   return segments.length ? `${baseKey}.${segments.join(".")}` : baseKey;
 }
 
+/**
+ * Lists the compatible keys for a setting that became progressively more
+ * specific. The current view always wins, followed only by values belonging
+ * to the same user/company scope and, finally, the two historical
+ * company-wide key formats.
+ */
+export function getUserViewScopedStorageReadKeys(
+  baseKey: string,
+  companyId?: string | null,
+  userId?: string | null,
+  viewId?: string | null,
+) {
+  const cleanCompanyId = companyId?.trim() ?? "";
+  const cleanUserId = userId?.trim() ?? "";
+  const cleanViewId = viewId?.trim() ?? "";
+  const keys = [
+    getUserViewScopedStorageKey(
+      baseKey,
+      cleanCompanyId,
+      cleanUserId,
+      cleanViewId,
+    ),
+  ];
+
+  if (cleanViewId) {
+    keys.push(
+      getUserViewScopedStorageKey(baseKey, cleanCompanyId, cleanUserId),
+    );
+  }
+
+  if (cleanCompanyId && (cleanUserId || cleanViewId)) {
+    keys.push(getUserViewScopedStorageKey(baseKey, cleanCompanyId));
+  }
+
+  if (cleanCompanyId) {
+    keys.push(getScopedStorageKey(baseKey, cleanCompanyId));
+  }
+
+  return Array.from(new Set(keys));
+}
+
+export function readUserViewScopedStorageEntry(
+  baseKey: string,
+  companyId?: string | null,
+  userId?: string | null,
+  viewId?: string | null,
+) {
+  if (typeof window === "undefined") return null;
+
+  for (const key of getUserViewScopedStorageReadKeys(
+    baseKey,
+    companyId,
+    userId,
+    viewId,
+  )) {
+    const value = window.localStorage.getItem(key);
+    if (value !== null) return { key, value };
+  }
+
+  return null;
+}
+
 export function getEntityCompanyId(value: unknown) {
   if (!value || typeof value !== "object") return "";
 
@@ -104,13 +342,17 @@ export function getEntityCompanyId(value: unknown) {
     record.company && typeof record.company === "object"
       ? (record.company as Record<string, unknown>)
       : null;
-  const companyId =
-    record.company_id ??
-    record.companyId ??
-    record.companyID ??
-    nestedCompany?.id;
+  for (const companyId of [
+    record.company_id,
+    record.companyId,
+    record.companyID,
+    nestedCompany?.id,
+  ]) {
+    const normalized = toCleanId(companyId);
+    if (normalized) return normalized;
+  }
 
-  return toCleanId(companyId);
+  return "";
 }
 
 export function getEntityUserId(value: unknown) {
@@ -354,8 +596,17 @@ function readStoredCompanyScope(key: string) {
     const rawScope = window.localStorage.getItem(key);
     if (!rawScope) return null;
 
-    const scope = JSON.parse(rawScope) as MasterCompanyScope;
-    return scope?.id && scope?.name ? scope : null;
+    const scope = JSON.parse(rawScope) as Partial<MasterCompanyScope>;
+    const id = toCleanId(scope?.id);
+    const name = toCleanId(scope?.name);
+    if (!id || !name) return null;
+
+    return {
+      id,
+      name,
+      timezone: normalizeOptionalString(scope.timezone),
+      trade_name: normalizeOptionalString(scope.trade_name),
+    };
   } catch {
     return null;
   }
@@ -364,7 +615,19 @@ function readStoredCompanyScope(key: string) {
 function writeStoredCompanyScope(key: string, scope: MasterCompanyScope) {
   if (typeof window === "undefined") return;
 
-  window.localStorage.setItem(key, JSON.stringify(scope));
+  const id = toCleanId(scope.id);
+  const name = toCleanId(scope.name);
+  if (!id || !name) return;
+
+  window.localStorage.setItem(
+    key,
+    JSON.stringify({
+      id,
+      name,
+      timezone: normalizeOptionalString(scope.timezone),
+      trade_name: normalizeOptionalString(scope.trade_name),
+    } satisfies MasterCompanyScope),
+  );
   window.dispatchEvent(new Event(MASTER_COMPANY_SCOPE_EVENT));
 }
 
@@ -373,4 +636,8 @@ function clearStoredCompanyScope(key: string) {
 
   window.localStorage.removeItem(key);
   window.dispatchEvent(new Event(MASTER_COMPANY_SCOPE_EVENT));
+}
+
+function normalizeOptionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }

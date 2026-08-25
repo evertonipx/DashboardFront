@@ -19,8 +19,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -35,9 +42,14 @@ import {
   aggregateQueryIso,
   endOfAggregateBucket,
   requireAggregateGranularity,
-  requireAggregateRows,
+  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  clearHourlyAggregateCache,
+  fetchHourlyAggregateRanges,
+  type HourlyAggregateCache,
+} from "@/lib/aggregate-hour-query";
 import { reconcileAggregateRows } from "@/lib/aggregate-reconciliation";
 import {
   DAY_OF_MONTH_AXIS_LABELS,
@@ -46,13 +58,21 @@ import {
   holidayCategoryIndexes,
 } from "@/lib/chart-calendar-axis";
 import { pastelBarColor } from "@/lib/chart-palette";
+import { requireCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
+import {
+  requireScenarioComparisonScope,
+  type ScenarioComparisonSourceScope,
+} from "@/lib/scenario-comparison-scope";
 import {
   buildFixedHourlyAxisValues,
   HOUR_OF_DAY_LABELS,
-  latestHourlyPointHour,
+  resolveFixedHourlyDayWindow,
 } from "@/lib/hourly-axis";
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
-import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  getUserViewScopedStorageKey,
+  readUserViewScopedStorageEntry,
+} from "@/lib/master-company-scope";
 import type { ReportPayload } from "@/lib/report-export";
 import type {
   AggregateEventRow,
@@ -66,6 +86,7 @@ type ScenarioComparisonCardProps = {
   action?: React.ReactNode;
   autoRefresh?: boolean;
   companyId?: string | null;
+  companyTimeZone: string;
   description?: string;
   disabledReason?: string;
   hourlySource?: ScenarioComparisonHourlySource;
@@ -77,7 +98,7 @@ type ScenarioComparisonCardProps = {
   title?: string;
 };
 
-export type ScenarioComparisonHourlySource = {
+export type ScenarioComparisonHourlySource = ScenarioComparisonSourceScope & {
   from: Date;
   rows: AggregateEventRow[];
   to: Date;
@@ -175,6 +196,7 @@ export function ScenarioComparisonCard({
   action,
   autoRefresh = false,
   companyId,
+  companyTimeZone,
   description = "Compare os cenários escolhidos no mesmo gráfico.",
   disabledReason,
   hourlySource,
@@ -199,6 +221,26 @@ export function ScenarioComparisonCard({
   const [settingsReady, setSettingsReady] = React.useState(false);
   const requestSequenceRef = React.useRef(0);
   const requestRunningRef = React.useRef(false);
+  const requestRef = React.useRef<AbortController | null>(null);
+  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
+    new Map(),
+  );
+  const scopeCertificationError = React.useMemo(() => {
+    try {
+      requireScenarioComparisonScope({
+        companyScopeId: companyId,
+        companyTimeZone,
+        hourlySource,
+        scenarios,
+      });
+      return "";
+    } catch (scopeError) {
+      return scopeError instanceof Error
+        ? scopeError.message
+        : "Escopo da comparação não certificado.";
+    }
+  }, [companyId, companyTimeZone, hourlySource, scenarios]);
+  const effectiveDisabledReason = disabledReason || scopeCertificationError;
   const [definition, setDefinition] = React.useState<ScenarioComparisonDefinition>(() =>
     buildScenarioComparisonDefinition(
       createDefaultScenarioComparisonSettings(),
@@ -214,17 +256,21 @@ export function ScenarioComparisonCard({
     () => buildScenarioComparisonSeries(selectedScenarios, rows, definition),
     [definition, rows, selectedScenarios],
   );
-  const hasData = series.some((item) =>
-    item.points.some((point) => point.total !== null && point.total !== 0),
-  );
+  const hasData =
+    (definition.granularity === "hour" &&
+      series.some((item) => item.points.length > 0)) ||
+    series.some((item) =>
+      item.points.some((point) => point.total !== null && point.total !== 0),
+    );
   const option = React.useMemo(
     () =>
       buildScenarioComparisonChartOption(
         series,
-        definition.granularity,
+        definition,
         widgetColor,
+        lastUpdated ?? new Date(),
       ),
-    [definition.granularity, series, widgetColor],
+    [definition, lastUpdated, series, widgetColor],
   );
   const effectiveGranularityLabel = `${granularityLabel(
     definition.granularity,
@@ -241,10 +287,13 @@ export function ScenarioComparisonCard({
   const load = React.useCallback(
     async (silent = false) => {
       const requestSequence = ++requestSequenceRef.current;
+      requestRef.current?.abort();
+      requestRef.current = null;
       requestRunningRef.current = true;
-      if (disabledReason) {
+      if (effectiveDisabledReason) {
         setRows([]);
-        setError(disabledReason);
+        setError(effectiveDisabledReason);
+        setLastUpdated(null);
         setLoading(false);
         setDefinition(
           buildScenarioComparisonDefinition(settings, new Date(), periodOverride),
@@ -256,6 +305,22 @@ export function ScenarioComparisonCard({
       if (!companyId) {
         setRows([]);
         setError("Empresa não definida para esta comparação.");
+        setLastUpdated(null);
+        setLoading(false);
+        requestRunningRef.current = false;
+        return;
+      }
+
+      try {
+        requireCountingRuntimeTimeZone(companyTimeZone);
+      } catch (loadError) {
+        setRows([]);
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Fuso da empresa não disponível.",
+        );
+        setLastUpdated(null);
         setLoading(false);
         requestRunningRef.current = false;
         return;
@@ -264,6 +329,7 @@ export function ScenarioComparisonCard({
       if (!scenarios.length) {
         setRows([]);
         setError("");
+        setLastUpdated(null);
         setLoading(false);
         setDefinition(
           buildScenarioComparisonDefinition(settings, new Date(), periodOverride),
@@ -275,6 +341,7 @@ export function ScenarioComparisonCard({
       if (settings.selectionMode === "custom" && !settings.selectedScenarioIds.length) {
         setRows([]);
         setError("");
+        setLastUpdated(null);
         setLoading(false);
         setDefinition(
           buildScenarioComparisonDefinition(settings, new Date(), periodOverride),
@@ -285,6 +352,8 @@ export function ScenarioComparisonCard({
 
       if (!silent) setLoading(true);
       setError("");
+      const controller = new AbortController();
+      requestRef.current = controller;
 
       try {
         const now = new Date();
@@ -302,6 +371,14 @@ export function ScenarioComparisonCard({
         const nextRows = await fetchScenarioComparisonRows(
           nextDefinition,
           hourlySource,
+          companyTimeZone,
+          companyId,
+          {
+            cache: hourlyAggregateCacheRef.current,
+            cacheScope: `scenario-comparison:${companyId}`,
+            now,
+            signal: controller.signal,
+          },
         );
         if (requestSequence !== requestSequenceRef.current) return;
 
@@ -310,6 +387,11 @@ export function ScenarioComparisonCard({
         setLastUpdated(now);
       } catch (loadError) {
         if (requestSequence !== requestSequenceRef.current) return;
+        if (loadError instanceof Error && loadError.name === "AbortError") {
+          return;
+        }
+        setRows([]);
+        setLastUpdated(null);
         setError(
           loadError instanceof Error
             ? loadError.message
@@ -319,20 +401,30 @@ export function ScenarioComparisonCard({
         if (requestSequence === requestSequenceRef.current) {
           setLoading(false);
           requestRunningRef.current = false;
+          if (requestRef.current === controller) requestRef.current = null;
         }
       }
     },
     [
       companyId,
-      disabledReason,
+      companyTimeZone,
+      effectiveDisabledReason,
       hourlySource,
       periodOverride,
-      scenarios.length,
+      scenarios,
       settings,
     ],
   );
 
   React.useEffect(() => {
+    requestSequenceRef.current += 1;
+    requestRef.current?.abort();
+    requestRef.current = null;
+    requestRunningRef.current = false;
+    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+    setRows([]);
+    setError("");
+    setLastUpdated(null);
     setSettingsReady(false);
     setSettings(
       loadSettings(storageKey, companyId, {
@@ -341,7 +433,15 @@ export function ScenarioComparisonCard({
       }),
     );
     setSettingsReady(true);
-  }, [companyId, preferenceScopeId, storageKey, user?.id]);
+  }, [companyId, companyTimeZone, preferenceScopeId, storageKey, user?.id]);
+
+  React.useEffect(
+    () => () => {
+      requestSequenceRef.current += 1;
+      requestRef.current?.abort();
+    },
+    [],
+  );
 
   React.useEffect(() => {
     setSettings((current) => ({
@@ -389,19 +489,25 @@ export function ScenarioComparisonCard({
   }
 
   return (
-    <Card className={cn(monitorMode && "h-full shadow-none")}>
+    <Card
+      className={cn(
+        "@container min-w-0 overflow-hidden",
+        monitorMode && "h-full shadow-none",
+      )}
+    >
       <CardHeader className={cn("pb-3", monitorMode && "pb-2")}>
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-3">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
+              <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
               {resolvedTitle}
             </CardTitle>
-            <CardDescription className="mt-1">
-              {settingsOpen && !monitorMode ? description : configurationSummary}
+            <CardDescription className="mt-1 [overflow-wrap:anywhere]">
+              {configurationSummary}
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          {!monitorMode ? action : null}
+          <div className="col-span-full flex min-w-0 flex-wrap items-center justify-end gap-2">
             {lastUpdated ? (
               <Badge variant="outline" className="gap-1 bg-card">
                 <Clock3 className="h-3.5 w-3.5" />
@@ -409,75 +515,70 @@ export function ScenarioComparisonCard({
               </Badge>
             ) : null}
             {monitorMode ? null : (
-              <>
-                {action}
-                <Button
-                  type="button"
-                  variant={settingsOpen ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setSettingsOpen((current) => !current)}
-                >
-                  <Settings2 className="h-3.5 w-3.5" />
-                  {settingsOpen ? "Ocultar" : "Configurar"}
-                </Button>
-              </>
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="sm"
+                onClick={() => setSettingsOpen(true)}
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+                Configurar
+              </Button>
             )}
           </div>
         </div>
       </CardHeader>
-      <CardContent className={cn("space-y-4", monitorMode && "space-y-2")}>
-        {!monitorMode && settingsOpen ? (
-          <div className="rounded-md border bg-muted/20 p-3">
-            <div className="space-y-3">
-              <ScenarioComparisonConfigurator
-                fixedPeriodLabel={periodOverride?.label}
-                onChange={updateSettings}
-                scenarios={scenarios}
-                settings={settings}
-              />
-              <div className="flex justify-end lg:col-span-3">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setSettingsOpen(false)}
-                >
-                  Concluir
-                </Button>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
+      <CardContent
+        className={cn("min-h-0 flex-1 overflow-hidden", monitorMode && "pt-2")}
+        data-echart-layout="natural"
+      >
         <div
+          aria-label="Gráfico comparativo responsivo"
           className={cn(
-            "w-full overflow-x-auto",
+            "h-[360px] min-h-0 w-full flex-1 overflow-hidden",
             monitorMode
               ? "h-[clamp(320px,42vh,620px)]"
               : "h-[360px]",
           )}
+          role="region"
         >
           {loading && !rows.length ? (
             <Skeleton className="h-full w-full" />
-          ) : error ? (
-            <ChartState text={error} />
+          ) : effectiveDisabledReason || error ? (
+            <ChartState text={effectiveDisabledReason || error} />
           ) : settings.selectionMode === "custom" &&
             !settings.selectedScenarioIds.length ? (
             <ChartState text="Selecione ao menos um cenário para comparar." />
           ) : !selectedScenarios.length ? (
             <ChartState text="Nenhum cenário disponível para comparar." />
           ) : hasData ? (
-            <EChart
-              option={option}
-              className={cn(
-                definition.granularity === "day" && "min-w-[720px]",
-              )}
-            />
+            <EChart option={option} />
           ) : (
             <ChartState text="Sem eventos nos cenários selecionados para este período." />
           )}
         </div>
       </CardContent>
+      <Dialog open={settingsOpen && !monitorMode} onOpenChange={setSettingsOpen}>
+        <DialogContent className="grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Configurar comparação por cenário</DialogTitle>
+            <DialogDescription>{description}</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 overflow-y-auto pr-1">
+            <ScenarioComparisonConfigurator
+              fixedPeriodLabel={periodOverride?.label}
+              onChange={updateSettings}
+              scenarios={scenarios}
+              settings={settings}
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" onClick={() => setSettingsOpen(false)}>
+              Concluir
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
@@ -502,7 +603,7 @@ export function ScenarioComparisonConfigurator({
             onChange({ view: value as ScenarioComparisonView })
           }
         >
-          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Visualização"><SelectValue /></SelectTrigger>
           <SelectContent>
             {viewOptions.map((optionItem) => (
               <SelectItem key={optionItem.value} value={optionItem.value}>
@@ -520,7 +621,7 @@ export function ScenarioComparisonConfigurator({
             onChange({ accumulated: value === "accumulated" })
           }
         >
-          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Leitura"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="interval">Valor por intervalo</SelectItem>
             <SelectItem value="accumulated">Acumulado no período</SelectItem>
@@ -536,7 +637,7 @@ export function ScenarioComparisonConfigurator({
             onChange({ granularity: value as ScenarioCompareGranularity })
           }
         >
-          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Granularidade"><SelectValue /></SelectTrigger>
           <SelectContent>
             {granularityOptions.map((optionItem) => (
               <SelectItem key={optionItem.value} value={optionItem.value}>
@@ -564,7 +665,7 @@ export function ScenarioComparisonConfigurator({
               onChange({ period: value as ScenarioComparePeriod })
             }
           >
-            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label="Período"><SelectValue /></SelectTrigger>
             <SelectContent>
               {periodOptions.map((optionItem) => (
                 <SelectItem key={optionItem.value} value={optionItem.value}>
@@ -591,6 +692,7 @@ export function ScenarioComparisonConfigurator({
         <div className="grid gap-3 sm:col-span-2 sm:grid-cols-2">
           <Field label="De">
             <Input
+              aria-label="De"
               type="datetime-local"
               value={settings.customFrom}
               onChange={(event) => onChange({ customFrom: event.target.value })}
@@ -598,6 +700,7 @@ export function ScenarioComparisonConfigurator({
           </Field>
           <Field label="Até">
             <Input
+              aria-label="Até"
               type="datetime-local"
               value={settings.customTo}
               onChange={(event) => onChange({ customTo: event.target.value })}
@@ -624,7 +727,7 @@ function Field({
 }) {
   return (
     <div className="space-y-2">
-      <Label>{label}</Label>
+      <div className="text-sm font-medium leading-none">{label}</div>
       {children}
     </div>
   );
@@ -640,8 +743,17 @@ function ChartState({ text }: { text: string }) {
 
 export async function fetchScenarioComparisonRows(
   definition: ScenarioComparisonDefinition,
-  hourlySource?: ScenarioComparisonHourlySource,
+  hourlySource: ScenarioComparisonHourlySource | undefined,
+  companyTimeZone: string,
+  companyScopeId: string,
+  options: ScenarioComparisonFetchOptions = {},
 ) {
+  const certifiedScope = requireScenarioComparisonScope({
+    companyScopeId,
+    companyTimeZone,
+    hourlySource,
+  });
+  requireCountingRuntimeTimeZone(certifiedScope.companyTimeZone);
   const ranges = definition.baselineFrom && definition.baselineTo
     ? [
         {
@@ -664,7 +776,12 @@ export async function fetchScenarioComparisonRows(
       ];
   const result = await Promise.all(
     ranges.map((range) =>
-      fetchScenarioComparisonRangeRows(range, hourlySource),
+      fetchScenarioComparisonRangeRows(
+        range,
+        certifiedScope.companyScopeId,
+        hourlySource,
+        options,
+      ),
     ),
   );
 
@@ -677,11 +794,20 @@ type AggregateRangeDefinition = {
   to: Date;
 };
 
+type ScenarioComparisonFetchOptions = {
+  cache?: HourlyAggregateCache;
+  cacheScope?: string;
+  now?: Date;
+  signal?: AbortSignal;
+};
+
 async function fetchScenarioComparisonRangeRows(
   definition: AggregateRangeDefinition,
+  companyScopeId: string,
   hourlySource?: ScenarioComparisonHourlySource,
+  options: ScenarioComparisonFetchOptions = {},
 ) {
-  const now = new Date();
+  const now = options.now ?? new Date();
   const hourlyDefinition = {
     granularity: "hour" as const,
     from: startOfHour(definition.from),
@@ -722,7 +848,7 @@ async function fetchScenarioComparisonRangeRows(
           hourlyDefinition.to,
         ),
       )
-    : await fetchAggregateRows(hourlyDefinition);
+    : await fetchAggregateRows(hourlyDefinition, companyScopeId, options);
   const currentHour = currentOpenBucket("hour", now);
   const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
   const requiredCurrentFrom = new Date(
@@ -760,6 +886,8 @@ async function fetchScenarioComparisonRangeRows(
         from: currentHour.from,
         to: currentMinuteEnd,
       },
+      companyScopeId,
+      options,
     );
     currentOpenMinuteRows = minuteRows;
     hourlyRows = replaceOpenBucketRowsFromSource(
@@ -809,11 +937,15 @@ async function fetchScenarioComparisonRangeRows(
       initialBoundaryStart.getTime() === currentHour.from.getTime() &&
       currentOpenMinuteRows
         ? currentOpenMinuteRows
-        : await fetchAggregateRows({
-            granularity: "minute",
-            from: definition.from,
-            to: initialBoundaryTo,
-          });
+        : await fetchAggregateRows(
+            {
+              granularity: "minute",
+              from: definition.from,
+              to: initialBoundaryTo,
+            },
+            companyScopeId,
+            options,
+          );
     hourlyRows = reconcileAggregateRows(
       hourlyRows,
       "hour",
@@ -831,14 +963,18 @@ async function fetchScenarioComparisonRangeRows(
     !(hasPartialInitialBoundary && rangeEndsInInitialHour);
   const currentCutoffAlreadyReconciled =
     historicalBoundaryStart.getTime() === currentHour.from.getTime() &&
-    definition.to >= startOfMinute(now) &&
+    definition.to >= currentMinuteEnd &&
     (reconciledCurrentCutoff || canonicalCoversCurrentRange);
   if (hasPartialHistoricalBoundary && !currentCutoffAlreadyReconciled) {
-    const historicalMinuteRows = await fetchAggregateRows({
-      granularity: "minute",
-      from: historicalBoundaryStart,
-      to: definition.to,
-    });
+    const historicalMinuteRows = await fetchAggregateRows(
+      {
+        granularity: "minute",
+        from: historicalBoundaryStart,
+        to: definition.to,
+      },
+      companyScopeId,
+      options,
+    );
     hourlyRows = reconcileAggregateRows(
       hourlyRows,
       "hour",
@@ -854,7 +990,21 @@ async function fetchScenarioComparisonRangeRows(
 
 async function fetchAggregateRows(
   definition: AggregateRangeDefinition,
+  companyScopeId: string,
+  options: ScenarioComparisonFetchOptions = {},
 ) {
+  if (definition.granularity === "hour") {
+    return fetchHourlyAggregateRanges({
+      cache: options.cache,
+      cacheScope:
+        options.cacheScope ?? "scenario-comparison:uncached-request",
+      companyScopeId,
+      now: options.now,
+      ranges: [definition],
+      signal: options.signal,
+    });
+  }
+
   const params = new URLSearchParams({
     granularity: definition.granularity,
     from: aggregateQueryIso(definition.from, definition.granularity),
@@ -863,12 +1013,17 @@ async function fetchAggregateRows(
   });
   const response = await apiFetch<AggregateEventsResponse>(
     `/analytics/aggregate?${params.toString()}`,
+    options.signal
+      ? { companyScopeId, signal: options.signal }
+      : { companyScopeId },
   );
   requireAggregateGranularity(response.granularity, definition.granularity);
 
-  return requireAggregateRows(
+  return requireAggregateRowsInRange(
     response.data,
     definition.granularity,
+    definition.from,
+    definition.to,
     DEFAULT_METRIC_TYPE,
   );
 }
@@ -1199,28 +1354,26 @@ function accumulateChartPoints(points: ChartPoint[]) {
 
 export function buildScenarioComparisonChartOption(
   series: ScenarioComparisonSeries[],
-  granularity: AggregateGranularity,
+  definition: ScenarioComparisonDefinition,
   widgetColor?: string,
+  referenceTime = new Date(),
 ): EnterpriseChartOption {
-  const fixedHourlyAxis =
-    granularity === "hour" &&
-    series.length > 0 &&
-    series.every((item) => pointsShareOneCalendarDay(item.points));
-  const hourlyThrough = fixedHourlyAxis
-    ? latestHourlyPointHour(
-        series.flatMap((item) =>
-          item.points.flatMap((point) =>
-            point.total === null
-              ? []
-              : [{ bucket: point.id, total: point.total }],
-          ),
-        ),
-      )
-    : -1;
+  const { granularity } = definition;
+  const fixedHourlyWindow =
+    granularity === "hour"
+      ? resolveFixedHourlyDayWindow(
+          definition.currentFrom,
+          definition.currentTo,
+          referenceTime,
+        )
+      : null;
+  const fixedHourlyAxis = fixedHourlyWindow !== null;
+  const hourlyThrough = fixedHourlyWindow?.throughHour ?? -1;
+  const hourlyFrom = fixedHourlyWindow?.fromHour ?? 0;
   const bucketLabels = fixedHourlyAxis
     ? HOUR_OF_DAY_LABELS
     : series[0]?.points.map((point) => point.name) ?? [];
-  const dense = bucketLabels.length > 12;
+  const dense = !fixedHourlyAxis && bucketLabels.length > 12;
   const manySeries = series.length > 12;
   const veryManySeries = series.length > 24;
   const calendarPoints =
@@ -1251,10 +1404,10 @@ export function buildScenarioComparisonChartOption(
         : pastelBarColor(item.colorIndex),
     ),
     grid: {
-      bottom: dense ? 34 : 18,
+      bottom: fixedHourlyAxis ? 6 : dense ? 34 : 18,
       containLabel: true,
-      left: 42,
-      right: 18,
+      left: fixedHourlyAxis ? 6 : 42,
+      right: fixedHourlyAxis ? 10 : 18,
       top: series.length > 1 ? (manySeries ? 76 : 58) : 28,
     },
     legend:
@@ -1296,15 +1449,23 @@ export function buildScenarioComparisonChartOption(
           : `${formatNumber(Number(value))} eventos`,
     },
     xAxis: {
-      axisLabel: buildCalendarAxisLabel({
-        fontSize: 11,
-        hideOverlap: true,
-        holidayIndexes: holidayCategoryIndexes(calendarDates),
-        interval: 0,
-        rotate: dense ? 24 : 0,
-        saturdayIndexes,
-        sundayIndexes,
-      }),
+      axisLabel: fixedHourlyAxis
+        ? {
+            color: "#66758A",
+            fontSize: 10,
+            hideOverlap: true,
+            interval: 1,
+            rotate: 0,
+          }
+        : buildCalendarAxisLabel({
+            fontSize: 11,
+            hideOverlap: true,
+            holidayIndexes: holidayCategoryIndexes(calendarDates),
+            interval: 0,
+            rotate: dense ? 24 : 0,
+            saturdayIndexes,
+            sundayIndexes,
+          }),
       axisLine: {
         lineStyle: {
           color: "#D8E3F2",
@@ -1355,6 +1516,10 @@ export function buildScenarioComparisonChartOption(
                   : [{ bucket: point.id, total: point.total }],
               ),
               hourlyThrough,
+              {
+                fromHour: hourlyFrom,
+                missingHourValue: null,
+              },
             )
           : item.points.map((point) => point.total),
         emphasis: {
@@ -1378,22 +1543,6 @@ export function buildScenarioComparisonChartOption(
       };
     }),
   };
-}
-
-function pointsShareOneCalendarDay(points: readonly ChartPoint[]) {
-  if (!points.length) return false;
-
-  const days = new Set<string>();
-  for (const point of points) {
-    const date = new Date(point.id);
-    if (Number.isNaN(date.getTime())) return false;
-    days.add(
-      `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`,
-    );
-    if (days.size > 1) return false;
-  }
-
-  return days.size === 1;
 }
 
 export function buildScenarioComparisonReportChart({
@@ -1440,7 +1589,7 @@ export function buildScenarioComparisonReportChart({
     ].join(" · "),
     option: buildScenarioComparisonChartOption(
       series,
-      definition.granularity,
+      definition,
       widgetColor,
     ),
     table: {
@@ -1775,12 +1924,17 @@ function loadSettings(
   if (typeof window === "undefined") return createDefaultScenarioComparisonSettings();
 
   try {
-    const stored = window.localStorage.getItem(
-      settingsStorageKey(storageKey, companyId, scope),
+    const stored = readUserViewScopedStorageEntry(
+      scenarioComparisonStorageBaseKey(storageKey),
+      companyId,
+      scope.userId,
+      scope.viewId,
     );
-    if (!stored) return createDefaultScenarioComparisonSettings();
+    if (!stored?.value) return createDefaultScenarioComparisonSettings();
 
-    const parsed = JSON.parse(stored) as Partial<ScenarioComparisonSettings>;
+    const parsed = JSON.parse(
+      stored.value,
+    ) as Partial<ScenarioComparisonSettings>;
     return normalizeScenarioComparisonSettings(parsed);
   } catch {
     return createDefaultScenarioComparisonSettings();
@@ -1807,11 +1961,15 @@ function settingsStorageKey(
   scope: ViewPreferenceScope = {},
 ) {
   return getUserViewScopedStorageKey(
-    `ipxdata.${storageKey}.scenario-comparison.v1`,
+    scenarioComparisonStorageBaseKey(storageKey),
     companyId,
     scope.userId,
     scope.viewId,
   );
+}
+
+function scenarioComparisonStorageBaseKey(storageKey: string) {
+  return `ipxdata.${storageKey}.scenario-comparison.v1`;
 }
 
 export function normalizeScenarioComparisonSettings(

@@ -1,6 +1,9 @@
 "use client";
 
-import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  getUserViewScopedStorageKey,
+  readUserViewScopedStorageEntry,
+} from "@/lib/master-company-scope";
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
 import type { AggregateGranularity } from "@/lib/types";
 
@@ -64,12 +67,15 @@ export function loadReportCustomWidgets(
   if (typeof window === "undefined") return [];
 
   try {
-    const stored = window.localStorage.getItem(
-      getReportCustomWidgetsKey(companyId, scope),
+    const stored = readUserViewScopedStorageEntry(
+      REPORT_CUSTOM_WIDGETS_KEY,
+      companyId,
+      scope.userId,
+      scope.viewId,
     );
-    if (!stored) return [];
+    if (!stored?.value) return [];
 
-    const parsed = JSON.parse(stored) as unknown[];
+    const parsed = JSON.parse(stored.value) as unknown[];
     if (!Array.isArray(parsed)) return [];
 
     return parsed

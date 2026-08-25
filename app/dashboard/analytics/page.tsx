@@ -1,6 +1,6 @@
 import { AppShell } from "@/components/app/app-shell";
+import { AnalysisDashboard } from "@/components/app/analysis-dashboard";
 import { AuthGuard } from "@/components/app/auth-guard";
-import { PeriodAnalysisDashboard } from "@/components/app/period-analysis-dashboard";
 
 export default function DashboardAnalyticsPage() {
   return (
@@ -10,7 +10,7 @@ export default function DashboardAnalyticsPage() {
         title="Análises"
         description="Consulta operacional por datas e cenários selecionados."
       >
-        <PeriodAnalysisDashboard />
+        <AnalysisDashboard />
       </AppShell>
     </AuthGuard>
   );

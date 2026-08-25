@@ -1,6 +1,10 @@
 "use client";
 
-import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  getUserViewScopedStorageKey,
+  readUserViewScopedStorageEntry,
+} from "@/lib/master-company-scope";
+import { requestUserGridSync } from "@/lib/user-grid";
 
 export type SavedLiveView = {
   createdAt: string;
@@ -38,12 +42,10 @@ export function loadSavedLiveViews(
   companyId?: string | null,
   userId?: string | null,
 ) {
-  return readArray(
-    getUserViewScopedStorageKey(
-      SAVED_VIEWS_STORAGE_KEY,
-      companyId,
-      userId,
-    ),
+  return readScopedArray(
+    SAVED_VIEWS_STORAGE_KEY,
+    companyId,
+    userId,
     normalizeSavedLiveView,
   ).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
@@ -90,12 +92,10 @@ export function loadVideoWallProfiles(
   companyId?: string | null,
   userId?: string | null,
 ) {
-  return readArray(
-    getUserViewScopedStorageKey(
-      VIDEO_WALLS_STORAGE_KEY,
-      companyId,
-      userId,
-    ),
+  return readScopedArray(
+    VIDEO_WALLS_STORAGE_KEY,
+    companyId,
+    userId,
     normalizeVideoWallProfile,
   ).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
@@ -118,6 +118,7 @@ export function saveVideoWallProfiles(
       JSON.stringify(normalized),
     );
     dispatchUpdate(companyId, userId);
+    requestUserGridSync();
   }
   return normalized;
 }
@@ -169,6 +170,7 @@ function writeSavedLiveViews(
     JSON.stringify(views),
   );
   dispatchUpdate(companyId, userId);
+  requestUserGridSync();
 }
 
 function dispatchUpdate(
@@ -182,18 +184,41 @@ function dispatchUpdate(
   );
 }
 
-function readArray<T>(
-  storageKey: string,
+function readScopedArray<T>(
+  baseKey: string,
+  companyId: string | null | undefined,
+  userId: string | null | undefined,
   normalize: (value: unknown) => T | null,
 ) {
   if (typeof window === "undefined") return [] as T[];
 
   try {
-    const stored = window.localStorage.getItem(storageKey);
-    if (!stored) return [] as T[];
-    const parsed = JSON.parse(stored) as unknown;
+    const stored = readUserViewScopedStorageEntry(
+      baseKey,
+      companyId,
+      userId,
+    );
+    if (!stored?.value) return [] as T[];
+    const parsed = JSON.parse(stored.value) as unknown;
     if (!Array.isArray(parsed)) return [] as T[];
-    return parsed.map(normalize).filter((value): value is T => Boolean(value));
+    const normalized = parsed
+      .map(normalize)
+      .filter((value): value is T => Boolean(value));
+    const currentKey = getUserViewScopedStorageKey(
+      baseKey,
+      companyId,
+      userId,
+    );
+
+    // Materialize a valid legacy company-scoped value in the personal
+    // namespace. This makes the recovered configuration visible immediately
+    // and eligible for the regular /users/me/grid synchronization.
+    if (stored.key !== currentKey) {
+      window.localStorage.setItem(currentKey, JSON.stringify(normalized));
+      requestUserGridSync();
+    }
+
+    return normalized;
   } catch {
     return [] as T[];
   }

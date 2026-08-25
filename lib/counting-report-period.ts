@@ -1,5 +1,8 @@
 import { COUNTING_HISTORY_START_YEAR } from "@/lib/counting-intelligence";
-import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  getUserViewScopedStorageKey,
+  readUserViewScopedStorageEntry,
+} from "@/lib/master-company-scope";
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
 
 export type CountingReportPeriod = {
@@ -99,10 +102,15 @@ export function loadCountingReportPeriod(
   if (typeof window === "undefined") return defaultCountingReportPeriod(now);
 
   try {
-    const stored = window.localStorage.getItem(storageKey(companyId, scope));
-    if (!stored) return defaultCountingReportPeriod(now);
+    const stored = readUserViewScopedStorageEntry(
+      STORAGE_KEY,
+      companyId,
+      scope.userId,
+      scope.viewId,
+    );
+    if (!stored?.value) return defaultCountingReportPeriod(now);
     return normalizeCountingReportPeriod(
-      JSON.parse(stored) as Partial<CountingReportPeriod>,
+      JSON.parse(stored.value) as Partial<CountingReportPeriod>,
       now,
     );
   } catch {

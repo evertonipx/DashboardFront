@@ -43,7 +43,12 @@ import {
   type ScenarioComparisonSettings,
 } from "@/components/app/scenario-comparison-card";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
-import { useWidgetColor } from "@/components/app/widget-appearance";
+import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
+import {
+  WidgetTitleText,
+  useWidgetColor,
+} from "@/components/app/widget-appearance";
+import { WidgetCardActions } from "@/components/app/widget-card-actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -73,14 +78,20 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { hasVisualAdminAccess } from "@/lib/access";
 import { apiFetch } from "@/lib/api";
+import { canReadInfrastructureCatalogs } from "@/lib/permissions";
 import {
   aggregateQueryIso,
   endOfAggregateBucket,
   parseAggregateBucket,
   requireAggregateGranularity,
-  requireAggregateRows,
+  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
+import {
+  clearHourlyAggregateCache,
+  fetchHourlyAggregateRanges,
+  type HourlyAggregateCache,
+} from "@/lib/aggregate-hour-query";
 import {
   reconcileAggregateRows,
   rollupAggregateRows,
@@ -117,10 +128,18 @@ import {
   type CountingReportPeriod,
 } from "@/lib/counting-report-period";
 import {
+  loadDashboardFocus,
+  resolveDashboardFocus,
+  saveDashboardFocus,
+} from "@/lib/dashboard-focus";
+import {
   filterScopedApiRows,
+  getEntityCompanyId,
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
+  useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
+import { requireCertifiedCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
 import {
   requireCameraRows,
   requireInfrastructureRelations,
@@ -138,6 +157,7 @@ import {
   type ReportCustomWidgetScopeMode,
   type ReportScopeCustomWidget,
 } from "@/lib/report-custom-widgets";
+import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
 import { requireScenarioRows } from "@/lib/scenario-validation";
 import type { ReportMetric, ReportPayload, ReportTable } from "@/lib/report-export";
 import type {
@@ -153,6 +173,10 @@ import { cn, formatDateTime, formatNumber, formatTime } from "@/lib/utils";
 
 type ScenarioReportsDashboardProps = {
   manager?: boolean;
+};
+
+type MetadataLoadOptions = {
+  silent?: boolean;
 };
 
 type ScenarioAggregateDefinition = {
@@ -236,9 +260,18 @@ export function ScenarioReportsDashboard({
   manager = false,
 }: ScenarioReportsDashboardProps) {
   const { user } = useAuth();
+  const userId = user?.id;
   const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const companyTimeZoneResolution =
+    useEffectiveCompanyTimeZoneResolution(user);
+  const companyTimeZone = companyTimeZoneResolution.timeZone;
+  const customGranularitySelectId = React.useId();
+  const customKindSelectId = React.useId();
+  const customScopeModeSelectId = React.useId();
+  const customScopeSelectId = React.useId();
   const canEditVisual = hasVisualAdminAccess(user);
+  const infrastructureCatalogsAllowed = canReadInfrastructureCatalogs(user);
   const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
   const [cameras, setCameras] = React.useState<Camera[]>([]);
   const [locations, setLocations] = React.useState<Location[]>([]);
@@ -280,10 +313,17 @@ export function ScenarioReportsDashboard({
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
   const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
   const metadataRequestSequenceRef = React.useRef(0);
+  const focusRef = React.useRef({ scopeMode, selectedId });
+  const exportRequestControllerRef = React.useRef<AbortController | null>(null);
   const chartRequestSequenceRef = React.useRef(0);
+  const chartRequestControllerRef = React.useRef<AbortController | null>(null);
   const openRefreshRequestSequenceRef = React.useRef(0);
+  const openRefreshRequestControllerRef = React.useRef<AbortController | null>(
+    null,
+  );
   const openRefreshRunningRef = React.useRef(false);
   const canonicalBaselineReadyRef = React.useRef(false);
+  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(new Map());
   const [customWidgetForm, setCustomWidgetForm] =
     React.useState<ReportCustomWidgetForm>({
       comparisonSettings: createDefaultScenarioComparisonSettings(),
@@ -352,6 +392,11 @@ export function ScenarioReportsDashboard({
     () => scopeOptions.find((option) => option.id === selectedId) ?? null,
     [scopeOptions, selectedId],
   );
+  const reportContextKey = `${companyScopeId}|${selectedScope?.id ?? ""}`;
+  const latestReportContextKeyRef = React.useRef(reportContextKey);
+  React.useEffect(() => {
+    latestReportContextKeyRef.current = reportContextKey;
+  }, [reportContextKey]);
   const clockYear = clock.getFullYear();
   const clockMonth = clock.getMonth();
   const reportReferenceDate = React.useMemo(
@@ -400,24 +445,32 @@ export function ScenarioReportsDashboard({
     [selectedScope?.id, user?.id],
   );
 
-  const loadScenarios = React.useCallback(async () => {
+  const loadScenarios = React.useCallback(async (
+    { silent = false }: MetadataLoadOptions = {},
+  ) => {
     const requestSequence = ++metadataRequestSequenceRef.current;
-    setLoadingScenarios(true);
-    setMetadataError("");
+    if (!silent) {
+      setLoadingScenarios(true);
+      setMetadataError("");
+    }
     try {
       const [scenarioRows, cameraRows, locationRows] = await Promise.all([
-        apiFetch<unknown>("/scenarios"),
-        apiFetch<unknown>("/cameras"),
-        apiFetch<unknown>("/locations"),
+        apiFetch<unknown>("/scenarios", { companyScopeId }),
+        infrastructureCatalogsAllowed
+          ? apiFetch<unknown>("/cameras", { companyScopeId })
+          : Promise.resolve([]),
+        infrastructureCatalogsAllowed
+          ? apiFetch<unknown>("/locations", { companyScopeId })
+          : Promise.resolve([]),
       ]);
-      const data = requireScenarioRows(scenarioRows);
+      const data = requireScenarioRows(scenarioRows, companyScopeId);
       const scopedScenarios = filterScopedApiRows(data, companyScopeId);
       const scopedCameras = filterScopedApiRows(
-        requireCameraRows(cameraRows),
+        requireCameraRows(cameraRows, companyScopeId),
         companyScopeId,
       );
       const scopedLocations = filterScopedApiRows(
-        requireLocationRows(locationRows),
+        requireLocationRows(locationRows, companyScopeId),
         companyScopeId,
       );
       const subLocationRows = await fetchSubLocations(
@@ -447,27 +500,39 @@ export function ScenarioReportsDashboard({
         scenarios: visible,
         subLocations: subLocationRows,
       });
-      const nextMode = modes.some((mode) => mode.value === scopeMode)
-        ? scopeMode
-        : modes[0]?.value ?? "scenario";
-      const options = buildReportScopeOptions({
-        cameras: scopedCameras,
-        groups: cameraGroups,
-        locations: scopedLocations,
-        manager,
-        mode: nextMode,
-        scenarios: visible,
-        subLocations: subLocationRows,
+      const resolvedFocus = resolveDashboardFocus<ReportScopeMode>({
+        availableModes: modes.map((mode) => mode.value),
+        current: focusRef.current,
+        getOptions: (mode) =>
+          buildReportScopeOptions({
+            cameras: scopedCameras,
+            groups: cameraGroups,
+            locations: scopedLocations,
+            manager,
+            mode,
+            scenarios: visible,
+            subLocations: subLocationRows,
+          }).map((option) => ({
+            active: option.scenario?.active,
+            id: option.id,
+            mode: option.mode,
+          })),
+        stored: loadDashboardFocus<ReportScopeMode>(
+          companyScopeId,
+          userId,
+          "reports",
+        ),
       });
-
-      if (nextMode !== scopeMode) setScopeMode(nextMode);
-      setSelectedId((current) => {
-        return current && options.some((option) => option.id === current)
-          ? current
-          : options[0]?.id ?? "";
-      });
+      const nextFocus = resolvedFocus ?? {
+        scopeMode: "scenario" as const,
+        selectedId: "",
+      };
+      focusRef.current = nextFocus;
+      setScopeMode(nextFocus.scopeMode);
+      setSelectedId(nextFocus.selectedId);
     } catch (error) {
       if (requestSequence !== metadataRequestSequenceRef.current) return;
+      if (silent) return;
       const message =
         error instanceof Error
           ? error.message
@@ -482,19 +547,50 @@ export function ScenarioReportsDashboard({
       setMetadataError(message);
       toast.error(message);
     } finally {
-      if (requestSequence === metadataRequestSequenceRef.current) {
+      if (!silent && requestSequence === metadataRequestSequenceRef.current) {
         setLoadingScenarios(false);
       }
     }
-  }, [cameraGroups, companyScopeId, manager, scopeMode]);
+  }, [
+    cameraGroups,
+    companyScopeId,
+    infrastructureCatalogsAllowed,
+    manager,
+    userId,
+  ]);
 
   const loadCharts = React.useCallback(
     async (_scope: ReportScopeOption, silent = false) => {
       const requestSequence = ++chartRequestSequenceRef.current;
+      chartRequestControllerRef.current?.abort();
+      const controller = new AbortController();
+      chartRequestControllerRef.current = controller;
       openRefreshRequestSequenceRef.current += 1;
+      openRefreshRequestControllerRef.current?.abort();
+      openRefreshRequestControllerRef.current = null;
       openRefreshRunningRef.current = false;
       canonicalBaselineReadyRef.current = false;
       if (!silent) setLoadingCharts(true);
+
+      try {
+        requireCertifiedCountingRuntimeTimeZone(companyTimeZoneResolution);
+      } catch (error) {
+        controller.abort();
+        if (chartRequestControllerRef.current === controller) {
+          chartRequestControllerRef.current = null;
+        }
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Fuso da empresa não disponível.";
+        chartDataRef.current = {};
+        setChartData({});
+        setChartLoadError(message);
+        setLastUpdated(null);
+        setLoadingCharts(false);
+        if (!silent) toast.error(message);
+        return;
+      }
 
       const now = new Date();
       const coverageTo = reportCoverageEnd(effectivePeriodDates, now);
@@ -532,7 +628,7 @@ export function ScenarioReportsDashboard({
       }
 
       try {
-        const entries = await Promise.all(
+      const entries = await Promise.all(
           [...visibleDefinitions, ...previousDefinitions, ...supportDefinitions].map(async (definition) => {
             if (definition.to <= definition.from) {
               return [
@@ -550,8 +646,26 @@ export function ScenarioReportsDashboard({
               ] as const;
             }
             try {
+              if (definition.id === COUNTING_HOUR_HISTORY_ID) {
+                return [
+                  definition.id,
+                  {
+                    granularity: "hour",
+                    rows: await fetchHourlyAggregateRanges({
+                      cache: hourlyAggregateCacheRef.current,
+                      cacheScope: `reports:${companyScopeId ?? "jwt-company"}`,
+                      companyScopeId: companyScopeId?.trim() || undefined,
+                      now,
+                      ranges: [definition],
+                      signal: controller.signal,
+                    }),
+                  },
+                ] as const;
+              }
+
               const response = await apiFetch<AggregateEventsResponse>(
                 aggregatePath(definition),
+                { companyScopeId, signal: controller.signal },
               );
               const responseGranularity = requireAggregateGranularity(
                 response.granularity,
@@ -560,15 +674,18 @@ export function ScenarioReportsDashboard({
               return [
                 definition.id,
                 {
-                  rows: requireAggregateRows(
+                  rows: requireAggregateRowsInRange(
                     response.data,
                     responseGranularity,
+                    definition.from,
+                    definition.to,
                     DEFAULT_METRIC_TYPE,
                   ),
                   granularity: responseGranularity,
                 },
               ] as const;
             } catch (error) {
+              if (controller.signal.aborted) throw error;
               return [
                 definition.id,
                 {
@@ -646,6 +763,7 @@ export function ScenarioReportsDashboard({
           canonicalHourState && !canonicalHourState.error,
         );
       } catch (error) {
+        if (controller.signal.aborted) return;
         if (requestSequence !== chartRequestSequenceRef.current) return;
         canonicalBaselineReadyRef.current = false;
         const message =
@@ -655,12 +773,17 @@ export function ScenarioReportsDashboard({
         setChartLoadError(message);
         toast.error(message);
       } finally {
+        if (chartRequestControllerRef.current === controller) {
+          chartRequestControllerRef.current = null;
+        }
         if (requestSequence === chartRequestSequenceRef.current) {
           setLoadingCharts(false);
         }
       }
     },
     [
+      companyScopeId,
+      companyTimeZoneResolution,
       customWidgets,
       effectivePeriodDates,
       intradayComparison,
@@ -681,8 +804,26 @@ export function ScenarioReportsDashboard({
       return;
     }
 
+    try {
+      requireCertifiedCountingRuntimeTimeZone(companyTimeZoneResolution);
+    } catch (error) {
+      canonicalBaselineReadyRef.current = false;
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Fuso da empresa não disponível.";
+      chartDataRef.current = {};
+      setChartData({});
+      setChartLoadError(message);
+      setLastUpdated(null);
+      return;
+    }
+
     openRefreshRunningRef.current = true;
     const requestSequence = ++openRefreshRequestSequenceRef.current;
+    openRefreshRequestControllerRef.current?.abort();
+    const controller = new AbortController();
+    openRefreshRequestControllerRef.current = controller;
     const definitions = buildScenarioAggregateDefinitions(
       now,
       effectivePeriodDates,
@@ -728,8 +869,23 @@ export function ScenarioReportsDashboard({
       definition: ScenarioAggregateDefinition,
     ): Promise<ScenarioChartState> {
       try {
+        if (definition.granularity === "hour") {
+          return {
+            granularity: "hour",
+            rows: await fetchHourlyAggregateRanges({
+              cache: hourlyAggregateCacheRef.current,
+              cacheScope: `reports:${companyScopeId ?? "jwt-company"}`,
+              companyScopeId: companyScopeId?.trim() || undefined,
+              now,
+              ranges: [definition],
+              signal: controller.signal,
+            }),
+          };
+        }
+
         const response = await apiFetch<AggregateEventsResponse>(
           aggregatePath(definition),
+          { companyScopeId, signal: controller.signal },
         );
         const granularity = requireAggregateGranularity(
           response.granularity,
@@ -737,13 +893,16 @@ export function ScenarioReportsDashboard({
         );
         return {
           granularity,
-          rows: requireAggregateRows(
+          rows: requireAggregateRowsInRange(
             response.data,
             granularity,
+            definition.from,
+            definition.to,
             DEFAULT_METRIC_TYPE,
           ),
         };
       } catch (error) {
+        if (controller.signal.aborted) throw error;
         return {
           error:
             error instanceof Error
@@ -829,12 +988,28 @@ export function ScenarioReportsDashboard({
       setChartData(hydrated);
       setClock(now);
       setLastUpdated(new Date());
+    } catch (error) {
+      if (
+        !controller.signal.aborted &&
+        requestSequence === openRefreshRequestSequenceRef.current
+      ) {
+        setChartLoadError(
+          error instanceof Error
+            ? error.message
+            : "Não foi possível atualizar o período aberto.",
+        );
+      }
     } finally {
+      if (openRefreshRequestControllerRef.current === controller) {
+        openRefreshRequestControllerRef.current = null;
+      }
       if (requestSequence === openRefreshRequestSequenceRef.current) {
         openRefreshRunningRef.current = false;
       }
     }
   }, [
+    companyScopeId,
+    companyTimeZoneResolution,
     customWidgets,
     effectivePeriodDates,
     intradayComparison,
@@ -844,20 +1019,37 @@ export function ScenarioReportsDashboard({
   ]);
 
   React.useEffect(() => {
-    loadScenarios();
+    void loadScenarios();
   }, [loadScenarios]);
 
+  useResourceAutoRefresh(
+    () => loadScenarios({ silent: true }),
+    {
+      enabled: Boolean(companyScopeId) && !loadingScenarios,
+      intervalMs: RESOURCE_METADATA_REFRESH_INTERVAL_MS,
+    },
+  );
+
   React.useEffect(() => {
+    exportRequestControllerRef.current?.abort();
+    exportRequestControllerRef.current = null;
     chartRequestSequenceRef.current += 1;
+    chartRequestControllerRef.current?.abort();
+    chartRequestControllerRef.current = null;
     openRefreshRequestSequenceRef.current += 1;
+    openRefreshRequestControllerRef.current?.abort();
+    openRefreshRequestControllerRef.current = null;
     openRefreshRunningRef.current = false;
     canonicalBaselineReadyRef.current = false;
+    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
     setMetadataError("");
     setChartLoadError("");
     setScenarios([]);
     setCameras([]);
     setLocations([]);
     setSubLocations([]);
+    focusRef.current = { scopeMode: "scenario", selectedId: "" };
+    setScopeMode("scenario");
     setSelectedId("");
     chartDataRef.current = {};
     setChartData({});
@@ -954,6 +1146,10 @@ export function ScenarioReportsDashboard({
   }, [customWidgetScopeOptions]);
 
   React.useEffect(() => {
+    focusRef.current = { scopeMode, selectedId };
+  }, [scopeMode, selectedId]);
+
+  React.useEffect(() => {
     if (!availableModes.some((mode) => mode.value === scopeMode)) {
       setScopeMode(availableModes[0]?.value ?? "scenario");
     }
@@ -963,12 +1159,34 @@ export function ScenarioReportsDashboard({
     setSelectedId((current) =>
       current && scopeOptions.some((option) => option.id === current)
         ? current
-        : scopeOptions[0]?.id ?? "",
+        : scopeMode === "scenario"
+          ? scopeOptions.find((option) => option.scenario?.active)?.id ??
+            scopeOptions[0]?.id ??
+            ""
+          : scopeOptions[0]?.id ?? "",
     );
-  }, [scopeOptions]);
+  }, [scopeMode, scopeOptions]);
+
+  React.useEffect(() => {
+    if (!selectedScope) return;
+    const entityCompanyId = getEntityCompanyId(
+      selectedScope.scenario ??
+        selectedScope.location ??
+        selectedScope.subLocation,
+    );
+    if (entityCompanyId && entityCompanyId !== companyScopeId) return;
+    saveDashboardFocus(
+      { scopeMode: selectedScope.mode, selectedId: selectedScope.id },
+      companyScopeId,
+      userId,
+      "reports",
+    );
+  }, [companyScopeId, selectedScope, userId]);
 
   React.useEffect(() => {
     if (!selectedScope) {
+      exportRequestControllerRef.current?.abort();
+      exportRequestControllerRef.current = null;
       chartRequestSequenceRef.current += 1;
       openRefreshRequestSequenceRef.current += 1;
       openRefreshRunningRef.current = false;
@@ -980,6 +1198,9 @@ export function ScenarioReportsDashboard({
     }
 
     loadCharts(selectedScope);
+    return () => {
+      exportRequestControllerRef.current?.abort();
+    };
   }, [loadCharts, selectedScope]);
 
   React.useEffect(() => {
@@ -1098,12 +1319,16 @@ export function ScenarioReportsDashboard({
       const canonicalDefinition =
         buildCountingHourHistoryDefinition(effectivePeriodDates, clock);
       return {
+        companyScopeId,
+        companyTimeZone,
         from: canonicalDefinition.from,
         rows: reportHourHistoryState.rows,
         to: canonicalDefinition.to,
       };
     }, [
       clock,
+      companyScopeId,
+      companyTimeZone,
       effectivePeriodDates,
       reportCertificationError,
       reportHourHistoryState,
@@ -1278,6 +1503,10 @@ export function ScenarioReportsDashboard({
   }
 
   function removeCustomWidget(widgetId: string) {
+    if (!canEditVisual) {
+      toast.error("Seu usuário não pode remover widgets de relatório.");
+      return;
+    }
     const widget = customWidgets.find((item) => item.id === widgetId);
     if (widget?.kind === "scenario_comparison") {
       deleteScenarioComparisonSettings(
@@ -1301,11 +1530,13 @@ export function ScenarioReportsDashboard({
           id: "report_scenario_period_comparison",
           chartTypeEnabled: true,
           label: "Cenários por período",
+          defaultHeight: "tall" as const,
           defaultSize: "full" as const,
           className: "sm:col-span-2 xl:col-span-4",
           node: (
             <ScenarioComparisonCard
               companyId={companyScopeId}
+              companyTimeZone={companyTimeZone}
               description="Compare todos os cenários ou apenas os escolhidos para análise de relatório."
               disabledReason={reportComparisonDisabledReason}
               hourlySource={reportComparisonHourlySource}
@@ -1316,6 +1547,7 @@ export function ScenarioReportsDashboard({
               storageKey="reports"
             />
           ),
+          titleEditable: true,
         },
       ]
     : [];
@@ -1326,27 +1558,31 @@ export function ScenarioReportsDashboard({
         id: `report_custom_${widget.id}`,
         chartTypeEnabled: true,
         label: widget.title,
+        defaultHeight: "tall" as const,
         defaultSize: "full" as const,
         className: "sm:col-span-2 xl:col-span-4",
         node: (
           <ScenarioComparisonCard
-            action={
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  removeCustomWidget(widget.id);
-                }}
-                aria-label={`Remover widget ${widget.title}`}
-                title="Remover widget"
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            }
+            action={canEditVisual && !monitorMode ? (
+              <WidgetCardActions label={`Ações do widget ${widget.title}`}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeCustomWidget(widget.id);
+                  }}
+                  aria-label={`Remover widget ${widget.title}`}
+                  title="Remover widget"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </WidgetCardActions>
+            ) : null}
             companyId={companyScopeId}
+            companyTimeZone={companyTimeZone}
             disabledReason={reportComparisonDisabledReason}
             hourlySource={reportComparisonHourlySource}
             monitorMode={monitorMode}
@@ -1357,6 +1593,7 @@ export function ScenarioReportsDashboard({
             title={widget.title}
           />
         ),
+        titleEditable: true,
       };
     }
 
@@ -1379,26 +1616,30 @@ export function ScenarioReportsDashboard({
       id: `report_custom_${widget.id}`,
       chartTypeEnabled: true,
       label: widget.title,
+      defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
       node: scope ? (
         <ScenarioAggregateChartCard
           action={
-            monitorMode ? null : (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  removeCustomWidget(widget.id);
-                }}
-                aria-label={`Remover widget ${widget.title}`}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            )
+            canEditVisual && !monitorMode ? (
+              <WidgetCardActions label={`Ações do widget ${widget.title}`}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeCustomWidget(widget.id);
+                  }}
+                  aria-label={`Remover widget ${widget.title}`}
+                  title="Remover widget"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </WidgetCardActions>
+            ) : null
           }
           definition={definition}
           loading={loadingCharts}
@@ -1417,9 +1658,14 @@ export function ScenarioReportsDashboard({
       ) : (
         <MissingReportCustomWidgetCard
           title={widget.title}
-          onRemove={monitorMode ? undefined : () => removeCustomWidget(widget.id)}
+          onRemove={
+            canEditVisual && !monitorMode
+              ? () => removeCustomWidget(widget.id)
+              : undefined
+          }
         />
       ),
+      titleEditable: true,
     };
   });
 
@@ -1504,15 +1750,40 @@ export function ScenarioReportsDashboard({
       ),
     [reportPreferences],
   );
-  const applyReportChartType = React.useCallback(
-    (cardId: string, chart: ReportPayload["charts"][number]) => ({
-      ...chart,
-      option: applyChartTypePreference(
-        chart.option,
-        reportChartTypeByCardId.get(cardId),
+  const reportTitleByCardId = React.useMemo(
+    () =>
+      new Map(
+        reportPreferences.flatMap((preference) =>
+          preference.title
+            ? [[preference.id, preference.title] as const]
+            : [],
+        ),
       ),
-    }),
-    [reportChartTypeByCardId],
+    [reportPreferences],
+  );
+  const resolveReportTitle = React.useCallback(
+    (cardId: string, fallback: string) =>
+      reportTitleByCardId.get(cardId) ?? fallback,
+    [reportTitleByCardId],
+  );
+  const applyReportChartType = React.useCallback(
+    (cardId: string, chart: ReportPayload["charts"][number]) => {
+      const title = resolveReportTitle(cardId, chart.title);
+      return {
+        ...chart,
+        title,
+        option: applyChartTypePreference(
+          chart.option,
+          reportChartTypeByCardId.get(cardId),
+        ),
+        table: {
+          ...chart.table,
+          title:
+            title === chart.title ? chart.table.title : `Dados - ${title}`,
+        },
+      };
+    },
+    [reportChartTypeByCardId, resolveReportTitle],
   );
   const countingIntelligenceAssets = React.useMemo(
     () =>
@@ -1585,18 +1856,39 @@ export function ScenarioReportsDashboard({
   ] as const);
   const visibleMetricByCardId = new Map<string, ReportMetric>(
     countingIntelligenceAssets.metrics.map(
-      ({ cardId, value }) => [cardId, value] as const,
+      ({ cardId, value }) => [
+        cardId,
+        { ...value, label: resolveReportTitle(cardId, value.label) },
+      ] as const,
     ),
   );
   const visibleTableEntries: Array<readonly [string, ReportTable]> =
     countingIntelligenceAssets.tables.map(
-      ({ cardId, value }) => [cardId, value] as const,
+      ({ cardId, value }) => [
+        cardId,
+        { ...value, title: resolveReportTitle(cardId, value.title) },
+      ] as const,
     );
   if (scenarioDetailTable) {
-    visibleTableEntries.push(["report_scenario_detail", scenarioDetailTable]);
+    visibleTableEntries.push([
+      "report_scenario_detail",
+      {
+        ...scenarioDetailTable,
+        title: resolveReportTitle(
+          "report_scenario_detail",
+          scenarioDetailTable.title,
+        ),
+      },
+    ]);
   }
   if (scopeListTable) {
-    visibleTableEntries.push(["report_scenario_table", scopeListTable]);
+    visibleTableEntries.push([
+      "report_scenario_table",
+      {
+        ...scopeListTable,
+        title: resolveReportTitle("report_scenario_table", scopeListTable.title),
+      },
+    ]);
   }
   const visibleTablesByCardId = new Map<string, ReportTable[]>();
   visibleTableEntries.forEach(([cardId, table]) => {
@@ -1614,14 +1906,18 @@ export function ScenarioReportsDashboard({
     metrics: ReportMetric[];
     tables: ReportTable[];
   }): ReportPayload {
+    const generatedAt = new Date();
     return {
       title: selectedScope
         ? `Relatório de Contagem - ${selectedScope.name}`
         : "Relatório de Contagem",
       subtitle: "Resultados de contagem por visão e períodos agregados.",
-      filename: `ipxdata-relatorio-contagem-${reportDateSlug(lastUpdated ?? clock)}`,
-      generatedAt: lastUpdated ?? clock,
-      dataCompleteUntil: clock,
+      filename: `ipxdata-relatorio-contagem-${reportDateSlug(generatedAt)}`,
+      generatedAt,
+      dataCompleteUntil: scenarioReportDataCompleteUntil(
+        effectivePeriodDates,
+        generatedAt,
+      ),
       context: [
         selectedScope
           ? `${scopeModeLabel(selectedScope.mode)}: ${selectedScope.name}`
@@ -1639,6 +1935,30 @@ export function ScenarioReportsDashboard({
   }
 
   async function buildConfiguredScenarioReportPayload() {
+    exportRequestControllerRef.current?.abort();
+    const controller = new AbortController();
+    const requestContextKey = reportContextKey;
+    exportRequestControllerRef.current = controller;
+
+    try {
+      const payload = await resolveConfiguredScenarioReportPayload(
+        controller.signal,
+      );
+      controller.signal.throwIfAborted();
+      if (latestReportContextKeyRef.current !== requestContextKey) {
+        throw new Error(
+          "A empresa ou visão mudou durante a exportação. Gere o relatório novamente.",
+        );
+      }
+      return payload;
+    } finally {
+      if (exportRequestControllerRef.current === controller) {
+        exportRequestControllerRef.current = null;
+      }
+    }
+  }
+
+  async function resolveConfiguredScenarioReportPayload(signal: AbortSignal) {
     const chartByCardId = new Map<string, ReportPayload["charts"][number]>([
       ...countingIntelligenceChartEntries,
       ...customReportChartEntries,
@@ -1661,6 +1981,9 @@ export function ScenarioReportsDashboard({
       const rows = await fetchScenarioComparisonRows(
         definition,
         reportComparisonHourlySource,
+        companyTimeZone,
+        companyScopeId,
+        { signal },
       );
       const reportChart = buildScenarioComparisonReportChart({
         definition,
@@ -1703,6 +2026,9 @@ export function ScenarioReportsDashboard({
           const rows = await fetchScenarioComparisonRows(
             definition,
             reportComparisonHourlySource,
+            companyTimeZone,
+            companyScopeId,
+            { signal },
           );
           const cardId = `report_custom_${widget.id}`;
           const reportChart = buildScenarioComparisonReportChart({
@@ -1754,15 +2080,14 @@ export function ScenarioReportsDashboard({
       id="relatorios"
       className={cn(
         monitorMode
-          ? "fixed inset-0 z-[100] h-screen overflow-y-auto bg-background p-3 text-foreground lg:p-4"
+          ? "fixed inset-0 z-[100] h-[100dvh] overflow-y-auto bg-background p-3 text-foreground lg:p-4"
           : "scroll-mt-6 space-y-4",
       )}
     >
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
       {reportCertificationError ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
-          Dados não certificados: {reportCertificationError} Os valores
-          afetados e as exportações não devem ser considerados conclusivos.
+          Consulta bloqueada: {reportCertificationError}
         </div>
       ) : null}
 
@@ -2010,12 +2335,12 @@ export function ScenarioReportsDashboard({
 
           <div className="grid gap-4">
             <div className="space-y-2">
-              <Label>Tipo de widget</Label>
+              <Label htmlFor={customKindSelectId}>Tipo de widget</Label>
               <Select
                 value={customWidgetForm.kind}
                 onValueChange={handleCustomWidgetKindChange}
               >
-                <SelectTrigger>
+                <SelectTrigger id={customKindSelectId}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -2050,12 +2375,14 @@ export function ScenarioReportsDashboard({
               <>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label>Tipo de visão</Label>
+                    <Label htmlFor={customScopeModeSelectId}>
+                      Tipo de visão
+                    </Label>
                     <Select
                       value={customWidgetForm.scopeMode}
                       onValueChange={handleCustomWidgetModeChange}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger id={customScopeModeSelectId}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -2069,13 +2396,15 @@ export function ScenarioReportsDashboard({
                   </div>
 
                   <div className="space-y-2">
-                    <Label>{scopeModeLabel(customWidgetForm.scopeMode)}</Label>
+                    <Label htmlFor={customScopeSelectId}>
+                      {scopeModeLabel(customWidgetForm.scopeMode)}
+                    </Label>
                     <Select
                       value={customWidgetForm.scopeId}
                       onValueChange={handleCustomWidgetScopeChange}
                       disabled={!customWidgetScopeOptions.length}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger id={customScopeSelectId}>
                         <SelectValue placeholder="Selecione" />
                       </SelectTrigger>
                       <SelectContent>
@@ -2090,12 +2419,12 @@ export function ScenarioReportsDashboard({
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Gráfico</Label>
+                  <Label htmlFor={customGranularitySelectId}>Gráfico</Label>
                   <Select
                     value={customWidgetForm.granularity}
                     onValueChange={handleCustomWidgetGranularityChange}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id={customGranularitySelectId}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -2212,33 +2541,33 @@ function ScenarioAggregateChartCard({
     previousPoints.some((point) => point.total !== 0);
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              {definition.label}
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2">
+              <BarChart3 className="mt-1 h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText fallback={definition.label} className="leading-6" />
             </CardTitle>
             <CardDescription className="mt-1">
               {definition.description}
             </CardDescription>
           </div>
           {action}
+          {showPreviousPeriod ? (
+            <div className="col-span-full max-w-full break-words rounded-md border border-primary/20 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">
+              {comparisonDescription(definition, intradayComparison)}
+            </div>
+          ) : null}
         </div>
-        {showPreviousPeriod ? (
-          <div className="max-w-full break-words rounded-md border border-primary/20 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">
-            {comparisonDescription(definition, intradayComparison)}
-          </div>
-        ) : null}
       </CardHeader>
       <CardContent>
         {loading ? (
-          <Skeleton className="h-[300px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full" />
         ) : error || state?.error ? (
           <EmptyChartState text={error || state?.error || "Dados não certificados."} />
         ) : hasData ? (
-          <div className="h-[300px] w-full">
+          <div className="h-full min-h-0 w-full">
             <EChart option={option} />
           </div>
         ) : (
@@ -2257,29 +2586,35 @@ function MissingReportCustomWidgetCard({
   title: string;
 }) {
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-primary" />
-              {title || "Widget personalizado"}
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2">
+              <BarChart3 className="mt-1 h-4 w-4 shrink-0 text-primary" />
+              <WidgetTitleText
+                fallback={title || "Widget personalizado"}
+                className="leading-6"
+              />
             </CardTitle>
             <CardDescription>
               A visão vinculada a este widget não está mais disponível.
             </CardDescription>
           </div>
           {onRemove ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={onRemove}
-              aria-label="Remover widget"
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
+            <WidgetCardActions label={`Ações do widget ${title}`}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                onClick={onRemove}
+                aria-label={`Remover widget ${title}`}
+                title="Remover widget"
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </WidgetCardActions>
           ) : null}
         </div>
       </CardHeader>
@@ -2292,7 +2627,7 @@ function MissingReportCustomWidgetCard({
 
 function EmptyChartState({ text }: { text: string }) {
   return (
-    <div className="flex h-[300px] items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+    <div className="flex h-full min-h-0 items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
       {text}
     </div>
   );
@@ -2312,7 +2647,7 @@ function PreviousPeriodToggle({
       aria-checked={checked}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        "inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition",
+        "inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
         checked
           ? "border-primary/30 bg-primary/10 text-primary"
           : "border-border bg-card text-muted-foreground",
@@ -2574,6 +2909,16 @@ function reportCoverageEnd(
   return now >= period.from && now < period.to
     ? addMinutes(startOfMinute(now), 1)
     : period.to;
+}
+
+function scenarioReportDataCompleteUntil(
+  period: { from: Date; to: Date },
+  now: Date,
+) {
+  const inclusiveEnd = new Date(period.to.getTime() - 1);
+  return now >= period.from && now < period.to
+    ? new Date(Math.min(now.getTime(), inclusiveEnd.getTime()))
+    : inclusiveEnd;
 }
 
 function buildReportCustomWidgetDefinition(
@@ -3167,16 +3512,17 @@ async function fetchSubLocations(
   locations: Location[],
   companyScopeId?: string | null,
 ) {
+  const expectedCompanyId = companyScopeId?.trim() || undefined;
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<unknown>(`/locations/${location.id}/sub-locations`).then(
-        requireSubLocationRows,
-      ),
+      apiFetch<unknown>(`/locations/${location.id}/sub-locations`, {
+        companyScopeId: expectedCompanyId,
+      }).then((value) => requireSubLocationRows(value, expectedCompanyId)),
     ),
   );
 
   return filterScopedApiRows(
-    requireSubLocationRows(rows.flat()),
+    requireSubLocationRows(rows.flat(), expectedCompanyId),
     companyScopeId,
   );
 }
@@ -3382,6 +3728,12 @@ function listScenarioBucketStarts(definition: ScenarioAggregateDefinition) {
     starts.push(bucketStart);
     cursor = addGranularity(bucketStart, definition.granularity);
     guard += 1;
+  }
+
+  if (cursor < end) {
+    throw new RangeError(
+      "O período excede 500 intervalos no gráfico. Reduza a janela para evitar dados truncados.",
+    );
   }
 
   return starts;

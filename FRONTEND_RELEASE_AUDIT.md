@@ -1,149 +1,159 @@
-# Auditoria de lancamento do frontend IPXData
+# Auditoria de lançamento do frontend IPXData
 
-Data da revisao: 14/07/2026
+Data da revisão: **12/08/2026**
 
 ## Parecer executivo
 
-Status: **GO condicionado para piloto ou instalacao on-premise com uma unica instancia**.
+Status: **NO-GO para produção multiempresa enquanto os bloqueadores externos P0 não forem concluídos**.
 
-Para producao multiempresa exposta a clientes, o parecer ainda e **NO-GO ate a conclusao dos bloqueadores P0** abaixo. O bundle compila, as rotas sao geradas e os fluxos principais funcionam, mas parte da configuracao operacional ainda depende do navegador ou do disco local do servidor Next.js.
+A revisão “Sweeper” eliminou divergências silenciosas importantes no frontend, padronizou escopo, fuso horário, atualização, preferências e apresentação entre Ao Vivo, Análises, Relatórios e Ocupação. Quando o contrato necessário não pode ser certificado, a interface agora falha de forma explícita em vez de converter ausência ou resposta incompleta em valor zero.
 
-## Entrega desta revisao
+Esse endurecimento não substitui a autoridade do backend. A liberação para clientes ainda depende principalmente da certificação dos agregados de Ocupação, da validação server-side do escopo multiempresa e do endurecimento da sessão no navegador.
 
-- Widgets personalizados agora aceitam dois tipos: visao individual e cenarios por periodo.
-- Ao Vivo permite varios comparativos independentes, todos atualizados a cada 5 segundos.
-- Relatorios permite varios comparativos e os inclui na exportacao configurada para PDF e Excel.
-- Visoes permite configurar, para cada widget comparativo, granularidade, periodo, intervalo personalizado e cenarios selecionados.
-- Widgets salvos no formato anterior continuam validos e sao normalizados como visao individual.
-- A troca de empresa deixou de depender de um segundo estado `masterScopeId` duplicado em Ao Vivo e Ocupacao.
-- Consultas analiticas dessas telas agora enviam `X-Company-ID` explicitamente.
-- O logo horizontal da empresa ganhou proporcao legivel no login mobile e desktop.
-- Relatorios ganhou uma visao executiva padrao com historico anual cumulativo, matriz ano x meses, acumulado comparavel, media mensal e variacao contra o mesmo mes do ano anterior.
-- A inteligencia de contagem foi dividida em oito widgets independentes, todos reordenaveis, redimensionaveis e ocultaveis pelo organizador de Relatorios.
-- O topo de Relatorios agora permite selecionar mes inicial e final, com atalhos para historico completo, ano atual e ultimos 12 meses; a escolha fica persistida por empresa.
-- A representatividade dos acessos passou a usar o cenario como unidade de portao, com ranking de entradas, saidas, participacao e picos horarios.
-- PDF e Excel seguem a ordem e a visibilidade dos widgets configurados e recebem os mesmos indicadores, graficos e tabelas detalhadas; rotulos densos usam orientacao vertical e ocultacao de colisao.
-- O PDF completo passou a comprimir as imagens dos graficos sem reduzir a resolucao. No teste real, caiu de aproximadamente 40 MB para 466 KB.
-- A grade compartilhada de widgets deixou de forcar cards com 520 px no mobile; a pagina nao apresenta mais overflow horizontal global.
-- O projeto passou a executar o lint sem erros ou avisos.
-- Relatorios passou a ser uma tela macro por padrao; indicadores intradiarios e graficos operacionais antigos deixaram o layout default e continuam disponiveis como widgets personalizados.
-- O periodo macro agora pode incluir o mes parcial ou considerar somente meses fechados.
-- O ranking usa barras horizontais, lista vertical, ordem crescente/decrescente e selecao em massa por palavras; a representatividade sempre totaliza 100% da selecao.
-- O comparativo do ano atual contra o anterior foi incorporado ao grafico mensal por ano, com rotulos verticais, limiar pela media do ano comparado e tabela matricial separada.
-- Ao Vivo passou a concentrar leitura operacional: horas fechadas contra ontem ou o mesmo dia da semana anterior, desempenho contra a media diaria e acumulados mensais comparaveis em dias completos.
-- Janelas isoladas de 1, 5 e 60 minutos, projecao linear e o grafico default Dia a dia foram removidos do Ao Vivo; o grafico Mes ate agora ja cobre a leitura diaria.
-- Hora a hora operacional usa barras lado a lado para os periodos comparados; a unica linha e o limiar derivado da media historica escolhida.
-- O ranking mensal dos acessos usa cenarios, barras horizontais, participacao percentual e volume absoluto, com altura adaptada a quantidade de itens.
-- A adicao de widgets fica exclusivamente dentro de Configurar widgets; ordem, visibilidade, tamanho, cor e criacao usam o mesmo organizador compacto.
-- O componente modular do ECharts registra `MarkLineComponent`, garantindo a renderizacao das linhas de limiar no bundle de producao.
-- O CRUD de cenarios permite adicionar todas as linhas, adicionar por filtro textual e criar cenarios individuais em lote sem duplicar linhas que ja possuem cenario unitario.
-- Cor, ordem, tamanho, visibilidade, periodo, widgets personalizados e configuracoes analiticas sao persistidos por empresa, usuario e visao/cenario.
-- As consultas escopadas usam JWT mais `X-Company-ID`; o frontend deixou de duplicar `company_id` na query string.
-- Registros encadeados criados pela revalidacao de um mesmo worker sao consolidados defensivamente, mantendo aliases de todos os IDs e preservando workers reais distintos.
-- O periodo global de Relatorios agora governa indicadores, matrizes, rankings, fluxo horario, comparativos padrao, widgets personalizados e os dados enviados ao Excel/PDF.
-- A edicao das duas extremidades do periodo usa uma estabilizacao de 500 ms; consultas e exportacoes so usam o intervalo completo aplicado, sem carregar ou exportar uma selecao intermediaria.
-- Linhas de limiar e media passaram a ser estaticas, solidas, sem simbolos ou animacao e com espessura de 1 px.
-- As tabelas Ano x meses e comparativa foram consolidadas em uma unica matriz com anos, meses, acumulado, media e variacao do ano mais recente contra o anterior.
-- O grafico Comparativo mensal por ano exibe a variacao percentual somente nos meses comparaveis, centralizada sobre cada grupo de barras e sem uma nova linha visual.
-- PDF e Excel preservam ordem, visibilidade e cores configuradas; tabelas PDF usam grade por celula, texto limitado a coluna, cabecalho quebravel e altura calculada.
+## Escopo desta revisão
 
-## Bloqueadores P0
+### Integridade dos dados e recortes temporais
 
-### 1. Persistencia nao compartilhada
+- Consultas de Contagem passaram a exigir um timezone IANA cadastrado para a empresa e correspondência com o calendário civil usado pelo navegador antes de agrupar ou exportar valores. Divergências são bloqueadas e dados antigos são limpos, evitando que um gráfico continue exibindo um resultado de outro contexto.
+- As consultas de Ocupação usam intervalos com início inclusivo e fim exclusivo. No intervalo personalizado, o dia final selecionado representa todo o dia e a API recebe como limite o início do dia seguinte.
+- A atualização periódica de Ao Vivo, Análises e Relatórios de Ocupação foi serializada: uma execução não inicia outra enquanto a anterior estiver pendente. Isso reduz respostas fora de ordem e sobreposição de ciclos de cinco segundos.
+- O proxy de snapshots de Ocupação preserva falhas HTTP e converte respostas inválidas ou falhas de rede em erro. Ele não fabrica `data: []` e não interpreta ausência como ocupação zero.
+- Falhas no carregamento de alertas de Ocupação foram isoladas dos demais indicadores; um erro nessa consulta não derruba todo o painel nem gera uma contagem falsa.
+- Séries agregadas de Ocupação usam validação estrita no frontend. A compatibilidade com o contrato legado é limitada a buckets instantâneos de minuto/hora com timestamps RFC3339 absolutos; esses dados permanecem explicitamente provisórios e não liberam exportação certificada. Agregados civis de dia/semana/mês sem fuso e fechamento continuam indisponíveis, sem preenchimento, inferência ou conversão de ausência em zero.
+- Uma falha em uma série agregada não derruba mais o snapshot e os indicadores ao vivo válidos. O erro fica isolado no widget afetado, enquanto qualquer cobertura incompleta ou provisória bloqueia a exportação do painel.
+- Comparativos parciais da Contagem agora usam uma base temporal realmente comparável: recortam no mesmo minuto, reconciliam as horas de borda e preservam limites semiabertos em DST, meses curtos e anos bissextos.
+- Bases horárias extensas de Ao Vivo, Análises, Relatórios, comparativos e visão embutida são consultadas em meses civis independentes, com cache por empresa e fuso. Cada resposta é validada contra o intervalo semiaberto solicitado; o histórico fechado é reutilizado, enquanto mês e hora abertos são atualizados sem rebaixar buckets já fechados.
+- Os comparativos mensal e acumulado do Ao Vivo usam histórico realmente multi-ano. O mês aberto compara somente horas fechadas equivalentes, e períodos acima do limite seguro falham explicitamente em vez de publicar uma série truncada.
+- Totais de Ocupação iguais a zero em cenários com várias áreas permanecem zeros certificados; a validação não os confunde mais com soma independente inválida.
 
-Widgets personalizados, configuracoes dos comparativos, layouts, cores, grupos de cameras e alguns vinculos operacionais usam `localStorage`. As chaves agora separam empresa, usuario e visao, mas as configuracoes continuam presas ao navegador que as criou e nao acompanham outro computador ou perfil do navegador.
+### Escopo de empresa, usuário e superadmin
 
-Acao necessaria: persistir essas entidades no backend/DB por `company_id`, com versao, auditoria e controle de permissao. Ate isso existir, usar uma unica instancia e volume persistente com backup.
+- O bootstrap de sessão reconcilia o mesmo JWT aceito por `/auth/me`: `sub` e `user_id` precisam identificar o mesmo usuário e `role` completa campos omitidos. Para usuários comuns, `company_id` não pode divergir do perfil explícito; para Master certificado pelo JWT ou pelo próprio `/auth/me`, a empresa contextual do perfil pode diferir da empresa-base do token sem substituir a identidade do principal. Claims conflitantes, expirados, ainda não válidos ou com timezone inválido são rejeitados.
+- A validade local nunca ultrapassa o `exp` assinado. A confirmação master é vinculada ao access token e só atravessa refresh quando a identidade e o papel master continuam presentes no novo JWT.
+- Usuários comuns usam exclusivamente a empresa assinada no JWT; qualquer `X-Company-ID` forjado é removido e um `companyScopeId` divergente é bloqueado antes da rede. O frontend não envia `company_id` nem `user_id` redundantes nos payloads operacionais.
+- O carregamento das permissões do próprio usuário ignora a empresa visual selecionada pelo superadmin. Rotas administrativas bloqueiam divergência entre a empresa do path e o escopo congelado da operação.
+- Respostas tenant-aware que omitem `company_id` só podem ser normalizadas quando o call site fornece a empresa da requisição autenticada. Um `company_id` explícito divergente continua sendo rejeitado.
+- Consultas analíticas recebem o `company_id` efetivo de forma explícita por `X-Company-ID`, inclusive nos fluxos de comparação, relatório e visão incorporada.
+- Um override de empresa só é aceito pelo Ao Vivo quando coincide com o escopo efetivo selecionado e possui fuso certificado. Overrides inconsistentes são bloqueados.
+- O proxy de produção exige `IPXDATA_API_URL` fixo; o destino da API não é mais derivado de headers enviados pelo cliente.
+- O proxy encaminha apenas headers permitidos, usa host/protocolo confiáveis, propaga cancelamento e impõe timeout. A rota especializada de snapshots também cancela e limita chamadas ao backend.
+- A seleção de empresa do superadmin é propagada ao carregamento de metadados, cenários e agregados, sem reutilizar silenciosamente o contexto anterior.
+- A grade de preferências do usuário passou a sincronizar somente chaves pessoais permitidas. Uma falha de leitura remota não autoriza escrita subsequente, dados de outras empresas não são mesclados e a ausência remota não é interpretada como exclusão.
+- Preferências locais de módulo são isoladas por usuário. A persistência de visões no fallback em arquivo usa fila, lock interprocesso e substituição atômica, e não sobrescreve um arquivo corrompido como se estivesse vazio.
+- Falhas transitórias de rede/5xx ao atualizar o usuário não encerram mais a sessão nem apagam permissões já conhecidas. Respostas de login/refresh são validadas antes de substituir tokens e sua expiração.
+- O `localStorage` permanece como cache e fallback de preferências do cliente; ele não deve mais ser descrito como a única persistência de toda a grade. A disponibilidade compartilhada ainda depende do endpoint de preferências do backend.
 
-### 2. Contrato de empresa incompleto
+### Padronização funcional
 
-No teste autenticado, `/auth/me` forneceu `company_id`, mas nao retornou o nome da empresa. O frontend deixou de executar o fallback proibido `GET /companies/{id}` para usuario comum, eliminando o `403`, mas sem cache previo a interface ainda mostra apenas "Empresa".
+- Ao Vivo, Análises e Relatórios compartilham a seleção de módulo Contagem/Ocupação, com persistência e suporte a URL. A tela aguarda essa seleção antes de montar o módulo, evitando consultas transitórias do módulo errado.
+- Títulos de widgets são individualmente editáveis e reutilizados nas superfícies e exportações cobertas por essa configuração.
+- O organizador de widgets respeita a capacidade real de cada componente: controles sem efeito, como cor em gráficos governados por paleta semântica, foram ocultados.
+- Preferências de ordem, visibilidade, tamanho, título e aparência passaram a alimentar a mesma composição usada em tela e nos relatórios cobertos pela grade.
+- A seleção de intervalo de Contagem e Ocupação usa o mesmo seletor contínuo de datas, com calendário duplo, atalhos, rascunho e aplicação explícita. Cada módulo preserva seu próprio contrato de consulta e limite de período.
+- As barras superiores do Ao Vivo e das Análises de Contagem e Ocupação foram compactadas no mesmo padrão: período, contexto e ações permanecem em uma única linha rolável, sem indicadores redundantes. Na análise de Ocupação, comparação temporal e séries históricas ficam reunidas em um painel único sem perder suas configurações.
+- A paleta comparativa global ficou compacta no topo; o seletor fechado exibe somente as amostras de cor. Configurações exclusivas do simulador hexagonal permanecem no próprio widget.
+- Modos de comparação atuais preservam a ordem cadastrada dos cenários. Barras horizontais/verticais, meia rosca, heatmaps e séries históricas seguem a mesma semântica de cenário.
 
-Acao necessaria: `/auth/me` deve retornar ao menos `company_id`, `company_name`, `role`, `is_master` e permissoes ou uma referencia autorizada. O backend deve aplicar o escopo da empresa em todas as consultas; o filtro no frontend nao e uma barreira de seguranca.
+### Design, UX e acessibilidade operacional
 
-### 3. Contrato de worker insuficiente
+- Cards comuns deixaram de simular interatividade por hover. A resposta visual de arraste aparece apenas quando a reorganização está habilitada.
+- Tema claro e escuro, estados indisponíveis, pontos parciais, textos auxiliares e contraste foram revistos nas superfícies de Contagem e Ocupação.
+- O modo monitor usa altura dinâmica de viewport e mantém uma saída acessível também em dispositivos de toque.
+- Navegação por teclado ganhou foco visível, seleção exposta nos seletores de cenário, skip-link e indicação acessível nas regiões horizontais. O calendário móvel muda de mês antes de mover o foco e limita a busca ao diálogo ativo.
+- Animações dos gráficos respeitam `prefers-reduced-motion`.
+- Densidade tipográfica mínima e comportamento responsivo da grade foram ajustados para evitar texto excessivamente pequeno e espaços vazios artificiais.
+- Mensagens técnicas extensas foram retiradas da composição principal; bloqueios reais usam estados compactos com ação de tentar novamente quando aplicável.
 
-O Swagger atual define `CreateWorkerRequest` e `UpdateWorkerRequest` apenas com `name` e `description`. `WorkerResponse` possui `company_id`, mas nao possui `user_id`; portanto o frontend nao consegue associar de forma auditavel o worker ao usuario que revalidou o login. Em teste real, a API retornou uma cadeia extensa de registros em que o nome do novo worker era o ID do anterior, todos vinculados a uma unica empresa.
+### Limpeza e manutenção
 
-Acao necessaria: o backend deve tornar a identidade do agente estavel, atualizar o mesmo registro na revalidacao, derivar e persistir `company_id` do JWT/escopo autorizado e retornar uma referencia de usuario quando essa rastreabilidade fizer parte do dominio. A consolidacao do frontend evita poluicao visual, mas nao pode transferir um worker entre empresas.
+- Implementações sem consumidor ativo foram removidas.
+- Catálogos de widgets e rótulos foram alinhados aos IDs atuais das telas.
+- Next.js, ESLint e PostCSS foram atualizados para versões sem vulnerabilidades conhecidas no relatório local de dependências.
+- Configurações antigas de atualização da Ocupação e campos órfãos de cor foram removidos ou migrados para o componente que realmente os utiliza.
+- Preferências antigas continuam sendo normalizadas quando há caminho de migração seguro; valores desconhecidos não são apagados durante sincronização defensiva.
+- Polling da visão embutida separa metadados (30 s) de dados (5 s), usa single-flight/AbortSignal e descarta respostas de outra empresa ou visão.
+- Exportações de gráficos sempre liberam canvas/DOM em `finally`, e um mutex síncrono impede exportações duplicadas por duplo clique.
 
-### 4. Destino de API dinamico
+## Bloqueadores externos
 
-Resolvido no frontend: sem `IPXDATA_API_URL`, o proxy usa em tempo de execucao o hostname acessado pelo navegador, com protocolo e porta definidos por `IPXDATA_API_PROTOCOL` e `IPXDATA_API_PORT`. Nao existe mais IP de backend embutido no build.
+### P0 — Certificação dos agregados de Ocupação
 
-`IPXDATA_API_URL` permanece como override opcional para implantacoes em que a API esteja em outro host. Em proxy reverso, o header `X-Forwarded-Host` deve ser sobrescrito pelo proxy com o host publico confiavel.
+O backend precisa certificar cada resposta agregada de Ocupação com, no mínimo:
 
-### 5. Sessao no navegador sem endurecimento
+- `timezone` explícito e igual ao fuso contratado para a empresa;
+- `complete` e `status` coerentes com o fechamento do período;
+- `as_of` indicando até quando os dados são conhecidos;
+- `scenario_total_final` e `area_final` nos valores/buckets para distinguir o fechamento do ponto sem inferi-lo de média, mínimo ou máximo.
 
-Access token e refresh token ficam em `localStorage`. O projeto tambem nao define uma Content Security Policy de producao. Um XSS teria acesso direto aos dois tokens.
+Os agrupamentos também precisam respeitar esse fuso nas viradas de hora, dia, mês e ano. A ausência de bucket deve permanecer “sem dado”, nunca “zero”. A API real verificada em 11/08/2026 ainda publica dia/semana/mês em fronteiras UTC e sem os metadados acima; por isso essas séries civis permanecem indisponíveis. Apenas minuto/hora com instantes RFC3339 absolutos podem ser exibidos provisoriamente, sem certificação nem exportação, até o contrato definitivo ser publicado.
 
-Acao necessaria: preferir cookies `HttpOnly`, `Secure` e `SameSite` por meio de BFF. Se a migracao nao for imediata, implantar CSP, TLS obrigatorio, headers de seguranca e revisao de dependencias antes da exposicao publica.
+### P0 — Autoridade multiempresa no backend
 
-## Riscos P1
+O frontend envia JWT e `X-Company-ID` de forma explícita e mantém a empresa selecionada pelo superadmin no contexto das consultas. Ainda assim, o backend deve:
 
-- Permissoes operacionais usam aliases e inferencia textual. `canManageLocations` aceita qualquer permissao operacional, o que pode exibir funcoes alem do esperado. O backend precisa continuar sendo a autoridade final e o catalogo deve ser contratual.
-- A direcao entrada/saida ainda nao e um campo contratual da API. O relatorio usa, nesta ordem, rotulo da linha, nome/descricao do cenario e multiplicador. Formalizar `direction: entry | exit` por linha elimina ambiguidade em nomes fora da convencao atual.
-- Cada widget de cenarios por periodo no Ao Vivo executa seu proprio polling. Muitos widgets e monitores aumentam linearmente as chamadas a `/analytics/aggregate` a cada 5 segundos.
-- O branding padrao usa `jk.png`. Sem chave por query/subdominio, empresas nao configuradas podem herdar a marca JK. O padrao deve ser IPXData e a JK deve ter uma chave propria.
-- `npm audit --omit=dev` reporta duas vulnerabilidades moderadas herdadas de `exceljs -> uuid`. O fluxo atual nao usa as funcoes de UUID afetadas diretamente, mas a dependencia deve ser monitorada/substituida.
-- Nao ha suite automatizada de testes unitarios, integracao ou E2E. Build e teste manual nao protegem regressao de escopo, permissoes e exportacao.
-- Graficos Canvas nao possuem alternativa textual/ARIA equivalente para leitores de tela.
+- validar que um usuário comum ou admin só consulte a própria empresa;
+- aceitar troca de empresa apenas para uma identidade master/superadmin autorizada;
+- derivar ou validar `company_id` em workers, câmeras, linhas, áreas, locations e agregados;
+- rejeitar `X-Company-ID` ausente, inválido ou não autorizado;
+- registrar o escopo efetivo para auditoria.
 
-## Design e experiencia
+Na API real verificada em 12/08/2026, `X-Company-ID` seleciona corretamente câmeras, locais e cenários de Ocupação, mas ainda é ignorado por `/workers`, `/workers/{id}`, `/scenarios` de Contagem e `/users`. As rotas alternativas `/companies/{id}/workers` e `/companies/{id}/scenarios` não existem. O frontend oculta respostas de outra empresa de forma fail-closed; para o superadmin enxergar esses recursos da empresa escolhida, o backend precisa aplicar o tenant efetivo nessas rotas.
 
-### Pontos fortes
+Filtro e bloqueio no navegador não são barreiras de segurança. A garantia de isolamento entre empresas só existe quando essas regras são impostas pelo servidor.
 
-- Hierarquia visual consistente, controles compactos e boa densidade para uso operacional em monitores.
-- Tema claro/escuro coerente e paleta de graficos adaptada ao dark mode.
-- Visao executiva de Relatorios concentra indicadores, matriz anual, comparativo mensal, fluxo horario e ranking em uma unica faixa de leitura.
-- Configuracoes complexas ficam recolhidas atras de uma engrenagem integrada a barra de acoes, sem reservar uma faixa exclusiva acima dos widgets.
-- Modo monitor remove navegacao e controles de edicao sem perder a configuracao escolhida.
-- Formularios e dialogos mantem alinhamento e quebra responsiva sem sobreposicao.
+### P0 — Sessão armazenada no navegador e CSP
 
-### Melhorias recomendadas
+Access token e refresh token continuam acessíveis em `localStorage`, e a aplicação ainda precisa de uma Content Security Policy de produção verificada. Um XSS poderia ler ambos os tokens.
 
-- No celular, graficos vazios mantem altura grande e tornam a pagina excessivamente longa. Usar altura menor para estado vazio ou alternar graficos por abas/carrossel.
-- A navegacao mobile e horizontal e pode esconder itens sem indicar continuidade. Adicionar fade lateral ou menu compacto.
-- Cards sem dados ocupam a mesma area dos cards com dados. Um estado vazio mais compacto melhora leitura e reduz rolagem.
-- Componentes centrais com 2.000 a 3.000 linhas devem ser divididos por dominio, carregamento e apresentacao antes da proxima grande rodada de funcionalidades.
+A recomendação é migrar a sessão para cookies `HttpOnly`, `Secure` e `SameSite` por meio de BFF. Enquanto isso não ocorrer, TLS obrigatório, CSP restritiva, headers de segurança, revisão de dependências e rotação/revogação de tokens são requisitos mínimos de implantação.
 
-## Duplicidade confirmada
+### P1 — Granularidade do simulador hexagonal
 
-Ha implementacoes antigas sem rota consumidora, incluindo `components/app/live-dashboard.tsx`, `components/app/occupancy-dashboard.tsx`, `components/app/scenario-filter.tsx` e `lib/custom-aggregate-charts.ts`.
+Cada hexágono ainda representa o valor agregado do cenário ao qual foi associado. Repetir um cenário em 40 caixas, 100 mesas ou 300 vagas repete o mesmo agregado; isso não transforma cada célula em uma entidade individual.
 
-Elas nao entram no bundle atual, mas aumentam o risco de manutencao no arquivo errado. Remover em uma entrega isolada, apos registrar quais comportamentos ainda precisam ser preservados.
+Para representar ocupação real por vaga, mesa, posto, área ou fila, o domínio/API precisa fornecer uma identidade estável por entidade ou área e sua medição correspondente. O frontend não deve distribuir nem inventar valores individuais a partir de um total de cenário.
 
-## Validacoes executadas
+### P1 — Concorrência da grade pessoal
 
-- `npm ci`: concluido usando o `package-lock.json`.
+O endpoint `/users/me/grid` ainda recebe o documento completo por `PUT` e não publica revisão, `ETag`, `If-Match` ou operação incremental por chave. O frontend impede escrita depois de uma leitura falha, preserva chaves desconhecidas e faz merge defensivo, mas duas abas ou dispositivos que partam da mesma revisão ainda podem sobrescrever alterações distintas na ordem inversa de chegada.
+
+O contrato recomendado é `PATCH` por chave com tombstone explícito, ou leitura/escrita otimista com revisão e resposta `409` para remerge. A homologação deve incluir dois clientes editando preferências diferentes simultaneamente.
+
+### P1 — Procedência dos totais multiárea
+
+O frontend rejeita o padrão conhecido no qual `AVG`, `MIN` e `MAX` de áreas independentes são somados como se fossem simultâneos. Igualdade numérica, entretanto, não prova sozinha qual algoritmo o servidor utilizou — dois resultados legítimos podem coincidir.
+
+O backend deve publicar a procedência/estratégia do total do cenário (por exemplo, recomposição da linha temporal simultânea) e sua versão de agregação. Até esse metadado existir, coincidências multiárea não triviais permanecem conservadoras e não devem ser tratadas como certificação matemática completa.
+
+## Riscos residuais e dívida técnica
+
+- A sincronização das preferências depende da disponibilidade e do contrato do endpoint de grade do usuário; o cache local continua sendo apenas uma contingência do cliente.
+- Muitos widgets independentes ainda podem aumentar linearmente o volume de polling. É necessário testar carga com a quantidade máxima prevista de monitores, empresas e cenários.
+- Componentes centrais extensos devem continuar sendo separados por domínio, carregamento, modelo e apresentação para reduzir risco de regressão.
+- Gráficos Canvas precisam de alternativa textual/ARIA consistente para leitores de tela.
+- A revisão atual cobre verificações estáticas e testes automatizados focados, mas ainda não substitui E2E multiempresa nem homologação com o backend de produção.
+
+## Validações confirmadas nesta revisão
+
 - `npm run typecheck`: aprovado.
-- `npm run lint`: aprovado sem avisos.
-- `npm run build`: aprovado; 22 rotas geradas.
-- Login desktop e mobile: inspecionado em Chromium.
-- Ao Vivo autenticado: inspecionado em desktop e mobile com dados reais.
-- Dialogo de novo widget: inspecionado em viewport desktop com configuracao completa do comparativo antes da criacao.
-- Atualizacao de 5 segundos: 54 requisicoes analiticas observadas em 12,2 segundos no modo de desenvolvimento, cobrindo tres ciclos autenticados.
-- Escopo de API: todas as requisicoes analiticas testadas enviaram `X-Company-ID` correto junto ao JWT e nenhuma incluiu `company_id` na query string.
-- Teste de API: backend acessivel; a consulta proibida de empresa para usuario comum foi removida e a rodada final nao apresentou respostas HTTP de erro.
-- Agregado mensal: janela de cinco anos aceita pelo backend e todas as linhas testadas retornaram `line_count_id`.
-- Relatorios: inspecionado em Chromium a 1440 x 1000 e 390 x 844, em light e dark, sem overflow global.
-- Ranking e comparativo anual: inspecionados em desktop, mobile, light e dark; canvases renderizaram com dimensoes validas e sem sobreposicao.
-- Ao Vivo reformulado: sete widgets default no cenario testado, sem os indicadores de 1/5/60 minutos ou Dia a dia; ranking mensal e comparativos operacionais inspecionados em desktop e mobile dark.
-- Organizador: nenhuma acao Adicionar widget aparece fora da engrenagem; Ao Vivo e Relatorios exibem exatamente uma acao dentro do dialogo e abrem um unico formulario de criacao.
-- Cenarios: editor assistido e dialogo de criacao individual em lote inspecionados com linhas reais da API.
-- Periodo de Relatorios: intervalo personalizado e modo aberto/fechado persistiram por empresa, usuario e cenario; os oito widgets macro apareceram no organizador.
-- Persistencia: chaves de layout e configuracao verificadas com segmentos de empresa, usuario e visao.
-- Workers: teste isolado consolidou uma cadeia de tres registros em uma identidade com tres aliases sem unir um segundo worker real no mesmo host.
-- Exportacao completa: Excel com 11 planilhas (481 KB) e PDF com 24 paginas (457 KB) gerados com dados reais.
-- Periodo global ponta a ponta: janeiro a marco de 2025 gerou apenas consultas finais do intervalo, sem requisicoes intermediarias; o Excel registrou o contexto e o periodo selecionado, e Excel/PDF repetiram a mesma consulta do comparativo.
-- Artefatos da validacao de apresentacao: Excel de 266 KB, PDF de 401 KB com 17 paginas e captura completa de Relatorios, sem erros no console do Chromium.
-- Matriz comparativa: 15 colunas com posicao e largura identicas entre cabecalho e corpo; Excel com bordas, quebra de cabecalho e cores de variacao; PDF com 1.006 retangulos de celula desenhados.
+- `npm run lint`: aprovado.
+- Testes de analytics e recortes temporais no projeto principal: **175/175 aprovados**.
+- Testes de analytics e regressões adicionais no `DashboardFront`: **197/197 aprovados**.
+- Testes de autenticação e escopo multiempresa: **23/23 aprovados em cada projeto**.
+- Testes de sincronização da grade do usuário: **3/3 aprovados**.
+- `npm audit`: **0 vulnerabilidades conhecidas**.
+- `npm run check:production`: **aprovado nos dois projetos** (208 testes no principal, 230 no `DashboardFront`, incluindo autenticação, escopo tenant e grade do usuário, além de lint, typecheck e build).
+- `npm run build`: **aprovado nos dois projetos**, com 25 rotas geradas pelo Next.js 16.3.0 em cada um.
 
-## Criterio para liberar producao
+Não foram registrados nesta seção testes manuais de navegador, volume ou segurança que não tenham sido repetidos em 12/08/2026.
 
-1. Resolver ou aceitar formalmente os cinco bloqueadores P0.
-2. Testar usuario comum, admin e superadmin em pelo menos duas empresas reais.
-3. Validar criacao, reordenacao e leitura dos mesmos widgets em dois computadores diferentes.
-4. Executar teste de carga do polling com a quantidade maxima esperada de monitores e widgets.
-5. Validar exportacao PDF/Excel com comparativos personalizados e mais de 12 cenarios.
-6. Fixar DNS/TLS, variaveis de ambiente, backup do volume e estrategia de rollback.
+## Critérios para liberar produção
+
+1. Publicar e validar o contrato certificado de agregados de Ocupação, incluindo fuso e estado parcial/final.
+2. Demonstrar, por testes de integração, que o backend valida JWT, `X-Company-ID` e privilégios master em todas as entidades e consultas.
+3. Endurecer a sessão no navegador e validar CSP/headers de segurança no ambiente de produção.
+4. Repetir build, typecheck, lint e testes após qualquer correção posterior a esta auditoria.
+5. Homologar usuário comum, admin e superadmin em pelo menos duas empresas reais, incluindo workers, câmeras, linhas, áreas, locations, Contagem e Ocupação.
+6. Validar viradas de hora, dia, mês e ano no fuso da empresa com dados reais e valores conhecidos de ponta a ponta: IPXWorker → IPXData → Dashboard.
+7. Executar teste E2E de Ao Vivo, Análises, Relatórios e exportações, além de carga do polling na escala máxima esperada.
+8. Definir o modelo de entidade/área para o simulador hexagonal antes de usá-lo como mapa individual de mesas, vagas ou postos.
