@@ -58,7 +58,10 @@ import {
   resolveOccupancyAreaSelectionLabel,
   type OccupancyAreaOption,
 } from "@/lib/occupancy-areas";
-import { fetchOccupancyAreaOptions } from "@/lib/occupancy-area-options";
+import {
+  fetchOccupancyAreaCatalog,
+  requireOccupancyAreaClassCompatibility,
+} from "@/lib/occupancy-area-options";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
 import { canManageOccupancy } from "@/lib/permissions";
 import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
@@ -94,6 +97,9 @@ export function OccupancyScenarioManager() {
   const [loadingAreas, setLoadingAreas] = React.useState(true);
   const [scenarioCatalogError, setScenarioCatalogError] = React.useState("");
   const [areaCatalogError, setAreaCatalogError] = React.useState("");
+  const [areaCatalogWarning, setAreaCatalogWarning] = React.useState("");
+  const [areaCatalogAuthoritative, setAreaCatalogAuthoritative] =
+    React.useState(false);
   const [scenarioCatalogReady, setScenarioCatalogReady] = React.useState(false);
   const [areaCatalogReady, setAreaCatalogReady] = React.useState(false);
   const [scenarioCatalogCompanyId, setScenarioCatalogCompanyId] =
@@ -175,6 +181,8 @@ export function OccupancyScenarioManager() {
       setAreaCatalogReady(false);
       setAreaCatalogCompanyId("");
       setAreaCatalogError("");
+      setAreaCatalogWarning("");
+      setAreaCatalogAuthoritative(false);
     }
     try {
       if (!companyScopeId) {
@@ -182,7 +190,7 @@ export function OccupancyScenarioManager() {
           "Empresa ativa não definida para descobrir áreas de ocupação.",
         );
       }
-      const options = await fetchOccupancyAreaOptions({
+      const catalog = await fetchOccupancyAreaCatalog({
         companyId: companyScopeId,
         from: new Date(now.getTime() - 4 * HOUR_MS),
         request: <T,>(path: string) =>
@@ -190,8 +198,14 @@ export function OccupancyScenarioManager() {
         to: now,
       });
       if (requestSequence !== areaRequestSequenceRef.current) return;
-      setAreaOptions(options);
+      setAreaOptions(catalog.options);
       setAreaCatalogError("");
+      setAreaCatalogAuthoritative(catalog.authoritative);
+      setAreaCatalogWarning(
+        catalog.authoritative
+          ? ""
+          : "A API ainda não publicou o catálogo definitivo de regiões. A lista abaixo usa snapshots recentes e pode omitir uma área estável; o cadastro manual continua disponível.",
+      );
       setAreaCatalogCompanyId(companyScopeId);
       setAreaCatalogReady(true);
     } catch (error) {
@@ -204,6 +218,8 @@ export function OccupancyScenarioManager() {
         setAreaOptions([]);
         setAreaCatalogCompanyId("");
         setAreaCatalogError(message);
+        setAreaCatalogWarning("");
+        setAreaCatalogAuthoritative(false);
         setAreaCatalogReady(false);
         toast.error(message);
       }
@@ -372,7 +388,11 @@ export function OccupancyScenarioManager() {
             </div>
           ) : loadingAreas ? (
             <div className="rounded-md border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
-              Certificando câmeras, workers, linhas e snapshots de ocupação...
+              Carregando câmeras, catálogo e snapshots de ocupação...
+            </div>
+          ) : areaCatalogWarning ? (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
+              {areaCatalogWarning}
             </div>
           ) : null}
           {loading ? (
@@ -467,6 +487,7 @@ export function OccupancyScenarioManager() {
       </Card>
 
       <OccupancyScenarioDialog
+        areaCatalogAuthoritative={areaCatalogAuthoritative}
         areaCatalogError={areaCatalogError}
         areaCatalogReady={areaCatalogCertified}
         areaOptions={areaOptions}
@@ -482,6 +503,7 @@ export function OccupancyScenarioManager() {
 }
 
 function OccupancyScenarioDialog({
+  areaCatalogAuthoritative,
   areaCatalogError,
   areaCatalogReady,
   areaOptions,
@@ -492,6 +514,7 @@ function OccupancyScenarioDialog({
   open,
   scenario,
 }: {
+  areaCatalogAuthoritative: boolean;
   areaCatalogError: string;
   areaCatalogReady: boolean;
   areaOptions: AreaOption[];
@@ -505,6 +528,13 @@ function OccupancyScenarioDialog({
   const [draft, setDraft] = React.useState<Draft>(() => createEmptyDraft());
   const [saving, setSaving] = React.useState(false);
   const companyIdRef = React.useRef(companyId);
+  const compatibleAreaOptions = React.useMemo(() => {
+    const objectClass = draft.object_class.trim().toLowerCase();
+    return areaOptions.filter(
+      (option) =>
+        !option.object_class || option.object_class === objectClass,
+    );
+  }, [areaOptions, draft.object_class]);
 
   React.useEffect(() => {
     companyIdRef.current = companyId;
@@ -526,7 +556,17 @@ function OccupancyScenarioDialog({
 
   function addArea() {
     const used = new Set(draft.areas.map(areaKey));
-    const option = areaOptions.find((item) => !used.has(item.key)) ?? areaOptions[0];
+    const option = compatibleAreaOptions.find(
+      (item) => !used.has(areaKey(item)),
+    );
+    if (!option && areaCatalogAuthoritative) {
+      toast.error(
+        compatibleAreaOptions.length
+          ? "Todas as áreas disponíveis desta classe já foram incluídas."
+          : "Não há outra área ativa desta classe no catálogo de ocupação.",
+      );
+      return;
+    }
 
     setDraft((current) => ({
       ...current,
@@ -571,6 +611,12 @@ function OccupancyScenarioDialog({
     let payload: ReturnType<typeof buildScenarioPayload>;
     try {
       payload = buildScenarioPayload(draft);
+      requireOccupancyAreaClassCompatibility({
+        authoritative: areaCatalogAuthoritative && draft.active,
+        areas: payload.areas,
+        objectClass: payload.object_class,
+        options: areaOptions,
+      });
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -757,8 +803,9 @@ function OccupancyScenarioDialog({
                 {draft.areas.map((area, index) => (
                   <ScenarioAreaEditor
                     key={`${area.camera_id}-${area.area_id}-${index}`}
+                    allowManual={!areaCatalogAuthoritative}
                     area={area}
-                    areaOptions={areaOptions}
+                    areaOptions={compatibleAreaOptions}
                     onPatch={(patch) => updateArea(index, patch)}
                     onRemove={() => removeArea(index)}
                   />
@@ -796,11 +843,13 @@ function OccupancyScenarioDialog({
 }
 
 function ScenarioAreaEditor({
+  allowManual,
   area,
   areaOptions,
   onPatch,
   onRemove,
 }: {
+  allowManual: boolean;
   area: OccupancyScenarioArea;
   areaOptions: AreaOption[];
   onPatch: (patch: Partial<OccupancyScenarioArea>) => void;
@@ -837,7 +886,9 @@ function ScenarioAreaEditor({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={MANUAL_AREA_OPTION}>Manual</SelectItem>
+            <SelectItem value={MANUAL_AREA_OPTION} disabled={!allowManual}>
+              {allowManual ? "Manual" : "Indisponível no catálogo ativo"}
+            </SelectItem>
             {areaOptions.map((option) => (
               <SelectItem key={option.key} value={option.key}>
                 {option.label}
@@ -851,6 +902,7 @@ function ScenarioAreaEditor({
           value={area.camera_id}
           onChange={(event) => onPatch({ camera_id: event.target.value })}
           placeholder="camera_id"
+          readOnly={!allowManual}
         />
       </FormField>
       <FormField label="Área">
@@ -858,6 +910,7 @@ function ScenarioAreaEditor({
           value={area.area_id}
           onChange={(event) => onPatch({ area_id: event.target.value })}
           placeholder="area-1"
+          readOnly={!allowManual}
         />
       </FormField>
       <FormField label="Rótulo">
@@ -922,7 +975,7 @@ function buildScenarioPayload(draft: Draft) {
   if (!name) {
     throw new Error("Informe o nome do cenário.");
   }
-  const objectClass = draft.object_class.trim();
+  const objectClass = draft.object_class.trim().toLowerCase();
   if (!objectClass) {
     throw new Error("Informe a classe de objeto.");
   }

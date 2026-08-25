@@ -43,6 +43,9 @@ const OCCUPANCY_ROW_COLLECTION_KEYS = [
   "items",
 ] as const;
 
+const RFC3339_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
 export function requireOccupancyScenarioRows(
   value: unknown,
   expectedCompanyId?: string | null,
@@ -83,6 +86,11 @@ export function requireOccupancyScenarioRows(
       row.object_class,
       `object_class do cenário de ocupação "${id}"`,
     );
+    if (objectClass !== objectClass.toLowerCase()) {
+      throw new Error(
+        `A API retornou object_class não normalizado no cenário de ocupação "${id}".`,
+      );
+    }
     const active = requireBoolean(
       row.active,
       `active do cenário de ocupação "${id}"`,
@@ -613,8 +621,8 @@ function requireText(value: unknown, context: string) {
 }
 
 function requireOptionalText(value: unknown, context: string) {
-  if (value === undefined || value === null) return;
-  requireText(value, context);
+  if (value === undefined || value === null) return undefined;
+  return requireText(value, context);
 }
 
 function requireBoolean(value: unknown, context: string) {
@@ -646,7 +654,7 @@ function requireOptionalNonNegativeNumber(
 function requireTimestamp(value: unknown, context: string) {
   const timestamp = requireText(value, context);
   const parsed = Date.parse(timestamp);
-  if (Number.isNaN(parsed)) {
+  if (!RFC3339_TIMESTAMP_PATTERN.test(timestamp) || Number.isNaN(parsed)) {
     throw new Error(`A API retornou ${context} inválido.`);
   }
   return parsed;

@@ -13,8 +13,10 @@ import {
   getStoredSession,
   loginRequest,
   SESSION_EXPIRED_EVENT,
+  SESSION_SYNC_STORAGE_KEY,
   SESSION_UPDATED_EVENT,
   setAuthenticatedMasterAccess,
+  synchronizeExternalSessionUpdate,
 } from "@/lib/api";
 import {
   accessTokenMatchesUserIdentity,
@@ -78,7 +80,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     userRef.current = user;
   }, [user]);
 
-  const resolveManagerAccess = React.useCallback(async (currentUser: CurrentUser | null) => {
+  const resolveManagerAccess = React.useCallback((currentUser: CurrentUser | null) => {
     if (!currentUser) return false;
     if (hasDeclaredManagerAccess(currentUser)) return true;
     if (hasAnyOperationalPermission(currentUser)) return true;
@@ -88,9 +90,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshUser = React.useCallback(async () => {
     try {
       const currentUser = await requestAuthenticatedUser(userRef.current);
-      const canManage = await resolveManagerAccess(currentUser);
       setUser(currentUser);
-      setIsManager(canManage);
+      setIsManager(resolveManagerAccess(currentUser));
       return currentUser;
     } catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
@@ -102,8 +103,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       // Rede/5xx não invalidam uma sessão previamente autenticada. Preserve o
-      // último perfil até que uma nova tentativa consiga revalidá-lo.
-      return userRef.current;
+      // último perfil somente se o JWT atual ainda certificar exatamente a
+      // mesma identidade/empresa. Uma sessão trocada nunca herda o principal
+      // publicado pela anterior.
+      const fallbackUser = userRef.current;
+      const accessToken = getStoredSession()?.access_token ?? "";
+      if (
+        fallbackUser &&
+        accessToken &&
+        accessTokenMatchesUserIdentity(accessToken, fallbackUser)
+      ) {
+        return fallbackUser;
+      }
+      clearUserGridSync();
+      userRef.current = null;
+      setUser(null);
+      setIsManager(false);
+      return null;
     }
   }, [resolveManagerAccess]);
 
@@ -117,10 +133,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const currentUser = await refreshUser();
+      await refreshUser();
       if (!mounted) return;
 
-      setUser(currentUser);
       setLoading(false);
     }
 
@@ -130,6 +145,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       mounted = false;
     };
   }, [refreshUser]);
+
+  React.useEffect(() => {
+    let reconciliationTimer: number | null = null;
+
+    function reconcileExternalSession() {
+      reconciliationTimer = null;
+      synchronizeExternalSessionUpdate();
+      const session = getStoredSession();
+
+      clearUserGridSync();
+      userRef.current = null;
+      setUser(null);
+      setIsManager(false);
+      if (!session) {
+        router.replace("/login");
+        return;
+      }
+
+      // A cross-tab revision is a distinct session lineage. Hide the previous
+      // principal until `/auth/me` is reconciled against the token now stored.
+      void refreshUser();
+    }
+
+    function handleSessionStorage(event: StorageEvent) {
+      if (event.key !== SESSION_SYNC_STORAGE_KEY) return;
+      if (reconciliationTimer !== null) {
+        window.clearTimeout(reconciliationTimer);
+      }
+      // The sync marker is written after every token field, so one queued turn
+      // is enough to coalesce consecutive cross-tab session changes.
+      reconciliationTimer = window.setTimeout(reconcileExternalSession, 0);
+    }
+
+    window.addEventListener("storage", handleSessionStorage);
+    return () => {
+      window.removeEventListener("storage", handleSessionStorage);
+      if (reconciliationTimer !== null) {
+        window.clearTimeout(reconciliationTimer);
+      }
+    };
+  }, [refreshUser, router]);
 
   React.useEffect(() => {
     if (!user?.id) return;
@@ -165,6 +221,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     function handleSessionExpired() {
       clearStoredSession();
       clearUserGridSync();
+      userRef.current = null;
       setUser(null);
       setIsManager(false);
       router.replace("/login");
@@ -230,20 +287,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [resolveManagerAccess]);
 
   const logout = React.useCallback(async () => {
+    const accessToken = getStoredSession()?.access_token ?? "";
     const refreshToken = getStoredRefreshToken();
+
+    // Local logout is immediate. The revocation request is pinned to the old
+    // credentials so its late completion can never clear a newer login.
+    clearStoredSession();
+    clearUserGridSync();
+    userRef.current = null;
+    setUser(null);
+    setIsManager(false);
+    router.replace("/login");
 
     if (refreshToken) {
       await apiFetch("/auth/logout", {
         method: "POST",
+        auth: false,
         body: { refresh_token: refreshToken },
+        headers: accessToken
+          ? { Authorization: `Bearer ${accessToken}` }
+          : undefined,
       }).catch(() => undefined);
     }
-
-    clearStoredSession();
-    clearUserGridSync();
-    setUser(null);
-    setIsManager(false);
-    router.replace("/login");
   }, [router]);
 
   const value = React.useMemo<AuthContextValue>(
@@ -347,15 +412,40 @@ async function hydrateAuthenticatedUser(
       401,
     );
   }
-  setAuthenticatedMasterAccess(tokenEnrichedUser);
+  setAuthenticatedMasterAccess(tokenEnrichedUser, accessToken);
   const hydratedUser = await hydrateCurrentUser(tokenEnrichedUser, fallbackUser);
-  await hydrateUserGridFromServer(hydratedUser.id);
+  if (getStoredSession()?.access_token !== accessToken) {
+    throw new ApiError(
+      "A sessão mudou enquanto o perfil autenticado era hidratado.",
+      409,
+    );
+  }
+  const sessionIsCurrent = () =>
+    getStoredSession()?.access_token === accessToken;
+  await hydrateUserGridFromServer(hydratedUser.id, {
+    expectedAccessToken: accessToken,
+    shouldApply: sessionIsCurrent,
+  });
+  if (!sessionIsCurrent()) {
+    throw new ApiError(
+      "A sessão mudou enquanto as configurações do usuário eram hidratadas.",
+      409,
+    );
+  }
   const companyId = getEffectiveCompanyScopeId(hydratedUser);
   if (companyId) {
     await migrateLegacyLiveDefault({
       companyId,
+      expectedAccessToken: accessToken,
+      shouldApply: sessionIsCurrent,
       userId: hydratedUser.id,
     }).catch(() => false);
+    if (!sessionIsCurrent()) {
+      throw new ApiError(
+        "A sessão mudou durante a migração das configurações.",
+        409,
+      );
+    }
   }
   return hydratedUser;
 }

@@ -1,4 +1,5 @@
 import type { EnterpriseChartOption } from "@/components/app/echart";
+import type { ReportTable } from "@/lib/report-export";
 import { formatNumber } from "@/lib/utils";
 
 export type CurrentYearMonthPoint = {
@@ -7,6 +8,86 @@ export type CurrentYearMonthPoint = {
   month: number;
   value: number | null;
 };
+
+const CURRENT_YEAR_MONTH_LABELS = [
+  "Jan",
+  "Fev",
+  "Mar",
+  "Abr",
+  "Mai",
+  "Jun",
+  "Jul",
+  "Ago",
+  "Set",
+  "Out",
+  "Nov",
+  "Dez",
+] as const;
+
+export function buildCurrentYearMonthPoints({
+  reference,
+  through,
+  valueForRange,
+}: {
+  reference: Date;
+  through: Date;
+  valueForRange: (from: Date, to: Date) => number;
+}): CurrentYearMonthPoint[] {
+  const year = reference.getFullYear();
+  const referenceMonth = reference.getMonth();
+  let accumulated = 0;
+
+  return CURRENT_YEAR_MONTH_LABELS.map((label, month) => {
+    if (month > referenceMonth) {
+      return {
+        accumulated: null,
+        label,
+        month,
+        value: null,
+      };
+    }
+
+    const from = new Date(year, month, 1);
+    const nextMonth = new Date(year, month + 1, 1);
+    const to = new Date(Math.min(through.getTime(), nextMonth.getTime()));
+    const value = valueForRange(from, to);
+    accumulated += value;
+
+    return {
+      accumulated,
+      label,
+      month,
+      value,
+    };
+  });
+}
+
+export function buildCurrentYearComparisonTable(
+  points: CurrentYearMonthPoint[],
+  title: string,
+  year: number,
+): ReportTable {
+  return {
+    columns: [
+      { key: "month", label: "Mês", width: 18 },
+      { key: "value", label: "Valor mensal", numeric: true, width: 22 },
+      { key: "accumulated", label: "Acumulado", numeric: true, width: 22 },
+    ],
+    description: String(year),
+    rows: points.flatMap((point) =>
+      point.value === null
+        ? []
+        : [
+            {
+              accumulated: point.accumulated ?? 0,
+              month: point.label,
+              value: point.value,
+            },
+          ],
+    ),
+    title,
+  };
+}
 
 export function buildCurrentYearComparisonOption(
   points: CurrentYearMonthPoint[],

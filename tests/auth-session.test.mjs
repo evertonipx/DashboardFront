@@ -1663,7 +1663,7 @@ test("video wall e comparativo propagam o escopo explícito em todas as consulta
     assert.match(
       reportSource,
       new RegExp(
-        `apiFetch<unknown>\\("/${path}", \\{ companyScopeId \\}\\)`,
+        `apiFetch<unknown>\\("/${path}", \\{[^}]*companyScopeId[^}]*\\}\\)`,
       ),
       `o caller de relatório deve escopar /${path}`,
     );
@@ -2756,11 +2756,14 @@ test("refresh atrasado da conta anterior não sobrescreve o novo tenant", async 
         token_type: "Bearer",
       }),
     );
-    await oldRequest;
+    await assert.rejects(
+      oldRequest,
+      (error) => error instanceof api.ApiError && error.status === 409,
+    );
 
     assert.equal(storage.getItem("access_token"), "access-company-new");
     assert.equal(storage.getItem("refresh_token"), "refresh-company-new");
-    assert.deepEqual(workerAuthorization, ["Bearer access-company-new"]);
+    assert.deepEqual(workerAuthorization, []);
   } finally {
     api.clearStoredSession();
     globalThis.fetch = originalFetch;
@@ -3230,13 +3233,11 @@ test("confirmação master não atravessa refresh para outra identidade", async 
       name: "Master",
     });
 
-    await api.apiFetch("/workers");
-    assert.deepEqual(requests, [
-      {
-        path: "/api/v1/workers",
-        companyId: null,
-      },
-    ]);
+    await assert.rejects(
+      () => api.apiFetch("/workers"),
+      (error) => error instanceof api.ApiError && error.status === 401,
+    );
+    assert.deepEqual(requests, []);
   } finally {
     api.clearStoredSession();
     globalThis.fetch = originalFetch;
@@ -3438,7 +3439,7 @@ test("login é transacional e impede submissões concorrentes", () => {
   );
   assert.match(
     loginSource,
-    /submittingRef\.current\) return[\s\S]*?submittingRef\.current = true[\s\S]*?submittingRef\.current = false/,
+    /(?:submittingRef|submitInFlightRef)\.current\) return[\s\S]*?(?:submittingRef|submitInFlightRef)\.current = true[\s\S]*?(?:submittingRef|submitInFlightRef)\.current = false/,
     "duplo clique não pode iniciar dois logins concorrentes",
   );
   assert.match(

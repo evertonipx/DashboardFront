@@ -34,14 +34,23 @@ const legacyLiveCardAliases: Record<string, string> = {
 
 export async function migrateLegacyLiveDefault({
   companyId,
+  expectedAccessToken,
+  shouldApply = () => true,
   userId,
 }: {
   companyId: string;
+  expectedAccessToken?: string;
+  shouldApply?: () => boolean;
   userId: string;
 }) {
   const requestedCompanyId = companyId.trim();
   const requestedUserId = userId.trim();
-  if (typeof window === "undefined" || !requestedCompanyId || !requestedUserId) {
+  if (
+    typeof window === "undefined" ||
+    !requestedCompanyId ||
+    !requestedUserId ||
+    !shouldApply()
+  ) {
     return false;
   }
 
@@ -68,8 +77,16 @@ export async function migrateLegacyLiveDefault({
     return false;
   }
 
-  const legacyView = await fetchLegacyLiveView(requestedCompanyId);
-  if (currentStoredCompanyScopeId() !== initialStoredCompanyId) return false;
+  const legacyView = await fetchLegacyLiveView(
+    requestedCompanyId,
+    expectedAccessToken,
+  );
+  if (
+    !shouldApply() ||
+    currentStoredCompanyScopeId() !== initialStoredCompanyId
+  ) {
+    return false;
+  }
 
   const responseCompanyId = legacyView?.company_id?.trim() ?? "";
   if (
@@ -134,9 +151,13 @@ export async function migrateLegacyLiveDefault({
   return true;
 }
 
-async function fetchLegacyLiveView(companyScopeId: string) {
+async function fetchLegacyLiveView(
+  companyScopeId: string,
+  expectedAccessToken?: string,
+) {
   return apiFetch<LegacyDashboardViewResponse>("/dashboard-views/live", {
     companyScopeId,
+    expectedAccessToken,
   }).catch(() => null);
 }
 

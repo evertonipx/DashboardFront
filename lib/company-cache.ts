@@ -1,20 +1,20 @@
 "use client";
 
-import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
+import {
+  buildCurrentUserCompanyCacheRecord,
+  resolveCompanyRecordTimeZone,
+  resolveCurrentUserCompanyTimeZone,
+} from "@/lib/company-time-zone-record";
 import type { CurrentUserCompany } from "@/lib/types";
+
+export {
+  buildCurrentUserCompanyCacheRecord,
+  resolveCompanyRecordTimeZone,
+  resolveCurrentUserCompanyTimeZone,
+};
 
 const COMPANY_CACHE_KEY = "ipxdata-company-cache-v1";
 export const COMPANY_CACHE_EVENT = "ipxdata:company-cache";
-
-const COMPANY_TIME_ZONE_FIELDS = [
-  "timezone",
-  "company_timezone",
-  "companyTimezone",
-  "company_time_zone",
-  "companyTimeZone",
-  "tenant_timezone",
-  "tenantTimezone",
-] as const;
 
 type CompanyCache = Record<string, CurrentUserCompany>;
 
@@ -22,23 +22,6 @@ export function readCachedCompany(companyId: string | undefined) {
   if (!companyId || typeof window === "undefined") return null;
 
   return readCompanyCache()[companyId] ?? null;
-}
-
-export function resolveCompanyRecordTimeZone(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { declared: false, timeZone: null } as const;
-  }
-
-  const record = value as Record<string, unknown>;
-  let declared = false;
-  for (const field of COMPANY_TIME_ZONE_FIELDS) {
-    if (!Object.prototype.hasOwnProperty.call(record, field)) continue;
-    declared = true;
-    const timeZone = canonicalCompanyTimeZone(record[field]);
-    if (timeZone) return { declared: true, timeZone } as const;
-  }
-
-  return { declared, timeZone: null } as const;
 }
 
 export function normalizeCompanyRecord<T extends CurrentUserCompany>(company: T) {

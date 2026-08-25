@@ -14,6 +14,9 @@ const reconciliation = loadTypeScriptModule(
 const aggregateTime = loadTypeScriptModule("lib/aggregate-time.ts");
 const scenarioAnalytics = loadTypeScriptModule("lib/scenario-analytics.ts");
 const hourlyAxis = loadTypeScriptModule("lib/hourly-axis.ts");
+const periodAnalysisModel = loadTypeScriptModule(
+  "lib/period-analysis-model.ts",
+);
 const probe = process.argv[2];
 
 if (probe === "company-four-hour-offset") {
@@ -158,6 +161,34 @@ if (probe === "company-four-hour-offset") {
   });
   assert.equal(points.length, 2);
   assert.deepEqual(points.map((point) => point.total), [7, 5]);
+} else if (probe === "midnight-forward") {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2018-11-04",
+    "2018-11-04",
+  );
+  assert.ok(period);
+  assert.equal(period.from.getFullYear(), 2018);
+  assert.equal(period.from.getMonth(), 10);
+  assert.equal(period.from.getDate(), 4);
+  assert.equal(period.from.getHours(), 1);
+  assert.equal(period.to.getFullYear(), 2018);
+  assert.equal(period.to.getMonth(), 10);
+  assert.equal(period.to.getDate(), 5);
+  assert.equal(period.to.getHours(), 0);
+  assert.equal(
+    aggregateTime.endOfAggregateBucket(period.from, "day").getTime(),
+    period.to.getTime(),
+  );
+
+  const baseline = periodAnalysisModel.periodAnalysisBaselineRange(
+    {
+      from: new Date(2010, 1, 14),
+      to: new Date(2010, 1, 15),
+    },
+    "last_year",
+  );
+  assert.equal(baseline.from.getTime(), new Date(2009, 1, 14).getTime());
+  assert.equal(baseline.to.getTime(), new Date(2009, 1, 15).getTime());
 } else {
   throw new Error(`Probe desconhecido: ${probe ?? "ausente"}`);
 }

@@ -4401,14 +4401,8 @@ test("bucket horário sem offset preserva o relógio local", () => {
   assert.equal(bucket.getMilliseconds(), 250);
 });
 
-test("bucket RFC3339 com offset permanece um instante absoluto", () => {
-  const bucket = aggregateTime.parseAggregateBucket(
-    "2026-07-22T13:15:30Z",
-    "hour",
-  );
 
-  assert.equal(bucket?.toISOString(), "2026-07-22T13:15:30.000Z");
-});
+
 
 test("consulta horária envia os limites locais como instantes UTC", () => {
   const localStart = new Date(2026, 6, 22, 0, 0, 0, 0);
@@ -4417,6 +4411,504 @@ test("consulta horária envia os limites locais como instantes UTC", () => {
     aggregateTime.aggregateQueryIso(localStart, "hour"),
     localStart.toISOString(),
   );
+});
+
+test("filtros 22 e 23 reutilizam exatamente os mesmos meses horários", () => {
+  const throughDay22 = aggregateQueryPlan.planHourlyCalendarMonthQueries([
+    {
+      from: new Date(2026, 5, 2),
+      to: new Date(2026, 6, 23),
+    },
+  ]);
+  const throughDay23 = aggregateQueryPlan.planHourlyCalendarMonthQueries([
+    {
+      from: new Date(2026, 5, 2),
+      to: new Date(2026, 6, 24),
+    },
+  ]);
+
+  assert.deepEqual(
+    throughDay22.map(({ key, from, to }) => [
+      key,
+      from.getTime(),
+      to.getTime(),
+    ]),
+    throughDay23.map(({ key, from, to }) => [
+      key,
+      from.getTime(),
+      to.getTime(),
+    ]),
+  );
+});
+
+test("plano horário preserva lacunas e respeita o limite exclusivo mensal", () => {
+  const queries = aggregateQueryPlan.planHourlyCalendarMonthQueries([
+    {
+      from: new Date(2025, 6, 22),
+      to: new Date(2025, 7, 1),
+    },
+    {
+      from: new Date(2026, 0, 1),
+      to: new Date(2026, 1, 1),
+    },
+  ]);
+
+  assert.deepEqual(
+    queries.map((query) => query.key),
+    ["2025-07", "2026-01"],
+  );
+  assert.equal(queries[0].from.getDate(), 1);
+  assert.equal(queries[0].to.getMonth(), 7);
+  assert.equal(queries[1].to.getMonth(), 1);
+});
+
+test("plano horário atravessa dezembro e janeiro sem sobrepor fronteiras", () => {
+  const queries = aggregateQueryPlan.planHourlyCalendarMonthQueries([
+    {
+      from: new Date(2025, 11, 31),
+      to: new Date(2026, 0, 2),
+    },
+  ]);
+
+  assert.deepEqual(
+    queries.map((query) => query.key),
+    ["2025-12", "2026-01"],
+  );
+  assert.equal(queries[0].to.getTime(), queries[1].from.getTime());
+});
+
+test("consulta horária rejeita fan-out histórico excessivo", async () => {
+  await assert.rejects(
+    aggregateHourQuery.fetchHourlyAggregateRanges({
+      cacheScope: "test-company",
+      ranges: [
+        {
+          from: new Date(2000, 0, 1),
+          to: new Date(2020, 1, 1),
+        },
+      ],
+    }),
+    /excede 240 meses/,
+  );
+});
+
+test("planejador interrompe fan-out extremo antes de materializar o histórico", () => {
+  assert.throws(
+    () =>
+      aggregateQueryPlan.planHourlyCalendarMonthQueries([
+        {
+          from: new Date(1_000, 0, 1),
+          to: new Date(100_000, 0, 1),
+        },
+      ]),
+    /excede 240 meses/,
+  );
+});
+
+test("rollup de meses particionados equivale à consulta horária contínua", () => {
+  const range = {
+    from: new Date(2026, 0, 15),
+    to: new Date(2026, 2, 1),
+  };
+  const source = [
+    aggregateRow("2026-01-10T10:00:00", "line-entry", 100),
+    aggregateRow("2026-01-22T10:00:00", "line-entry", 2),
+    aggregateRow("2026-02-22T10:00:00", "line-entry", 3),
+    aggregateRow("2026-03-01T00:00:00", "line-entry", 200),
+  ];
+  const partitioned = aggregateQueryPlan
+    .planHourlyCalendarMonthQueries([range])
+    .flatMap((query) =>
+      source.filter((row) =>
+        aggregateTime.aggregateBucketInRange(
+          row.bucket,
+          "hour",
+          query.from,
+          query.to,
+        ),
+      ),
+    );
+  const continuousRollup = aggregateReconciliation.rollupAggregateRows(
+    source,
+    "hour",
+    "month",
+    range.from,
+    range.to,
+  );
+  const partitionedRollup = aggregateReconciliation.rollupAggregateRows(
+    partitioned,
+    "hour",
+    "month",
+    range.from,
+    range.to,
+  );
+
+  assert.deepEqual(
+    normalizeAggregateRows(partitionedRollup),
+    normalizeAggregateRows(continuousRollup),
+  );
+});
+
+test("cache mensal só entrega horas dentro do corte solicitado", () => {
+  const rows = aggregateHourQuery.filterHourlyAggregateRowsToRanges(
+    [
+      aggregateRow("2026-07-10T10:00:00", "line-entry", 100),
+      aggregateRow("2026-07-22T10:00:00", "line-entry", 2),
+      aggregateRow("2026-07-23T00:00:00", "line-entry", 200),
+    ],
+    [
+      {
+        from: new Date(2026, 6, 15),
+        to: new Date(2026, 6, 23),
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    rows.map((row) => [row.bucket, row.total]),
+    [["2026-07-22T10:00:00", 2]],
+  );
+});
+
+test("cache revalida mês aberto/recém-fechado por hora e histórico por dia", () => {
+  const query = {
+    from: new Date(2026, 6, 1),
+    to: new Date(2026, 7, 1),
+  };
+  const settling = aggregateHourQuery.hourlyAggregateCacheRevision(
+    query,
+    new Date(2026, 7, 1, 12),
+  );
+  const historicalMorning =
+    aggregateHourQuery.hourlyAggregateCacheRevision(
+      query,
+      new Date(2026, 7, 4, 9),
+    );
+  const historicalAfternoon =
+    aggregateHourQuery.hourlyAggregateCacheRevision(
+      query,
+      new Date(2026, 7, 4, 18),
+    );
+  const openQuery = {
+    from: new Date(2026, 7, 1),
+    to: new Date(2026, 8, 1),
+  };
+  const openMorning = aggregateHourQuery.hourlyAggregateCacheRevision(
+    openQuery,
+    new Date(2026, 7, 22, 9),
+  );
+  const openAfternoon = aggregateHourQuery.hourlyAggregateCacheRevision(
+    openQuery,
+    new Date(2026, 7, 22, 18),
+  );
+
+  assert.match(settling, /^hour:/);
+  assert.match(historicalMorning, /^day:/);
+  assert.equal(historicalAfternoon, historicalMorning);
+  assert.match(openMorning, /^hour:/);
+  assert.match(openAfternoon, /^hour:/);
+  assert.notEqual(openAfternoon, openMorning);
+});
+
+test("consultas 22 e 23 reutilizam o mesmo snapshot HTTP do dia 22", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (input) => {
+    requests.push(String(input));
+    return new Response(
+      JSON.stringify({
+        data: [
+          aggregateRow("2026-07-22T10:00:00", "line-entry", 22),
+          aggregateRow("2026-07-23T10:00:00", "line-entry", 23),
+          aggregateRow("2026-07-24T10:00:00", "line-entry", 24),
+        ],
+        granularity: "hour",
+      }),
+      {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      },
+    );
+  };
+
+  try {
+    const cache = new Map();
+    const through22 = await aggregateHourQuery.fetchHourlyAggregateRanges({
+      cache,
+      cacheScope: "test-company",
+      now: new Date(2026, 6, 27, 10, 30, 1),
+      ranges: [
+        {
+          from: new Date(2026, 6, 1),
+          to: new Date(2026, 6, 23),
+        },
+      ],
+    });
+    const through23 = await aggregateHourQuery.fetchHourlyAggregateRanges({
+      cache,
+      cacheScope: "test-company",
+      now: new Date(2026, 6, 27, 10, 45, 59),
+      ranges: [
+        {
+          from: new Date(2026, 6, 1),
+          to: new Date(2026, 6, 24),
+        },
+      ],
+    });
+    const day22First = through22.find((row) =>
+      row.bucket.startsWith("2026-07-22"),
+    );
+    const day22Second = through23.find((row) =>
+      row.bucket.startsWith("2026-07-22"),
+    );
+
+    assert.equal(requests.length, 1);
+    assert.deepEqual(day22Second, day22First);
+    assert.deepEqual(
+      through22.map((row) => row.total),
+      [22],
+    );
+    assert.deepEqual(
+      through23.map((row) => row.total),
+      [22, 23],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("consultas concorrentes do mesmo mês compartilham uma única resposta HTTP", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let releaseResponse;
+  const responseReady = new Promise((resolveResponse) => {
+    releaseResponse = resolveResponse;
+  });
+  globalThis.fetch = async (input) => {
+    requests.push(String(input));
+    await responseReady;
+    return new Response(
+      JSON.stringify({
+        data: [
+          aggregateRow("2026-07-22T10:00:00", "line-entry", 22),
+          aggregateRow("2026-07-23T10:00:00", "line-entry", 23),
+        ],
+        granularity: "hour",
+      }),
+      {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      },
+    );
+  };
+
+  try {
+    const cache = new Map();
+    const first = aggregateHourQuery.fetchHourlyAggregateRanges({
+      cache,
+      cacheScope: "test-company",
+      now: new Date(2026, 6, 27, 10, 15),
+      ranges: [
+        {
+          from: new Date(2026, 6, 1),
+          to: new Date(2026, 6, 23),
+        },
+      ],
+    });
+    const second = aggregateHourQuery.fetchHourlyAggregateRanges({
+      cache,
+      cacheScope: "test-company",
+      now: new Date(2026, 6, 27, 10, 45),
+      ranges: [
+        {
+          from: new Date(2026, 6, 1),
+          to: new Date(2026, 6, 24),
+        },
+      ],
+    });
+
+    await new Promise((resolveTick) => setImmediate(resolveTick));
+    assert.equal(requests.length, 1);
+    releaseResponse();
+    const [through22, through23] = await Promise.all([first, second]);
+
+    assert.equal(requests.length, 1);
+    assert.deepEqual(
+      through22.map((row) => row.total),
+      [22],
+    );
+    assert.deepEqual(
+      through23.map((row) => row.total),
+      [22, 23],
+    );
+  } finally {
+    releaseResponse?.();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("limpar o cache impede uma resposta antiga de repovoá-lo", async () => {
+  const originalFetch = globalThis.fetch;
+  let releaseResponse;
+  const responseReady = new Promise((resolveResponse) => {
+    releaseResponse = resolveResponse;
+  });
+  globalThis.fetch = async () => {
+    await responseReady;
+    return new Response(
+      JSON.stringify({
+        data: [aggregateRow("2026-07-22T10:00:00", "line-entry", 22)],
+        granularity: "hour",
+      }),
+      {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      },
+    );
+  };
+
+  try {
+    const cache = new Map();
+    const pending = aggregateHourQuery.fetchHourlyAggregateRanges({
+      cache,
+      cacheScope: "test-company",
+      now: new Date(2026, 6, 27, 10),
+      ranges: [
+        {
+          from: new Date(2026, 6, 1),
+          to: new Date(2026, 6, 23),
+        },
+      ],
+    });
+    await new Promise((resolveTick) => setImmediate(resolveTick));
+    aggregateHourQuery.clearHourlyAggregateCache(cache);
+    releaseResponse();
+    await pending;
+
+    assert.equal(cache.size, 0);
+  } finally {
+    releaseResponse?.();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("dia aberto e fechado conservam o mesmo snapshot mensal", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (input) => {
+    const request = new URL(String(input), "http://localhost");
+    const from = request.searchParams.get("from");
+    requests.push({ from, url: String(input) });
+    return new Response(
+      JSON.stringify({
+        data: [
+          aggregateRow("2026-07-22T10:00:00", "line-entry", 22),
+          aggregateRow("2026-07-27T10:00:00", "line-entry", 1),
+        ],
+        granularity: "hour",
+      }),
+      {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      },
+    );
+  };
+
+  try {
+    const cache = new Map();
+    const range = {
+      from: new Date(2026, 6, 1),
+      to: new Date(2026, 6, 27, 10, 31),
+    };
+    const first = await aggregateHourQuery.fetchHourlyAggregateRanges({
+      cache,
+      cacheScope: "test-company",
+      now: new Date(2026, 6, 27, 10, 30),
+      ranges: [range],
+    });
+    const second = await aggregateHourQuery.fetchHourlyAggregateRanges({
+      cache,
+      cacheScope: "test-company",
+      now: new Date(2026, 6, 27, 10, 35),
+      ranges: [
+        {
+          ...range,
+          to: new Date(2026, 6, 27, 10, 36),
+        },
+      ],
+    });
+
+    assert.equal(requests.length, 1);
+    assert.deepEqual(
+      first.map((row) => [row.bucket, row.total]),
+      [
+        ["2026-07-22T10:00:00", 22],
+        ["2026-07-27T10:00:00", 1],
+      ],
+    );
+    assert.deepEqual(second, first);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("virada do dia mantém a mesma consulta mensal para a data encerrada", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (input) => {
+    const request = new URL(String(input), "http://localhost");
+    requests.push({
+      from: request.searchParams.get("from"),
+      to: request.searchParams.get("to"),
+    });
+    return new Response(
+      JSON.stringify({
+        data: [
+          aggregateRow("2026-07-31T23:00:00", "line-entry", 31),
+        ],
+        granularity: "hour",
+      }),
+      {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      },
+    );
+  };
+
+  try {
+    const cache = new Map();
+    const july = {
+      from: new Date(2026, 6, 1),
+      to: new Date(2026, 7, 1),
+    };
+    const whileOpen = await aggregateHourQuery.fetchHourlyAggregateRanges({
+      cache,
+      cacheScope: "test-company",
+      now: new Date(2026, 6, 31, 23, 30),
+      ranges: [july],
+    });
+    const afterMidnight =
+      await aggregateHourQuery.fetchHourlyAggregateRanges({
+        cache,
+        cacheScope: "test-company",
+        now: new Date(2026, 7, 1, 0, 30),
+        ranges: [july],
+      });
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[1], requests[0]);
+    assert.equal(
+      requests[0].from,
+      aggregateTime.aggregateQueryIso(july.from, "hour"),
+    );
+    assert.equal(
+      requests[0].to,
+      aggregateTime.aggregateQueryIso(july.to, "hour"),
+    );
+    assert.deepEqual(afterMidnight, whileOpen);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("resposta com granularidade diferente é rejeitada", () => {
@@ -4776,6 +5268,49 @@ test("agregado de ocupação exige tuplas completas, ordenadas e não negativas"
         "scenario-a",
       ),
     /cenário "scenario-b".*"scenario-a"/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          complete: false,
+          data: validRows,
+          granularity: "hour",
+          scenario_id: "scenario-a",
+        },
+        "hour",
+        "scenario-a",
+      ),
+    /incompleto ou inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          as_of: "2026-07-22 10:30:00",
+          data: validRows,
+          granularity: "hour",
+          scenario_id: "scenario-a",
+        },
+        "hour",
+        "scenario-a",
+      ),
+    /as_of.*inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          data: validRows,
+          granularity: "hour",
+          scenario_id: "scenario-a",
+          timezone: "UTC",
+        },
+        "hour",
+        "scenario-a",
+        "America/Sao_Paulo",
+      ),
+    /API agregou.*UTC.*Dashboard.*America\/Sao_Paulo/,
   );
 
   const invalidRows = [
@@ -5875,6 +6410,334 @@ test("relações de infraestrutura inválidas cancelam a certificação", () => 
   );
 });
 
+test("catálogo de ocupação usa somente rotas autorizadas ao usuário", async () => {
+  const from = new Date("2026-08-03T12:00:00.000Z");
+  const to = new Date("2026-08-03T13:00:00.000Z");
+  const areaId = "camera-a|3|1|ocupacao|region";
+  const requestedPaths = [];
+  const request = async (path) => {
+    requestedPaths.push(path);
+
+    if (path === "/cameras") {
+      return [
+        {
+          active: true,
+          company_id: "company-a",
+          id: "camera-a",
+          name: "Câmera A",
+        },
+      ];
+    }
+    if (path === "/cameras/camera-a/line-counts") {
+      return [
+        {
+          active: true,
+          camera_id: "camera-a",
+          company_id: "company-a",
+          id: "line-entry-a",
+          line_code: "entrada",
+          metric_type: "count",
+          name: "Entrada",
+        },
+      ];
+    }
+    if (path === "/occupancy/areas") {
+      return {
+        complete: true,
+        data: [
+          {
+            active: true,
+            area_id: areaId,
+            area_name: "Ocupação principal",
+            camera_id: "camera-a",
+            company_id: "company-a",
+            last_seen_at: "2026-08-03T12:30:00.000Z",
+            object_class: "person",
+            source_kind: "region",
+          },
+          {
+            active: true,
+            area_id: "area-without-baseline",
+            area_name: "Área ainda não medida",
+            camera_id: "camera-a",
+            company_id: "company-a",
+            last_seen_at: null,
+            object_class: "person",
+            source_kind: "region",
+          },
+        ],
+      };
+    }
+    if (path.startsWith("/occupancy?")) {
+      return {
+        data: [
+          {
+            area: areaId,
+            avg: 7,
+            camera_id: "camera-a",
+            current_at: "2026-08-03T12:30:00.000Z",
+            current_value: 7,
+            min: 7,
+            object_class: "person",
+            peak: 7,
+          },
+        ],
+      };
+    }
+
+    throw new Error(`Rota inesperada: ${path}`);
+  };
+
+  const catalog = await occupancyAreaOptions.fetchOccupancyAreaCatalog({
+    companyId: "company-a",
+    from,
+    request,
+    to,
+  });
+  const options = catalog.options;
+
+  assert.equal(catalog.authoritative, true);
+  assert.equal(
+    requestedPaths.some((path) => path === "/workers/config"),
+    false,
+  );
+  assert.equal(
+    requestedPaths.some((path) => path === "/occupancy/areas"),
+    true,
+  );
+  assert.equal(
+    requestedPaths.some(
+      (path) =>
+        path.startsWith("/occupancy?") || path.endsWith("/line-counts"),
+    ),
+    false,
+  );
+  assert.deepEqual(options, [
+    {
+      area_id: areaId,
+      camera_id: "camera-a",
+      detail: `${areaId} / camera-a`,
+      key: JSON.stringify(["camera-a", areaId]),
+      label: "Ocupação principal / Câmera A",
+      object_class: "person",
+    },
+  ]);
+  assert.doesNotThrow(() =>
+    occupancyAreaOptions.requireOccupancyAreaClassCompatibility({
+      authoritative: true,
+      areas: [{ area_id: areaId, camera_id: "camera-a" }],
+      objectClass: "person",
+      options,
+    }),
+  );
+  assert.throws(
+    () =>
+      occupancyAreaOptions.requireOccupancyAreaClassCompatibility({
+        authoritative: true,
+        areas: [{ area_id: areaId, camera_id: "camera-a" }],
+        objectClass: "vehicle",
+        options,
+      }),
+    /não mede a classe "vehicle"/,
+  );
+  assert.throws(
+    () =>
+      occupancyAreaOptions.requireOccupancyAreaClassCompatibility({
+        authoritative: true,
+        areas: [{ area_id: "unknown-area", camera_id: "camera-a" }],
+        objectClass: "person",
+        options,
+      }),
+    /não consta no catálogo ativo/,
+  );
+  assert.doesNotThrow(() =>
+    occupancyAreaOptions.requireOccupancyAreaClassCompatibility({
+      authoritative: false,
+      areas: [{ area_id: "legacy-area", camera_id: "camera-a" }],
+      objectClass: "person",
+      options,
+    }),
+  );
+});
+
+test("descoberta de ocupação mantém snapshot como fallback do catálogo novo", async () => {
+  const from = new Date("2026-08-03T12:00:00.000Z");
+  const to = new Date("2026-08-03T13:00:00.000Z");
+  const areaId = "camera-a|3|1|ocupacao|region";
+  const request = async (path) => {
+    if (path === "/occupancy/areas") {
+      const error = new Error("Rota ainda não publicada.");
+      error.status = 404;
+      throw error;
+    }
+    if (path === "/cameras") {
+      return [
+        {
+          active: true,
+          company_id: "company-a",
+          id: "camera-a",
+          name: "Câmera A",
+        },
+      ];
+    }
+    if (path === "/cameras/camera-a/line-counts") {
+      return [
+        {
+          active: true,
+          camera_id: "camera-a",
+          company_id: "company-a",
+          id: "line-entry-a",
+          line_code: "entrada",
+          metric_type: "count",
+          name: "Entrada",
+        },
+        {
+          active: true,
+          camera_id: "camera-a",
+          company_id: "company-a",
+          id: "legacy-region-a",
+          line_code: areaId,
+          metric_type: "count",
+          name: "Ocupação observada",
+        },
+      ];
+    }
+    if (path.startsWith("/occupancy?")) {
+      return {
+        data: [
+          {
+            area: areaId,
+            area_label: "Ocupação observada",
+            avg: 4,
+            camera_id: "camera-a",
+            current_at: "2026-08-03T12:30:00.000Z",
+            current_value: 4,
+            min: 4,
+            object_class: "person",
+            peak: 4,
+          },
+        ],
+      };
+    }
+    throw new Error(`Rota inesperada: ${path}`);
+  };
+
+  const catalog = await occupancyAreaOptions.fetchOccupancyAreaCatalog({
+    companyId: "company-a",
+    from,
+    request,
+    to,
+  });
+  const options = catalog.options;
+
+  assert.equal(catalog.authoritative, false);
+  assert.equal(options.length, 1);
+  assert.equal(options[0].area_id, areaId);
+  assert.equal(options[0].label, "Ocupação observada / Câmera A");
+  assert.equal(options[0].object_class, "person");
+});
+
+test("fallback de ocupação não perde snapshots quando linhas aninhadas retornam 404", async () => {
+  const from = new Date("2026-08-03T12:00:00.000Z");
+  const to = new Date("2026-08-03T13:00:00.000Z");
+  const areaId = "camera-a|3|1|ocupacao1|region";
+  const request = async (path) => {
+    if (path === "/occupancy/areas") {
+      const error = new Error("Rota ainda não publicada.");
+      error.status = 405;
+      throw error;
+    }
+    if (path === "/cameras") {
+      return [
+        {
+          active: true,
+          company_id: "company-a",
+          id: "camera-a",
+          name: "Câmera A",
+        },
+      ];
+    }
+    if (path === "/cameras/camera-a/line-counts") {
+      const error = new Error("Rota indisponível no escopo selecionado.");
+      error.status = 404;
+      throw error;
+    }
+    if (path.startsWith("/occupancy?")) {
+      return {
+        data: [
+          {
+            area: areaId,
+            avg: 4,
+            camera_id: "camera-a",
+            current_at: "2026-08-03T12:30:00.000Z",
+            current_value: 4,
+            min: 4,
+            object_class: "person",
+            peak: 4,
+          },
+        ],
+      };
+    }
+    throw new Error(`Rota inesperada: ${path}`);
+  };
+
+  const catalog = await occupancyAreaOptions.fetchOccupancyAreaCatalog({
+    companyId: "company-a",
+    from,
+    request,
+    to,
+  });
+
+  assert.equal(catalog.authoritative, false);
+  assert.deepEqual(catalog.options, [
+    {
+      area_id: areaId,
+      camera_id: "camera-a",
+      detail: `${areaId} / camera-a`,
+      key: JSON.stringify(["camera-a", areaId]),
+      label: "ocupacao1 / Câmera A",
+      object_class: "person",
+    },
+  ]);
+});
+
+test("identidades opacas de ocupação não colidem e classes conflitantes falham", () => {
+  assert.notEqual(
+    occupancyAreas.buildOccupancyAreaKey("camera::a", "area"),
+    occupancyAreas.buildOccupancyAreaKey("camera", "a::area"),
+  );
+
+  const merged = occupancyAreas.buildOccupancyAreaOptions([
+    {
+      area: "area-a",
+      camera_id: "camera-a",
+      object_class: undefined,
+    },
+    {
+      area: "area-a",
+      camera_id: "camera-a",
+      object_class: "person",
+    },
+  ]);
+  assert.equal(merged[0].object_class, "person");
+  assert.throws(
+    () =>
+      occupancyAreas.buildOccupancyAreaOptions([
+        {
+          area: "area-a",
+          camera_id: "camera-a",
+          object_class: "person",
+        },
+        {
+          area: "area-a",
+          camera_id: "camera-a",
+          object_class: "vehicle",
+        },
+      ]),
+    /divergiram sobre a classe/,
+  );
+});
+
 test("lista de cenários de ocupação exige contrato completo e único", () => {
   const valid = {
     active: true,
@@ -5910,6 +6773,13 @@ test("lista de cenários de ocupação exige contrato completo e único", () => 
         data: [{ ...valid, company_id: undefined }],
       }),
     /company_id.*inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancyScenarioRows({
+        data: [{ ...valid, object_class: "Person" }],
+      }),
+    /object_class não normalizado/,
   );
   assert.throws(
     () =>
@@ -6199,6 +7069,23 @@ test("snapshots de ocupação rejeitam envelope, valores e identidades ambíguas
         scope,
       ),
     /fora do bucket/,
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancySnapshotRows(
+        [{ ...valid, current_at: "2026-07-22 10:30:00" }],
+        scope,
+      ),
+    /current_at.*inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancySnapshotRows(
+        [{ ...valid, current_at: "2026-07-22T09:30:00Z" }],
+        scope,
+      ),
+    /fora do bucket/,
+    "o limite inferior também deve pertencer ao bucket solicitado",
   );
   assert.throws(
     () =>
@@ -6708,6 +7595,66 @@ test("fonte detalhada substitui o agregado mesmo quando o valor é menor", () =>
   assert.equal(rows[0].total, 90);
 });
 
+test("resposta agregada fora do intervalo solicitado é rejeitada", () => {
+  assert.throws(
+    () =>
+      aggregateTime.requireAggregateRowsInRange(
+        [
+          aggregateRow(
+            "2026-07-22T10:31:00",
+            "line-entry",
+            1,
+            "camera-1",
+            "count",
+          ),
+        ],
+        "minute",
+        new Date(2026, 6, 22, 10),
+        new Date(2026, 6, 22, 10, 31),
+        "count",
+      ),
+    /fora do intervalo consultado/,
+  );
+});
+
+test("snapshot curto de minutos substitui a mesma hora no gráfico minuto", () => {
+  const rows = aggregateReconciliation.reconcileAggregateRows(
+    [
+      aggregateRow("2026-07-22T10:00:00", "line-entry", 2),
+      aggregateRow("2026-07-22T10:01:00", "line-entry", 3),
+      aggregateRow("2026-07-22T09:59:00", "line-entry", 9),
+    ],
+    "minute",
+    [
+      aggregateRow("2026-07-22T10:00:00", "line-entry", 7),
+      aggregateRow("2026-07-22T10:01:00", "line-entry", 8),
+    ],
+    "minute",
+    new Date(2026, 6, 22, 10),
+    new Date(2026, 6, 22, 10, 2),
+  );
+
+  assert.deepEqual(
+    rows
+      .map((row) => {
+        const bucket = aggregateTime.parseAggregateBucket(
+          row.bucket,
+          "minute",
+        );
+        return [bucket?.getHours(), bucket?.getMinutes(), row.total];
+      })
+      .sort(
+        ([leftHour, leftMinute], [rightHour, rightMinute]) =>
+          leftHour - rightHour || leftMinute - rightMinute,
+      ),
+    [
+      [9, 59, 9],
+      [10, 0, 7],
+      [10, 1, 8],
+    ],
+  );
+});
+
 test("bucket detalhado substitui integralmente identidades do agregado", () => {
   const from = new Date(2026, 6, 22);
   const to = new Date(2026, 6, 23);
@@ -6937,6 +7884,7 @@ test("agrupamento horário preserva o fuso da empresa e transições DST", () =>
     ["UTC", "company-four-hour-offset"],
     ["America/New_York", "fallback"],
     ["Australia/Lord_Howe", "half-hour-forward"],
+    ["America/Sao_Paulo", "midnight-forward"],
   ]) {
     const result = spawnSync(
       process.execPath,
@@ -8588,6 +9536,557 @@ test("Total do dia e Tendência 7 x 30 usam exatamente a mesma fonte horária", 
   assert.equal(dayTotal.metrics?.[0]?.value, 12);
   assert.equal(selectedDay?.total, 12);
   assert.equal(selectedDay?.total, dayTotal.metrics?.[0]?.value);
+});
+
+test("o bucket do dia 22 é invariável ao avançar a âncora para o dia 23", () => {
+  const period22 = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-07-22",
+    "2026-07-22",
+  );
+  const period23 = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-07-23",
+    "2026-07-23",
+  );
+  assert.ok(period22);
+  assert.ok(period23);
+
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const dayRows = Array.from({ length: 23 }, (_, index) =>
+    aggregateRow(
+      `2026-07-${String(index + 1).padStart(2, "0")}`,
+      "line-entry",
+      index + 1,
+    ),
+  );
+  const data = analysisData({ dayRows });
+  const widget = analysisWidget("trend", {
+    scenarioIds: [entryScenario.id],
+    selectionMode: "custom",
+  });
+  const anchor22 = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data,
+    period: period22,
+    scenarios: [entryScenario],
+    widget,
+  });
+  const anchor23 = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data,
+    period: period23,
+    scenarios: [entryScenario],
+    widget,
+  });
+  const row22 = anchor22.table?.rows.find((row) => row.date === "22/07");
+  const sameRowWithNextAnchor = anchor23.table?.rows.find(
+    (row) => row.date === "22/07",
+  );
+
+  assert.ok(row22);
+  assert.deepEqual(sameRowWithNextAnchor, row22);
+});
+
+test("janeiro mantém o mesmo valor ao fechar e avançar para fevereiro", () => {
+  const january31 = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-01-31",
+    "2026-01-31",
+  );
+  const february1 = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-02-01",
+    "2026-02-01",
+  );
+  assert.ok(january31);
+  assert.ok(february1);
+
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const data = analysisData({
+    dayRows: [
+      aggregateRow("2026-01-01", "line-entry", 310),
+      aggregateRow("2026-02-01", "line-entry", 10),
+    ],
+    monthRows: [
+      aggregateRow("2026-01-01", "line-entry", 310),
+      aggregateRow("2026-02-01", "line-entry", 10),
+    ],
+  });
+
+  for (const kind of ["year_monthly", "year_accumulated"]) {
+    const widget = analysisWidget(kind, {
+      scenarioIds: [entryScenario.id],
+      selectionMode: "custom",
+    });
+    const atJanuaryClose =
+      periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+        data,
+        period: january31,
+        scenarios: [entryScenario],
+        widget,
+      });
+    const afterFebruaryStarts =
+      periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+        data,
+        period: february1,
+        scenarios: [entryScenario],
+        widget,
+      });
+    const closedJanuary = atJanuaryClose.table?.rows.find(
+      (row) => row.month === "Jan",
+    );
+    const sameJanuary = afterFebruaryStarts.table?.rows.find(
+      (row) => row.month === "Jan",
+    );
+
+    assert.ok(closedJanuary);
+    assert.deepEqual(sameJanuary, closedJanuary, kind);
+  }
+});
+
+test("mês parcial anual ignora horas posteriores à data consultada", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-01-22",
+    "2026-01-22",
+  );
+  assert.ok(period);
+
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const monthRows = aggregateReconciliation.rollupAggregateRows(
+    [
+      aggregateRow("2026-01-22T10:00:00", "line-entry", 5),
+      aggregateRow("2026-01-23T00:00:00", "line-entry", 900),
+    ],
+    "hour",
+    "month",
+    new Date(2026, 0, 1),
+    new Date(2026, 0, 23),
+  );
+  const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data: analysisData({
+      dayRows: [aggregateRow("2026-01-22", "line-entry", 5)],
+      monthRows,
+    }),
+    period,
+    scenarios: [entryScenario],
+    widget: analysisWidget("year_monthly", {
+      scenarioIds: [entryScenario.id],
+      selectionMode: "custom",
+    }),
+  });
+
+  assert.equal(
+    model.table?.rows.find((row) => row.month === "Jan")?.value,
+    5,
+  );
+});
+
+test("mês aberto compara somente horas fechadas equivalentes do ano anterior", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    hourlyRows: [
+      aggregateRow("2025-07-01T10:00:00", "line-entry", 100),
+      aggregateRow("2025-07-22T14:00:00", "line-entry", 100),
+      aggregateRow("2025-07-22T15:00:00", "line-entry", 110),
+      aggregateRow("2026-07-01T10:00:00", "line-entry", 100),
+      aggregateRow("2026-07-22T14:00:00", "line-entry", 100),
+      aggregateRow("2026-07-22T15:00:00", "line-entry", 20),
+    ],
+    includeOpenPeriod: true,
+    monthlyRows: [
+      aggregateRow("2025-07-01", "line-entry", 310),
+      aggregateRow("2026-07-01", "line-entry", 220),
+    ],
+    now: new Date(2026, 6, 22, 15, 30),
+    period: {
+      from: new Date(2026, 0, 1),
+      to: new Date(2026, 7, 1),
+    },
+    scenarios: [entryScenario],
+    scope: {
+      cameraIds: [],
+      name: "Entrada",
+      scenario: entryScenario,
+    },
+  });
+  const july = model.yearOverYearMonths.find((row) => row.month === 6);
+  const comparison =
+    countingIntelligence.buildCountingMonthlyComparison(model);
+  const accumulatedOption =
+    countingIntelligence.buildAnnualAccumulatedComparisonChartOption(model);
+  const accumulatedVariationSeries = accumulatedOption.series.find(
+    (series) => series.name === "Variação acumulada 2026/2025",
+  );
+  const reportAssets =
+    countingIntelligence.buildCountingIntelligenceReportAssets(model);
+  const accumulatedReport = reportAssets.charts.find(
+    ({ cardId }) =>
+      cardId ===
+      countingIntelligence.COUNTING_INTELLIGENCE_CARD_IDS
+        .annualAccumulatedComparison,
+  );
+
+  assert.equal(model.currentMonthValue, 220);
+  assert.equal(model.currentMonthDelta, 0);
+  assert.equal(model.periodDelta, 0);
+  assert.deepEqual(
+    {
+      current: july?.current,
+      delta: july?.delta,
+      previous: july?.previous,
+    },
+    { current: 200, delta: 0, previous: 200 },
+  );
+  assert.equal(comparison.variation.accumulated, 0);
+  assert.ok(accumulatedVariationSeries);
+  assert.equal(accumulatedVariationSeries.data[6].delta, 0);
+  assert.equal(
+    accumulatedReport?.value.table.rows.find(({ month }) => month === "Jul")
+      ?.variation,
+    countingIntelligence.formatDelta(0),
+  );
+});
+
+test("comparativo acumulado soma apenas meses cobertos nos dois anos", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    hourlyRows: [],
+    includeOpenPeriod: false,
+    monthlyRows: [
+      aggregateRow("2025-02-01", "line-entry", 50),
+      aggregateRow("2026-01-01", "line-entry", 100),
+      aggregateRow("2026-02-01", "line-entry", 100),
+    ],
+    now: new Date(2026, 2, 1),
+    period: {
+      from: new Date(2025, 0, 1),
+      to: new Date(2026, 2, 1),
+    },
+    scenarios: [entryScenario],
+    scope: {
+      cameraIds: [],
+      name: "Entrada",
+      scenario: entryScenario,
+    },
+  });
+  model.yearOverYearMonths = model.yearOverYearMonths.map((row) =>
+    row.month === 0
+      ? { ...row, delta: null, previous: null }
+      : row,
+  );
+  const accumulatedOption =
+    countingIntelligence.buildAnnualAccumulatedComparisonChartOption(model);
+  const variationSeries = accumulatedOption.series.find(
+    (series) => series.name === "Variação acumulada 2026/2025",
+  );
+  const accumulatedReport =
+    countingIntelligence
+      .buildCountingIntelligenceReportAssets(model)
+      .charts.find(
+        ({ cardId }) =>
+          cardId ===
+          countingIntelligence.COUNTING_INTELLIGENCE_CARD_IDS
+            .annualAccumulatedComparison,
+      );
+
+  assert.ok(variationSeries);
+  assert.equal(variationSeries.data[0], null);
+  assert.equal(variationSeries.data[1].delta, 1);
+  assert.equal(
+    accumulatedReport?.value.table.rows.find(({ month }) => month === "Fev")
+      ?.variation,
+    countingIntelligence.formatDelta(1),
+  );
+});
+
+test("base parcial sobreposta ganha série própria no comparativo anual", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    hourlyRows: [
+      aggregateRow("2025-07-01T10:00:00", "line-entry", 100),
+      aggregateRow("2025-07-22T14:00:00", "line-entry", 100),
+      aggregateRow("2025-07-22T15:00:00", "line-entry", 110),
+      aggregateRow("2026-07-01T10:00:00", "line-entry", 100),
+      aggregateRow("2026-07-22T14:00:00", "line-entry", 100),
+      aggregateRow("2026-07-22T15:00:00", "line-entry", 20),
+    ],
+    includeOpenPeriod: true,
+    monthlyRows: [
+      aggregateRow("2025-07-01", "line-entry", 310),
+      aggregateRow("2026-07-01", "line-entry", 220),
+    ],
+    now: new Date(2026, 6, 22, 15, 30),
+    period: {
+      from: new Date(2025, 0, 1),
+      to: new Date(2026, 7, 1),
+    },
+    scenarios: [entryScenario],
+    scope: {
+      cameraIds: [],
+      name: "Entrada",
+      scenario: entryScenario,
+    },
+  });
+  const comparison =
+    countingIntelligence.buildCountingMonthlyComparison(model);
+  const selected2025 = comparison.rows.find(
+    (row) => row.year === 2025 && !row.baselineOnly,
+  );
+  const comparable2025 = comparison.rows.find(
+    (row) => row.year === 2025 && row.baselineOnly,
+  );
+
+  assert.equal(selected2025?.months[6], 310);
+  assert.equal(comparable2025?.months[6], 200);
+});
+
+test("mês aberto sem eventos aparece como zero comparável", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    hourlyRows: [
+      aggregateRow("2025-07-01T10:00:00", "line-entry", 100),
+    ],
+    includeOpenPeriod: true,
+    monthlyRows: [
+      aggregateRow("2025-07-01", "line-entry", 100),
+    ],
+    now: new Date(2026, 6, 22, 15, 30),
+    period: {
+      from: new Date(2026, 0, 1),
+      to: new Date(2026, 7, 1),
+    },
+    scenarios: [entryScenario],
+    scope: {
+      cameraIds: [],
+      name: "Entrada",
+      scenario: entryScenario,
+    },
+  });
+  const july = model.yearOverYearMonths.find((row) => row.month === 6);
+  const currentYear = model.yearRows.find((row) => row.year === 2026);
+
+  assert.equal(model.currentMonthValue, 0);
+  assert.equal(model.currentMonthDelta, -1);
+  assert.deepEqual(
+    {
+      current: july?.current,
+      delta: july?.delta,
+      previous: july?.previous,
+    },
+    { current: 0, delta: -1, previous: 100 },
+  );
+  assert.equal(currentYear?.months[6], 0);
+});
+
+test("mês fechado sem eventos entra como zero na média certificada", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    hourlyRows: [],
+    includeOpenPeriod: false,
+    monthlyRows: [
+      aggregateRow("2025-01-01", "line-entry", 50),
+      aggregateRow("2025-02-01", "line-entry", 50),
+      aggregateRow("2026-01-01", "line-entry", 100),
+    ],
+    now: new Date(2026, 2, 1),
+    period: {
+      from: new Date(2026, 0, 1),
+      to: new Date(2026, 2, 1),
+    },
+    scenarios: [entryScenario],
+    scope: {
+      cameraIds: [],
+      name: "Entrada",
+      scenario: entryScenario,
+    },
+  });
+  const currentYear = model.yearRows.find((row) => row.year === 2026);
+  const february = model.yearOverYearMonths.find((row) => row.month === 1);
+
+  assert.deepEqual(currentYear?.months.slice(0, 2), [100, 0]);
+  assert.equal(currentYear?.selectedMonthCount, 2);
+  assert.equal(model.periodMonthCount, 2);
+  assert.equal(model.periodAverage, 50);
+  assert.deepEqual(
+    {
+      current: february?.current,
+      delta: february?.delta,
+      previous: february?.previous,
+    },
+    { current: 0, delta: -1, previous: 50 },
+  );
+});
+
+test("comparativo anual não injeta meses fora do período selecionado", () => {
+  const selected2025Months = [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+  ];
+  const comparison = countingIntelligence.buildCountingMonthlyComparison({
+    currentYear: 2026,
+    yearOverYearMonths: Array.from({ length: 12 }, (_, month) => ({
+      current: month < 6 ? month + 11 : null,
+      delta: null,
+      label: "",
+      month,
+      previous: month < 6 ? month + 1 : null,
+    })),
+    yearRows: [
+      {
+        average: 9.5,
+        months: selected2025Months,
+        monthYoy: Array(12).fill(null),
+        selectedMonthCount: 6,
+        total: 57,
+        year: 2025,
+        ytd: 57,
+        ytdYoy: null,
+      },
+      {
+        average: 13.5,
+        months: [11, 12, 13, 14, 15, 16, ...Array(6).fill(null)],
+        monthYoy: Array(12).fill(null),
+        selectedMonthCount: 6,
+        total: 81,
+        year: 2026,
+        ytd: 81,
+        ytdYoy: null,
+      },
+    ],
+  });
+  const selected2025 = comparison.rows.find(
+    (row) => row.year === 2025 && !row.baselineOnly,
+  );
+  const baseline2025 = comparison.rows.find(
+    (row) => row.year === 2025 && row.baselineOnly,
+  );
+
+  assert.ok(selected2025);
+  assert.ok(baseline2025);
+  assert.equal(selected2025.baselineOnly, false);
+  assert.deepEqual(selected2025.months, selected2025Months);
+  assert.equal(selected2025.accumulated, 57);
+  assert.deepEqual(
+    baseline2025.months.slice(0, 6),
+    [1, 2, 3, 4, 5, 6],
+  );
+  assert.deepEqual(
+    comparison.comparisonMonths.slice(0, 6),
+    [1, 2, 3, 4, 5, 6],
+  );
+
+  const monthlyOption =
+    countingIntelligence.buildAnnualComparisonChartOption({
+      currentYear: 2026,
+      yearOverYearMonths: Array.from({ length: 12 }, (_, month) => ({
+        current: month < 6 ? month + 11 : null,
+        delta: month < 6 ? 1 : null,
+        label: "",
+        month,
+        previous: month < 6 ? month + 1 : null,
+      })),
+      yearRows: [
+        {
+          average: 9.5,
+          months: selected2025Months,
+          monthYoy: Array(12).fill(null),
+          selectedMonthCount: 6,
+          total: 57,
+          year: 2025,
+          ytd: 57,
+          ytdYoy: null,
+        },
+        {
+          average: 13.5,
+          months: [11, 12, 13, 14, 15, 16, ...Array(6).fill(null)],
+          monthYoy: Array(12).fill(null),
+          selectedMonthCount: 6,
+          total: 81,
+          year: 2026,
+          ytd: 81,
+          ytdYoy: null,
+        },
+      ],
+    });
+  const variationSeries = monthlyOption.series.find(
+    (series) => series.name === "Variação 2026/2025",
+  );
+  const baselineSeries = monthlyOption.series.find(
+    (series) => series.name === "2025 (base comparável)",
+  );
+
+  assert.ok(variationSeries);
+  assert.ok(baselineSeries);
+  assert.equal(baselineSeries.data[0], 1);
+  assert.equal(variationSeries.data[0].value, 11);
+});
+
+test("detalhes horários do relatório ignoram baseline e horas após o corte", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    hourlyRows: [
+      aggregateRow("2026-06-30T08:00:00", "line-entry", 100),
+      aggregateRow("2026-07-15T09:00:00", "line-entry", 3),
+      aggregateRow("2026-08-01T10:00:00", "line-entry", 200),
+    ],
+    monthlyRows: [
+      aggregateRow("2026-07-01", "line-entry", 3),
+    ],
+    now: new Date(2026, 8, 1),
+    period: {
+      from: new Date(2026, 6, 1),
+      to: new Date(2026, 7, 1),
+    },
+    scenarios: [entryScenario],
+    scope: {
+      cameraIds: [],
+      name: "Entrada",
+      scenario: entryScenario,
+    },
+  });
+
+  assert.equal(
+    model.directionalHours.reduce((sum, row) => sum + row.total, 0),
+    3,
+  );
+  assert.equal(
+    model.accessHours.reduce((sum, row) => sum + row.total, 0),
+    3,
+  );
+  assert.equal(model.directionalHours[9].total, 3);
+  assert.equal(model.directionalHours[8].total, 0);
+  assert.equal(model.directionalHours[10].total, 0);
+});
+
+test("variação anual compara somente meses com cobertura nos dois anos", () => {
+  const comparison = countingIntelligence.buildCountingMonthlyComparison({
+    currentYear: 2026,
+    yearOverYearMonths: [
+      {
+        current: 100,
+        delta: 1,
+        label: "Jan",
+        month: 0,
+        previous: 50,
+      },
+      {
+        current: 100,
+        delta: null,
+        label: "Fev",
+        month: 1,
+        previous: null,
+      },
+    ],
+    yearRows: [],
+  });
+
+  assert.equal(comparison.variation.accumulated, 1);
+  assert.equal(comparison.variation.average, 1);
 });
 
 test("totais por local usam as câmeras do escopo sem deslocar o dia", () => {

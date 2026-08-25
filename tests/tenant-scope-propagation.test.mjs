@@ -58,10 +58,13 @@ test("gerenciador de visões invalida a consulta quando a empresa muda", () => {
 test("migração legada usa empresa explícita e revalida o escopo", () => {
   const source = readSource("lib/legacy-dashboard-view-migration.ts");
 
-  assert.match(source, /fetchLegacyLiveView\(requestedCompanyId\)/);
   assert.match(
     source,
-    /apiFetch<LegacyDashboardViewResponse>\("\/dashboard-views\/live", \{\s*companyScopeId/,
+    /fetchLegacyLiveView\(\s*requestedCompanyId,\s*expectedAccessToken,\s*\)/,
+  );
+  assert.match(
+    source,
+    /apiFetch<LegacyDashboardViewResponse>\("\/dashboard-views\/live", \{\s*companyScopeId,\s*expectedAccessToken/,
   );
   assert.match(
     source,
@@ -69,7 +72,7 @@ test("migração legada usa empresa explícita e revalida o escopo", () => {
   );
   assert.match(
     source,
-    /if \(currentStoredCompanyScopeId\(\) !== initialStoredCompanyId\) return false/,
+    /!shouldApply\(\) \|\|\s*currentStoredCompanyScopeId\(\) !== initialStoredCompanyId[\s\S]*?return false/,
   );
 });
 

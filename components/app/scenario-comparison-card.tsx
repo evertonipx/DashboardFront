@@ -365,7 +365,7 @@ export function ScenarioComparisonCard({
         if (nextDefinition.to <= nextDefinition.from) {
           setDefinition(nextDefinition);
           setRows([]);
-          setLastUpdated(now);
+          setLastUpdated(null);
           return;
         }
         const nextRows = await fetchScenarioComparisonRows(

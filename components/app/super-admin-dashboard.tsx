@@ -321,6 +321,7 @@ export function SuperAdminDashboard() {
   const [companyDetailsError, setCompanyDetailsError] = React.useState("");
   const [companyOperationalWarnings, setCompanyOperationalWarnings] =
     React.useState<CompanyOperationalWarning[]>([]);
+  const [loadedCompanyId, setLoadedCompanyId] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [loadingDetails, setLoadingDetails] = React.useState(false);
   const [companyDialog, setCompanyDialog] = React.useState(false);
@@ -411,6 +412,7 @@ export function SuperAdminDashboard() {
       selectedCompanyIdRef.current = nextCompanyId;
       companyDetailsRequestSequenceRef.current += 1;
       invalidateUserPermissionRequest({ closeDialog: true });
+      setLoadedCompanyId("");
       setSelectedCompanyId(nextCompanyId);
     },
     [invalidateUserPermissionRequest],
@@ -575,6 +577,7 @@ export function SuperAdminDashboard() {
       setCompanyOperationalWarnings([]);
       setCompanyStats(null);
       setCompanyDetailsError("");
+      setLoadedCompanyId("");
       setLoadingDetails(false);
       return;
     }
@@ -582,6 +585,7 @@ export function SuperAdminDashboard() {
     setLoadingDetails(true);
     setCompanyStats(null);
     setCompanyDetailsError("");
+    setLoadedCompanyId("");
     setWorkerScopeWarning("");
     setCompanyOperationalWarnings([]);
     let administrativeDetailsCertified = false;
@@ -610,6 +614,7 @@ export function SuperAdminDashboard() {
       certifiedModuleRows = moduleRows;
       setUsers(scopedUserRows.filter((user) => !user.is_master));
       setCompanyModules(moduleRows);
+      setLoadedCompanyId(companyId);
       const authenticatedCompanyId = getCurrentUserCompanyId(currentUser);
       const canQueryJwtBoundCatalogs =
         !authenticatedCompanyId || authenticatedCompanyId === companyId;
@@ -796,6 +801,7 @@ export function SuperAdminDashboard() {
         setCompanyOperationalWarnings([]);
         setCompanyStats(null);
         setCompanyDetailsError(message);
+        setLoadedCompanyId("");
         toast.error(message);
       }
     } finally {
@@ -951,6 +957,10 @@ export function SuperAdminDashboard() {
     const companyId = selectedCompanyIdRef.current;
     if (!companyId) {
       toast.error("Selecione uma empresa antes de criar usuário.");
+      return;
+    }
+    if (loadedCompanyId !== companyId) {
+      toast.error("Aguarde o carregamento da empresa selecionada.");
       return;
     }
 
@@ -1350,14 +1360,17 @@ export function SuperAdminDashboard() {
   }
 
   async function deleteCompany(company: Company) {
-    const usersCount = selectedCompanyId === company.id ? users.length : 0;
-    const workersCount = selectedCompanyId === company.id ? workers.length : 0;
+    const hasLoadedCompany =
+      selectedCompanyId === company.id && loadedCompanyId === company.id;
+    const usersCount = hasLoadedCompany ? companyUsersCount : null;
+    const workersCount = hasLoadedCompany ? companyStats?.workers ?? null : null;
+    const loadedSummary = hasLoadedCompany
+      ? `Resumo carregado: ${formatCertifiedCount(usersCount)} usuário(s) e ${formatCertifiedCount(workersCount)} worker(s).`
+      : "";
     const message = [
       `Excluir a empresa "${company.name}"?`,
       "Esta ação é permanente e pode remover dados do tenant no backend.",
-      usersCount || workersCount
-        ? `Resumo carregado: ${formatNumber(usersCount)} usuário(s) e ${formatNumber(workersCount)} worker(s).`
-        : "",
+      loadedSummary,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -1385,6 +1398,7 @@ export function SuperAdminDashboard() {
         setCompanyOperationalWarnings([]);
         setCompanyStats(null);
         setCompanyDetailsError("");
+        setLoadedCompanyId("");
       }
 
       await loadCompanies();
@@ -1993,6 +2007,10 @@ export function SuperAdminDashboard() {
   const workerOperationalWarning = companyOperationalWarnings.find(
     (warning) => warning.resource === "workers",
   );
+  const hasCurrentCompanyDetails = Boolean(
+    selectedCompanyId && loadedCompanyId === selectedCompanyId,
+  );
+  const companyUsersCount = hasCurrentCompanyDetails ? users.length : null;
   const authenticatedCompanyId = getCurrentUserCompanyId(currentUser);
   const canEnumerateSelectedCompanyWorkers = Boolean(
     selectedCompanyId &&
@@ -2019,8 +2037,20 @@ export function SuperAdminDashboard() {
         <MetricCard
           icon={Users}
           label="Usuários da empresa"
-          value={formatNumber(users.length)}
-          detail={selectedCompany ? selectedCompany.name : "Selecione uma empresa"}
+          value={
+            loadingDetails
+              ? "..."
+              : formatCertifiedCount(
+                  hasCurrentCompanyDetails ? companyUsersCount : null,
+                )
+          }
+          detail={
+            companyDetailsError
+              ? "Dados indisponíveis"
+              : selectedCompany
+                ? selectedCompany.name
+                : "Selecione uma empresa"
+          }
         />
         <MetricCard
           icon={ServerCog}
@@ -2192,7 +2222,7 @@ export function SuperAdminDashboard() {
             loading={loadingDetails}
             warnings={companyOperationalWarnings}
             stats={
-              companyStats
+              hasCurrentCompanyDetails && companyStats
                 ? {
                     ...companyStats,
                     users: users.length,
@@ -2228,18 +2258,31 @@ export function SuperAdminDashboard() {
                     type="button"
                     className="w-full sm:w-auto"
                     onClick={() => openUser()}
-                    disabled={!selectedCompanyId}
+                    disabled={
+                      !selectedCompanyId ||
+                      !hasCurrentCompanyDetails ||
+                      loadingDetails
+                    }
                   >
                     <UserPlus className="h-4 w-4" />
                     Novo usuário
                   </Button>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  {companyDetailsError ? (
+                    <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
+                      Usuários indisponíveis: {companyDetailsError}
+                    </div>
+                  ) : null}
                   <Input
                     value={userQuery}
                     onChange={(event) => setUserQuery(event.target.value)}
                     placeholder="Buscar usuário"
-                    disabled={!selectedCompanyId || loadingDetails}
+                    disabled={
+                      !selectedCompanyId ||
+                      !hasCurrentCompanyDetails ||
+                      loadingDetails
+                    }
                   />
 
                   {loadingDetails ? (
@@ -2298,6 +2341,8 @@ export function SuperAdminDashboard() {
                         ))}
                       </TableBody>
                     </Table>
+                  ) : companyDetailsError ? (
+                    <EmptyState text="Não foi possível certificar os usuários desta empresa." />
                   ) : (
                     <EmptyState text="Nenhum usuário para a empresa selecionada." />
                   )}
@@ -2405,9 +2450,16 @@ export function SuperAdminDashboard() {
                     Catálogo de algoritmos da plataforma para a empresa selecionada.
                   </CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="space-y-3">
+                  {companyDetailsError ? (
+                    <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
+                      Algoritmos indisponíveis: {companyDetailsError}
+                    </div>
+                  ) : null}
                   {loadingDetails ? (
                     <TableSkeleton />
+                  ) : companyDetailsError ? (
+                    <EmptyState text="Não foi possível certificar os algoritmos desta empresa." />
                   ) : visibleModules.length ? (
                     <div className="divide-y rounded-md border">
                       {visibleModules.map((module) => {
@@ -2459,6 +2511,7 @@ export function SuperAdminDashboard() {
                               onClick={() => toggleCompanyModule(module)}
                               disabled={
                                 !selectedCompanyId ||
+                                !hasCurrentCompanyDetails ||
                                 !module.active ||
                                 updatingModuleId === module.id
                               }
@@ -2498,7 +2551,10 @@ export function SuperAdminDashboard() {
                     disabled={!selectedCompanyId || loadingDetails}
                   >
                     <RefreshCw
-                      className={cn("h-4 w-4", loadingDetails && "animate-spin")}
+                      className={cn(
+                        "h-4 w-4",
+                        loadingDetails && "animate-spin",
+                      )}
                     />
                     Atualizar
                   </Button>
@@ -3435,6 +3491,10 @@ function WorkerScopeBadge({
   );
 }
 
+function formatCertifiedCount(value?: number | null) {
+  return typeof value === "number" ? formatNumber(value) : "—";
+}
+
 function buildWorkerScopeWarning(
   foreignCount: number,
   unscopedCount: number,
@@ -3445,13 +3505,13 @@ function buildWorkerScopeWarning(
   const messages = [];
   if (foreignCount) {
     const returnedScopes = foreignCompanyIds.length
-      ? ` A API retornou company_id ${foreignCompanyIds.join(", ")}`
+      ? ` Recebido: ${foreignCompanyIds.join(", ")}.`
       : "";
     const requestedScope = selectedCompanyId
-      ? ` ao solicitar a empresa ${selectedCompanyId}`
+      ? ` Solicitado: ${selectedCompanyId}.`
       : "";
     messages.push(
-      `${formatNumber(foreignCount)} worker(s) foram ocultados por pertencerem a outra empresa.${returnedScopes}${requestedScope}. O JWT atual não autorizou dados operacionais dessa empresa.`,
+      `${formatNumber(foreignCount)} worker(s) de outra empresa foram ocultados.${returnedScopes}${requestedScope}`,
     );
   }
   if (unscopedCount) {

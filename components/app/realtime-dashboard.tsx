@@ -3881,16 +3881,36 @@ export function RealtimeDashboard({
                     enabled={layoutReorderMode}
                     onChange={setLayoutReorderMode}
                   />
+                  {canEditVisual ? (
+                    <>
+                      <ReorderModeButton
+                        className="h-8 w-8 shrink-0"
+                        enabled={layoutReorderMode}
+                        onChange={setLayoutReorderMode}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8 shrink-0"
+                        onClick={() => setLayoutOrganizerOpen(true)}
+                        aria-label="Configurar widgets"
+                        title="Configurar widgets"
+                      >
+                        <Settings2 className="h-4 w-4" />
+                      </Button>
+                    </>
+                  ) : null}
                   <Button
                     type="button"
-                    variant="outline"
+                    variant={operationalSettingsOpen ? "default" : "outline"}
                     size="icon"
                     className="h-8 w-8"
                     onClick={() => setLayoutOrganizerOpen(true)}
                     aria-label="Configurar widgets"
                     title="Configurar widgets"
                   >
-                    <Settings2 className="h-4 w-4" />
+                    <Target className="h-4 w-4" />
                   </Button>
                 </>
               ) : null}
