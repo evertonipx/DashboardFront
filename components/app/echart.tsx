@@ -39,7 +39,6 @@ import {
   chartValueLabelRightPadding,
   chartValueLabelTopPadding,
   composeChartValueLabelLayout,
-  lastVisibleChartValueLabelIndex,
 } from "@/lib/chart-value-labels";
 import type { CardChartType } from "@/lib/view-preferences";
 import { cn } from "@/lib/utils";
@@ -428,11 +427,6 @@ export function applyChartTypePreference(
       show: true,
       verticalAlign: "middle",
     };
-    const lastValueLabelIndex = lastVisibleChartValueLabelIndex({
-      ...lineSeries,
-      label: convertedLineLabel,
-    });
-
     return {
       ...lineSeries,
       connectNulls: false,
@@ -441,7 +435,6 @@ export function applyChartTypePreference(
       labelLayout: composeChartValueLabelLayout(originalLabelLayout, {
         angled: true,
         hideOverlap: false,
-        lastDataIndex: lastValueLabelIndex,
       }),
       lineStyle: {
         ...(seriesColor ? { color: seriesColor } : {}),
@@ -584,11 +577,6 @@ function enhanceInteractiveChartOption(
         Number.isFinite(valueLabelRotation) &&
         Math.abs(valueLabelRotation % 180) > 0.001,
     );
-    const lastValueLabelIndex = lastVisibleChartValueLabelIndex({
-      ...seriesOption,
-      label: valueLabel,
-    });
-
     return {
       ...seriesOption,
       emphasis: {
@@ -604,7 +592,6 @@ function enhanceInteractiveChartOption(
               // Every line point remains visible. Exceptionally dense widgets
               // opt out explicitly with valueLabels="none".
               hideOverlap: !showEveryLinePoint,
-              lastDataIndex: lastValueLabelIndex,
               // Keep bar and point labels anchored to their own data item.
               // Other layouts may shift collisions along their category axis.
               moveOverlap: anchoredValueLabel

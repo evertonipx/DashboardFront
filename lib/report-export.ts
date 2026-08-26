@@ -6,7 +6,6 @@ import {
   chartValueLabelRightPadding,
   chartValueLabelTopPadding,
   composeChartValueLabelLayout,
-  lastVisibleChartValueLabelIndex,
 } from "@/lib/chart-value-labels";
 
 export type ReportMetric = {
@@ -1921,18 +1920,12 @@ function addExportValueLabel(
     verticalAlign:
       horizontal || verticalBarLabel || isLine ? "middle" : "bottom",
   };
-  const lastValueLabelIndex = lastVisibleChartValueLabelIndex({
-    ...record,
-    label,
-  });
-
   return {
     ...record,
     label,
     labelLayout: composeChartValueLabelLayout(record.labelLayout, {
       angled: !horizontal && (verticalBarLabel || isLine),
       hideOverlap: !isLine,
-      lastDataIndex: lastValueLabelIndex,
     }),
   };
 }

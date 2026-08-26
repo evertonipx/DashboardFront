@@ -11856,8 +11856,6 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
     chartValueLabelTopPadding: chartValueLabels.chartValueLabelTopPadding,
     composeChartValueLabelLayout:
       chartValueLabels.composeChartValueLabelLayout,
-    lastVisibleChartValueLabelIndex:
-      chartValueLabels.lastVisibleChartValueLabelIndex,
   };
   const applyChartTypePreference = loadStandaloneFunction(
     "components/app/echart.tsx",
@@ -11993,7 +11991,6 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
     rotate: 45,
   });
   assert.deepEqual(preservedLayoutCallback({ dataIndex: 1 }), {
-    align: "right",
     dx: 2,
     hideOverlap: false,
     rotate: 45,
@@ -12029,12 +12026,10 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
   assert.equal(interactiveVertical.series[1].label.rotate, 45);
   assert.equal(interactiveVertical.series[1].label.show, true);
   assert.deepEqual(interactiveVertical.series[0].labelLayout({ dataIndex: 1 }), {
-    align: "right",
     hideOverlap: true,
     rotate: 45,
   });
   assert.deepEqual(interactiveVertical.series[1].labelLayout({ dataIndex: 1 }), {
-    align: "right",
     hideOverlap: false,
     rotate: 45,
   });
@@ -12050,19 +12045,15 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
     interactiveVertical.grid.right > 24,
     "o valor inclinado deve reservar sua projeção também na borda direita",
   );
-  const trailingNullLayout = chartValueLabels.composeChartValueLabelLayout(
+  const uniformAngledLayout = chartValueLabels.composeChartValueLabelLayout(
     undefined,
-    {
-      angled: true,
-      hideOverlap: false,
-      lastDataIndex: chartValueLabels.lastVisibleChartValueLabelIndex({
-        data: [10, 20, null],
-        label: interactiveVertical.series[1].label,
-      }),
-    },
+    { angled: true, hideOverlap: false },
   );
-  assert.deepEqual(trailingNullLayout({ dataIndex: 1 }), {
-    align: "right",
+  assert.deepEqual(uniformAngledLayout({ dataIndex: 0 }), {
+    hideOverlap: false,
+    rotate: 45,
+  });
+  assert.deepEqual(uniformAngledLayout({ dataIndex: 1 }), {
     hideOverlap: false,
     rotate: 45,
   });
@@ -12211,13 +12202,11 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
   );
   assert.equal(exportedLine.label.rotate, 45);
   assert.deepEqual(exportedLine.labelLayout({ dataIndex: 1 }), {
-    align: "right",
     hideOverlap: false,
     rotate: 45,
   });
   assert.equal(exportedVerticalBar.label.rotate, 45);
   assert.deepEqual(exportedVerticalBar.labelLayout({ dataIndex: 1 }), {
-    align: "right",
     hideOverlap: true,
     rotate: 45,
   });

@@ -17,22 +17,16 @@ type LabelLayoutOption =
   | null
   | undefined;
 
-/**
- * Keeps every angled value growing toward the upper-right. The trailing value
- * uses a right anchor to stay inside a closed canvas without mirroring its
- * reading direction; the chart grid already reserves the required edge space.
- */
+/** Keeps every angled value at the same upper-right reading direction. */
 export function composeChartValueLabelLayout(
   existing: unknown,
   {
     angled,
     hideOverlap,
-    lastDataIndex,
     moveOverlap,
   }: {
     angled: boolean;
     hideOverlap: boolean;
-    lastDataIndex: number;
     moveOverlap?: "shiftX" | "shiftY";
   },
 ) {
@@ -43,19 +37,12 @@ export function composeChartValueLabelLayout(
       typeof existingLayout === "function"
         ? existingLayout(params) ?? {}
         : existingLayout ?? {};
-    const trailingEdge =
-      angled && lastDataIndex > 0 && params.dataIndex === lastDataIndex;
 
     return {
       ...resolved,
       ...(moveOverlap ? { moveOverlap } : {}),
       hideOverlap,
       ...(angled ? { rotate: CHART_VALUE_LABEL_ANGLE } : {}),
-      ...(trailingEdge
-        ? {
-            align: "right",
-          }
-        : {}),
     };
   };
 }
@@ -143,26 +130,6 @@ function maximumAngledValueLabelProjection(series: unknown[]) {
   }
 
   return { found, horizontal, vertical };
-}
-
-/** Returns the last data item that will actually render a numeric label. */
-export function lastVisibleChartValueLabelIndex(series: unknown) {
-  if (!series || typeof series !== "object") return -1;
-  const record = series as Record<string, unknown>;
-  const label =
-    record.label && typeof record.label === "object"
-      ? (record.label as Record<string, unknown>)
-      : null;
-  const data = Array.isArray(record.data) ? record.data : [];
-  if (!label || label.show === false) return -1;
-
-  for (let dataIndex = data.length - 1; dataIndex >= 0; dataIndex -= 1) {
-    if (dataLabelIsHidden(data[dataIndex])) continue;
-    if (formatSeriesLabel(label.formatter, data[dataIndex], dataIndex)) {
-      return dataIndex;
-    }
-  }
-  return -1;
 }
 
 function isLabelLayoutOption(value: unknown): value is LabelLayoutOption {
