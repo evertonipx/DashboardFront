@@ -138,6 +138,7 @@ import {
   useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
 import { requireCertifiedCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
+import { companyCalendarDate } from "@/lib/company-time-zone";
 import {
   requireCameraRows,
   requireInfrastructureRelations,
@@ -1901,6 +1902,7 @@ export function ScenarioReportsDashboard({
               scope,
               showPreviousPeriod,
               intradayComparison,
+              companyTimeZone,
               reportColorByCardId.get(cardId),
             ),
           ),
@@ -1981,6 +1983,7 @@ export function ScenarioReportsDashboard({
       subtitle: "Resultados de contagem por visão e períodos agregados.",
       filename: `ipxdata-relatorio-contagem-${reportDateSlug(generatedAt)}`,
       generatedAt,
+      timeZone: companyTimeZone,
       dataCompleteUntil: scenarioReportDataCompleteUntil(
         effectivePeriodDates,
         generatedAt,
@@ -4099,6 +4102,7 @@ function buildScenarioReportChart(
   scope: ReportScopeOption,
   showPreviousPeriod: boolean,
   intradayComparison: IntradayComparisonMode,
+  timeZone: string,
   widgetColor?: string,
 ): ReportPayload["charts"][number] {
   const points = buildReportScopeAggregatePoints(definition, rows, scope);
@@ -4160,8 +4164,10 @@ function buildScenarioReportChart(
       rows: points.map((point, index) => ({
         current: point.total,
         period: point.label,
-        period_start: formatDateTime(point.bucket),
-        weekday: showWeekday ? weekdayName(new Date(point.bucket)) : undefined,
+        period_start: formatDateTime(point.bucket, timeZone),
+        weekday: showWeekday
+          ? weekdayName(new Date(point.bucket), timeZone)
+          : undefined,
         previous: showPreviousPeriod
           ? (previousPoints[index]?.total ?? 0)
           : undefined,
@@ -4172,10 +4178,11 @@ function buildScenarioReportChart(
                 new Date(point.bucket),
                 new Date(previousPoints[index].bucket),
                 intradayComparison,
+                timeZone,
               )
             : undefined,
         week_of_month: showWeekOfMonth
-          ? weekOfMonthLabel(new Date(point.bucket), false)
+          ? weekOfMonthLabel(new Date(point.bucket), false, timeZone)
           : undefined,
       })),
     },
@@ -4222,33 +4229,39 @@ function comparisonReferenceLabel(
   currentDate: Date,
   previousDate: Date,
   intradayComparison: IntradayComparisonMode,
+  timeZone?: string,
 ) {
   if (granularity === "minute" || granularity === "hour") {
     return intradayComparison === "last_week"
-      ? `${weekdayName(previousDate)} da semana passada (${formatShortDate(previousDate)})`
-      : `Ontem, ${weekdayName(previousDate)} (${formatShortDate(previousDate)})`;
+      ? `${weekdayName(previousDate, timeZone)} da semana passada (${formatShortDate(previousDate, timeZone)})`
+      : `Ontem, ${weekdayName(previousDate, timeZone)} (${formatShortDate(previousDate, timeZone)})`;
   }
   if (granularity === "day") {
-    return `${weekdayName(previousDate)} anterior (${formatShortDate(previousDate)})`;
+    return `${weekdayName(previousDate, timeZone)} anterior (${formatShortDate(previousDate, timeZone)})`;
   }
   if (granularity === "week") {
-    return `${weekOfMonthLabel(previousDate, false)} de ${monthYearLabel(previousDate)}`;
+    return `${weekOfMonthLabel(previousDate, false, timeZone)} de ${monthYearLabel(previousDate, timeZone)}`;
   }
+  const previousYear = reportCalendarYear(previousDate, timeZone);
   if (granularity === "month") {
-    return `Mesmo mês em ${previousDate.getFullYear()}`;
+    return `Mesmo mês em ${previousYear}`;
   }
   if (granularity === "semester") {
-    return `Mesmo semestre em ${previousDate.getFullYear()}`;
+    return `Mesmo semestre em ${previousYear}`;
   }
 
-  return `${currentDate.getFullYear() - 1}`;
+  return `${reportCalendarYear(currentDate, timeZone) - 1}`;
 }
 
-function weekOfMonthLabel(date: Date, compact: boolean) {
-  const index = weekOfMonthIndex(date) + 1;
+function weekOfMonthLabel(date: Date, compact: boolean, timeZone?: string) {
+  const civilDate = timeZone
+    ? companyCalendarDate(date, timeZone, "day")
+    : date;
+  const index = weekOfMonthIndex(civilDate) + 1;
   const suffix = compact ? "sem." : "semana";
   const month = new Intl.DateTimeFormat("pt-BR", {
     month: compact ? "short" : "long",
+    ...(timeZone ? { timeZone } : {}),
   })
     .format(date)
     .replace(".", "");
@@ -4267,8 +4280,11 @@ function weekOfMonthIndex(date: Date) {
   );
 }
 
-function weekdayName(date: Date) {
-  return new Intl.DateTimeFormat("pt-BR", { weekday: "long" }).format(date);
+function weekdayName(date: Date, timeZone?: string) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    weekday: "long",
+    ...(timeZone ? { timeZone } : {}),
+  }).format(date);
 }
 
 function weekdayShortName(date: Date) {
@@ -4277,19 +4293,28 @@ function weekdayShortName(date: Date) {
     .replace(".", "");
 }
 
-function monthYearLabel(date: Date) {
+function monthYearLabel(date: Date, timeZone?: string) {
   return new Intl.DateTimeFormat("pt-BR", {
     month: "long",
+    ...(timeZone ? { timeZone } : {}),
     year: "numeric",
   }).format(date);
 }
 
-function formatShortDate(date: Date) {
+function formatShortDate(date: Date, timeZone?: string) {
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
     month: "2-digit",
+    ...(timeZone ? { timeZone } : {}),
     year: "2-digit",
   }).format(date);
+}
+
+function reportCalendarYear(date: Date, timeZone?: string) {
+  return (timeZone
+    ? companyCalendarDate(date, timeZone, "year")
+    : date
+  ).getFullYear();
 }
 
 function barMaxWidth(granularity: AggregateGranularity) {

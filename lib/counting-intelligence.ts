@@ -5,6 +5,7 @@ import {
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import { pastelBarColor } from "@/lib/chart-palette";
+import { CHART_VALUE_LABEL_ANGLE } from "@/lib/chart-value-labels";
 import {
   inferDirectionFromText,
   type ScenarioDirection,
@@ -839,7 +840,7 @@ export function buildAnnualComparisonChartOption(
               : compactNumber(value);
           },
           position: "top",
-          rotate: 90,
+          rotate: CHART_VALUE_LABEL_ANGLE,
           show: rows.length <= 5,
           verticalAlign: "middle",
         },
@@ -1030,7 +1031,7 @@ export function buildAnnualAccumulatedComparisonChartOption(
               : compactNumber(value);
           },
           position: "top",
-          rotate: 90,
+          rotate: CHART_VALUE_LABEL_ANGLE,
           show: rows.length <= 5,
           verticalAlign: "middle",
         },

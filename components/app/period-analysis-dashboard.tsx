@@ -25,6 +25,10 @@ import {
   CardLayout,
   ReorderModeButton,
 } from "@/components/app/card-layout";
+import {
+  COMPACT_METRIC_LAYOUT_DEFAULTS,
+  CompactMetricCard,
+} from "@/components/app/compact-metric-card";
 import { EChart, applyChartTypePreference } from "@/components/app/echart";
 import {
   MonitorModeButton,
@@ -1119,6 +1123,7 @@ export function PeriodAnalysisDashboard({
         "totals_table",
       ].includes(widget.kind),
       colorPreview: widget.kind === "heatmap" ? ("gradient" as const) : undefined,
+      ...(compact ? COMPACT_METRIC_LAYOUT_DEFAULTS : {}),
       defaultHeight:
         widget.kind === "summary"
           ? ("standard" as const)
@@ -1184,6 +1189,7 @@ export function PeriodAnalysisDashboard({
         title: widgetTitleById.get(widget.id) ?? widget.title,
       })),
     period,
+    timeZone: companyTimeZone,
   });
 
   function commitAnalysisSettings(nextSettings: PeriodAnalysisSettings) {
@@ -1619,6 +1625,70 @@ function PeriodAnalysisCard({
   const compactSummary = widget.kind === "summary";
   const compactWidget = isCompactAnalysisWidget(widget.kind);
   const compactContent = compactSummary || compactWidget;
+  const widgetAction =
+    canConfigure && !monitorMode ? (
+      <WidgetCardActions label={`Ações do widget ${widget.title}`}>
+        <>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={onEdit}
+            aria-label={`Configurar ${widget.title}`}
+            title="Configurar widget"
+          >
+            <Settings2 className="h-4 w-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+            onClick={onRemove}
+            aria-label={`Remover ${widget.title}`}
+            title="Remover widget"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </>
+      </WidgetCardActions>
+    ) : null;
+
+  if (compactWidget) {
+    const metric = model.metrics?.[0];
+    const metricValue =
+      typeof metric?.value === "number"
+        ? formatNumber(metric.value)
+        : metric?.value ?? "-";
+    const toneColor =
+      widget.kind === "target_progress"
+        ? "#4F46E5"
+        : widget.kind === "cumulative_metric"
+          ? "#0369A1"
+          : "#1267C4";
+    const compactLabel =
+      (widget.kind === "day_total" && widget.title === "Total do dia") ||
+      (widget.kind === "target_progress" &&
+        widget.title === "Dia x média-base")
+        ? metric?.label ?? widget.title
+        : widget.title;
+
+    return (
+      <CompactMetricCard
+        action={widgetAction}
+        description={model.error ?? metric?.description ?? model.description}
+        descriptionTitle={model.error ?? metric?.description ?? model.description}
+        icon={Icon}
+        label={compactLabel}
+        loading={loading}
+        toneColor={toneColor}
+        value={model.error ? "Não certificado" : metricValue}
+        valueClassName={model.error ? "text-sm text-destructive" : undefined}
+        valueTitle={model.error ?? String(metricValue)}
+      />
+    );
+  }
 
   return (
     <Card
@@ -1649,34 +1719,7 @@ function PeriodAnalysisCard({
               {model.description}
             </CardDescription>
           </div>
-          {canConfigure && !monitorMode ? (
-            <WidgetCardActions label={`Ações do widget ${widget.title}`}>
-              <>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  onClick={onEdit}
-                  aria-label={`Configurar ${widget.title}`}
-                  title="Configurar widget"
-                >
-                  <Settings2 className="h-4 w-4" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                  onClick={onRemove}
-                  aria-label={`Remover ${widget.title}`}
-                  title="Remover widget"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </>
-            </WidgetCardActions>
-          ) : null}
+          {widgetAction}
           {!compactWidget ? (
             <div className="col-span-full min-w-0 pt-1">
               <div
@@ -1787,7 +1830,7 @@ function MetricGrid({
   return (
     <div
       className={cn(
-        "grid w-full min-w-0 self-stretch overflow-hidden rounded-md border bg-border",
+        "grid h-full min-h-0 w-full min-w-0 self-stretch overflow-hidden rounded-md border bg-border",
         metrics.length === 1
           ? "grid-cols-1"
           : "grid-cols-[repeat(auto-fit,minmax(min(100%,8rem),1fr))] gap-px",
@@ -1798,14 +1841,14 @@ function MetricGrid({
         <div
           key={metric.label}
           className={cn(
-            "min-w-0 overflow-visible bg-card",
-            compact ? "p-2.5" : "p-4",
+            "flex min-h-0 min-w-0 flex-col overflow-hidden bg-card",
+            compact ? "p-2.5" : "p-3.5",
           )}
         >
           <div
             className={cn(
-              "break-words font-medium uppercase text-muted-foreground [overflow-wrap:anywhere]",
-              compact ? "text-[10px] leading-3" : "text-xs",
+              "break-words font-semibold uppercase tracking-[0.025em] text-muted-foreground [overflow-wrap:anywhere]",
+              compact ? "text-[11px] leading-4" : "text-xs leading-4",
             )}
           >
             {metric.label}
@@ -1813,7 +1856,7 @@ function MetricGrid({
           <div
             className={cn(
               "max-w-full break-words font-semibold leading-tight tabular-nums [font-size:clamp(1rem,6cqi,1.5rem)] [overflow-wrap:anywhere]",
-              compact ? "mt-1" : "mt-2",
+              compact ? "mt-1.5" : "mt-2",
             )}
             data-analysis-metric-value
           >
@@ -1824,8 +1867,8 @@ function MetricGrid({
           {metric.description ? (
             <div
               className={cn(
-                "line-clamp-2 break-words text-muted-foreground [overflow-wrap:anywhere]",
-                compact ? "mt-0.5 text-[10px] leading-3" : "mt-1 text-xs",
+                "mt-auto line-clamp-2 break-words pt-1 text-muted-foreground [overflow-wrap:anywhere]",
+                compact ? "text-[11px] leading-4" : "text-xs leading-4",
               )}
               title={metric.description}
             >
@@ -2361,6 +2404,7 @@ function periodAnalysisScenarioSummary(
 function composePeriodAnalysisReport({
   models,
   period,
+  timeZone,
 }: {
   models: Array<{
     chartType?: CardChartType;
@@ -2369,6 +2413,7 @@ function composePeriodAnalysisReport({
     title: string;
   }>;
   period: PeriodAnalysisRange;
+  timeZone: string;
 }): ReportPayload {
   const singleDay = isSingleDayAnalysisPeriod(period);
   const generatedAt = new Date();
@@ -2424,6 +2469,7 @@ function composePeriodAnalysisReport({
             },
           ],
     ),
+    timeZone,
     title: singleDay ? "Análise do dia" : "Análises por período",
   };
 }

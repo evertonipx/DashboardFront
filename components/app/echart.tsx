@@ -34,6 +34,13 @@ import {
   useWidgetChartType,
   useWidgetZoom,
 } from "@/components/app/widget-appearance";
+import {
+  CHART_VALUE_LABEL_ANGLE,
+  chartValueLabelRightPadding,
+  chartValueLabelTopPadding,
+  composeChartValueLabelLayout,
+  lastVisibleChartValueLabelIndex,
+} from "@/lib/chart-value-labels";
 import type { CardChartType } from "@/lib/view-preferences";
 import { cn } from "@/lib/utils";
 
@@ -383,10 +390,7 @@ export function applyChartTypePreference(
       lineSeries.label && typeof lineSeries.label === "object"
         ? (lineSeries.label as Record<string, unknown>)
         : {};
-    const originalLabelLayout =
-      lineSeries.labelLayout && typeof lineSeries.labelLayout === "object"
-        ? (lineSeries.labelLayout as Record<string, unknown>)
-        : {};
+    const originalLabelLayout = lineSeries.labelLayout;
     const categoryCount = categoryCounts[axisIndex] ?? 0;
     const seriesColor =
       typeof itemStyle.color === "string" ? itemStyle.color : undefined;
@@ -415,23 +419,30 @@ export function applyChartTypePreference(
       delete lineSeries.markArea;
     }
 
+    const convertedLineLabel = {
+      ...originalLabel,
+      align: "left",
+      distance: 7,
+      position: "top",
+      rotate: CHART_VALUE_LABEL_ANGLE,
+      show: true,
+      verticalAlign: "middle",
+    };
+    const lastValueLabelIndex = lastVisibleChartValueLabelIndex({
+      ...lineSeries,
+      label: convertedLineLabel,
+    });
+
     return {
       ...lineSeries,
       connectNulls: false,
       itemStyle: seriesColor ? { color: seriesColor } : undefined,
-      label: {
-        ...originalLabel,
-        align: "left",
-        distance: 7,
-        position: "top",
-        rotate: 90,
-        show: true,
-        verticalAlign: "middle",
-      },
-      labelLayout: {
-        ...originalLabelLayout,
+      label: convertedLineLabel,
+      labelLayout: composeChartValueLabelLayout(originalLabelLayout, {
+        angled: true,
         hideOverlap: false,
-      },
+        lastDataIndex: lastValueLabelIndex,
+      }),
       lineStyle: {
         ...(seriesColor ? { color: seriesColor } : {}),
         opacity:
@@ -491,7 +502,7 @@ function resolveLineValueLabelPresentation(
     align: "left" as const,
     distance: 7,
     position: "top" as const,
-    rotate: 90,
+    rotate: CHART_VALUE_LABEL_ANGLE,
     verticalAlign: "middle" as const,
     ...(showEveryPoint ? { show: true } : {}),
     ...(valueLabels === "none" ? { show: false } : {}),
@@ -542,8 +553,8 @@ function enhanceInteractiveChartOption(
     const valueLabel = supportsValueLabels &&
       (existingLabel || showAutomaticValueLabels || showEveryLinePoint)
       ? {
-          // A 90-degree label needs a left anchor: after rotation its whole
-          // height grows upward from the bar top instead of crossing it.
+          // The angled label uses a left anchor so it grows diagonally upward
+          // from the data point instead of crossing the bar or line.
           align: horizontal || verticalBarLabel ? "left" : "center",
           color: dark ? "#D4D4D8" : "#334155",
           distance: horizontal ? 6 : verticalBarLabel ? 5 : 6,
@@ -552,21 +563,31 @@ function enhanceInteractiveChartOption(
           formatter: (params: { value?: unknown }) =>
             formatChartValueLabel(params.value),
           position: horizontal ? "right" : "top",
-          rotate: verticalBarLabel ? 90 : 0,
+          rotate: verticalBarLabel ? CHART_VALUE_LABEL_ANGLE : 0,
           show: true,
           verticalAlign:
             horizontal || verticalBarLabel ? "middle" : "bottom",
           ...(existingLabel ?? {}),
           ...(valueLabels === "none" ? { show: false } : {}),
-          // Line charts keep one vertical value anchored to every point,
+          // Line charts keep one angled value anchored to every point,
           // including labels inherited from a bar chart preference.
           ...(lineValueLabelPresentation ?? {}),
         }
       : existingLabel;
-    const existingLabelLayout =
-      seriesOption.labelLayout && typeof seriesOption.labelLayout === "object"
-        ? (seriesOption.labelLayout as Record<string, unknown>)
-        : {};
+    const existingLabelLayout = seriesOption.labelLayout;
+    const valueLabelRotation =
+      valueLabel && typeof valueLabel === "object"
+        ? (valueLabel as { rotate?: unknown }).rotate
+        : 0;
+    const angledValueLabel = Boolean(
+      typeof valueLabelRotation === "number" &&
+        Number.isFinite(valueLabelRotation) &&
+        Math.abs(valueLabelRotation % 180) > 0.001,
+    );
+    const lastValueLabelIndex = lastVisibleChartValueLabelIndex({
+      ...seriesOption,
+      label: valueLabel,
+    });
 
     return {
       ...seriesOption,
@@ -578,18 +599,20 @@ function enhanceInteractiveChartOption(
       ...(valueLabel ? { label: valueLabel } : {}),
       ...(supportsValueLabels
         ? {
-            labelLayout: {
-              ...existingLabelLayout,
+            labelLayout: composeChartValueLabelLayout(existingLabelLayout, {
+              angled: angledValueLabel,
               // Every line point remains visible. Exceptionally dense widgets
               // opt out explicitly with valueLabels="none".
               hideOverlap: !showEveryLinePoint,
-              // Keep bar and point labels centered on their own data item.
-              // Dense charts may hide a collision instead of shifting the
-              // value away from the bar or point it describes.
-              ...(anchoredValueLabel
-                ? {}
-                : { moveOverlap: horizontal ? "shiftY" : "shiftX" }),
-            },
+              lastDataIndex: lastValueLabelIndex,
+              // Keep bar and point labels anchored to their own data item.
+              // Other layouts may shift collisions along their category axis.
+              moveOverlap: anchoredValueLabel
+                ? undefined
+                : horizontal
+                  ? "shiftY"
+                  : "shiftX",
+            }),
           }
         : {}),
     };
@@ -748,19 +771,23 @@ function valueLabelGrid(
     return (seriesOption.label as { show?: unknown }).show !== false;
   });
   if (!visibleValueLabelSeries.length) return grid;
-  const hasVerticalValueLabels = visibleValueLabelSeries.some((item) => {
-    const rotate = (item as { label?: { rotate?: unknown } }).label?.rotate;
-    return typeof rotate === "number" && Math.abs(rotate % 180) === 90;
-  });
+  const angledRightPadding = chartValueLabelRightPadding(
+    visibleValueLabelSeries,
+  );
 
   return {
     ...grid,
     right: horizontal
       ? numericGridOffset(grid.right, 58)
-      : grid.right,
+      : angledRightPadding
+        ? numericGridOffset(grid.right, angledRightPadding)
+        : grid.right,
     top: horizontal
       ? grid.top
-      : numericGridOffset(grid.top, hasVerticalValueLabels ? 56 : 38),
+      : numericGridOffset(
+          grid.top,
+          chartValueLabelTopPadding(visibleValueLabelSeries, 38, 56),
+        ),
   };
 }
 

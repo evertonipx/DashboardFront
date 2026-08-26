@@ -2,10 +2,8 @@
 
 import * as React from "react";
 import {
-  ArrowDownRight,
   ArrowDown,
   ArrowUp,
-  ArrowUpRight,
   CalendarRange,
   Clock3,
   Gauge,
@@ -13,6 +11,10 @@ import {
   Trophy,
 } from "lucide-react";
 
+import {
+  COMPACT_METRIC_LAYOUT_DEFAULTS,
+  CompactMetricCard,
+} from "@/components/app/compact-metric-card";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import {
@@ -245,11 +247,7 @@ export function buildCountingIntelligenceWidgetCards({
   ].map((card) => ({
     ...card,
     ...(isCountingIntelligenceCompactCard(card.id)
-      ? {
-          condensed: true,
-          defaultHeight: "short" as const,
-          defaultHeightLevel: 1 as const,
-        }
+      ? COMPACT_METRIC_LAYOUT_DEFAULTS
       : {}),
     titleEditable: true as const,
   }));
@@ -274,62 +272,36 @@ function ExecutiveMetricCard({
   trend?: number | null;
   value: string;
 }) {
-  const TrendIcon =
-    trend !== undefined && trend !== null && trend < 0
-      ? ArrowDownRight
-      : ArrowUpRight;
-  const widgetColor = useWidgetColor();
+  const trendLabel =
+    trend !== undefined && trend !== null ? formatDelta(trend) : undefined;
+  const comparisonContext = trendLabel
+    ? description.replace(`${trendLabel} `, "")
+    : description;
 
   return (
-    <Card className="h-full min-w-0 overflow-hidden">
-      <CardHeader className="space-y-0 px-4 pb-1 pt-3">
-        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
-          <CardTitle className="min-w-0 text-xs font-semibold uppercase leading-4 text-muted-foreground">
-            <WidgetTitleText fallback={label} />
-          </CardTitle>
-          <span className="shrink-0 self-start justify-self-end" style={{ color: widgetColor }}>
-            <Icon className="h-4 w-4" />
-          </span>
-        </div>
-      </CardHeader>
-      <CardContent className="min-w-0 px-4 pb-3 pt-1">
-        {loading ? (
-          <Skeleton className="h-8 w-32" />
-        ) : (
-          <div
-            className={cn(
-              "min-w-0 break-words font-semibold leading-tight text-foreground [overflow-wrap:anywhere]",
-              textValue
-                ? "text-[clamp(1rem,7cqi,1.125rem)]"
-                : "text-[clamp(1.25rem,9cqi,1.5rem)] tabular-nums",
-            )}
-            title={value}
-          >
-            {value}
-          </div>
-        )}
-        <div className="mt-1 line-clamp-1 break-words text-[11px] leading-4 text-muted-foreground [overflow-wrap:anywhere]" title={period}>
-          {period}
-        </div>
-        <div className="mt-1 flex min-w-0 items-start gap-1 text-[11px] leading-4 text-muted-foreground">
-          {trend !== undefined && trend !== null ? (
-            <TrendIcon
-              className={cn(
-                "h-3 w-3 shrink-0",
-                trend > 0
-                  ? "text-emerald-600 dark:text-emerald-400"
-                  : trend < 0
-                    ? "text-rose-600 dark:text-rose-400"
-                    : "text-muted-foreground",
-              )}
-            />
-          ) : null}
-          <span className="line-clamp-1 min-w-0 break-words [overflow-wrap:anywhere]" title={description}>
-            {description}
-          </span>
-        </div>
-      </CardContent>
-    </Card>
+    <CompactMetricCard
+      comparison={trendLabel}
+      comparisonClassName={
+        trend === undefined || trend === null || trend === 0
+          ? "text-muted-foreground"
+          : trend > 0
+            ? "text-emerald-700 dark:text-emerald-300"
+            : "text-rose-700 dark:text-rose-300"
+      }
+      description={comparisonContext}
+      descriptionClassName="!line-clamp-1"
+      descriptionTitle={description}
+      icon={Icon}
+      label={label}
+      loading={loading}
+      meta={period}
+      metaTitle={period}
+      value={value}
+      valueClassName={
+        textValue ? "text-[clamp(1rem,7cqi,1.125rem)]" : undefined
+      }
+      valueTitle={value}
+    />
   );
 }
 

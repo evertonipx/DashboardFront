@@ -25,6 +25,7 @@ const aggregateQueryPlan = loadTypeScriptModule(
   "lib/aggregate-query-plan.ts",
 );
 const chartPalette = loadTypeScriptModule("lib/chart-palette.ts");
+const chartValueLabels = loadTypeScriptModule("lib/chart-value-labels.ts");
 const cardLayoutSizing = loadTypeScriptModule("lib/card-layout-sizing.ts");
 const widgetBentoPreviewLayout = loadTypeScriptModule(
   "lib/widget-bento-preview-layout.ts",
@@ -55,6 +56,7 @@ const countingReportPeriod = loadTypeScriptModule(
 const countingReportViewSettings = loadTypeScriptModule(
   "lib/counting-report-view-settings.ts",
 );
+const currentYearChart = loadTypeScriptModule("lib/current-year-chart.ts");
 const masterCompanyScope = loadTypeScriptModule(
   "lib/master-company-scope.ts",
 );
@@ -8275,22 +8277,25 @@ test("grade Bento preserva seis níveis e oferece KPI mínimo compacto", () => {
     resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
     "utf8",
   );
+  const compactMetricSource = readFileSync(
+    resolve(projectRoot, "components/app/compact-metric-card.tsx"),
+    "utf8",
+  );
   assert.match(cardLayoutSource, /dimensionLabel: `\$\{Math\.round\(dimensions\.widthRatio \* 100\)\}% · \$\{dimensions\.pixelHeight\}px`/);
   assert.match(
     realtimeSource,
-    /const metricCards = \[[\s\S]*?\]\.map\(\(card\) => \(\{[\s\S]*?condensed: true,[\s\S]*?defaultHeightLevel: 1 as const/,
+    /const metricCards = \[[\s\S]*?\]\.map\(\(card\) => \(\{[\s\S]*?\.\.\.COMPACT_METRIC_LAYOUT_DEFAULTS/,
   );
   assert.match(
-    realtimeSource,
-    /className="mt-auto line-clamp-2[^"]*"\s+data-live-metric-description/,
+    compactMetricSource,
+    /COMPACT_METRIC_LAYOUT_DEFAULTS[\s\S]*?condensed: true[\s\S]*?defaultHeight: "short"[\s\S]*?defaultHeightLevel: 1[\s\S]*?defaultSize: "compact"/,
   );
   assert.match(
-    occupancySource.slice(
-      occupancySource.indexOf("function MetricCard("),
-      occupancySource.indexOf("function OccupancyChartCard"),
-    ),
-    /className="mt-auto line-clamp-2/,
+    compactMetricSource,
+    /mt-auto line-clamp-2[\s\S]*?data-compact-metric-description/,
   );
+  assert.match(realtimeSource, /function MetricCard\([\s\S]*?<CompactMetricCard/);
+  assert.match(occupancySource, /function MetricCard\([\s\S]*?<CompactMetricCard/);
 
   const legacy = viewPreferences.normalizeCardPreferences(
     "live",
@@ -9015,7 +9020,7 @@ test("Contagem mantém somente KPIs compactos na tela e na prévia Bento", () =>
   }
   assert.match(
     source,
-    /isCountingIntelligenceCompactCard\(card\.id\)[\s\S]*?condensed: true[\s\S]*?defaultHeight: "short"[\s\S]*?defaultHeightLevel: 1/,
+    /isCountingIntelligenceCompactCard\(card\.id\)[\s\S]*?COMPACT_METRIC_LAYOUT_DEFAULTS/,
   );
   assert.match(
     source,
@@ -9061,6 +9066,58 @@ test("exportação da análise propaga o título personalizado para métricas e 
     source,
     /tables: models\.flatMap\(\(\{ defaultTitle, model, title \}\)[\s\S]*?title: title === defaultTitle \? model\.table\.title : title/,
   );
+});
+
+test("KPIs compactos compartilham shell, preset e miniatura fiel nos seis contextos", () => {
+  const compactSource = readFileSync(
+    resolve(projectRoot, "components/app/compact-metric-card.tsx"),
+    "utf8",
+  );
+  const analysisSource = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const previewSource = readFileSync(
+    resolve(projectRoot, "components/app/widget-bento-preview.tsx"),
+    "utf8",
+  );
+  const globalSource = readFileSync(
+    resolve(projectRoot, "app/globals.css"),
+    "utf8",
+  );
+  const dashboardSources = [
+    "components/app/realtime-dashboard.tsx",
+    "components/app/period-analysis-dashboard.tsx",
+    "components/app/counting-intelligence-report.tsx",
+    "components/app/occupancy-scenario-dashboard.tsx",
+    "components/app/occupancy-reports-dashboard.tsx",
+  ].map((relativePath) =>
+    readFileSync(resolve(projectRoot, relativePath), "utf8"),
+  );
+
+  assert.match(compactSource, /COMPACT_METRIC_LAYOUT_DEFAULTS/);
+  assert.match(compactSource, /data-compact-metric-card/);
+  assert.match(compactSource, /data-compact-metric-title/);
+  assert.match(compactSource, /data-compact-metric-value/);
+  assert.match(compactSource, /data-compact-metric-description/);
+  assert.match(compactSource, /<h3[\s\S]*?data-compact-metric-title/);
+  assert.match(compactSource, /--compact-metric-accent/);
+  assert.match(globalSource, /\.dark \[data-compact-metric-icon\]/);
+  for (const source of dashboardSources) {
+    assert.match(source, /CompactMetricCard/);
+    assert.match(source, /COMPACT_METRIC_LAYOUT_DEFAULTS/);
+  }
+  assert.match(analysisSource, /const compactLabel =/);
+  assert.match(analysisSource, /metric\?\.label \?\? widget\.title/);
+  assert.match(previewSource, /data-widget-bento-metric-zone="title"/);
+  assert.match(previewSource, /data-widget-bento-metric-zone="value"/);
+  assert.match(previewSource, /data-widget-bento-metric-zone="context"/);
+  assert.match(previewSource, /flex-col gap-0\.5 p-1/);
+  assert.match(
+    previewSource,
+    /Boolean\(item\.condensed\) && tileHeight < 96\)[\s\S]*?tileHeight < 72 \|\|[\s\S]*?tileWidth < 120/,
+  );
+  assert.match(previewSource, /tileHeight < 48 \|\| tileWidth < 72/);
 });
 
 test("ocupação ignora completamente eventos anteriores ao início configurado", () => {
@@ -11586,7 +11643,7 @@ function loadTypeScriptModule(relativePath) {
   return loadedModule.exports;
 }
 
-function loadStandaloneFunction(relativePath, functionName) {
+function loadStandaloneFunction(relativePath, functionName, bindings = {}) {
   const filename = resolve(projectRoot, relativePath);
   const source = readFileSync(filename, "utf8");
   const sourceFile = ts.createSourceFile(
@@ -11614,8 +11671,14 @@ function loadStandaloneFunction(relativePath, functionName) {
     },
   ).outputText;
   const loadedModule = { exports: {} };
-  const execute = new Function("exports", "module", output);
-  execute(loadedModule.exports, loadedModule);
+  const bindingNames = Object.keys(bindings);
+  const execute = new Function(
+    "exports",
+    "module",
+    ...bindingNames,
+    output,
+  );
+  execute(loadedModule.exports, loadedModule, ...Object.values(bindings));
   return loadedModule.exports;
 }
 
@@ -11785,18 +11848,70 @@ test("cenário mantém a mesma cor entre comparativos, ranking e máximos", () =
   );
 });
 
-test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => {
+test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () => {
+  assert.equal(chartValueLabels.CHART_VALUE_LABEL_ANGLE, 45);
+  const valueLabelBindings = {
+    CHART_VALUE_LABEL_ANGLE: chartValueLabels.CHART_VALUE_LABEL_ANGLE,
+    chartValueLabelRightPadding: chartValueLabels.chartValueLabelRightPadding,
+    chartValueLabelTopPadding: chartValueLabels.chartValueLabelTopPadding,
+    composeChartValueLabelLayout:
+      chartValueLabels.composeChartValueLabelLayout,
+    lastVisibleChartValueLabelIndex:
+      chartValueLabels.lastVisibleChartValueLabelIndex,
+  };
   const applyChartTypePreference = loadStandaloneFunction(
     "components/app/echart.tsx",
     "applyChartTypePreference",
+    valueLabelBindings,
   );
   const resolveLineValueLabelPresentation = loadStandaloneFunction(
     "components/app/echart.tsx",
     "resolveLineValueLabelPresentation",
+    valueLabelBindings,
   );
   const formatChartValueLabel = loadStandaloneFunction(
     "components/app/echart.tsx",
     "formatChartValueLabel",
+  );
+  const firstAxisType = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "firstAxisType",
+  );
+  const isDecorativeChartSeries = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "isDecorativeChartSeries",
+  );
+  const numericGridOffset = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "numericGridOffset",
+  );
+  const categoryAxisLength = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "categoryAxisLength",
+  );
+  const valueLabelGrid = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "valueLabelGrid",
+    { ...valueLabelBindings, numericGridOffset },
+  );
+  const chartPointCount = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "chartPointCount",
+    { categoryAxisLength },
+  );
+  const enhanceInteractiveChartOption = loadStandaloneFunction(
+    "components/app/echart.tsx",
+    "enhanceInteractiveChartOption",
+    {
+      ...valueLabelBindings,
+      categoryAxisLength,
+      chartPointCount,
+      firstAxisType,
+      formatChartValueLabel,
+      isDecorativeChartSeries,
+      resolveLineValueLabelPresentation,
+      valueLabelGrid,
+    },
   );
   const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
   const model = countingIntelligence.buildCountingIntelligenceModel({
@@ -11826,15 +11941,24 @@ test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => 
     align: "left",
     distance: 7,
     position: "top",
-    rotate: 90,
+    rotate: 45,
     show: true,
     verticalAlign: "middle",
   });
 
-  for (const option of [
+  const annualOptions = [
     countingIntelligence.buildAnnualComparisonChartOption(model),
     countingIntelligence.buildAnnualAccumulatedComparisonChartOption(model),
-  ]) {
+  ];
+  for (const option of annualOptions) {
+    const originalValueSeries = option.series.filter(
+      (series) => series.type === "bar" && series.silent !== true,
+    );
+    assert.ok(originalValueSeries.length >= 2);
+    originalValueSeries.forEach((series) => {
+      assert.equal(series.label.rotate, 45);
+    });
+
     const converted = applyChartTypePreference(option, "line");
     const valueSeries = converted.series.filter(
       (series) => series.type === "line" && series.silent !== true,
@@ -11843,11 +11967,142 @@ test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => 
     assert.ok(valueSeries.length >= 2);
     for (const series of valueSeries) {
       assert.equal(series.data.length, 12);
-      assert.equal(series.label.rotate, 90);
+      assert.equal(series.label.rotate, 45);
       assert.equal(series.label.show, true);
-      assert.equal(series.labelLayout.hideOverlap, false);
+      assert.equal(series.labelLayout({ dataIndex: 0 }).hideOverlap, false);
     }
   }
+
+  const preservedLayoutCallback = applyChartTypePreference(
+    {
+      series: [
+        {
+          data: [10, 20],
+          labelLayout: ({ dataIndex }) => ({ dx: dataIndex + 1 }),
+          type: "bar",
+        },
+      ],
+      xAxis: { data: ["A", "B"], type: "category" },
+      yAxis: { type: "value" },
+    },
+    "line",
+  ).series[0].labelLayout;
+  assert.deepEqual(preservedLayoutCallback({ dataIndex: 0 }), {
+    dx: 1,
+    hideOverlap: false,
+  });
+  assert.deepEqual(preservedLayoutCallback({ dataIndex: 1 }), {
+    align: "right",
+    dx: 2,
+    hideOverlap: false,
+    rotate: -45,
+  });
+
+  const currentYearOption = currentYearChart.buildCurrentYearComparisonOption(
+    Array.from({ length: 12 }, (_, month) => ({
+      accumulated: (month + 1) * 100,
+      label: `M${month + 1}`,
+      month,
+      value: (month + 1) * 10,
+    })),
+    false,
+    2026,
+  );
+  assert.equal(currentYearOption.series[0].label.rotate, 45);
+
+  const interactiveVertical = enhanceInteractiveChartOption(
+    {
+      grid: { right: 8, top: 8 },
+      series: [
+        { data: [0, 1_234_567.8], name: "Barras", type: "bar" },
+        { data: [0, 1_234_567.8], name: "Linha", type: "line" },
+      ],
+      xAxis: { data: ["Jan", "Fev"], type: "category" },
+      yAxis: { type: "value" },
+    },
+    false,
+    "always",
+  );
+  assert.equal(interactiveVertical.series[0].label.rotate, 45);
+  assert.equal(interactiveVertical.series[0].label.show, true);
+  assert.equal(interactiveVertical.series[1].label.rotate, 45);
+  assert.equal(interactiveVertical.series[1].label.show, true);
+  assert.deepEqual(interactiveVertical.series[0].labelLayout({ dataIndex: 1 }), {
+    align: "right",
+    hideOverlap: true,
+    rotate: -45,
+  });
+  assert.deepEqual(interactiveVertical.series[1].labelLayout({ dataIndex: 1 }), {
+    align: "right",
+    hideOverlap: false,
+    rotate: -45,
+  });
+  assert.deepEqual(interactiveVertical.series[1].labelLayout({ dataIndex: 0 }), {
+    hideOverlap: false,
+  });
+  assert.ok(
+    interactiveVertical.grid.top > 56,
+    "o maior valor inclinado deve ampliar dinamicamente a margem superior",
+  );
+  assert.ok(
+    interactiveVertical.grid.right > 24,
+    "o valor inclinado deve reservar sua projeção também na borda direita",
+  );
+  const trailingNullLayout = chartValueLabels.composeChartValueLabelLayout(
+    undefined,
+    {
+      angled: true,
+      hideOverlap: false,
+      lastDataIndex: chartValueLabels.lastVisibleChartValueLabelIndex({
+        data: [10, 20, null],
+        label: interactiveVertical.series[1].label,
+      }),
+    },
+  );
+  assert.deepEqual(trailingNullLayout({ dataIndex: 1 }), {
+    align: "right",
+    hideOverlap: false,
+    rotate: -45,
+  });
+
+  const interactiveHorizontal = enhanceInteractiveChartOption(
+    {
+      grid: { right: 8, top: 8 },
+      series: [{ data: [10, 20], name: "Ranking", type: "bar" }],
+      xAxis: { type: "value" },
+      yAxis: { data: ["A", "B"], type: "category" },
+    },
+    false,
+    "always",
+  );
+  assert.equal(interactiveHorizontal.series[0].label.rotate, 0);
+  assert.equal(interactiveHorizontal.series[0].label.position, "right");
+  assert.deepEqual(interactiveHorizontal.series[0].labelLayout({ dataIndex: 1 }), {
+    hideOverlap: true,
+    moveOverlap: "shiftY",
+  });
+  assert.equal(interactiveHorizontal.grid.right, 58);
+  assert.equal(interactiveHorizontal.grid.top, 8);
+
+  const hiddenLineLabels = enhanceInteractiveChartOption(
+    {
+      grid: { right: 8, top: 8 },
+      series: [
+        {
+          data: [10, 20],
+          label: { show: true },
+          name: "Minuto a minuto",
+          type: "line",
+        },
+      ],
+      xAxis: { data: ["10:00", "10:01"], type: "category" },
+      yAxis: { type: "value" },
+    },
+    false,
+    "none",
+  );
+  assert.equal(hiddenLineLabels.series[0].label.show, false);
+  assert.equal(hiddenLineLabels.grid.top, 8);
 
   assert.equal(resolveLineValueLabelPresentation("auto").show, true);
   assert.equal(resolveLineValueLabelPresentation("always").show, true);
@@ -11864,8 +12119,10 @@ test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => 
   assert.match(chartSource, /hideOverlap: !showEveryLinePoint/);
   assert.match(
     chartSource,
-    /\.\.\.existingLabelLayout,[\s\S]*?hideOverlap: !showEveryLinePoint/,
+    /composeChartValueLabelLayout\(existingLabelLayout,[\s\S]*?hideOverlap: !showEveryLinePoint/,
   );
+  assert.match(chartSource, /chartValueLabelTopPadding\(visibleValueLabelSeries/);
+  assert.match(chartSource, /chartValueLabelRightPadding/);
 
   const realtimeSource = readFileSync(
     resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
@@ -11891,12 +12148,120 @@ test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => 
     resolve(projectRoot, "lib/report-export.ts"),
     "utf8",
   );
-  assert.match(exportSource, /verticalBarLabel \|\| isLine \? 90 : 0/);
+  assert.match(exportSource, /CHART_VALUE_LABEL_ANGLE/);
   assert.match(exportSource, /hideOverlap: !isLine/);
   assert.doesNotMatch(
     exportSource,
     /numericValue === 0[\s\S]{0,80}return ""/,
   );
+  const formatBarLabelValue = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "formatBarLabelValue",
+  );
+  const isExportReferenceSeries = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "isExportReferenceSeries",
+  );
+  const addExportValueLabel = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "addExportValueLabel",
+    {
+      ...valueLabelBindings,
+      formatBarLabelValue,
+      isExportReferenceSeries,
+    },
+  );
+  const exportGridPercentage = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "exportGridPercentage",
+  );
+  const exportGridTop = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "exportGridTop",
+    {
+      chartValueLabelTopPadding: chartValueLabels.chartValueLabelTopPadding,
+      exportGridPercentage,
+    },
+  );
+  const exportGridRight = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "exportGridRight",
+    {
+      chartValueLabelRightPadding:
+        chartValueLabels.chartValueLabelRightPadding,
+      exportGridPercentage,
+    },
+  );
+  const exportedLine = addExportValueLabel(
+    { data: [0, 1_234_567.8], type: "line" },
+    false,
+    false,
+  );
+  const exportedVerticalBar = addExportValueLabel(
+    { data: [0, 1_234_567.8], type: "bar" },
+    false,
+    false,
+  );
+  const exportedHorizontalBar = addExportValueLabel(
+    { data: [0, 20], type: "bar" },
+    false,
+    true,
+  );
+  assert.equal(exportedLine.label.rotate, 45);
+  assert.deepEqual(exportedLine.labelLayout({ dataIndex: 1 }), {
+    align: "right",
+    hideOverlap: false,
+    rotate: -45,
+  });
+  assert.equal(exportedVerticalBar.label.rotate, 45);
+  assert.deepEqual(exportedVerticalBar.labelLayout({ dataIndex: 1 }), {
+    align: "right",
+    hideOverlap: true,
+    rotate: -45,
+  });
+  assert.equal(exportedHorizontalBar.label.rotate, 0);
+  assert.equal(exportedHorizontalBar.label.position, "right");
+  assert.equal(exportedLine.label.formatter({ value: 0 }), "0");
+  assert.equal(formatBarLabelValue({ value: ["2026-08", 1_234.5] }), "1.234,5");
+  const exportedMinuteLine = addExportValueLabel(
+    { data: Array.from({ length: 120 }, (_, index) => index), type: "line" },
+    true,
+    false,
+  );
+  assert.equal(exportedMinuteLine.label.formatter({ dataIndex: 0, value: 0 }), "0");
+  assert.equal(exportedMinuteLine.label.formatter({ dataIndex: 1, value: 1 }), "");
+  assert.equal(
+    exportedMinuteLine.label.formatter({ dataIndex: 119, value: 119 }),
+    "119",
+  );
+  assert.ok(exportGridTop(8, false, false, [exportedLine]) > 56);
+  assert.ok(exportGridRight(8, false, [exportedLine]) > 24);
+  assert.equal(exportGridTop("40%", false, false, [exportedLine]), "40%");
+  assert.equal(exportGridRight("40%", false, [exportedLine]), "40%");
+  const hiddenExportLabel = { label: { show: false }, type: "line" };
+  assert.equal(
+    addExportValueLabel(hiddenExportLabel, false, false),
+    hiddenExportLabel,
+  );
+
+  for (const relativePath of [
+    "components/app/echart.tsx",
+    "lib/counting-intelligence.ts",
+    "lib/current-year-chart.ts",
+    "lib/report-export.ts",
+  ]) {
+    const source = readFileSync(resolve(projectRoot, relativePath), "utf8");
+    assert.doesNotMatch(
+      source,
+      /\brotate:\s*90\b/,
+      `${relativePath} não pode reintroduzir rótulos numéricos a 90 graus`,
+    );
+    assert.match(
+      source,
+      /CHART_VALUE_LABEL_ANGLE/,
+      `${relativePath} deve usar o ângulo compartilhado`,
+    );
+  }
 
   const scenarioComparisonSource = readFileSync(
     resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
@@ -11910,6 +12275,142 @@ test("linhas mensais e acumuladas exibem todos os valores verticalmente", () => 
   assert.doesNotMatch(
     scenarioComparisonSource,
     /const granularity = periodOverride\s*\?/,
+  );
+});
+
+test("exportação executiva separa gráficos e dados sem reduzir tabelas extensas", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "lib/report-export.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /fitToHeight: 0/);
+  assert.match(source, /fitToWidth: 0/);
+  assert.match(source, /safeSheetName\(`Gráfico \$\{index \+ 1\}/);
+  assert.match(source, /safeSheetName\(`Dados \$\{index \+ 1\}/);
+  assert.match(source, /fitToHeight: 1/);
+  assert.match(source, /pageSetup\.printTitlesRow/);
+  assert.match(source, /pageSetup\.printTitlesColumn = "A:A"/);
+  assert.match(source, /buildExcelDataSheetHeader/);
+  assert.match(source, /excelNumberFormat\(value\)/);
+  assert.match(source, /#,##0\.0########/);
+  assert.match(source, /drawPdfPageFooters/);
+  assert.match(source, /drawPdfParagraph/);
+  assert.match(source, /drawPdfFittedText/);
+  assert.match(source, /fontSize: dense \? 9 : 11/);
+  assert.match(source, /const tableFontSize = 8\.25/);
+  assert.match(source, /if \(mode === "charts"\) return \[\]/);
+  assert.match(source, /reportTableDataSignature/);
+  assert.match(source, /drawPdfExecutiveAppendices/);
+  assert.match(source, /drawPdfContextPages/);
+  assert.match(source, /chartExportDensityNote/);
+  assert.match(source, /todos os valores permanecem na tabela de dados/);
+  assert.match(source, /formatReportDateTime/);
+  assert.match(source, /certifiedReportTimeZone/);
+  assert.match(source, /width - 42,[\s\S]{0,120}"right"/);
+  assert.match(source, /payload\.context\?\.forEach/);
+  assert.match(source, /Contexto completo na próxima página/);
+
+  const formatDateTime = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "formatDateTime",
+  );
+  const certifiedReportTimeZone = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "certifiedReportTimeZone",
+  );
+  const formatReportDateTime = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "formatReportDateTime",
+    { certifiedReportTimeZone, formatDateTime },
+  );
+  const instant = new Date("2026-08-26T02:30:00.000Z");
+  assert.match(
+    formatReportDateTime({ timeZone: "America/Sao_Paulo" }, instant),
+    /25\/08\/2026.*23:30/,
+  );
+  assert.match(
+    formatReportDateTime({ timeZone: "Asia\/Tokyo" }, instant),
+    /26\/08\/2026.*11:30/,
+  );
+
+  const reportTableDataSignature = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "reportTableDataSignature",
+  );
+  const reportTablesForMode = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "reportTablesForMode",
+    { reportTableDataSignature },
+  );
+  const sharedTable = {
+    columns: [{ key: "period", label: "Período" }],
+    rows: [{ period: "Agosto" }],
+    title: "Dados",
+  };
+  assert.deepEqual(
+    reportTablesForMode(
+      [sharedTable, { ...sharedTable, rows: [{ period: "Setembro" }] }],
+      "complete",
+      [{ table: sharedTable }],
+    ).map((table) => table.rows[0].period),
+    ["Setembro"],
+  );
+
+  for (const relativePath of [
+    "components/app/realtime-dashboard.tsx",
+    "components/app/period-analysis-dashboard.tsx",
+    "components/app/scenario-reports-dashboard.tsx",
+    "components/app/occupancy-scenario-dashboard.tsx",
+    "components/app/occupancy-reports-dashboard.tsx",
+  ]) {
+    const payloadSource = readFileSync(resolve(projectRoot, relativePath), "utf8");
+    assert.match(
+      payloadSource,
+      /timeZone:\s*companyTimeZone|timeZone,\s*\n\s*title:/,
+      `${relativePath} deve propagar o fuso IANA ao relatório`,
+    );
+  }
+
+  const chartPass = source.indexOf('if (mode !== "data")');
+  const tablePass = source.indexOf('if (mode !== "charts")', chartPass);
+  assert.ok(
+    chartPass >= 0 && tablePass > chartPass,
+    "o PDF completo deve imprimir todos os gráficos antes das tabelas",
+  );
+
+  const pdfTableColumnBand = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "pdfTableColumnBand",
+  );
+  const pdfTableColumnMinimumWidth = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "pdfTableColumnMinimumWidth",
+  );
+  const splitPdfTableColumns = loadStandaloneFunction(
+    "lib/report-export.ts",
+    "splitPdfTableColumns",
+    { pdfTableColumnBand, pdfTableColumnMinimumWidth },
+  );
+  const mockDoc = {
+    getTextWidth: (text) => String(text).length * 4.2,
+    setFont: () => {},
+    setFontSize: () => {},
+  };
+  const columns = [
+    { key: "indicator", label: "Indicador" },
+    ...Array.from({ length: 14 }, (_, index) => ({
+      key: `month_${index}`,
+      label: `Mês ${index + 1}`,
+      numeric: true,
+    })),
+  ];
+  const bands = splitPdfTableColumns(mockDoc, columns, 758);
+  assert.ok(bands.length >= 2, "15 colunas não podem ser espremidas em 6pt");
+  assert.ok(bands.every((band) => band.columns[0].key === "indicator"));
+  assert.deepEqual(
+    bands.flatMap((band) => band.columns.slice(1).map((column) => column.key)),
+    columns.slice(1).map((column) => column.key),
   );
 });
 
@@ -12087,6 +12588,10 @@ test("Resumo do período permanece legível com 37 cenários e valores extensos"
 });
 
 test("widgets do Ao Vivo respondem à largura real sem ocultar texto essencial", () => {
+  const compactMetricSource = readFileSync(
+    resolve(projectRoot, "components/app/compact-metric-card.tsx"),
+    "utf8",
+  );
   const realtimeSource = readFileSync(
     resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
     "utf8",
@@ -12168,12 +12673,19 @@ test("widgets do Ao Vivo respondem à largura real sem ocultar texto essencial",
     );
   }
 
+  assert.match(compactMetricSource, /@container/);
+  assert.match(compactMetricSource, /9cqi/);
+  assert.match(compactMetricSource, /break-words/);
+  assert.match(compactMetricSource, /line-clamp-2/);
+  assert.match(compactMetricSource, /data-compact-metric-title/);
+  assert.match(compactMetricSource, /data-compact-metric-value/);
+  assert.match(compactMetricSource, /data-compact-metric-description/);
+  assert.doesNotMatch(
+    compactMetricSource,
+    /\btruncate\b|overflow-(?:auto|scroll|x-auto|y-auto)/,
+  );
   for (const metric of [countingMetric, occupancyMetric]) {
-    assert.match(metric, /@container/);
-    assert.match(metric, /12cqi/);
-    assert.match(metric, /break-all/);
-    assert.match(metric, /line-clamp-[12]/);
-    assert.doesNotMatch(metric, /\btruncate\b|overflow-(?:auto|scroll|x-auto|y-auto)/);
+    assert.match(metric, /<CompactMetricCard/);
   }
 
   assert.match(countingTable, /scrollRegionLabel=/);
@@ -12299,6 +12811,10 @@ test("widgets ECharts se adaptam ao card sem barras de rolagem permanentes", () 
 });
 
 test("widgets de Relatórios preservam títulos, métricas e contexto dentro do card", () => {
+  const compactMetricSource = readFileSync(
+    resolve(projectRoot, "components/app/compact-metric-card.tsx"),
+    "utf8",
+  );
   const globalsSource = readFileSync(
     resolve(projectRoot, "app/globals.css"),
     "utf8",
@@ -12356,8 +12872,10 @@ test("widgets de Relatórios preservam títulos, métricas e contexto dentro do 
     /\[data-layout-card-id\] \[data-card-content\] \{[\s\S]*?overflow: hidden;/,
   );
 
-  assert.match(executiveMetric, /grid-cols-\[minmax\(0,1fr\)_auto\]/);
-  assert.match(executiveMetric, /text-\[clamp\(1\.25rem,9cqi,1\.5rem\)\]/);
+  assert.match(compactMetricSource, /grid-cols-\[minmax\(0,1fr\)_auto\]/);
+  assert.match(compactMetricSource, /1\.625rem/);
+  assert.match(compactMetricSource, /data-compact-metric-meta/);
+  assert.match(executiveMetric, /<CompactMetricCard/);
   assert.match(executiveMetric, /line-clamp-1/);
   assert.doesNotMatch(executiveMetric, /\btruncate\b/);
 
@@ -12365,8 +12883,7 @@ test("widgets de Relatórios preservam títulos, métricas e contexto dentro do 
   assert.match(executiveCharts, /enterprise-horizontal-scroll/);
   assert.match(executiveCharts, /grid-cols-\[minmax\(0,1fr\)_auto\]/);
 
-  assert.match(occupancyMetric, /grid-cols-\[minmax\(0,1fr\)_auto\]/);
-  assert.match(occupancyMetric, /text-\[clamp\(1\.25rem,9cqi,1\.5rem\)\]/);
+  assert.match(occupancyMetric, /<CompactMetricCard/);
   assert.doesNotMatch(occupancyMetric, /\btruncate\b/);
   assert.match(occupancyChart, /grid-cols-\[minmax\(0,1fr\)\]/);
   assert.match(occupancyChart, /whitespace-normal break-words/);

@@ -29,6 +29,10 @@ import {
   ReorderModeButton,
 } from "@/components/app/card-layout";
 import {
+  COMPACT_METRIC_LAYOUT_DEFAULTS,
+  CompactMetricCard,
+} from "@/components/app/compact-metric-card";
+import {
   EChart,
   applyChartTypePreference,
   type EnterpriseChartOption,
@@ -41,7 +45,6 @@ import {
   WidgetTitleText,
   useWidgetChartType,
   useWidgetColor,
-  useWidgetColorOverride,
 } from "@/components/app/widget-appearance";
 import { WidgetCardActions } from "@/components/app/widget-card-actions";
 import {
@@ -2458,9 +2461,7 @@ export function RealtimeDashboard({
     },
   ].map((card) => ({
     ...card,
-    condensed: true,
-    defaultHeight: "short" as const,
-    defaultHeightLevel: 1 as const,
+    ...COMPACT_METRIC_LAYOUT_DEFAULTS,
     titleEditable: true as const,
   }));
 
@@ -3622,6 +3623,7 @@ export function RealtimeDashboard({
       filename: `ipxdata-ao-vivo-${realtimeReportDateSlug(lastUpdated ?? clock)}`,
       generatedAt: lastUpdated ?? clock,
       dataCompleteUntil: lastUpdated ?? clock,
+      timeZone: companyTimeZone,
       context: [
         selectedScope
           ? `${scopeModeLabel(selectedScope.mode)}: ${selectedScope.name}`
@@ -4289,62 +4291,31 @@ function MetricCard({
   tone: "primary" | "sky" | "indigo" | "slate";
   value: number | string;
 }) {
-  const widgetColorOverride = useWidgetColorOverride();
-  const iconToneClass = {
-    primary: "text-primary",
-    sky: "text-sky-700 dark:text-sky-300",
-    indigo: "text-indigo-700 dark:text-indigo-300",
-    slate: "text-muted-foreground",
+  const toneColor = {
+    primary: "#1267C4",
+    sky: "#0369A1",
+    indigo: "#4F46E5",
+    slate: "#64748B",
   }[tone];
+  const formattedValue =
+    typeof value === "number" ? formatNumber(value) : value;
 
   return (
-    <Card className="@container h-full min-w-0 overflow-hidden">
-      <CardContent className="h-full min-h-0 p-4">
-        <div className="flex h-full min-h-0 min-w-0 flex-col">
-          <div className="flex min-w-0 items-start gap-1.5 break-words text-xs font-medium uppercase text-muted-foreground [overflow-wrap:anywhere]">
-            <Icon
-              className={cn("h-3.5 w-3.5 shrink-0", iconToneClass)}
-              style={
-                widgetColorOverride
-                  ? { color: widgetColorOverride }
-                  : undefined
-              }
-            />
-            <WidgetTitleText fallback={label} />
-          </div>
-          {loading ? (
-            <Skeleton className="mt-3 h-8 w-24" />
-          ) : error ? (
-            <div className="mt-2 text-sm font-semibold text-destructive">
-              Não certificado
-            </div>
-          ) : (
-            <div className="mt-1.5 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
-              <div className="max-w-full break-all text-[clamp(1.35rem,12cqi,1.875rem)] font-semibold leading-none tabular-nums">
-                {typeof value === "number" ? formatNumber(value) : value}
-              </div>
-              {comparison ? (
-                <div
-                  className={cn(
-                    "max-w-full break-all text-sm font-semibold tabular-nums",
-                    metricComparisonClassName(comparison),
-                  )}
-                >
-                  {comparison}
-                </div>
-              ) : null}
-            </div>
-          )}
-          <div
-            className="mt-auto line-clamp-2 break-words pt-1 text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
-            data-live-metric-description
-            title={description}
-          >
-            {description}
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+    <CompactMetricCard
+      comparison={error ? undefined : comparison}
+      comparisonClassName={
+        comparison ? metricComparisonClassName(comparison) : undefined
+      }
+      description={description}
+      descriptionTitle={description}
+      icon={Icon}
+      label={label}
+      loading={loading}
+      toneColor={toneColor}
+      value={error ? "Não certificado" : formattedValue}
+      valueClassName={error ? "text-sm text-destructive" : undefined}
+      valueTitle={error ? error : String(formattedValue)}
+    />
   );
 }
 

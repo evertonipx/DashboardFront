@@ -20,6 +20,10 @@ import {
   CardLayout,
   ReorderModeButton,
 } from "@/components/app/card-layout";
+import {
+  COMPACT_METRIC_LAYOUT_DEFAULTS,
+  CompactMetricCard,
+} from "@/components/app/compact-metric-card";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
 import { OccupancyBlockingState } from "@/components/app/occupancy-blocking-state";
 import {
@@ -1063,7 +1067,7 @@ export function OccupancyReportsDashboard({
           ? "snapshot temporariamente indisponível"
           : "") ||
         (selectedScope?.scenario && visibleCurrentSnapshot
-          ? `fonte em ${formatDateTime(visibleCurrentSnapshot.asOf)}`
+          ? `fonte em ${formatDateTime(visibleCurrentSnapshot.asOf, companyTimeZone)}`
           : selectedScope?.name ?? "visão selecionada"),
       tone: "primary" as const,
     },
@@ -1137,10 +1141,7 @@ export function OccupancyReportsDashboard({
   const occupancyReportLayoutCards = [
     ...metricCards.map((card) => ({
       colorEditable: false,
-      condensed: true,
-      defaultHeight: "short" as const,
-      defaultHeightLevel: 1 as const,
-      defaultSize: "compact" as const,
+      ...COMPACT_METRIC_LAYOUT_DEFAULTS,
       id: card.id,
       label: card.label,
       node: (
@@ -1331,6 +1332,7 @@ export function OccupancyReportsDashboard({
       ? `Intervalo ${formatOccupancyAnalysisRangeLabel(analysisRangeInput)}`
       : "Séries históricas e leitura atual da visão selecionada.",
     tables: [],
+    timeZone: companyTimeZone,
     title: selectedScope
       ? `${analysis ? "Análise" : "Relatório"} de Ocupação - ${selectedScope.name}`
       : analysis
@@ -1805,44 +1807,25 @@ function MetricCard({
   tone: "average" | "maximum" | "minimum" | "primary";
   value: number | null;
 }) {
-  const toneClass = {
-    average:
-      "bg-violet-500/10 text-violet-700 ring-violet-500/20 dark:text-violet-300",
-    maximum:
-      "bg-rose-500/10 text-rose-700 ring-rose-500/20 dark:text-rose-300",
-    minimum:
-      "bg-amber-500/10 text-amber-800 ring-amber-500/20 dark:text-amber-300",
-    primary: "bg-primary/10 text-primary ring-primary/20",
+  const toneColor = {
+    average: "#7C3AED",
+    maximum: "#E11D48",
+    minimum: "#D97706",
+    primary: "#1267C4",
   }[tone];
+  const formattedValue = formatOccupancyValue(value);
 
   return (
-    <Card className="h-full min-w-0 overflow-hidden">
-      <CardContent className="grid min-h-[116px] min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3 p-4">
-        <div className="min-w-0">
-          <div className="min-w-0 break-words text-xs font-medium uppercase leading-4 text-muted-foreground [overflow-wrap:anywhere]">
-            <WidgetTitleText fallback={label} />
-          </div>
-          {loading ? (
-            <Skeleton className="mt-3 h-8 w-24" />
-          ) : (
-            <div className="mt-2 min-w-0 break-words text-[clamp(1.25rem,9cqi,1.5rem)] font-semibold leading-tight tabular-nums [overflow-wrap:anywhere]">
-              {formatOccupancyValue(value)}
-            </div>
-          )}
-          <div className="mt-1 line-clamp-2 min-w-0 break-words text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]" title={description}>
-            {description}
-          </div>
-        </div>
-        <div
-          className={cn(
-            "flex h-10 w-10 shrink-0 items-center justify-center self-start justify-self-end rounded-md ring-1",
-            toneClass,
-          )}
-        >
-          <Icon className="h-5 w-5" />
-        </div>
-      </CardContent>
-    </Card>
+    <CompactMetricCard
+      description={description}
+      descriptionTitle={description}
+      icon={Icon}
+      label={label}
+      loading={loading}
+      toneColor={toneColor}
+      value={formattedValue}
+      valueTitle={formattedValue}
+    />
   );
 }
 

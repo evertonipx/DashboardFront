@@ -1,4 +1,5 @@
 import type { EnterpriseChartOption } from "@/components/app/echart";
+import { CHART_VALUE_LABEL_ANGLE } from "@/lib/chart-value-labels";
 import type { ReportTable } from "@/lib/report-export";
 import { formatNumber } from "@/lib/utils";
 
@@ -171,7 +172,7 @@ export function buildCurrentYearComparisonOption(
               : compactChartNumber(value);
           },
           position: "top",
-          rotate: 90,
+          rotate: CHART_VALUE_LABEL_ANGLE,
           show: true,
           verticalAlign: "middle",
         },

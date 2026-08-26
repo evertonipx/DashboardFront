@@ -259,8 +259,11 @@ export function WidgetBentoPreview({
                   geometry.rowHeight,
                   geometry.gap,
                 );
-                const compactTile = tileHeight < 52 || tileWidth < 96;
-                const tinyTile = tileHeight < 32 || tileWidth < 64;
+                const compactTile =
+                  (Boolean(item.condensed) && tileHeight < 96) ||
+                  tileHeight < 72 ||
+                  tileWidth < 120;
+                const tinyTile = tileHeight < 48 || tileWidth < 72;
                 const tileContent = (
                   <WidgetBentoTileContent
                     compact={compactTile}
@@ -407,7 +410,7 @@ function WidgetBentoTileContent({
             {label}
           </span>
         </span>
-        <WidgetBentoMiniature className="mt-1 flex-1" item={item} />
+        <WidgetBentoMiniature className="mt-0.5 flex-1" item={item} />
         <span className="sr-only">{dimensionLabel}</span>
       </>
     );
@@ -464,13 +467,30 @@ function WidgetBentoMiniature({
   if (kind === "metric") {
     return (
       <span
-        className={cn(sharedClassName, "flex-col justify-center gap-1 px-1.5")}
+        className={cn(sharedClassName, "flex-col gap-0.5 p-1")}
         style={backgroundStyle}
         aria-hidden="true"
         data-widget-bento-miniature={kind}
       >
-        <span className="h-1.5 w-2/5 rounded-full bg-current" style={contentStyle} />
-        <span className="h-1 w-3/4 rounded-full bg-foreground/15" />
+        <span
+          className="flex min-w-0 items-center gap-0.5"
+          data-widget-bento-metric-zone="title"
+        >
+          <span
+            className="h-2 w-2 shrink-0 rounded-[2px] bg-current/15 ring-1 ring-current/25"
+            style={contentStyle}
+          />
+          <span className="h-1 w-1/2 rounded-full bg-foreground/20" />
+        </span>
+        <span
+          className="h-1.5 w-2/5 rounded-[2px] bg-current"
+          data-widget-bento-metric-zone="value"
+          style={contentStyle}
+        />
+        <span
+          className="mt-auto h-0.5 w-4/5 rounded-full bg-foreground/15"
+          data-widget-bento-metric-zone="context"
+        />
       </span>
     );
   }

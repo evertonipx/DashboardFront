@@ -26,6 +26,10 @@ import {
   CardLayout,
   ReorderModeButton,
 } from "@/components/app/card-layout";
+import {
+  COMPACT_METRIC_LAYOUT_DEFAULTS,
+  CompactMetricCard,
+} from "@/components/app/compact-metric-card";
 import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
 import {
   useOccupancyComparisonCards,
@@ -968,7 +972,7 @@ export function OccupancyScenarioDashboard() {
           tone={thresholdStatus?.tone ?? "primary"}
           description={
             certifiedHistory?.as_of
-              ? `fonte em ${formatDateTime(certifiedHistory.as_of)}`
+              ? `fonte em ${formatDateTime(certifiedHistory.as_of, companyTimeZone)}`
               : selectedScenario?.name ?? "Cenário obrigatório"
           }
         />
@@ -1062,9 +1066,7 @@ export function OccupancyScenarioDashboard() {
     },
   ].map((card) => ({
     ...card,
-    condensed: true,
-    defaultHeight: "short" as const,
-    defaultHeightLevel: 1 as const,
+    ...COMPACT_METRIC_LAYOUT_DEFAULTS,
   }));
 
   const chartCards = chartDefinitions.map((definition) => ({
@@ -1110,8 +1112,7 @@ export function OccupancyScenarioDashboard() {
         utilization,
       });
       return {
-        defaultHeight: "short" as const,
-        defaultSize: "compact" as const,
+        ...COMPACT_METRIC_LAYOUT_DEFAULTS,
         id: `occupancy_custom_${widget.id}`,
         label: widget.title,
         titleEditable: true,
@@ -1190,6 +1191,7 @@ export function OccupancyScenarioDashboard() {
                 alerts={certifiedAlerts}
                 error={certifiedAlertsError}
                 loading={initialLoading}
+                timeZone={companyTimeZone}
               />
             ),
         },
@@ -1254,6 +1256,7 @@ export function OccupancyScenarioDashboard() {
     // no PDF/PNG quando o dashboard está no modo escuro.
     palette: getOccupancyChartPalette("light"),
     scenario: selectedScenario,
+    timeZone: companyTimeZone,
     titleByCardId: occupancyTitleByCardId,
     todayMetric,
     utilization,
@@ -1601,22 +1604,6 @@ function MetricCard({
     | "warning";
   value: number | string | null;
 }) {
-  const resolvedTitle = useWidgetTitle(label);
-  const toneClass = {
-    average:
-      "bg-violet-500/10 text-violet-700 ring-violet-500/20 dark:text-violet-300",
-    maximum:
-      "bg-rose-500/10 text-rose-700 ring-rose-500/20 dark:text-rose-300",
-    minimum:
-      "bg-amber-500/10 text-amber-800 ring-amber-500/20 dark:text-amber-300",
-    primary: "bg-primary/10 text-primary ring-primary/20",
-    sky: "bg-sky-500/10 text-sky-700 ring-sky-500/20 dark:text-sky-300",
-    indigo:
-      "bg-indigo-500/10 text-indigo-700 ring-indigo-500/20 dark:text-indigo-300",
-    slate: "bg-muted text-muted-foreground ring-border",
-    warning:
-      "bg-amber-500/10 text-amber-800 ring-amber-500/20 dark:text-amber-300",
-  }[tone];
   const toneColor = {
     average: "#7C3AED",
     maximum: "#E11D48",
@@ -1627,55 +1614,21 @@ function MetricCard({
     slate: "#64748B",
     warning: "#D97706",
   }[tone];
-  const widgetColor = useWidgetColor(toneColor);
+  const formattedValue =
+    typeof value === "string" ? value : formatOccupancyValue(value);
 
   return (
-    <Card className="@container h-full min-w-0 overflow-hidden">
-      <CardContent className="grid h-full min-h-[116px] grid-cols-[minmax(0,1fr)_auto] items-stretch gap-3 p-4">
-        <div className="flex h-full min-h-0 min-w-0 flex-col">
-          <div
-            className="line-clamp-2 break-words text-xs font-medium uppercase text-muted-foreground [overflow-wrap:anywhere]"
-            title={resolvedTitle}
-          >
-            {resolvedTitle}
-          </div>
-          {loading ? (
-            <Skeleton className="mt-3 h-8 w-24" />
-          ) : (
-            <div className="mt-2 max-w-full break-all text-[clamp(1.25rem,12cqi,1.5rem)] font-semibold leading-tight tabular-nums">
-              {typeof value === "string" ? value : formatOccupancyValue(value)}
-            </div>
-          )}
-          <div
-            className="mt-auto line-clamp-2 break-words pt-1 text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
-            title={description}
-          >
-            {description}
-          </div>
-        </div>
-        <div
-          className={cn(
-            "flex h-full min-h-0 shrink-0 flex-col items-end gap-2",
-            action ? "justify-between" : "justify-center",
-          )}
-        >
-          {action}
-          <div
-            className={cn(
-              "flex h-11 w-11 shrink-0 items-center justify-center rounded-md ring-1",
-              toneClass,
-            )}
-            style={{
-              backgroundColor: `color-mix(in srgb, ${widgetColor} 12%, transparent)`,
-              color: widgetColor,
-              boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${widgetColor} 24%, transparent)`,
-            }}
-          >
-            <Icon className="h-5 w-5" />
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+    <CompactMetricCard
+      action={action}
+      description={description}
+      descriptionTitle={description}
+      icon={Icon}
+      label={label}
+      loading={loading}
+      toneColor={toneColor}
+      value={formattedValue}
+      valueTitle={String(formattedValue)}
+    />
   );
 }
 
@@ -2183,10 +2136,12 @@ function OccupancyAlertsCard({
   alerts,
   error,
   loading,
+  timeZone,
 }: {
   alerts: OccupancyAlertRow[];
   error: string;
   loading: boolean;
+  timeZone: string;
 }) {
   const widgetColor = useWidgetColor();
   const resolvedTitle = useWidgetTitle("Histórico de alertas");
@@ -2243,7 +2198,7 @@ function OccupancyAlertsCard({
                     </span>
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    {formatDateTime(alert.triggered_at)}
+                    {formatDateTime(alert.triggered_at, timeZone)}
                   </div>
                 </div>
                 <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" />
@@ -3138,6 +3093,7 @@ function buildOccupancyDashboardReport({
   occupancyComparisonReportAssets,
   palette,
   scenario,
+  timeZone,
   titleByCardId,
   todayMetric,
   utilization,
@@ -3160,6 +3116,7 @@ function buildOccupancyDashboardReport({
   >["reportAssets"];
   palette: OccupancyChartPalette;
   scenario: OccupancyScenario | null;
+  timeZone: string;
   titleByCardId: Map<string, string>;
   todayMetric: {
     average: number | null;
@@ -3177,7 +3134,7 @@ function buildOccupancyDashboardReport({
       "occupancy_current_total",
       {
         description: history?.as_of
-          ? `Fonte em ${formatDateTime(history.as_of)}`
+          ? `Fonte em ${formatDateTime(history.as_of, timeZone)}`
           : "Snapshot ainda não certificado",
         label: resolveTitle("occupancy_current_total", "Último snapshot"),
         value: reportOccupancyValue(currentTotal),
@@ -3338,7 +3295,9 @@ function buildOccupancyDashboardReport({
       rows: alerts.map((alert) => ({
         kind: alert.threshold_kind === "min" ? "Mínimo" : "Máximo",
         threshold: alert.threshold_value ?? null,
-        time: alert.triggered_at ? formatDateTime(alert.triggered_at) : "—",
+        time: alert.triggered_at
+          ? formatDateTime(alert.triggered_at, timeZone)
+          : "—",
         value: alert.total_value ?? null,
       })),
       title: resolveTitle("occupancy_alert_list", "Histórico de alertas"),
@@ -3364,6 +3323,7 @@ function buildOccupancyDashboardReport({
     }),
     subtitle: "Ocupação certificada do cenário e suas séries históricas.",
     tables,
+    timeZone,
     title: scenario ? `Ocupação - ${scenario.name}` : "Ocupação",
   };
 }

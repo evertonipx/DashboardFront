@@ -9,7 +9,10 @@ export function formatNumber(value: number | null | undefined) {
   return new Intl.NumberFormat("pt-BR").format(value ?? 0);
 }
 
-export function formatDateTime(value: string | Date | null | undefined) {
+export function formatDateTime(
+  value: string | Date | null | undefined,
+  timeZone?: string,
+) {
   if (!value) return "-";
 
   const date = value instanceof Date ? value : new Date(value);
@@ -18,6 +21,7 @@ export function formatDateTime(value: string | Date | null | undefined) {
   return new Intl.DateTimeFormat("pt-BR", {
     dateStyle: "short",
     timeStyle: "short",
+    ...(timeZone ? { timeZone } : {}),
   }).format(date);
 }
 
