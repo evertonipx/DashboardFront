@@ -18,9 +18,9 @@ type LabelLayoutOption =
   | undefined;
 
 /**
- * Keeps the trailing value inside a closed canvas. A +45° label grows toward
- * the upper-right; mirroring only the last one to -45° with a right anchor
- * makes it grow toward the upper-left without changing the reading angle.
+ * Keeps every angled value growing toward the upper-right. The trailing value
+ * uses a right anchor to stay inside a closed canvas without mirroring its
+ * reading direction; the chart grid already reserves the required edge space.
  */
 export function composeChartValueLabelLayout(
   existing: unknown,
@@ -50,10 +50,10 @@ export function composeChartValueLabelLayout(
       ...resolved,
       ...(moveOverlap ? { moveOverlap } : {}),
       hideOverlap,
+      ...(angled ? { rotate: CHART_VALUE_LABEL_ANGLE } : {}),
       ...(trailingEdge
         ? {
             align: "right",
-            rotate: -CHART_VALUE_LABEL_ANGLE,
           }
         : {}),
     };

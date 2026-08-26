@@ -11990,12 +11990,13 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
   assert.deepEqual(preservedLayoutCallback({ dataIndex: 0 }), {
     dx: 1,
     hideOverlap: false,
+    rotate: 45,
   });
   assert.deepEqual(preservedLayoutCallback({ dataIndex: 1 }), {
     align: "right",
     dx: 2,
     hideOverlap: false,
-    rotate: -45,
+    rotate: 45,
   });
 
   const currentYearOption = currentYearChart.buildCurrentYearComparisonOption(
@@ -12030,15 +12031,16 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
   assert.deepEqual(interactiveVertical.series[0].labelLayout({ dataIndex: 1 }), {
     align: "right",
     hideOverlap: true,
-    rotate: -45,
+    rotate: 45,
   });
   assert.deepEqual(interactiveVertical.series[1].labelLayout({ dataIndex: 1 }), {
     align: "right",
     hideOverlap: false,
-    rotate: -45,
+    rotate: 45,
   });
   assert.deepEqual(interactiveVertical.series[1].labelLayout({ dataIndex: 0 }), {
     hideOverlap: false,
+    rotate: 45,
   });
   assert.ok(
     interactiveVertical.grid.top > 56,
@@ -12062,7 +12064,7 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
   assert.deepEqual(trailingNullLayout({ dataIndex: 1 }), {
     align: "right",
     hideOverlap: false,
-    rotate: -45,
+    rotate: 45,
   });
 
   const interactiveHorizontal = enhanceInteractiveChartOption(
@@ -12211,13 +12213,13 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
   assert.deepEqual(exportedLine.labelLayout({ dataIndex: 1 }), {
     align: "right",
     hideOverlap: false,
-    rotate: -45,
+    rotate: 45,
   });
   assert.equal(exportedVerticalBar.label.rotate, 45);
   assert.deepEqual(exportedVerticalBar.labelLayout({ dataIndex: 1 }), {
     align: "right",
     hideOverlap: true,
-    rotate: -45,
+    rotate: 45,
   });
   assert.equal(exportedHorizontalBar.label.rotate, 0);
   assert.equal(exportedHorizontalBar.label.position, "right");
@@ -12246,6 +12248,7 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
 
   for (const relativePath of [
     "components/app/echart.tsx",
+    "lib/chart-value-labels.ts",
     "lib/counting-intelligence.ts",
     "lib/current-year-chart.ts",
     "lib/report-export.ts",
@@ -12255,6 +12258,11 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
       source,
       /\brotate:\s*90\b/,
       `${relativePath} não pode reintroduzir rótulos numéricos a 90 graus`,
+    );
+    assert.doesNotMatch(
+      source,
+      /\brotate:\s*-\s*CHART_VALUE_LABEL_ANGLE\b/,
+      `${relativePath} não pode inclinar o último rótulo para a esquerda`,
     );
     assert.match(
       source,
