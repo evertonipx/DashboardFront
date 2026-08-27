@@ -43,6 +43,8 @@ export const COUNTING_MONTH_LABELS = [
   "Dez",
 ] as const;
 
+const ANNUAL_COMPARISON_AVERAGE_COLOR = "#C48A38";
+
 export const COUNTING_INTELLIGENCE_CARD_IDS = {
   periodTotal: "report_counting_period_total",
   endMonth: "report_counting_end_month",
@@ -761,7 +763,7 @@ export function buildAnnualComparisonChartOption(
           ? primaryColor ?? "#4F8FCB"
           : pastelBarColor(index + 1),
       ),
-      "#D49A45",
+      ANNUAL_COMPARISON_AVERAGE_COLOR,
     ],
     grid: {
       bottom: 8,
@@ -852,9 +854,9 @@ export function buildAnnualComparisonChartOption(
             {
               animation: false,
               data: COUNTING_MONTH_LABELS.map(() => comparisonAverage),
-              itemStyle: { color: "#D49A45" },
+              itemStyle: { color: ANNUAL_COMPARISON_AVERAGE_COLOR },
               lineStyle: {
-                color: "#C48A38",
+                color: ANNUAL_COMPARISON_AVERAGE_COLOR,
                 opacity: 0.72,
                 type: "dashed",
                 width: 1,

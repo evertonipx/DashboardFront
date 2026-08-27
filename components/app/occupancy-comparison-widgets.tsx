@@ -5038,7 +5038,6 @@ function buildScenarioMaximumLineOption({
     color: series.map((item) => scenarioColors.get(item.scenarioId)!),
     grid: { bottom: 8, containLabel: true, left: 8, right: 18, top: 54 },
     legend: {
-      icon: "roundRect",
       itemGap: 14,
       itemHeight: 7,
       itemWidth: 12,

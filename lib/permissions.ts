@@ -245,32 +245,19 @@ export function createOperationalPermissionState(
 export function canManageWidgets(user: CurrentUser | null) {
   if (isMasterUser(user)) return true;
   if (!isOperationalAdmin(user)) return false;
-  return (
-    permissionsAllowWidgetManagement(user?.permissions) ||
-    userHasModuleManagementPermission(user, "counting") ||
-    userHasModuleManagementPermission(user, "occupancy")
-  );
+  return permissionsAllowWidgetManagement(user?.permissions, user);
 }
 
 export function canManageLocations(user: CurrentUser | null) {
-  return (
-    canManage(user, "locations_manage") ||
-    userHasModuleManagementPermission(user, "counting")
-  );
+  return canManage(user, "locations_manage");
 }
 
 export function canManageOccupancy(user: CurrentUser | null) {
-  return (
-    canManage(user, "occupancy_manage") ||
-    userHasModuleManagementPermission(user, "occupancy")
-  );
+  return canManage(user, "occupancy_manage");
 }
 
 export function canManageScenarios(user: CurrentUser | null) {
-  return (
-    canManage(user, "scenarios_manage") ||
-    userHasModuleManagementPermission(user, "counting")
-  );
+  return canManage(user, "scenarios_manage");
 }
 
 /**
@@ -283,25 +270,15 @@ export function canManageScenarioCatalogs(user: CurrentUser | null) {
 }
 
 export function canManageCameras(user: CurrentUser | null) {
-  return (
-    canManage(user, "cameras_manage") ||
-    userHasModuleManagementPermission(user, "counting")
-  );
+  return canManage(user, "cameras_manage");
 }
 
 export function canManageWorkers(user: CurrentUser | null) {
-  return (
-    canManage(user, "workers_manage") ||
-    userHasModuleManagementPermission(user, "counting")
-  );
+  return canManage(user, "workers_manage");
 }
 
 export function canManageViews(user: CurrentUser | null) {
-  return (
-    canManage(user, "views_manage") ||
-    userHasModuleManagementPermission(user, "counting") ||
-    userHasModuleManagementPermission(user, "occupancy")
-  );
+  return canManage(user, "views_manage");
 }
 
 export function hasAnyOperationalPermission(user: CurrentUser | null) {
@@ -327,6 +304,7 @@ export function canReadInfrastructureCatalogs(user: CurrentUser | null) {
 
 export function permissionsAllowWidgetManagement(
   permissions: UserPermission[] = [],
+  user?: CurrentUser | null,
 ) {
   const widgetPermission = OPERATIONAL_PERMISSIONS.find(
     (permission) => permission.slug === "dashboard_widgets_manage",
@@ -334,8 +312,12 @@ export function permissionsAllowWidgetManagement(
 
   return Boolean(
     widgetPermission &&
-      permissions.some((permission) =>
-        userPermissionMatchesDefinition(permission, widgetPermission),
+      permissions.some(
+        (permission) =>
+          (!user ||
+            (permissionBelongsToUserCompany(user, permission) &&
+              companyEnablesExplicitPermissionModule(user, permission))) &&
+          userPermissionMatchesDefinition(permission, widgetPermission),
       ),
   );
 }
@@ -362,6 +344,20 @@ export function permissionMatchesExplicitGrant(
   );
 }
 
+/**
+ * Returns presentation metadata only when one catalog slug maps unambiguously
+ * to a resource known by this frontend. The grant itself always remains the
+ * exact permission record returned by `/permissions`.
+ */
+export function operationalPermissionDefinitionForGrant(
+  permission: Pick<UserPermission, "slug">,
+) {
+  const matches = OPERATIONAL_PERMISSIONS.filter((definition) =>
+    permissionMatchesExplicitGrant(permission, definition),
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function getPermissionRecordId(permission: UserPermission) {
   return permission.permission_id ?? permission.id;
 }
@@ -382,8 +378,11 @@ function userHasPermission(
   definition: OperationalPermissionDefinition,
 ) {
   return Boolean(
-    user?.permissions?.some((permission) =>
-      userPermissionMatchesDefinition(permission, definition),
+    user?.permissions?.some(
+      (permission) =>
+        permissionBelongsToUserCompany(user, permission) &&
+        companyEnablesExplicitPermissionModule(user, permission) &&
+        userPermissionMatchesDefinition(permission, definition),
     ),
   );
 }
@@ -528,6 +527,11 @@ export function canViewOccupancy(user: CurrentUser | null) {
   return userCanViewModule(user, "occupancy");
 }
 
+/** Ao Vivo, Análises e Relatórios formam o pacote de leitura dos módulos. */
+export function canAccessOperationalDashboards(user: CurrentUser | null) {
+  return canViewCounting(user) || canViewOccupancy(user);
+}
+
 /**
  * Module-wide write access used to derive an Admin's management capabilities
  * from the same Swagger permission records used for dashboard visibility.
@@ -601,6 +605,42 @@ function companyEnablesPermissionModule(
       [assignment.module?.slug, assignment.module?.name].join(" "),
     ) === family;
   });
+}
+
+function companyEnablesExplicitPermissionModule(
+  user: CurrentUser,
+  permission: UserPermission,
+) {
+  if (permission.module?.active === false) return false;
+
+  const assignments = user.company_modules;
+  // The JWT permission remains authoritative when an older backend does not
+  // publish module assignments. A matching assignment, when available, can
+  // explicitly disable the resource.
+  if (!assignments?.length) return true;
+
+  const rawModuleId =
+    permission.module_id?.trim() || permission.module?.id?.trim() || "";
+  const moduleId = rawModuleId.startsWith("jwt-module:") ? "" : rawModuleId;
+  const moduleSlug = normalizePermissionText(permission.module?.slug);
+  const moduleName = normalizePermissionText(permission.module?.name);
+  const matchingAssignments = assignments.filter((assignment) => {
+    const assignmentModuleId =
+      assignment.module_id?.trim() || assignment.module?.id?.trim() || "";
+    if (moduleId && assignmentModuleId) return moduleId === assignmentModuleId;
+
+    const assignmentSlug = normalizePermissionText(assignment.module?.slug);
+    const assignmentName = normalizePermissionText(assignment.module?.name);
+    return Boolean(
+      (moduleSlug && assignmentSlug && moduleSlug === assignmentSlug) ||
+        (moduleName && assignmentName && moduleName === assignmentName),
+    );
+  });
+
+  if (!matchingAssignments.length) return true;
+  return matchingAssignments.some(
+    (assignment) => assignment.enabled && assignment.module?.active !== false,
+  );
 }
 
 function permissionBelongsToUserCompany(

@@ -830,7 +830,7 @@ test("rotas administrativas exigem a concessão do próprio recurso", () => {
     "canManageCameras",
     "canManageLocations",
     "canManageOccupancy",
-    "canManageScenarios",
+    "canManageScenarioCatalogs",
     "canManageViews",
     "canManageWorkers",
   ]) {
@@ -1079,7 +1079,7 @@ test("sincronização de admin é aditiva e alterações granulares não tocam o
   );
 });
 
-test("grade do Master usa cada PermissionResponse operacional sem hardcode de slug", () => {
+test("grade do Master usa todos os módulos e cada PermissionResponse do catálogo Swagger", () => {
   const source = readFileSync(
     resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
     "utf8",
@@ -1094,14 +1094,33 @@ test("grade do Master usa cada PermissionResponse operacional sem hardcode de sl
     groupingStart,
   );
   const groupingSource = source.slice(groupingStart, groupingEnd);
+  const moduleSelectorStart = source.indexOf("function selectVisibleModules");
+  const moduleSelectorEnd = source.indexOf(
+    "function algorithmModuleFamily",
+    moduleSelectorStart,
+  );
+  const moduleSelectorSource = source.slice(
+    moduleSelectorStart,
+    moduleSelectorEnd >= 0 ? moduleSelectorEnd : resolverStart,
+  );
 
+  assert.ok(
+    moduleSelectorStart >= 0,
+    "o catálogo não pode ser limitado a algoritmos",
+  );
+  assert.match(source, /selectVisibleModules\(modules\)/);
+  assert.doesNotMatch(source, /selectVisibleAlgorithmModules\(modules\)/);
+  assert.match(moduleSelectorSource, /modules\.(?:filter|forEach|map)/);
+  assert.doesNotMatch(moduleSelectorSource, /if \(!family\) return/);
   assert.match(resolverSource, /catalog\.flatMap/);
   assert.match(resolverSource, /permission\.action/);
   assert.match(resolverSource, /module_id: moduleId/);
   assert.match(resolverSource, /slug,/);
-  assert.match(resolverSource, /algorithmModuleFamily\(permissionModule\)/);
-  assert.doesNotMatch(resolverSource, /OPERATIONAL_PERMISSIONS/);
-  assert.doesNotMatch(resolverSource, /permissionMatchesExplicitGrant/);
+  assert.doesNotMatch(
+    resolverSource,
+    /!algorithmModuleFamily\(permissionModule\)/,
+    "permissões de módulos adicionais não podem ser descartadas",
+  );
   assert.match(groupingSource, /groups\.get\(permission\.module_id\)/);
   assert.match(source, /Slug: <code>\{permission\.slug\}<\/code>/);
   assert.match(source, /Módulo: <code>\{permission\.module_id\}<\/code>/);
@@ -2340,7 +2359,7 @@ test("reconciliação de metadados rejeita tenant ou módulo ambíguo", () => {
   assert.deepEqual(ambiguous, [genericGrant]);
 });
 
-test("permissão JWT nested preserva o módulo necessário para autorizar Ocupação", () => {
+test("permissão JWT nested preserva o módulo sem transformar ação genérica em grant de recurso", () => {
   const now = Date.UTC(2026, 7, 25, 13, 0, 0);
   const user = currentUser();
   const token = accessToken({
@@ -2393,8 +2412,13 @@ test("permissão JWT nested preserva o módulo necessário para autorizar Ocupa�
   ]);
   assert.equal(
     permissions.canManageOccupancy(reconciled),
+    false,
+    "módulo Ocupação + slug genérico create não substitui occupancy_manage",
+  );
+  assert.equal(
+    permissions.canViewOccupancy(reconciled),
     true,
-    "o parser não pode remover o contexto de módulo usado pela matriz operacional",
+    "a mesma permissão ainda concede a visualização do módulo",
   );
 
   const repeatedActionSlugs = accessTokenClaims.reconcileCurrentUserWithAccessToken(

@@ -16,5 +16,11 @@ frontend/
 next-dev.*.log
 tsconfig.tsbuildinfo
 
+# Credenciais locais criptografadas dos Insights IA (server-only)
+.ipxdata/ai-insights-config.v1.json
+.ipxdata/ai-insights-config.v1.key
+.ipxdata/ai-insights-config.v1.lock
+.ipxdata/ai-insights-config.v1.*.tmp
+
 .DS_Store
 Thumbs.db

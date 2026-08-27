@@ -24,6 +24,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { AiAnalysisAction } from "@/components/app/ai-analysis-action";
 import {
   CardLayout,
   ReorderModeButton,
@@ -224,6 +225,10 @@ import {
   resolveLiveAnnualComparisonRanges,
   rollupLiveAnnualHistoryRows,
 } from "@/lib/live-annual-comparison";
+import {
+  OPERATIONAL_TREND_LEGEND_DATA,
+  OPERATIONAL_TREND_SERIES,
+} from "@/lib/operational-trend-style";
 import type {
   ReportMetric,
   ReportPayload,
@@ -3807,19 +3812,19 @@ export function RealtimeDashboard({
       ) : (
       <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
         {loadingScenarios ? (
-          <div className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(176px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(176px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(176px,1fr)] @lg:grid-cols-[112px_168px_minmax(176px,1fr)] @xl:grid-cols-[120px_200px_minmax(176px,1fr)] @2xl:grid-cols-[132px_220px_minmax(176px,1fr)]">
+          <div className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(212px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(212px,1fr)] @lg:grid-cols-[112px_168px_minmax(212px,1fr)] @xl:grid-cols-[120px_200px_minmax(212px,1fr)] @2xl:grid-cols-[132px_220px_minmax(212px,1fr)]">
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-full" />
             <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
               <Skeleton className="hidden h-3.5 w-4 shrink-0 @lg:block @xl:w-12 @2xl:w-24" />
-              <Skeleton className="h-8 w-[176px] shrink-0" />
+              <Skeleton className="h-8 w-[212px] shrink-0" />
             </div>
           </div>
         ) : scopeOptions.length ? (
           <div className="space-y-3">
             <div
               aria-label="Controles da visão ao vivo de Contagem"
-              className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(176px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(176px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(176px,1fr)] @lg:grid-cols-[112px_168px_minmax(176px,1fr)] @xl:grid-cols-[120px_200px_minmax(176px,1fr)] @2xl:grid-cols-[132px_220px_minmax(176px,1fr)]"
+              className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(212px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(212px,1fr)] @lg:grid-cols-[112px_168px_minmax(212px,1fr)] @xl:grid-cols-[120px_200px_minmax(212px,1fr)] @2xl:grid-cols-[132px_220px_minmax(212px,1fr)]"
               role="group"
             >
               <div className="min-w-0">
@@ -3894,6 +3899,19 @@ export function RealtimeDashboard({
                     }
                     getPayload={buildConfiguredLiveReportPayload}
                     payload={liveReportPayload}
+                  />
+                  <AiAnalysisAction
+                    disabled={
+                      initialLoading ||
+                      loadingAnnualHistory ||
+                      !selectedScope ||
+                      Boolean(liveDataCertificationError) ||
+                      Boolean(liveAnnualComparisonError)
+                    }
+                    getPayload={buildConfiguredLiveReportPayload}
+                    manager={manager}
+                    payload={liveReportPayload}
+                    source={{ module: "counting", surface: "live" }}
                   />
                   {canEditVisual ? (
                     <>
@@ -5718,12 +5736,10 @@ function OperationalTrendCard({
     () =>
       buildOperationalTrendOption(
         points,
-        trend7.direction,
-        trend30.direction,
         month,
         widgetColor,
       ),
-    [month, points, trend30.direction, trend7.direction, widgetColor],
+    [month, points, widgetColor],
   );
   const hasData = points.some((point) => point.average7 !== null);
 
@@ -7715,13 +7731,9 @@ function buildOperationalMonthCumulativeOption(
 
 function buildOperationalTrendOption(
   points: OperationalTrendPoint[],
-  direction7: number,
-  direction30: number,
   month: Date,
   volumeColor = "#C7D2DE",
 ): EnterpriseChartOption {
-  const directionColor = (direction: number) =>
-    direction > 0 ? "#0F766E" : direction < 0 ? "#C2410C" : "#64748B";
   const valuesByDay = (
     selector: (point: OperationalTrendPoint) => number | null,
   ) => {
@@ -7743,9 +7755,14 @@ function buildOperationalTrendOption(
   };
 
   return {
-    color: [volumeColor, directionColor(direction30), directionColor(direction7)],
+    color: [
+      volumeColor,
+      OPERATIONAL_TREND_SERIES.average7.color,
+      OPERATIONAL_TREND_SERIES.average30.color,
+    ],
     grid: { bottom: 8, containLabel: true, left: 8, right: 12, top: 52 },
     legend: {
+      data: [...OPERATIONAL_TREND_LEGEND_DATA],
       itemGap: 14,
       itemHeight: 9,
       itemWidth: 14,
@@ -7791,34 +7808,38 @@ function buildOperationalTrendOption(
         data: valuesByDay((point) => point.total),
         itemStyle: { color: volumeColor, opacity: 0.42 },
         markArea: buildCalendarMarkAreaForMonth(month),
-        name: "Volume diário",
+        name: OPERATIONAL_TREND_SERIES.volume.name,
         type: "bar",
       },
       {
-        data: valuesByDay((point) => point.average30),
+        data: valuesByDay((point) => point.average7),
+        itemStyle: { color: OPERATIONAL_TREND_SERIES.average7.color },
         lineStyle: {
-          color: directionColor(direction30),
+          color: OPERATIONAL_TREND_SERIES.average7.color,
           opacity: 0.9,
           type: "solid",
           width: 2.5,
         },
-        name: "Média móvel 30 dias",
+        name: OPERATIONAL_TREND_SERIES.average7.name,
         showSymbol: false,
         smooth: 0.18,
         type: "line",
+        z: 4,
       },
       {
-        data: valuesByDay((point) => point.average7),
+        data: valuesByDay((point) => point.average30),
+        itemStyle: { color: OPERATIONAL_TREND_SERIES.average30.color },
         lineStyle: {
-          color: directionColor(direction7),
-          opacity: 0.76,
+          color: OPERATIONAL_TREND_SERIES.average30.color,
+          opacity: 0.8,
           type: "dashed",
-          width: 1.25,
+          width: 1.5,
         },
-        name: "Média móvel 7 dias",
+        name: OPERATIONAL_TREND_SERIES.average30.name,
         showSymbol: false,
         smooth: 0.18,
         type: "line",
+        z: 3,
       },
     ],
   };
@@ -8035,6 +8056,7 @@ function buildMinuteDayChartOption(
         label: {
           show: false,
         },
+        itemStyle: { color: widgetColor },
         lineStyle: {
           color: widgetColor,
           width: 1.75,
@@ -8610,7 +8632,7 @@ function buildOperationalTrendReportChart(
   points: OperationalTrendPoint[],
   scopeName: string,
   month: Date,
-  widgetColor = "#9AAABD",
+  widgetColor = "#1267C4",
 ): ReportPayload["charts"][number] {
   const trend7 = movingAverageTrend(points, "average7");
   const trend30 = movingAverageTrend(points, "average30");
@@ -8622,8 +8644,6 @@ function buildOperationalTrendReportChart(
     description: `Médias móveis de 7 e 30 dias atualizadas com o dia corrente parcial, exibidas no eixo mensal de 1 a 31 com fins de semana e feriados nacionais e de São Paulo destacados. Visão: ${scopeName}.`,
     option: buildOperationalTrendOption(
       points,
-      trend7.direction,
-      trend30.direction,
       month,
       widgetColor,
     ),

@@ -13,6 +13,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { AiAnalysisAction } from "@/components/app/ai-analysis-action";
 import { CardLayout, ReorderModeButton } from "@/components/app/card-layout";
 import { buildCountingIntelligenceWidgetCards } from "@/components/app/counting-intelligence-report";
 import { CountingReportPeriodControl } from "@/components/app/counting-report-period-control";
@@ -2213,12 +2214,12 @@ export function ScenarioReportsDashboard({
                   updateCountingViewSettings({ includeOpenPeriod })
                 }
               />
-              <div className="grid min-w-0 grid-cols-[minmax(0,80px)_minmax(0,104px)_minmax(0,1fr)_212px] items-center gap-1.5 border-t pt-3 @lg:grid-cols-[88px_120px_minmax(54px,1fr)_212px] @xl:grid-cols-[104px_144px_minmax(70px,1fr)_212px] @2xl:grid-cols-[120px_180px_minmax(100px,1fr)_212px] @3xl:grid-cols-[132px_220px_minmax(150px,1fr)_212px]">
+              <div className="grid min-w-0 grid-cols-[minmax(0,80px)_minmax(0,104px)_minmax(0,1fr)_248px] items-center gap-1.5 border-t pt-3 @lg:grid-cols-[88px_120px_minmax(54px,1fr)_248px] @xl:grid-cols-[104px_144px_minmax(70px,1fr)_248px] @2xl:grid-cols-[120px_180px_minmax(100px,1fr)_248px] @3xl:grid-cols-[132px_220px_minmax(150px,1fr)_248px]">
                 <Skeleton className="h-8 w-full" />
                 <Skeleton className="h-8 w-full" />
                 <div className="contents">
                   <Skeleton className="col-start-3 row-start-1 h-8 w-8 shrink-0 justify-self-end @lg:w-[54px]" />
-                  <Skeleton className="col-start-4 row-start-1 h-8 w-[212px] shrink-0" />
+                  <Skeleton className="col-start-4 row-start-1 h-8 w-[248px] shrink-0" />
                 </div>
               </div>
             </div>
@@ -2235,7 +2236,7 @@ export function ScenarioReportsDashboard({
               />
               <div
                 aria-label="Controles dos relatórios de Contagem"
-                className="grid min-w-0 grid-cols-[minmax(0,80px)_minmax(0,104px)_minmax(0,1fr)_212px] items-center gap-1.5 border-t pt-3 @lg:grid-cols-[88px_120px_minmax(54px,1fr)_212px] @xl:grid-cols-[104px_144px_minmax(70px,1fr)_212px] @2xl:grid-cols-[120px_180px_minmax(100px,1fr)_212px] @3xl:grid-cols-[132px_220px_minmax(150px,1fr)_212px]"
+                className="grid min-w-0 grid-cols-[minmax(0,80px)_minmax(0,104px)_minmax(0,1fr)_248px] items-center gap-1.5 border-t pt-3 @lg:grid-cols-[88px_120px_minmax(54px,1fr)_248px] @xl:grid-cols-[104px_144px_minmax(70px,1fr)_248px] @2xl:grid-cols-[120px_180px_minmax(100px,1fr)_248px] @3xl:grid-cols-[132px_220px_minmax(150px,1fr)_248px]"
                 role="group"
               >
                 <div className="min-w-0">
@@ -2306,7 +2307,7 @@ export function ScenarioReportsDashboard({
 
                   <div
                     aria-label="Ações dos relatórios de Contagem"
-                    className="col-start-4 row-start-1 flex w-[212px] min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1"
+                    className="col-start-4 row-start-1 flex w-[248px] min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1"
                     role="group"
                   >
                     <Button
@@ -2333,6 +2334,19 @@ export function ScenarioReportsDashboard({
                         !selectedScope ||
                         Boolean(reportComparisonDisabledReason)
                       }
+                    />
+                    <AiAnalysisAction
+                      disabled={
+                        countingPeriodPending ||
+                        loadingCharts ||
+                        loadingScenarios ||
+                        !selectedScope ||
+                        Boolean(reportComparisonDisabledReason)
+                      }
+                      getPayload={buildConfiguredScenarioReportPayload}
+                      manager={manager}
+                      payload={scenarioReportPayload}
+                      source={{ module: "counting", surface: "reports" }}
                     />
                     <Button
                       type="button"
@@ -3980,7 +3994,7 @@ function buildChartOption(
   const previousName = comparisonSeriesName(definition, intradayComparison);
 
   return {
-    color: showPreviousSeries ? [widgetColor, "#B7C7DA"] : [widgetColor],
+    color: showPreviousSeries ? ["#B7C7DA", widgetColor] : [widgetColor],
     grid: {
       left: 4,
       right: 10,

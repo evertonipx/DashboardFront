@@ -10,6 +10,7 @@ const ts = require("typescript");
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const moduleCache = new Map();
 const permissions = loadTypeScriptModule("lib/permissions.ts");
+const access = loadTypeScriptModule("lib/access.ts");
 
 test("Master enxerga os dois módulos sem depender do catálogo de permissões", () => {
   const master = user({ is_master: true, permissions: [] });
@@ -70,7 +71,7 @@ test("grant somente leitura sem action nunca vira permissão de escrita", () => 
   assert.equal(permissions.canManageViews(admin), true);
 });
 
-test("Admin só gerencia o módulo com grant mutável explícito", () => {
+test("grant amplo do módulo não concede recursos administrativos implicitamente", () => {
   const countingWrite = permission({
     action: "manage",
     module: {
@@ -79,7 +80,7 @@ test("Admin só gerencia o módulo com grant mutável explícito", () => {
       name: "Contagem",
       slug: "people-counting",
     },
-    slug: "backend_generated_permission",
+    slug: "counting_manage",
   });
   const occupancyRead = permission({
     action: "view",
@@ -106,11 +107,40 @@ test("Admin só gerencia o módulo com grant mutável explícito", () => {
     permissions.userHasModuleManagementPermission(admin, "occupancy"),
     false,
   );
-  assert.equal(permissions.canManageWorkers(admin), true);
-  assert.equal(permissions.canManageCameras(admin), true);
-  assert.equal(permissions.canManageLocations(admin), true);
-  assert.equal(permissions.canManageScenarios(admin), true);
+  assert.equal(permissions.canManageWidgets(admin), false);
+  assert.equal(permissions.canManageViews(admin), false);
+  assert.equal(permissions.canManageWorkers(admin), false);
+  assert.equal(permissions.canManageCameras(admin), false);
+  assert.equal(permissions.canManageLocations(admin), false);
+  assert.equal(permissions.canManageScenarios(admin), false);
   assert.equal(permissions.canManageOccupancy(admin), false);
+});
+
+test("Admin gerencia somente cada recurso concedido explicitamente", () => {
+  const capabilityChecks = [
+    ["dashboard_widgets_manage", "canManageWidgets"],
+    ["views_manage", "canManageViews"],
+    ["workers_manage", "canManageWorkers"],
+    ["cameras_manage", "canManageCameras"],
+    ["locations_manage", "canManageLocations"],
+    ["scenarios_manage", "canManageScenarios"],
+    ["occupancy_manage", "canManageOccupancy"],
+  ];
+
+  for (const [slug, selectedCheck] of capabilityChecks) {
+    const admin = user({
+      role: "admin",
+      permissions: [permission({ action: "manage", slug })],
+    });
+
+    for (const [, check] of capabilityChecks) {
+      assert.equal(
+        permissions[check](admin),
+        check === selectedCheck,
+        `${slug} não pode liberar ${check}`,
+      );
+    }
+  }
 });
 
 test("Operador nunca recebe mutação e flags somente leitura vencem action conflitante", () => {
@@ -146,6 +176,27 @@ test("Operador nunca recebe mutação e flags somente leitura vencem action conf
     permissions.userHasModuleManagementPermission(admin, "counting"),
     false,
   );
+});
+
+test("Operador nunca gerencia recursos mesmo com todos os grants explícitos", () => {
+  const operator = user({
+    role: "operator",
+    permissions: permissions.OPERATIONAL_PERMISSIONS.map(({ slug }) =>
+      permission({ action: "manage", slug }),
+    ),
+  });
+
+  for (const check of [
+    "canManageWidgets",
+    "canManageViews",
+    "canManageWorkers",
+    "canManageCameras",
+    "canManageLocations",
+    "canManageScenarios",
+    "canManageOccupancy",
+  ]) {
+    assert.equal(permissions[check](operator), false, check);
+  }
 });
 
 test("módulo ausente, inativo, contraditório ou de outro tenant falha fechado", () => {
@@ -192,7 +243,7 @@ test("módulo ausente, inativo, contraditório ou de outro tenant falha fechado"
   assert.equal(permissions.canViewCounting(foreignTenant), false);
 });
 
-test("módulo desabilitado na empresa bloqueia grant preservado", () => {
+test("módulo desabilitado na empresa bloqueia visualização e não amplia recursos", () => {
   const countingGrant = permission({
     action: "manage",
     module_id: "module-counting",
@@ -224,7 +275,7 @@ test("módulo desabilitado na empresa bloqueia grant preservado", () => {
   assert.equal(permissions.canViewCounting(disabledAdmin), false);
   assert.equal(permissions.canManageWorkers(disabledAdmin), false);
   assert.equal(permissions.canViewCounting(enabledAdmin), true);
-  assert.equal(permissions.canManageWorkers(enabledAdmin), true);
+  assert.equal(permissions.canManageWorkers(enabledAdmin), false);
 
   const authSource = readFileSync(
     resolve(projectRoot, "components/app/auth-provider.tsx"),
@@ -238,6 +289,119 @@ test("módulo desabilitado na empresa bloqueia grant preservado", () => {
   assert.match(
     authSource,
     /async function hydrateUserCompanyModules[\s\S]*?catch \(error\) \{[\s\S]*?currentUserSessionIsCurrent\(authenticatedSession\)[\s\S]*?return \[\];/,
+  );
+});
+
+test("Ao Vivo, Análises e Relatórios formam um pacote de visualização por módulo", () => {
+  const master = user({ is_master: true, permissions: [] });
+  const countingOperator = user({
+    permissions: [permission({ action: "view", slug: "counting_view" })],
+  });
+  const occupancyOperator = user({
+    permissions: [permission({ action: "view", slug: "occupancy_view" })],
+  });
+  const resourceOnlyAdmin = user({
+    role: "admin",
+    permissions: [permission({ action: "manage", slug: "workers_manage" })],
+  });
+
+  assert.equal(permissions.canAccessOperationalDashboards(master), true);
+  assert.equal(
+    permissions.canAccessOperationalDashboards(countingOperator),
+    true,
+  );
+  assert.equal(
+    permissions.canAccessOperationalDashboards(occupancyOperator),
+    true,
+  );
+  assert.equal(
+    permissions.canAccessOperationalDashboards(resourceOnlyAdmin),
+    false,
+  );
+
+  const shellSource = readFileSync(
+    resolve(projectRoot, "components/app/app-shell.tsx"),
+    "utf8",
+  );
+  const packageGuards = shellSource.match(
+    /canShow:\s*canAccessOperationalDashboards/g,
+  );
+  assert.equal(
+    packageGuards?.length,
+    6,
+    "os três itens dos menus client e manager devem compartilhar o mesmo guard",
+  );
+});
+
+test("redirecionamento escolhe a primeira tela realmente autorizada", () => {
+  const master = user({ is_master: true });
+  const viewsAdmin = user({
+    role: "admin",
+    permissions: [permission({ action: "manage", slug: "views_manage" })],
+  });
+  const workersAdmin = user({
+    role: "admin",
+    permissions: [permission({ action: "manage", slug: "workers_manage" })],
+  });
+  const countingAdmin = user({
+    role: "admin",
+    permissions: [permission({ action: "manage", slug: "counting_manage" })],
+  });
+  const operator = user({
+    permissions: [permission({ action: "view", slug: "counting_view" })],
+  });
+
+  assert.equal(access.resolveAuthorizedHomePath(master), "/manager/master");
+  assert.equal(access.resolveAuthorizedHomePath(viewsAdmin), "/manager/views");
+  assert.equal(access.resolveAuthorizedHomePath(workersAdmin), "/manager/workers");
+  assert.equal(access.resolveAuthorizedHomePath(countingAdmin), "/manager/live");
+  assert.equal(access.resolveAuthorizedHomePath(operator), "/dashboard/live");
+});
+
+test("tenant ou módulo desabilitado também bloqueia grant granular", () => {
+  const viewsGrant = permission({
+    action: "manage",
+    company_id: "company-current",
+    module_id: "module-views",
+    module: {
+      active: true,
+      id: "module-views",
+      name: "Views",
+      slug: "views",
+    },
+    slug: "views_manage",
+  });
+  const assignment = {
+    company_id: "company-current",
+    enabled: false,
+    module_id: "module-views",
+    module: viewsGrant.module,
+  };
+
+  assert.equal(
+    permissions.canManageViews(
+      user({ role: "admin", permissions: [viewsGrant], company_modules: [assignment] }),
+    ),
+    false,
+  );
+  assert.equal(
+    permissions.canManageViews(
+      user({
+        role: "admin",
+        permissions: [viewsGrant],
+        company_modules: [{ ...assignment, enabled: true }],
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    permissions.canManageViews(
+      user({
+        role: "admin",
+        permissions: [{ ...viewsGrant, company_id: "company-foreign" }],
+      }),
+    ),
+    false,
   );
 });
 
@@ -262,14 +426,59 @@ test("Dashboard monta somente módulos concedidos e corrige seleção persistida
   assert.match(source, /Nenhum módulo disponível/);
 });
 
+test("configuração IA fica restrita ao Master e a rota client redireciona por perfil", () => {
+  const guardSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-guard.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(guardSource, /case "insights"|canUseAiInsights/);
+
+  const clientPage = readFileSync(
+    resolve(projectRoot, "app/dashboard/insights/page.tsx"),
+    "utf8",
+  );
+  const managerPage = readFileSync(
+    resolve(projectRoot, "app/manager/insights/page.tsx"),
+    "utf8",
+  );
+  assert.match(clientPage, /<AuthGuard>/);
+  assert.doesNotMatch(clientPage, /AiInsightsDashboard|<AppShell/);
+  assert.match(clientPage, /router\.replace\(/);
+  assert.match(
+    clientPage,
+    /hasMasterAccess\(user\)[\s\S]*?"\/manager\/insights"[\s\S]*?isManager[\s\S]*?"\/manager\/live"[\s\S]*?"\/dashboard\/live"/,
+  );
+  assert.match(managerPage, /<AuthGuard requireManager requireMaster>/);
+  assert.match(managerPage, /title="Configuração IA"/);
+
+  const shellSource = readFileSync(
+    resolve(projectRoot, "components/app/app-shell.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(shellSource, /href: "\/dashboard\/insights"/);
+  assert.match(
+    shellSource,
+    /href: "\/manager\/insights",\s*label: "Configuração IA",\s*icon: BrainCircuit,\s*canShow: hasMasterAccess,\s*}/,
+  );
+  assert.match(
+    shellSource,
+    /min-h-0 flex-1 space-y-1 overflow-y-auto/,
+    "a lista desktop deve rolar sem encobrir o rodapé da sidebar",
+  );
+});
+
 test("catálogo de cenários abre para qualquer módulo sem misturar suas telas", () => {
   const countingAdmin = user({
     role: "admin",
-    permissions: [permission({ action: "manage", slug: "counting_manage" })],
+    permissions: [permission({ action: "manage", slug: "scenarios_manage" })],
   });
   const occupancyAdmin = user({
     role: "admin",
     permissions: [permission({ action: "manage", slug: "occupancy_manage" })],
+  });
+  const broadModuleAdmin = user({
+    role: "admin",
+    permissions: [permission({ action: "manage", slug: "counting_manage" })],
   });
 
   assert.equal(permissions.canManageScenarios(countingAdmin), true);
@@ -278,6 +487,8 @@ test("catálogo de cenários abre para qualquer módulo sem misturar suas telas"
   assert.equal(permissions.canManageScenarios(occupancyAdmin), false);
   assert.equal(permissions.canManageOccupancy(occupancyAdmin), true);
   assert.equal(permissions.canManageScenarioCatalogs(occupancyAdmin), true);
+  assert.equal(permissions.canManageScenarios(broadModuleAdmin), false);
+  assert.equal(permissions.canManageScenarioCatalogs(broadModuleAdmin), false);
 
   const managerSource = readFileSync(
     resolve(projectRoot, "components/app/scenario-manager.tsx"),
@@ -309,8 +520,30 @@ test("catálogo de cenários abre para qualquer módulo sem misturar suas telas"
   );
   assert.match(
     guardSource,
-    /case "scenarios":[\s\S]*?canManageScenarios\(user\) \|\| canManageOccupancy\(user\)/,
+    /case "scenarios":[\s\S]*?canManageScenarioCatalogs\(user\)/,
   );
+});
+
+test("rota direta de Ocupação exige o módulo de visualização correspondente", () => {
+  const occupancyPageSource = readFileSync(
+    resolve(projectRoot, "app/dashboard/occupancy/page.tsx"),
+    "utf8",
+  );
+  const guardSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-guard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    occupancyPageSource,
+    /<AuthGuard requireModule="occupancy">/,
+  );
+  assert.match(guardSource, /requireModule\?:\s*OperationalModuleFamily/);
+  const moduleGuardSource = guardSource.slice(
+    guardSource.indexOf("function canViewModule"),
+  );
+  assert.match(moduleGuardSource, /canViewCounting\(user\)/);
+  assert.match(moduleGuardSource, /canViewOccupancy\(user\)/);
 });
 
 function user(overrides = {}) {

@@ -20,6 +20,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { AiAnalysisAction } from "@/components/app/ai-analysis-action";
 import { AnalysisDateRangePicker } from "@/components/app/occupancy-date-range-picker";
 import {
   CardLayout,
@@ -168,6 +169,7 @@ import type {
 } from "@/lib/types";
 import { cn, formatNumber, formatTime } from "@/lib/utils";
 import {
+  orderByCardPreferences,
   saveCardPreferences,
   type CardChartType,
 } from "@/lib/view-preferences";
@@ -540,15 +542,10 @@ export function PeriodAnalysisDashboard({
       ),
     [preferences],
   );
-  const queryWidgets = React.useMemo(() => {
-    if (!preferences.length) return widgets;
-    const visibleIds = new Set(
-      preferences
-        .filter((preference) => preference.visible !== false)
-        .map((preference) => preference.id),
-    );
-    return widgets.filter((widget) => visibleIds.has(widget.id));
-  }, [preferences, widgets]);
+  const queryWidgets = React.useMemo(
+    () => orderByCardPreferences(widgets, preferences),
+    [preferences, widgets],
+  );
   const dataRequirementsKey = React.useMemo(
     () => {
       const effectiveWidgetGranularity = (widget: PeriodAnalysisWidget) =>
@@ -1172,22 +1169,20 @@ export function PeriodAnalysisDashboard({
         !compact,
     };
   });
-  const visibleWidgetIds = new Set(
-    preferences
-      .filter((preference) => preference.visible !== false)
-      .map((preference) => preference.id),
-  );
   const reportPayload = composePeriodAnalysisReport({
-    models: widgets
-      .filter(
-        (widget) => !preferences.length || visibleWidgetIds.has(widget.id),
-      )
-      .map((widget) => ({
-        chartType: widgetChartTypeById.get(widget.id),
-        defaultTitle: widget.title,
-        model: modelByWidgetId.get(widget.id)!,
-        title: widgetTitleById.get(widget.id) ?? widget.title,
-      })),
+    models: queryWidgets.flatMap((widget) => {
+      const model = modelByWidgetId.get(widget.id);
+      return model
+        ? [
+            {
+              chartType: widgetChartTypeById.get(widget.id),
+              defaultTitle: widget.title,
+              model,
+              title: widgetTitleById.get(widget.id) ?? widget.title,
+            },
+          ]
+        : [];
+    }),
     period,
     timeZone: companyTimeZone,
   });
@@ -1451,7 +1446,7 @@ export function PeriodAnalysisDashboard({
         <div className="@container rounded-md border bg-card px-3 py-2 shadow-soft">
           <div
             aria-label="Controles da análise de Contagem"
-            className="grid min-w-0 grid-cols-[32px_minmax(32px,1fr)_140px] items-center gap-2 @sm:grid-cols-[160px_minmax(32px,1fr)_140px] @lg:grid-cols-[220px_minmax(32px,1fr)_140px] @2xl:grid-cols-[300px_minmax(32px,1fr)_140px]"
+            className="grid min-w-0 grid-cols-[32px_minmax(32px,1fr)_176px] items-center gap-2 @sm:grid-cols-[160px_minmax(32px,1fr)_176px] @lg:grid-cols-[220px_minmax(32px,1fr)_176px] @2xl:grid-cols-[300px_minmax(32px,1fr)_176px]"
             role="group"
           >
             <div className="col-start-1 row-start-1 min-w-0">
@@ -1512,7 +1507,7 @@ export function PeriodAnalysisDashboard({
 
             <div
               aria-label="Ações da análise de Contagem"
-              className="col-start-3 row-start-1 flex w-[140px] min-w-0 flex-nowrap items-center justify-end gap-1 justify-self-end"
+              className="col-start-3 row-start-1 flex w-[176px] min-w-0 flex-nowrap items-center justify-end gap-1 justify-self-end"
               role="group"
             >
               {canEditVisual ? (
@@ -1544,6 +1539,17 @@ export function PeriodAnalysisDashboard({
                   Boolean(analysisCertificationError)
                 }
                 payload={reportPayload}
+              />
+              <AiAnalysisAction
+                disabled={
+                  loadingData ||
+                  loadingScenarios ||
+                  !widgets.length ||
+                  Boolean(analysisCertificationError)
+                }
+                manager={manager}
+                payload={reportPayload}
+                source={{ module: "counting", surface: "analysis" }}
               />
               <MonitorModeButton
                 compact

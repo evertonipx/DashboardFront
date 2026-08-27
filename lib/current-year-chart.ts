@@ -25,6 +25,8 @@ const CURRENT_YEAR_MONTH_LABELS = [
   "Dez",
 ] as const;
 
+const CURRENT_YEAR_AVERAGE_COLOR = "#C48A38";
+
 export function buildCurrentYearMonthPoints({
   reference,
   through,
@@ -109,7 +111,7 @@ export function buildCurrentYearComparisonOption(
   const averageName = `Média mensal de ${year}`;
 
   return {
-    color: [widgetColor, "#C48A38"],
+    color: [widgetColor, CURRENT_YEAR_AVERAGE_COLOR],
     grid: { bottom: 8, containLabel: true, left: 8, right: 10, top: 58 },
     legend: {
       data: [String(year), ...(!accumulated && average ? [averageName] : [])],
@@ -186,9 +188,9 @@ export function buildCurrentYearComparisonOption(
               data: points.map((point) =>
                 point.value === null ? null : average,
               ),
-              itemStyle: { color: "#D49A45" },
+              itemStyle: { color: CURRENT_YEAR_AVERAGE_COLOR },
               lineStyle: {
-                color: "#C48A38",
+                color: CURRENT_YEAR_AVERAGE_COLOR,
                 opacity: 0.72,
                 type: "dashed",
                 width: 1,

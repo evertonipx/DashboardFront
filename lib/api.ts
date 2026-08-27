@@ -828,6 +828,7 @@ function shouldSendMasterCompanyScope(path: string) {
   if (/^\/companies\/[^/]+(?:\/|$)/.test(pathname)) return false;
 
   return [
+    "/ai",
     "/analytics",
     "/cameras",
     "/company/modules",

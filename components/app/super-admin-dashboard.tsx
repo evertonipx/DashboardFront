@@ -106,6 +106,7 @@ import {
   requireWorkerRows,
 } from "@/lib/metadata-validation";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
+import { operationalPermissionDefinitionForGrant } from "@/lib/permissions";
 import { requireScenarioRows } from "@/lib/scenario-validation";
 import type {
   Location,
@@ -230,7 +231,7 @@ type CompanyOperationalWarning = {
 };
 
 type CompanyOperationalStats = {
-  algorithms: number;
+  modules: number;
   cameras: number | null;
   locations: number | null;
   subLocations: number | null;
@@ -464,7 +465,7 @@ export function SuperAdminDashboard() {
   }, [masterUserQuery, masterUsers]);
 
   const visibleModules = React.useMemo(
-    () => selectVisibleAlgorithmModules(modules),
+    () => selectVisibleModules(modules),
     [modules],
   );
 
@@ -493,7 +494,7 @@ export function SuperAdminDashboard() {
           unavailable: option.unavailable || !hasEnabledGrant,
           description:
             option.grants.length && !hasEnabledGrant
-              ? `${option.description} Habilite o algoritmo para esta empresa antes de conceder este acesso.`
+              ? `${option.description} Habilite o módulo para esta empresa antes de conceder este acesso.`
               : option.description,
         };
       }),
@@ -745,7 +746,7 @@ export function SuperAdminDashboard() {
         workerRows ? sortWorkersByActivity(collapsedWorkerRows) : [],
       );
       setCompanyStats({
-        algorithms: enabledOperationalModuleCount(moduleRows, modules),
+        modules: enabledCompanyModuleCount(moduleRows, modules),
         cameras: scopedCameras?.length ?? null,
         locations: scopedLocations?.length ?? null,
         subLocations: subLocationRows?.length ?? null,
@@ -777,7 +778,7 @@ export function SuperAdminDashboard() {
       setWorkerScopeWarning("");
       if (administrativeDetailsCertified) {
         setCompanyStats({
-          algorithms: enabledOperationalModuleCount(certifiedModuleRows, modules),
+          modules: enabledCompanyModuleCount(certifiedModuleRows, modules),
           cameras: null,
           locations: null,
           subLocations: null,
@@ -2241,7 +2242,7 @@ export function SuperAdminDashboard() {
             <TabsList className="flex h-auto flex-wrap justify-start">
               <TabsTrigger value="users">Usuários</TabsTrigger>
               <TabsTrigger value="workers">Workers</TabsTrigger>
-              <TabsTrigger value="modules">Algoritmos</TabsTrigger>
+              <TabsTrigger value="modules">Módulos</TabsTrigger>
               <TabsTrigger value="masters">Super-admins</TabsTrigger>
             </TabsList>
 
@@ -2445,21 +2446,22 @@ export function SuperAdminDashboard() {
             <TabsContent value="modules">
               <Card>
                 <CardHeader>
-                  <CardTitle>Algoritmos</CardTitle>
+                  <CardTitle>Módulos</CardTitle>
                   <CardDescription>
-                    Catálogo de algoritmos da plataforma para a empresa selecionada.
+                    Catálogo da plataforma usado para liberar produtos, menus e
+                    recursos da empresa selecionada.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   {companyDetailsError ? (
                     <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
-                      Algoritmos indisponíveis: {companyDetailsError}
+                      Módulos indisponíveis: {companyDetailsError}
                     </div>
                   ) : null}
                   {loadingDetails ? (
                     <TableSkeleton />
                   ) : companyDetailsError ? (
-                    <EmptyState text="Não foi possível certificar os algoritmos desta empresa." />
+                    <EmptyState text="Não foi possível certificar os módulos desta empresa." />
                   ) : visibleModules.length ? (
                     <div className="divide-y rounded-md border">
                       {visibleModules.map((module) => {
@@ -2895,10 +2897,11 @@ export function SuperAdminDashboard() {
               <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="text-sm font-medium text-foreground">
-                    Acessos operacionais
+                    Menus e acessos
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Selecione individualmente as ações publicadas pela API.
+                    Selecione individualmente as permissões publicadas em
+                    Módulos pela API.
                   </div>
                 </div>
                 {loadingUserPermissions ? (
@@ -2990,7 +2993,10 @@ export function SuperAdminDashboard() {
                             />
                             <span className="min-w-0">
                               <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
-                                <span>{formatPermissionAction(permission)}</span>
+                                <span>{permission.label}</span>
+                                <Badge variant="outline">
+                                  {formatPermissionAction(permission)}
+                                </Badge>
                                 {permission.unavailable ? (
                                   <Badge variant="outline">Indisponível</Badge>
                                 ) : null}
@@ -3255,9 +3261,9 @@ function CompanyManagementFlow({
     },
     {
       index: "03",
-      label: "Algoritmos",
-      detail: "Analíticos habilitados",
-      count: stats.algorithms,
+      label: "Módulos",
+      detail: "Produtos e acessos habilitados",
+      count: stats.modules,
       icon: CircuitBoard,
       onClick: () => onOpenTab("modules"),
     },
@@ -3671,22 +3677,22 @@ function uniqueRowsById<T extends { id?: string | null }>(rows: T[]) {
   });
 }
 
-function enabledOperationalModuleCount(
+function enabledCompanyModuleCount(
   assignments: CompanyModule[],
   modules: IpxModule[],
 ) {
   const modulesById = new Map(modules.map((module) => [module.id, module]));
-  const enabledFamilies = new Set<AlgorithmModuleFamily>();
+  const enabledModuleIds = new Set<string>();
 
   assignments.forEach((assignment) => {
-    if (!assignment.enabled) return false;
-    const family = algorithmModuleFamily(
-      assignment.module ?? modulesById.get(assignment.module_id) ?? assignment.module_id,
-    );
-    if (family) enabledFamilies.add(family);
+    if (!assignment.enabled) return;
+    const catalogModule =
+      assignment.module ?? modulesById.get(assignment.module_id);
+    if (catalogModule?.active === false) return;
+    if (assignment.module_id) enabledModuleIds.add(assignment.module_id);
   });
 
-  return enabledFamilies.size;
+  return enabledModuleIds.size;
 }
 
 function workerIsOnline(worker: Worker) {
@@ -3732,29 +3738,13 @@ function createPermissionState(
       .filter((permission) => permission.slug && permissionIsEnabled(permission))
       .map((permission) => permission.slug),
   );
-  const grantedModuleIds = new Set(
-    permissions
-      .filter(permissionIsEnabled)
-      .map(getPermissionModuleId)
-      .filter(Boolean),
-  );
-  const hasGranularPermissionMatches = options.some(
-    (option) =>
-      option.grants.some((grant) => grantedPermissionIds.has(grant.id)) ||
-      option.slugs.some((slug) => grantedSlugs.has(slug)),
-  );
-
   return Object.fromEntries(
     options.map((option) => {
       const hasExactGrant =
         option.grants.some((grant) => grantedPermissionIds.has(grant.id)) ||
         option.slugs.some((slug) => grantedSlugs.has(slug));
-      const hasModuleGrant =
-        !hasGranularPermissionMatches &&
-        option.module_id &&
-        grantedModuleIds.has(option.module_id);
 
-      return [option.slug, Boolean(hasExactGrant || hasModuleGrant)];
+      return [option.slug, Boolean(hasExactGrant)];
     }),
   );
 }
@@ -4037,22 +4027,33 @@ function normalizeSlug(value: string) {
     .trim();
 }
 
-function selectVisibleAlgorithmModules(modules: IpxModule[]) {
-  const byFamily = new Map<AlgorithmModuleFamily, IpxModule>();
+function selectVisibleModules(modules: IpxModule[]) {
+  const modulesById = new Map<string, IpxModule>();
 
   modules.forEach((module) => {
-    const family = algorithmModuleFamily(module);
-    if (!family) return;
-
-    const current = byFamily.get(family);
-    if (!current || isBetterAlgorithmModule(module, current, family)) {
-      byFamily.set(family, module);
-    }
+    const id = module.id?.trim();
+    if (!id || !module.name?.trim() || !module.slug?.trim()) return;
+    if (!modulesById.has(id)) modulesById.set(id, module);
   });
 
-  return Array.from(byFamily.entries())
-    .sort(([left], [right]) => algorithmFamilyOrder(left) - algorithmFamilyOrder(right))
-    .map(([, module]) => module);
+  return Array.from(modulesById.values()).sort(compareCatalogModules);
+}
+
+function compareCatalogModules(left: IpxModule, right: IpxModule) {
+  const leftFamily = algorithmModuleFamily(left);
+  const rightFamily = algorithmModuleFamily(right);
+  if (leftFamily && rightFamily) {
+    const familyDifference =
+      algorithmFamilyOrder(leftFamily) - algorithmFamilyOrder(rightFamily);
+    if (familyDifference) return familyDifference;
+  } else if (leftFamily || rightFamily) {
+    return leftFamily ? -1 : 1;
+  }
+
+  return algorithmModuleLabel(left).localeCompare(
+    algorithmModuleLabel(right),
+    "pt-BR",
+  );
 }
 
 function algorithmModuleFamily(
@@ -4087,25 +4088,6 @@ function algorithmFamilyOrder(family: AlgorithmModuleFamily) {
   return family === "counting" ? 0 : 1;
 }
 
-function isBetterAlgorithmModule(
-  candidate: IpxModule,
-  current: IpxModule,
-  family: AlgorithmModuleFamily,
-) {
-  const definition = algorithmModuleDefinitions.find(
-    (item) => item.family === family,
-  );
-  const aliases = definition?.aliases.map(normalizeSlug) ?? [];
-  const candidateSlug = normalizeSlug(candidate.slug);
-  const currentSlug = normalizeSlug(current.slug);
-  const candidateExactSlug = aliases.includes(candidateSlug);
-  const currentExactSlug = aliases.includes(currentSlug);
-
-  if (candidateExactSlug !== currentExactSlug) return candidateExactSlug;
-  if (candidate.active !== current.active) return candidate.active;
-  return candidate.name.localeCompare(current.name, "pt-BR") < 0;
-}
-
 function resolveOperationalPermissionOptions(
   catalog: Permission[],
   modules: IpxModule[],
@@ -4131,14 +4113,14 @@ function resolveOperationalPermissionOptions(
       !id ||
       !moduleId ||
       !slug ||
-      !permissionModule ||
-      !algorithmModuleFamily(permissionModule)
+      !permissionModule
     ) {
       return [];
     }
 
     const action = permission.action?.trim() ?? "";
     const moduleName = algorithmModuleLabel(permissionModule);
+    const knownPermission = operationalPermissionDefinitionForGrant({ slug });
     const grant = {
       id,
       module_id: moduleId,
@@ -4153,8 +4135,10 @@ function resolveOperationalPermissionOptions(
         module_slug: permissionModule.slug,
         slug,
         action,
-        label: action || slug,
-        description: `Permissão publicada pela API para o módulo ${moduleName}.`,
+        label: knownPermission?.label ?? humanizePermissionSlug(slug),
+        description:
+          knownPermission?.description ??
+          `Permissão publicada pela API para o módulo ${moduleName}.`,
         slugs: [slug],
         grants: [grant],
         unavailable: permissionModule.active === false,
@@ -4170,4 +4154,13 @@ function resolveOperationalPermissionOptions(
   });
 
   return Array.from(optionsByPermission.values());
+}
+
+function humanizePermissionSlug(slug: string) {
+  const label = slug
+    .split(/[_\-.]+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+  return label || slug;
 }

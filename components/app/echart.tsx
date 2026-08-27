@@ -40,6 +40,7 @@ import {
   chartValueLabelTopPadding,
   composeChartValueLabelLayout,
 } from "@/lib/chart-value-labels";
+import { synchronizeLineSeriesVisualColors } from "@/lib/chart-series-colors";
 import type { CardChartType } from "@/lib/view-preferences";
 import { cn } from "@/lib/utils";
 
@@ -99,7 +100,9 @@ export function EChart({
   const chartRef = React.useRef<EChartsType | null>(null);
   const themedOption = React.useMemo(() => {
     const interactiveOption = enhanceInteractiveChartOption(
-      applyChartTypePreference(option, chartType),
+      synchronizeLineSeriesVisualColors(
+        applyChartTypePreference(option, chartType),
+      ),
       effectiveTheme === "dark",
       valueLabels,
     );
@@ -919,9 +922,10 @@ export async function renderEChartToDataUrl(
       width,
     });
 
+    const synchronizedOption = synchronizeLineSeriesVisualColors(option);
     chart.setOption(
       {
-        ...option,
+        ...synchronizedOption,
         animation: false,
         animationDuration: 0,
         animationDurationUpdate: 0,

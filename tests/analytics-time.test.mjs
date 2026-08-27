@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
+const echarts = require("echarts");
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const moduleCache = new Map();
 
@@ -25,6 +26,8 @@ const aggregateQueryPlan = loadTypeScriptModule(
   "lib/aggregate-query-plan.ts",
 );
 const chartPalette = loadTypeScriptModule("lib/chart-palette.ts");
+const chartCalendarAxis = loadTypeScriptModule("lib/chart-calendar-axis.ts");
+const chartSeriesColors = loadTypeScriptModule("lib/chart-series-colors.ts");
 const chartValueLabels = loadTypeScriptModule("lib/chart-value-labels.ts");
 const cardLayoutSizing = loadTypeScriptModule("lib/card-layout-sizing.ts");
 const widgetBentoPreviewLayout = loadTypeScriptModule(
@@ -57,6 +60,9 @@ const countingReportViewSettings = loadTypeScriptModule(
   "lib/counting-report-view-settings.ts",
 );
 const currentYearChart = loadTypeScriptModule("lib/current-year-chart.ts");
+const operationalTrendStyle = loadTypeScriptModule(
+  "lib/operational-trend-style.ts",
+);
 const masterCompanyScope = loadTypeScriptModule(
   "lib/master-company-scope.ts",
 );
@@ -2730,7 +2736,7 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     compactToolbarSource,
-    /className="grid min-w-0 grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(212px,1fr\)\][^"]*@md:grid-cols-\[minmax\(120px,160px\)_64px_minmax\(212px,1fr\)\]/,
+    /className="grid min-w-0 grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(248px,1fr\)\][^"]*@md:grid-cols-\[minmax\(120px,160px\)_64px_minmax\(248px,1fr\)\]/,
     "cenário, paleta, horário e ações devem permanecer na mesma linha",
   );
   assert.doesNotMatch(
@@ -2849,7 +2855,7 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     liveToolbar,
-    /className="grid w-full min-w-0 grid-cols-\[80px_minmax\(0,104px\)_minmax\(176px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(176px,1fr\)\]/,
+    /className="grid w-full min-w-0 grid-cols-\[80px_minmax\(0,104px\)_minmax\(212px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(212px,1fr\)\]/,
   );
   assert.doesNotMatch(liveToolbar, /enterprise-horizontal-scroll|overflow-x-auto/);
   assert.doesNotMatch(liveToolbar, /row-start-2/);
@@ -2883,7 +2889,7 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     analysisToolbar,
-    /grid-cols-\[32px_minmax\(32px,1fr\)_140px\][^"]*@2xl:grid-cols-\[300px_minmax\(32px,1fr\)_140px\]/,
+    /grid-cols-\[32px_minmax\(32px,1fr\)_176px\][^"]*@2xl:grid-cols-\[300px_minmax\(32px,1fr\)_176px\]/,
   );
   assert.match(
     analysisToolbar,
@@ -2891,7 +2897,7 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     analysisToolbar,
-    /aria-label="Ações da análise de Contagem"\s+className="col-start-3 row-start-1 flex w-\[140px\][^"]*flex-nowrap/,
+    /aria-label="Ações da análise de Contagem"\s+className="col-start-3 row-start-1 flex w-\[176px\][^"]*flex-nowrap/,
   );
   assert.match(analysisToolbar, /<AnalysisDateRangePicker/);
   assert.match(
@@ -3047,7 +3053,7 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
   );
   assert.match(
     reports,
-    /analysis[\s\S]*?"grid min-w-0 grid-cols-\[minmax\(0,32px\)_minmax\(0,64px\)_minmax\(0,96px\)_minmax\(212px,1fr\)\] items-center gap-1 @4xl:grid-cols-\[300px_minmax\(140px,170px\)_minmax\(180px,220px\)_minmax\(212px,1fr\)\]/,
+    /analysis[\s\S]*?"grid min-w-0 grid-cols-\[minmax\(0,32px\)_minmax\(0,64px\)_minmax\(0,96px\)_minmax\(248px,1fr\)\] items-center gap-1 @4xl:grid-cols-\[300px_minmax\(140px,170px\)_minmax\(180px,220px\)_minmax\(248px,1fr\)\]/,
     "calendário, filtros, horário e ações devem compartilhar uma linha compacta",
   );
   const analysisToolbar = reports.slice(
@@ -3108,7 +3114,7 @@ test("Relatórios de Ocupação mantém filtros e ações na régua compacta", (
   assert.match(source, /<div className="@container rounded-md border/);
   assert.match(
     source,
-    /: "grid min-w-0 grid-cols-\[minmax\(0,64px\)_minmax\(0,96px\)_minmax\(212px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(212px,1fr\)\]"/,
+    /: "grid min-w-0 grid-cols-\[minmax\(0,64px\)_minmax\(0,96px\)_minmax\(248px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(248px,1fr\)\]"/,
   );
   assert.equal(
     (reportControls.match(/className="h-8 w-full min-w-0 bg-card"/g) ?? [])
@@ -3145,7 +3151,7 @@ test("Relatórios de Contagem não duplica o controle do mês aberto", () => {
   );
   assert.match(
     reportsSource,
-    /aria-label="Ações dos relatórios de Contagem"\s+className="col-start-4 row-start-1 flex w-\[212px\][^"]*flex-nowrap/,
+    /aria-label="Ações dos relatórios de Contagem"\s+className="col-start-4 row-start-1 flex w-\[248px\][^"]*flex-nowrap/,
   );
 });
 
@@ -9720,6 +9726,247 @@ test("Total do dia e Tendência 7 x 30 usam exatamente a mesma fonte horária", 
   assert.equal(selectedDay?.total, dayTotal.metrics?.[0]?.value);
 });
 
+test("a cor visual de toda linha acompanha o traço sem depender da posição na paleta", () => {
+  const sourceOption = {
+    color: ["#94A3B8", "#0F766E"],
+    series: [
+      {
+        data: [10, 12],
+        itemStyle: { color: "#94A3B8", opacity: 0.5 },
+        name: "Volume",
+        type: "bar",
+      },
+      {
+        data: [9, 11],
+        itemStyle: { color: "#94A3B8", opacity: 0.8 },
+        lineStyle: { color: "#0F766E", type: "dashed", width: 2 },
+        name: "Média",
+        type: "line",
+      },
+    ],
+  };
+  const synchronized =
+    chartSeriesColors.synchronizeLineSeriesVisualColors(sourceOption);
+
+  assert.notStrictEqual(synchronized, sourceOption);
+  assert.equal(sourceOption.series[1].itemStyle.color, "#94A3B8");
+  assert.deepEqual(synchronized.series[1].itemStyle, {
+    color: "#0F766E",
+    opacity: 0.8,
+  });
+  assert.equal(
+    synchronized.series[1].itemStyle.color,
+    synchronized.series[1].lineStyle.color,
+  );
+  assert.strictEqual(
+    chartSeriesColors.synchronizeLineSeriesVisualColors(synchronized),
+    synchronized,
+    "uma opção já coerente não deve gerar novos objetos a cada renderização",
+  );
+});
+
+test("Tendência 7 x 30 mantém identidade, ordem e legenda idênticas no Ao Vivo e Análises", () => {
+  const buildOperationalTrendOption = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "buildOperationalTrendOption",
+    {
+      DAY_OF_MONTH_AXIS_LABELS: chartCalendarAxis.DAY_OF_MONTH_AXIS_LABELS,
+      OPERATIONAL_TREND_LEGEND_DATA:
+        operationalTrendStyle.OPERATIONAL_TREND_LEGEND_DATA,
+      OPERATIONAL_TREND_SERIES:
+        operationalTrendStyle.OPERATIONAL_TREND_SERIES,
+      buildCalendarAxisLabel: chartCalendarAxis.buildCalendarAxisLabel,
+      buildCalendarMarkAreaForMonth:
+        chartCalendarAxis.buildCalendarMarkAreaForMonth,
+      formatNumber: (value) => String(value),
+      holidayCategoryIndexesForMonth:
+        chartCalendarAxis.holidayCategoryIndexesForMonth,
+      saturdayCategoryIndexesForMonth:
+        chartCalendarAxis.saturdayCategoryIndexesForMonth,
+      sundayCategoryIndexesForMonth:
+        chartCalendarAxis.sundayCategoryIndexesForMonth,
+    },
+  );
+  const liveOption = buildOperationalTrendOption(
+    Array.from({ length: 31 }, (_, index) => ({
+      average30: 80 + index * 0.5,
+      average7: 95 - index * 0.75,
+      bucket: new Date(2026, 7, index + 1),
+      total: 100 + index,
+    })),
+    new Date(2026, 7, 15),
+    "#1267C4",
+  );
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-08-01",
+    "2026-08-31",
+  );
+  assert.ok(period);
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const analysisModel = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data: analysisData({
+      dayRows: Array.from({ length: 31 }, (_, index) =>
+        aggregateRow(
+          `2026-08-${String(index + 1).padStart(2, "0")}`,
+          "line-entry",
+          100 + index,
+        ),
+      ),
+    }),
+    period,
+    scenarios: [entryScenario],
+    widget: analysisWidget("trend", {
+      scenarioIds: [entryScenario.id],
+      selectionMode: "custom",
+    }),
+  });
+  assert.ok(analysisModel.option);
+
+  const expectedNames = [
+    ...operationalTrendStyle.OPERATIONAL_TREND_LEGEND_DATA,
+  ];
+  const average7 = operationalTrendStyle.OPERATIONAL_TREND_SERIES.average7;
+  const average30 = operationalTrendStyle.OPERATIONAL_TREND_SERIES.average30;
+  assert.notEqual(average7.color, average30.color);
+
+  for (const [context, option] of [
+    ["Ao Vivo", liveOption],
+    ["Análises", analysisModel.option],
+  ]) {
+    assert.deepEqual(option.legend.data, expectedNames, `${context}: legenda`);
+    assert.deepEqual(
+      option.series.map((series) => series.name),
+      expectedNames,
+      `${context}: ordem das séries`,
+    );
+    assert.deepEqual(
+      option.color,
+      ["#1267C4", average7.color, average30.color],
+      `${context}: ordem da paleta`,
+    );
+
+    const chart = echarts.init(null, null, {
+      height: 360,
+      renderer: "svg",
+      ssr: true,
+      width: 900,
+    });
+    try {
+      chart.setOption(option);
+      for (const trendSeries of [average7, average30]) {
+        const rawSeries = option.series.find(
+          (series) => series.name === trendSeries.name,
+        );
+        assert.ok(rawSeries, `${context}: ${trendSeries.name}`);
+        assert.equal(rawSeries.itemStyle.color, trendSeries.color);
+        assert.equal(rawSeries.lineStyle.color, trendSeries.color);
+
+        const seriesModel = chart.getModel().getSeriesByName(trendSeries.name)[0];
+        assert.ok(seriesModel, `${context}: modelo ${trendSeries.name}`);
+        const visualColor = seriesModel.getData().getVisual("style")?.fill;
+        const strokeColor = seriesModel.getModel("lineStyle").get("color");
+        assert.equal(
+          String(visualColor).toLowerCase(),
+          String(strokeColor).toLowerCase(),
+          `${context}: o índice de ${trendSeries.name} deve usar a cor da linha`,
+        );
+      }
+    } finally {
+      chart.dispose();
+    }
+  }
+});
+
+test("legendas de Ocupação apontam somente para séries visíveis e com cores canônicas", () => {
+  const denseMarkerSize = () => 6;
+  const palette = occupancyChartPalette.getOccupancyChartPalette("light");
+  const definition = { granularity: "day", resolutionLabel: "Dia" };
+  const points = [
+    { average: 7, current: 8, label: "01/08", minimum: 3, peak: 12 },
+    { average: 8, current: 9, label: "02/08", minimum: 4, peak: 14 },
+  ];
+  const previousPoints = [
+    { average: 6, current: 7, label: "01/07", minimum: 2, peak: 10 },
+    { average: 7, current: 8, label: "02/07", minimum: 3, peak: 11 },
+  ];
+  const visibility = { average: true, minimum: true, peak: true };
+  const limits = { maximum: 15, minimum: 2 };
+  const buildOccupancyChartOption = loadStandaloneFunction(
+    "components/app/occupancy-scenario-dashboard.tsx",
+    "buildOccupancyChartOption",
+    { denseMarkerSize },
+  );
+  const buildOccupancyLineChartOption = loadStandaloneFunction(
+    "components/app/occupancy-scenario-dashboard.tsx",
+    "buildOccupancyLineChartOption",
+  );
+  const buildOccupancyReportChartOption = loadStandaloneFunction(
+    "components/app/occupancy-reports-dashboard.tsx",
+    "buildOccupancyReportChartOption",
+    { denseMarkerSize },
+  );
+  const options = [
+    buildOccupancyChartOption(
+      definition,
+      points,
+      visibility,
+      limits,
+      palette,
+      "bar",
+    ),
+    buildOccupancyLineChartOption(
+      definition,
+      points,
+      visibility,
+      limits,
+      palette,
+    ),
+    buildOccupancyReportChartOption(
+      definition,
+      points,
+      previousPoints,
+      visibility,
+      limits,
+      palette,
+    ),
+  ];
+
+  for (const option of options) {
+    assert.equal(
+      option.legend?.icon,
+      undefined,
+      "a legenda deve preservar o glifo real de linhas, barras e marcadores",
+    );
+    for (const series of option.series) {
+      if (series.type !== "line" || !series.lineStyle?.color) continue;
+      assert.equal(
+        series.itemStyle?.color,
+        series.lineStyle.color,
+        `${series.name}: índice e linha devem compartilhar a mesma cor`,
+      );
+    }
+
+    const legendNames = (option.legend?.data ?? []).map((item) =>
+      typeof item === "string" ? item : item.name,
+    );
+    for (const name of legendNames) {
+      const matchingSeries = option.series.filter(
+        (series) => series.name === name,
+      );
+      assert.equal(
+        matchingSeries.length,
+        1,
+        `${name}: a legenda deve apontar para uma única série`,
+      );
+      assert.notEqual(
+        matchingSeries[0].itemStyle?.color,
+        "transparent",
+        `${name}: a legenda não pode apontar para uma série técnica invisível`,
+      );
+    }
+  }
+});
+
 test("o bucket do dia 22 é invariável ao avançar a âncora para o dia 23", () => {
   const period22 = periodAnalysisModel.resolvePeriodAnalysisRange(
     "2026-07-22",
@@ -11206,8 +11453,14 @@ test("Análises longas consultam dia integral e limitam o detalhe horário", () 
     source,
     /window\.setInterval\(\s*refreshWhenIdle,\s*analysisRangePlan\.refreshIntervalMs/,
   );
-  assert.match(source, /const queryWidgets = React\.useMemo/);
+  assert.match(
+    source,
+    /const queryWidgets = React\.useMemo\(\s*\(\) => orderByCardPreferences\(widgets, preferences\)/,
+  );
   assert.match(source, /queryWidgets\.map\(\(widget\) => \[/);
+  assert.match(source, /models: queryWidgets\.flatMap\(\(widget\) => \{/);
+  assert.match(source, /const model = modelByWidgetId\.get\(widget\.id\)/);
+  assert.doesNotMatch(source, /modelByWidgetId\.get\(widget\.id\)!/);
   assert.match(source, /const MAX_ANALYSIS_DAY_CACHE_ENTRIES = 64/);
   assert.match(
     source,
@@ -11949,6 +12202,15 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
     countingIntelligence.buildAnnualAccumulatedComparisonChartOption(model),
   ];
   for (const option of annualOptions) {
+    for (const lineSeries of option.series.filter(
+      (series) => series.type === "line" && series.lineStyle?.color,
+    )) {
+      assert.equal(
+        lineSeries.itemStyle?.color,
+        lineSeries.lineStyle.color,
+        `${lineSeries.name}: a legenda anual deve usar a cor do traço`,
+      );
+    }
     const originalValueSeries = option.series.filter(
       (series) => series.type === "bar" && series.silent !== true,
     );
@@ -12007,6 +12269,14 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
     2026,
   );
   assert.equal(currentYearOption.series[0].label.rotate, 45);
+  const currentYearAverage = currentYearOption.series.find(
+    (series) => series.type === "line",
+  );
+  assert.ok(currentYearAverage);
+  assert.equal(
+    currentYearAverage.itemStyle.color,
+    currentYearAverage.lineStyle.color,
+  );
 
   const interactiveVertical = enhanceInteractiveChartOption(
     {
@@ -12947,7 +13217,7 @@ test("réguas principais mantêm filtros e ações na mesma linha compacta", () 
 
   assert.match(
     realtimeToolbar,
-    /grid-cols-\[80px_minmax\(0,104px\)_minmax\(176px,1fr\)\]/,
+    /grid-cols-\[80px_minmax\(0,104px\)_minmax\(212px,1fr\)\]/,
   );
   assert.match(
     realtimeToolbar,
@@ -12955,7 +13225,7 @@ test("réguas principais mantêm filtros e ações na mesma linha compacta", () 
   );
   assert.match(
     occupancyToolbar,
-    /grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(212px,1fr\)\]/,
+    /grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(248px,1fr\)\]/,
   );
   assert.match(occupancyToolbar, /<OccupancyPaletteSelect[\s\S]*?compact[\s\S]*?fluid/);
   assert.match(
@@ -12964,7 +13234,7 @@ test("réguas principais mantêm filtros e ações na mesma linha compacta", () 
   );
   assert.match(
     analysisToolbar,
-    /grid-cols-\[32px_minmax\(32px,1fr\)_140px\]/,
+    /grid-cols-\[32px_minmax\(32px,1fr\)_176px\]/,
   );
   assert.match(
     analysisToolbar,

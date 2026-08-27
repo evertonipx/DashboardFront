@@ -26,6 +26,10 @@ import {
   latestHourlyPointHour,
 } from "@/lib/hourly-axis";
 import { buildScenarioCumulativeTotalsOption } from "@/lib/scenario-cumulative-chart";
+import {
+  OPERATIONAL_TREND_LEGEND_DATA,
+  OPERATIONAL_TREND_SERIES,
+} from "@/lib/operational-trend-style";
 import type { PeriodAnalysisScopeOption } from "@/lib/period-analysis-scope";
 import { buildScopeTotalsComparisonOption } from "@/lib/scope-totals-chart";
 import type {
@@ -108,9 +112,6 @@ export type PeriodAnalysisInsight = {
 
 const DEFAULT_COLOR = "#1267C4";
 const MUTED_BASE_COLOR = "#A3AFBF";
-const POSITIVE_COLOR = "#0F766E";
-const NEGATIVE_COLOR = "#C2410C";
-const NEUTRAL_COLOR = "#64748B";
 
 export function buildPeriodAnalysisWidgetModel({
   chartType,
@@ -2065,13 +2066,6 @@ function buildTrendModel(
   const latest = [...trendPoints]
     .reverse()
     .find((point) => point.average7 !== null || point.average30 !== null);
-  const directionColor = (direction: number) =>
-    direction > 0
-      ? POSITIVE_COLOR
-      : direction < 0
-        ? NEGATIVE_COLOR
-        : NEUTRAL_COLOR;
-
   return {
     description: isSingleDayAnalysisPeriod(period)
       ? `Médias móveis no mês até ${formatDate(period.from)}, com 29 dias anteriores de base.`
@@ -2108,11 +2102,12 @@ function buildTrendModel(
     option: {
       color: [
         color,
-        directionColor(direction30),
-        directionColor(direction7),
+        OPERATIONAL_TREND_SERIES.average7.color,
+        OPERATIONAL_TREND_SERIES.average30.color,
       ],
       grid: { bottom: 8, containLabel: true, left: 8, right: 12, top: 52 },
       legend: {
+        data: [...OPERATIONAL_TREND_LEGEND_DATA],
         itemGap: 14,
         itemHeight: 9,
         itemWidth: 14,
@@ -2126,36 +2121,40 @@ function buildTrendModel(
           data: visualTrendPoints.map((point) => point.total),
           itemStyle: { color, opacity: 0.24 },
           markArea: buildCalendarMarkArea(calendarDates),
-          name: "Volume diário",
+          name: OPERATIONAL_TREND_SERIES.volume.name,
           type: "bar",
         },
         {
           connectNulls: false,
-          data: visualTrendPoints.map((point) => point.average30),
+          data: visualTrendPoints.map((point) => point.average7),
+          itemStyle: { color: OPERATIONAL_TREND_SERIES.average7.color },
           lineStyle: {
-            color: directionColor(direction30),
+            color: OPERATIONAL_TREND_SERIES.average7.color,
             opacity: 0.9,
             type: "solid",
             width: 2.5,
           },
-          name: "Média móvel 30 dias",
+          name: OPERATIONAL_TREND_SERIES.average7.name,
           showSymbol: false,
           smooth: 0.18,
           type: "line",
+          z: 4,
         },
         {
           connectNulls: false,
-          data: visualTrendPoints.map((point) => point.average7),
+          data: visualTrendPoints.map((point) => point.average30),
+          itemStyle: { color: OPERATIONAL_TREND_SERIES.average30.color },
           lineStyle: {
-            color: directionColor(direction7),
-            opacity: 0.76,
+            color: OPERATIONAL_TREND_SERIES.average30.color,
+            opacity: 0.8,
             type: "dashed",
-            width: 1.25,
+            width: 1.5,
           },
-          name: "Média móvel 7 dias",
+          name: OPERATIONAL_TREND_SERIES.average30.name,
           showSymbol: false,
           smooth: 0.18,
           type: "line",
+          z: 3,
         },
       ],
       tooltip: {

@@ -5,14 +5,17 @@ import { usePathname, useRouter } from "next/navigation";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/components/app/auth-provider";
-import { hasMasterAccess } from "@/lib/access";
+import { hasMasterAccess, resolveAuthorizedHomePath } from "@/lib/access";
 import {
   canManageCameras,
   canManageLocations,
   canManageOccupancy,
-  canManageScenarios,
+  canManageScenarioCatalogs,
   canManageViews,
   canManageWorkers,
+  canViewCounting,
+  canViewOccupancy,
+  type OperationalModuleFamily,
 } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/types";
 
@@ -28,6 +31,7 @@ type AuthGuardProps = {
   children: React.ReactNode;
   requireManager?: boolean;
   requireMaster?: boolean;
+  requireModule?: OperationalModuleFamily;
   requireResource?: ManagerResource;
 };
 
@@ -35,6 +39,7 @@ export function AuthGuard({
   children,
   requireManager = false,
   requireMaster = false,
+  requireModule,
   requireResource,
 }: AuthGuardProps) {
   const router = useRouter();
@@ -42,6 +47,7 @@ export function AuthGuard({
   const { user, loading, isManager } = useAuth();
   const isMaster = hasMasterAccess(user);
   const hasRequiredResource = canManageResource(user, requireResource);
+  const hasRequiredModule = canViewModule(user, requireModule);
 
   React.useEffect(() => {
     if (loading) return;
@@ -52,7 +58,7 @@ export function AuthGuard({
     }
 
     if (requireMaster && !isMaster) {
-      router.replace(isManager ? "/manager/live" : "/dashboard/live");
+      router.replace(resolveAuthorizedHomePath(user));
       return;
     }
 
@@ -62,9 +68,15 @@ export function AuthGuard({
     }
 
     if (requireResource && !hasRequiredResource) {
-      router.replace(isManager ? "/manager/live" : "/dashboard/live");
+      router.replace(resolveAuthorizedHomePath(user));
+      return;
+    }
+
+    if (requireModule && !hasRequiredModule) {
+      router.replace(resolveAuthorizedHomePath(user));
     }
   }, [
+    hasRequiredModule,
     hasRequiredResource,
     isManager,
     isMaster,
@@ -72,6 +84,7 @@ export function AuthGuard({
     pathname,
     requireManager,
     requireMaster,
+    requireModule,
     requireResource,
     router,
     user,
@@ -82,6 +95,7 @@ export function AuthGuard({
     !user ||
     (requireManager && !isManager) ||
     (requireMaster && !isMaster) ||
+    (Boolean(requireModule) && !hasRequiredModule) ||
     (Boolean(requireResource) && !hasRequiredResource)
   ) {
     return (
@@ -112,10 +126,18 @@ function canManageResource(
     case "occupancy":
       return canManageOccupancy(user);
     case "scenarios":
-      return canManageScenarios(user) || canManageOccupancy(user);
+      return canManageScenarioCatalogs(user);
     case "views":
       return canManageViews(user);
     case "workers":
       return canManageWorkers(user);
   }
+}
+
+function canViewModule(
+  user: CurrentUser | null,
+  module: OperationalModuleFamily | undefined,
+) {
+  if (!module) return true;
+  return module === "counting" ? canViewCounting(user) : canViewOccupancy(user);
 }

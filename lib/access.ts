@@ -1,4 +1,13 @@
-import { canManageWidgets, hasAnyOperationalPermission } from "@/lib/permissions";
+import {
+  canAccessOperationalDashboards,
+  canManageCameras,
+  canManageLocations,
+  canManageScenarioCatalogs,
+  canManageViews,
+  canManageWidgets,
+  canManageWorkers,
+  hasAnyOperationalPermission,
+} from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/types";
 import { isMasterUser } from "@/lib/user-role";
 
@@ -15,6 +24,10 @@ export function hasVisualAdminAccess(user: CurrentUser | null) {
 }
 
 export async function resolvePostLoginPath(user: CurrentUser | null) {
+  return resolveAuthorizedHomePath(user);
+}
+
+export function resolveAuthorizedHomePath(user: CurrentUser | null) {
   if (!user) return "/login";
 
   if (hasMasterAccess(user)) {
@@ -22,7 +35,12 @@ export async function resolvePostLoginPath(user: CurrentUser | null) {
   }
 
   if (hasAnyOperationalPermission(user)) {
-    return "/manager/live";
+    if (canAccessOperationalDashboards(user)) return "/manager/live";
+    if (canManageViews(user)) return "/manager/views";
+    if (canManageWorkers(user)) return "/manager/workers";
+    if (canManageCameras(user)) return "/manager/cameras";
+    if (canManageLocations(user)) return "/manager/locations";
+    if (canManageScenarioCatalogs(user)) return "/manager/scenarios";
   }
 
   return "/dashboard/live";

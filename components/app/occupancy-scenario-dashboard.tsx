@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { AiAnalysisAction } from "@/components/app/ai-analysis-action";
 import {
   CardLayout,
   ReorderModeButton,
@@ -1319,12 +1320,12 @@ export function OccupancyScenarioDashboard() {
             retrying={loadingScenarios || loadingData || refreshing}
           />
         ) : loadingScenarios ? (
-          <div className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(212px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(212px,1fr)] @md:gap-2">
+          <div className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(248px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(248px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(248px,1fr)] @md:gap-2">
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-full" />
             <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
               <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @md:block @lg:w-10 @xl:w-24" />
-              <Skeleton className="h-8 w-[212px] max-w-full shrink-0" />
+              <Skeleton className="h-8 w-[248px] max-w-full shrink-0" />
             </div>
           </div>
         ) : visibleScenarios.length ? (
@@ -1332,7 +1333,7 @@ export function OccupancyScenarioDashboard() {
             <div className="space-y-1">
               <div
                 aria-label="Controles da visão de ocupação"
-                className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(212px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(212px,1fr)] @md:gap-2"
+                className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(248px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(248px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(248px,1fr)] @md:gap-2"
                 role="group"
               >
               <div className="min-w-0">
@@ -1399,6 +1400,16 @@ export function OccupancyScenarioDashboard() {
                       hasIncompleteOccupancyCoverage
                     }
                     payload={occupancyReportPayload}
+                  />
+                  <AiAnalysisAction
+                    disabled={
+                      initialLoading ||
+                      !selectedScenario ||
+                      Boolean(occupancyCertificationError) ||
+                      hasIncompleteOccupancyCoverage
+                    }
+                    payload={occupancyReportPayload}
+                    source={{ module: "occupancy", surface: "live" }}
                   />
                   {canEditVisual ? (
                     <>
@@ -2639,7 +2650,6 @@ function buildOccupancyChartOption(
           : []),
         ...thresholdDefinitions.map((series) => series.name),
       ],
-      icon: "roundRect",
       itemGap: 14,
       itemHeight: 6,
       itemWidth: 9,
@@ -2769,6 +2779,7 @@ function buildOccupancyChartOption(
         emphasis: {
           disabled: true,
         },
+        itemStyle: { color: series.color },
         lineStyle: {
           color: series.color,
           opacity: 0.86,
@@ -2909,6 +2920,7 @@ function buildOccupancyLineChartOption(
   if (limits.minimum !== undefined) {
     series.push({
       data: points.map(() => limits.minimum),
+      itemStyle: { color: palette.minimumLimit },
       lineStyle: { color: palette.minimumLimit, type: "dashed", width: 1.4 },
       name: "Limite mínimo",
       showSymbol: false,
@@ -2920,6 +2932,7 @@ function buildOccupancyLineChartOption(
   if (limits.maximum !== undefined) {
     series.push({
       data: points.map(() => limits.maximum),
+      itemStyle: { color: palette.maximumLimit },
       lineStyle: { color: palette.maximumLimit, type: "dashed", width: 1.4 },
       name: "Limite máximo",
       showSymbol: false,
@@ -2938,7 +2951,6 @@ function buildOccupancyLineChartOption(
     ),
     grid: { bottom: 2, containLabel: true, left: 4, right: 12, top: 42 },
     legend: {
-      icon: "roundRect",
       itemGap: 14,
       itemHeight: 6,
       itemWidth: 9,

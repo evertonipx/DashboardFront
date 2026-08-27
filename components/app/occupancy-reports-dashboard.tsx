@@ -16,6 +16,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { AiAnalysisAction } from "@/components/app/ai-analysis-action";
 import {
   CardLayout,
   ReorderModeButton,
@@ -1360,6 +1361,20 @@ export function OccupancyReportsDashboard({
         }
         payload={occupancyReportPayload}
       />
+      <AiAnalysisAction
+        disabled={
+          chartsPending ||
+          !selectedScope ||
+          Boolean(occupancyCertificationError) ||
+          reportDataCompleteUntil === null
+        }
+        manager={manager}
+        payload={occupancyReportPayload}
+        source={{
+          module: "occupancy",
+          surface: analysis ? "analysis" : "reports",
+        }}
+      />
       {canEditVisual ? (
         <>
           <ReorderModeButton
@@ -1496,8 +1511,8 @@ export function OccupancyReportsDashboard({
           <div
             className={cn(
               analysis
-                ? "grid min-w-0 grid-cols-[minmax(0,32px)_minmax(0,64px)_minmax(0,96px)_minmax(212px,1fr)] items-center gap-1 @4xl:grid-cols-[300px_minmax(140px,170px)_minmax(180px,220px)_minmax(212px,1fr)] @4xl:gap-2"
-                : "grid min-w-0 grid-cols-[minmax(0,64px)_minmax(0,96px)_minmax(212px,1fr)] items-center gap-1 @md:grid-cols-[96px_minmax(120px,1fr)_minmax(212px,1fr)] @md:gap-2 @xl:grid-cols-[120px_200px_minmax(212px,1fr)] @2xl:grid-cols-[132px_220px_minmax(212px,1fr)]",
+                ? "grid min-w-0 grid-cols-[minmax(0,32px)_minmax(0,64px)_minmax(0,96px)_minmax(248px,1fr)] items-center gap-1 @4xl:grid-cols-[300px_minmax(140px,170px)_minmax(180px,220px)_minmax(248px,1fr)] @4xl:gap-2"
+                : "grid min-w-0 grid-cols-[minmax(0,64px)_minmax(0,96px)_minmax(248px,1fr)] items-center gap-1 @md:grid-cols-[96px_minmax(120px,1fr)_minmax(248px,1fr)] @md:gap-2 @xl:grid-cols-[120px_200px_minmax(248px,1fr)] @2xl:grid-cols-[132px_220px_minmax(248px,1fr)]",
             )}
             aria-label={analysis ? "Carregando controles da análise de Ocupação" : undefined}
             role={analysis ? "region" : undefined}
@@ -1513,7 +1528,7 @@ export function OccupancyReportsDashboard({
                 </div>
                 <div className="col-start-4 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
                   <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @sm:block @5xl:w-12" />
-                  <Skeleton className="h-8 w-[212px] shrink-0" />
+                  <Skeleton className="h-8 w-[248px] shrink-0" />
                 </div>
               </>
             ) : (
@@ -1522,7 +1537,7 @@ export function OccupancyReportsDashboard({
                 <Skeleton className="h-8 w-full" />
                 <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
                   <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @lg:block @2xl:w-10 @4xl:w-24" />
-                  <Skeleton className="h-8 w-[212px] max-w-full shrink-0" />
+                  <Skeleton className="h-8 w-[248px] max-w-full shrink-0" />
                 </div>
               </>
             )}
@@ -1537,8 +1552,8 @@ export function OccupancyReportsDashboard({
               }
               className={cn(
                 analysis
-                  ? "grid min-w-0 grid-cols-[minmax(0,32px)_minmax(0,64px)_minmax(0,96px)_minmax(212px,1fr)] items-center gap-1 @4xl:grid-cols-[300px_minmax(140px,170px)_minmax(180px,220px)_minmax(212px,1fr)] @4xl:gap-2"
-                  : "grid min-w-0 grid-cols-[minmax(0,64px)_minmax(0,96px)_minmax(212px,1fr)] items-center gap-1 @md:grid-cols-[96px_minmax(120px,1fr)_minmax(212px,1fr)] @md:gap-2 @xl:grid-cols-[120px_200px_minmax(212px,1fr)] @2xl:grid-cols-[132px_220px_minmax(212px,1fr)]",
+                  ? "grid min-w-0 grid-cols-[minmax(0,32px)_minmax(0,64px)_minmax(0,96px)_minmax(248px,1fr)] items-center gap-1 @4xl:grid-cols-[300px_minmax(140px,170px)_minmax(180px,220px)_minmax(248px,1fr)] @4xl:gap-2"
+                  : "grid min-w-0 grid-cols-[minmax(0,64px)_minmax(0,96px)_minmax(248px,1fr)] items-center gap-1 @md:grid-cols-[96px_minmax(120px,1fr)_minmax(248px,1fr)] @md:gap-2 @xl:grid-cols-[120px_200px_minmax(248px,1fr)] @2xl:grid-cols-[132px_220px_minmax(248px,1fr)]",
               )}
               role="group"
             >
@@ -2739,8 +2754,7 @@ function buildOccupancyReportChartOption(
 
   return {
     color: [
-      palette.rangeStart,
-      ...(showPrevious ? [palette.previousAverage] : []),
+      ...(showPrevious ? [palette.previousRangeFill] : []),
       ...markerDefinitions.map((series) => series.color),
       ...thresholdDefinitions.map((series) => series.color),
     ],
@@ -2754,7 +2768,6 @@ function buildOccupancyReportChartOption(
     legend: legendData.length
       ? {
           data: legendData,
-          icon: "roundRect",
           itemGap: 14,
           itemHeight: 6,
           itemWidth: 9,
@@ -2847,7 +2860,6 @@ function buildOccupancyReportChartOption(
               itemStyle: {
                 color: "transparent",
               },
-              name: "Base comparativa",
               silent: true,
               stack: "previous_occupancy_range",
               tooltip: {
@@ -2936,6 +2948,7 @@ function buildOccupancyReportChartOption(
         emphasis: {
           disabled: true,
         },
+        itemStyle: { color: series.color },
         lineStyle: {
           color: series.color,
           opacity: 0.86,

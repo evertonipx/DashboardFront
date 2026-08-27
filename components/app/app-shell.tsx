@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity,
+  BrainCircuit,
   Building2,
   Camera,
   ChartNoAxesCombined,
@@ -33,6 +34,7 @@ import {
   type MasterCompanyScope,
 } from "@/lib/master-company-scope";
 import {
+  canAccessOperationalDashboards,
   canManageCameras,
   canManageLocations,
   canManageScenarioCatalogs,
@@ -49,16 +51,6 @@ type AppShellProps = {
   description?: string;
 };
 
-const clientNavItems = [
-  { href: "/dashboard/live", label: "Ao Vivo", icon: Activity },
-  {
-    href: "/dashboard/analytics",
-    label: "Análises",
-    icon: ChartNoAxesCombined,
-  },
-  { href: "/dashboard/reports", label: "Relatórios", icon: FileText },
-];
-
 type NavItem = {
   href: string;
   label: string;
@@ -66,14 +58,52 @@ type NavItem = {
   canShow?: (user: CurrentUser | null) => boolean;
 };
 
+const clientNavItems: NavItem[] = [
+  {
+    href: "/dashboard/live",
+    label: "Ao Vivo",
+    icon: Activity,
+    canShow: canAccessOperationalDashboards,
+  },
+  {
+    href: "/dashboard/analytics",
+    label: "Análises",
+    icon: ChartNoAxesCombined,
+    canShow: canAccessOperationalDashboards,
+  },
+  {
+    href: "/dashboard/reports",
+    label: "Relatórios",
+    icon: FileText,
+    canShow: canAccessOperationalDashboards,
+  },
+];
+
 const managerNavItems: NavItem[] = [
-  { href: "/manager/live", label: "Ao Vivo", icon: Activity },
+  {
+    href: "/manager/live",
+    label: "Ao Vivo",
+    icon: Activity,
+    canShow: canAccessOperationalDashboards,
+  },
   {
     href: "/manager/analytics",
     label: "Análises",
     icon: ChartNoAxesCombined,
+    canShow: canAccessOperationalDashboards,
   },
-  { href: "/manager/reports", label: "Relatórios", icon: FileText },
+  {
+    href: "/manager/reports",
+    label: "Relatórios",
+    icon: FileText,
+    canShow: canAccessOperationalDashboards,
+  },
+  {
+    href: "/manager/insights",
+    label: "Configuração IA",
+    icon: BrainCircuit,
+    canShow: hasMasterAccess,
+  },
   {
     href: "/manager/views",
     label: "Visões",
@@ -124,6 +154,9 @@ export function AppShell({
   const [masterScopeReady, setMasterScopeReady] = React.useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
   const companyName = getCompanyDisplayName(user, masterCompanyScope, mode);
+  const visibleClientNavItems = clientNavItems.filter(
+    (item) => !item.canShow || item.canShow(user),
+  );
   const navItems =
     mode === "manager"
       ? [
@@ -131,8 +164,8 @@ export function AppShell({
           ...managerNavItems.filter((item) => !item.canShow || item.canShow(user)),
         ]
       : isMaster
-        ? [masterNavItem, ...clientNavItems]
-        : clientNavItems;
+        ? [masterNavItem, ...visibleClientNavItems]
+        : visibleClientNavItems;
   const pageTitle = title ?? (mode === "manager" ? "Manager" : "Dashboard do cliente");
   const pageDescription =
     description ??
@@ -279,7 +312,7 @@ export function AppShell({
 
         <nav
           className={cn(
-            "space-y-1 px-2 pt-4",
+            "min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pt-4",
             !sidebarCollapsed && "lg:pt-0",
           )}
         >
