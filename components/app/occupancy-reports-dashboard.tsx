@@ -63,6 +63,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import { hasVisualAdminAccess } from "@/lib/access";
+import { AI_INSIGHTS_LIMITS } from "@/lib/ai-insights-contract";
 import {
   aggregateQueryIso,
   endOfAggregateBucket,
@@ -220,6 +221,11 @@ type OccupancyReportState = {
   warning?: string;
 };
 
+type OccupancyAiDailyQueryPlan = {
+  bucketStarts: Date[];
+  chunks: OccupancyReportDefinition[];
+};
+
 type OccupancyReportMetric = {
   average: number | null;
   current: number | null;
@@ -253,6 +259,7 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 const BUCKET_CONCURRENCY = 8;
+const AI_OCCUPANCY_DAILY_CHUNK_DAYS = 62;
 const MAX_CLOSED_SEGMENT_CACHE_ENTRIES = 256;
 const REPORT_REFRESH_MS = 60_000;
 const DEFAULT_OBJECT_CLASS = "person";
@@ -1340,6 +1347,146 @@ export function OccupancyReportsDashboard({
         ? "Análise de Ocupação"
         : "Relatório de Ocupação",
   };
+  const occupancyDailyDefinition = definitions.find(
+    (definition) => definition.id === "occupancy_report_day",
+  );
+  const occupancyDailySegments = occupancyDailyDefinition
+    ? listDefinitionQuerySegments(occupancyDailyDefinition)
+    : [];
+  const occupancyDailyAiBucketStarts = occupancyDailySegments.every(
+    (segment) => segment.granularity === "day",
+  )
+    ? occupancyDailySegments.flatMap((segment) => segment.bucketStarts)
+    : [];
+  const occupancyDailyAiTable = (() => {
+    if (
+      !occupancyDailyDefinition ||
+      !occupancyDailyAiBucketStarts.length
+    ) {
+      return null;
+    }
+    const dailyState = visibleChartData[occupancyDailyDefinition.id];
+    if (!dailyState || dailyState.error || dailyState.warning) return null;
+
+    try {
+      return buildOccupancyAiDailyTable({
+        bucketStarts: occupancyDailyAiBucketStarts,
+        companyTimeZone,
+        points: dailyState.points,
+      });
+    } catch {
+      // A construção definitiva ocorre sob demanda e apresenta um erro no
+      // diálogo da IA, sem permitir que dados auxiliares quebrem o dashboard.
+      return null;
+    }
+  })();
+  // A exportação continua refletindo somente o layout visível. A IA recebe a
+  // série diária completa que já está em memória mesmo quando o respectivo
+  // widget foi ocultado; intervalos consolidados nunca são rotulados como dias.
+  const occupancyAiPayload: ReportPayload = occupancyDailyAiTable
+    ? {
+        ...occupancyReportPayload,
+        subtitle: `Série diária completa: ${occupancyAiDailyPeriodLabel(
+          occupancyDailyAiBucketStarts,
+          companyTimeZone,
+        )}.`,
+        tables: [
+          ...(occupancyReportPayload.tables ?? []),
+          occupancyDailyAiTable,
+        ],
+      }
+    : occupancyReportPayload;
+  const getOccupancyAiPayload = async (
+    signal?: AbortSignal,
+  ): Promise<ReportPayload> => {
+    signal?.throwIfAborted();
+    const scope = selectedScope;
+    const dailyDefinition = occupancyDailyDefinition;
+    if (!scope || !dailyDefinition || !companyScopeId) {
+      throw new Error(
+        "Selecione uma visão de ocupação antes de gerar a análise diária.",
+      );
+    }
+    if (occupancyDailyAiTable) return occupancyAiPayload;
+
+    requireCertifiedRuntimeCompanyTimeZone(companyTimeZoneResolution);
+    const requestedAt = new Date();
+    const requestScopeKey = requestedChartScopeKey;
+    assertOccupancyAiRequestCurrent(
+      requestedChartScopeKeyRef,
+      requestScopeKey,
+    );
+    const openBucket =
+      requestedAt >= dailyDefinition.from && requestedAt < dailyDefinition.to
+        ? startOfCompanyTimeZoneDay(requestedAt, companyTimeZone)
+        : undefined;
+    const dailyPlan = buildOccupancyAiDailyQueryPlan(
+      dailyDefinition,
+      openBucket,
+    );
+    const dailyStates: OccupancyReportState[] = [];
+
+    for (const chunk of dailyPlan.chunks) {
+      signal?.throwIfAborted();
+      assertOccupancyAiRequestCurrent(
+        requestedChartScopeKeyRef,
+        requestScopeKey,
+      );
+      const state = await loadOccupancyReportState(
+        chunk,
+        scope,
+        companyScopeId,
+        companyTimeZone,
+        requestedAt,
+        companyTimeZoneResolution.warning,
+        signal,
+        closedSegmentCacheRef.current,
+      );
+      signal?.throwIfAborted();
+      assertOccupancyAiRequestCurrent(
+        requestedChartScopeKeyRef,
+        requestScopeKey,
+      );
+      if (state.error || state.warning) {
+        throw new Error(
+          `A série diária completa não pôde ser certificada. ${
+            state.error || state.warning
+          }`,
+        );
+      }
+      dailyStates.push(state);
+    }
+
+    const dailyDataCompleteUntil = resolveCertifiedOccupancyDataCutoff(
+      dailyStates,
+    );
+    if (!dailyDataCompleteUntil) {
+      throw new Error(
+        "A série diária foi recebida sem um corte temporal certificado.",
+      );
+    }
+    const dailyTable = buildOccupancyAiDailyTable({
+      bucketStarts: dailyPlan.bucketStarts,
+      companyTimeZone,
+      points: dailyStates.flatMap((state) => state.points),
+    });
+    const currentDataCompleteUntil = occupancyReportPayload.dataCompleteUntil;
+
+    return {
+      ...occupancyReportPayload,
+      dataCompleteUntil:
+        currentDataCompleteUntil &&
+        currentDataCompleteUntil < dailyDataCompleteUntil
+          ? currentDataCompleteUntil
+          : dailyDataCompleteUntil,
+      generatedAt: requestedAt,
+      subtitle: `Série diária completa: ${occupancyAiDailyPeriodLabel(
+        dailyPlan.bucketStarts,
+        companyTimeZone,
+      )}.`,
+      tables: [...(occupancyReportPayload.tables ?? []), dailyTable],
+    };
+  };
   const analysisDateRangeControl = analysis ? (
     <OccupancyDateRangePicker
       key={`${companyScopeId ?? ""}|${user?.id ?? ""}`}
@@ -1368,8 +1515,9 @@ export function OccupancyReportsDashboard({
           Boolean(occupancyCertificationError) ||
           reportDataCompleteUntil === null
         }
+        getPayload={getOccupancyAiPayload}
         manager={manager}
-        payload={occupancyReportPayload}
+        payload={occupancyAiPayload}
         source={{
           module: "occupancy",
           surface: analysis ? "analysis" : "reports",
@@ -3337,6 +3485,167 @@ function occupancyPath(from: Date, to: Date) {
 
 function previousId(id: string) {
   return `${id}__previous`;
+}
+
+function buildOccupancyAiDailyQueryPlan(
+  source: OccupancyReportDefinition,
+  openBucket?: Date,
+): OccupancyAiDailyQueryPlan {
+  const bucketStarts: Date[] = [];
+  let cursor = new Date(source.from);
+
+  while (cursor < source.to) {
+    if (bucketStarts.length >= AI_INSIGHTS_LIMITS.dailyDatasetRows) {
+      throw new RangeError(
+        `O período possui mais de ${AI_INSIGHTS_LIMITS.dailyDatasetRows} dias. Reduza o intervalo antes de gerar a análise da IA.`,
+      );
+    }
+    bucketStarts.push(new Date(cursor));
+    const next = addDays(cursor, 1);
+    if (next <= cursor) {
+      throw new RangeError(
+        "Não foi possível avançar pela série diária de ocupação.",
+      );
+    }
+    cursor = next;
+  }
+
+  if (
+    !bucketStarts.length ||
+    cursor.getTime() !== source.to.getTime()
+  ) {
+    throw new RangeError(
+      "O intervalo de ocupação não corresponde a dias civis completos.",
+    );
+  }
+
+  const chunks: OccupancyReportDefinition[] = [];
+  for (
+    let index = 0;
+    index < bucketStarts.length;
+    index += AI_OCCUPANCY_DAILY_CHUNK_DAYS
+  ) {
+    const chunkStarts = bucketStarts
+      .slice(index, index + AI_OCCUPANCY_DAILY_CHUNK_DAYS)
+      .map((bucket) => new Date(bucket));
+    const from = chunkStarts[0]!;
+    const to =
+      bucketStarts[index + chunkStarts.length] ?? new Date(source.to);
+    const chunkOpenBucket =
+      openBucket && openBucket >= from && openBucket < to
+        ? new Date(openBucket)
+        : undefined;
+
+    chunks.push({
+      bucketStarts: chunkStarts,
+      description:
+        "Série diária carregada sob demanda exclusivamente para a IA Advisor.",
+      from: new Date(from),
+      granularity: "day",
+      id: `${source.id}__ai_daily_${chunks.length + 1}`,
+      label: "Série diária completa",
+      openBucket: chunkOpenBucket,
+      to: new Date(to),
+    });
+  }
+
+  return { bucketStarts, chunks };
+}
+
+function buildOccupancyAiDailyTable({
+  bucketStarts,
+  companyTimeZone,
+  points,
+}: {
+  bucketStarts: Date[];
+  companyTimeZone: string;
+  points: OccupancyReportPoint[];
+}): ReportTable {
+  if (bucketStarts.length > AI_INSIGHTS_LIMITS.dailyDatasetRows) {
+    throw new RangeError(
+      `O período possui ${bucketStarts.length} dias, acima do limite seguro de ${AI_INSIGHTS_LIMITS.dailyDatasetRows} dias por análise.`,
+    );
+  }
+  const dateKeys = bucketStarts.map((bucket) =>
+    companyDateKey(bucket, companyTimeZone),
+  );
+  const expectedDateKeys = new Set(dateKeys);
+  if (expectedDateKeys.size !== dateKeys.length) {
+    throw new Error(
+      "A série diária de ocupação possui datas civis duplicadas no fuso da empresa.",
+    );
+  }
+
+  const pointByDate = new Map<string, OccupancyReportPoint>();
+  for (const point of points) {
+    const bucket = new Date(point.bucket);
+    if (Number.isNaN(bucket.getTime())) {
+      throw new Error("A série diária de ocupação possui um bucket inválido.");
+    }
+    const dateKey = companyDateKey(bucket, companyTimeZone);
+    if (!expectedDateKeys.has(dateKey)) continue;
+    // Chunks não se sobrepõem, mas a chave civil garante deduplicação caso a
+    // API repita uma borda. A observação mais recente prevalece.
+    pointByDate.set(dateKey, point);
+  }
+
+  const missingDates = dateKeys.filter((dateKey) => !pointByDate.has(dateKey));
+  if (missingDates.length) {
+    throw new Error(
+      `A série diária de ocupação não retornou ${missingDates.length} ${
+        missingDates.length === 1 ? "dia esperado" : "dias esperados"
+      } do intervalo.`,
+    );
+  }
+
+  return {
+    columns: [
+      { key: "date", label: "Data", width: 18 },
+      { key: "current", label: "Fechamento", numeric: true, width: 16 },
+      { key: "average", label: "Média", numeric: true, width: 16 },
+      { key: "minimum", label: "Mínimo", numeric: true, width: 16 },
+      { key: "peak", label: "Máximo", numeric: true, width: 16 },
+    ],
+    description:
+      "Um registro por dia civil selecionado, em ordem cronológica e sem amostragem. Valores ausentes permanecem nulos.",
+    rows: dateKeys.map((date) => {
+      const point = pointByDate.get(date)!;
+      return {
+        average: point.average,
+        current: point.current,
+        date,
+        minimum: point.minimum,
+        peak: point.peak,
+      };
+    }),
+    title: "Série diária completa de ocupação",
+  };
+}
+
+function occupancyAiDailyPeriodLabel(
+  bucketStarts: Date[],
+  companyTimeZone: string,
+) {
+  const first = bucketStarts[0];
+  const last = bucketStarts.at(-1);
+  if (!first || !last) {
+    throw new Error("A série diária de ocupação está vazia.");
+  }
+  return `${companyDateKey(first, companyTimeZone)} a ${companyDateKey(
+    last,
+    companyTimeZone,
+  )}`;
+}
+
+function assertOccupancyAiRequestCurrent(
+  currentScopeKeyRef: { readonly current: string },
+  requestedScopeKey: string,
+) {
+  if (currentScopeKeyRef.current !== requestedScopeKey) {
+    throw new Error(
+      "A visão ou o período de ocupação mudou durante a leitura diária. Gere o relatório novamente.",
+    );
+  }
 }
 
 function listBucketStarts(definition: OccupancyReportDefinition) {

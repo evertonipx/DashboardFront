@@ -4,12 +4,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { reconcileCurrentUserWithAccessToken } from "@/lib/access-token-claims";
 import {
   AI_INSIGHTS_LIMITS,
+  AiInsightModuleSchema,
+  AiInsightSurfaceSchema,
   AiInsightsApiResponseSchema,
   AiInsightsConfigurationUpdateSchema,
+  AiInsightsReportSchema,
   AiInsightsRequestSchema,
+  AiInsightsScopedStatusResponseSchema,
   AiInsightsStatusResponseSchema,
   DEFAULT_AI_INSIGHTS_PROMPT,
   type AiInsightsRequest,
+  type AiInsightsReport,
   type AiInsightsStatusResponse,
 } from "@/lib/ai-insights-contract";
 import {
@@ -36,6 +41,11 @@ import {
   toPublicAiInsightsCompanySettings,
   type AiInsightsCompanySettings,
 } from "@/lib/ai-insights-company-settings";
+import {
+  AiInsightsReportStorageError,
+  readLatestAiInsightsReport,
+  saveLatestAiInsightsReport,
+} from "@/lib/ai-insights-report-store";
 import { canViewCounting, canViewOccupancy } from "@/lib/permissions";
 import type {
   CurrentUser,
@@ -77,7 +87,23 @@ export async function GET(request: NextRequest) {
     const settings = await readAiInsightsCompanySettings(
       authentication.companyId,
     );
-    const payload = buildStatusResponse(authentication, settings);
+    const scope = readOptionalReportScope(request);
+    const status = buildStatusResponse(authentication, settings);
+    if (!scope) return jsonResponse(status, 200, requestId);
+
+    let latestReport: AiInsightsReport | null = null;
+    if (status.available) {
+      await assertModuleAccess(authentication, scope.module, request.signal);
+      latestReport = await readLatestAiInsightsReport(
+        authentication.companyId,
+        scope.module,
+        scope.surface,
+      );
+    }
+    const payload = AiInsightsScopedStatusResponseSchema.parse({
+      latestReport,
+      status,
+    });
     return jsonResponse(payload, 200, requestId);
   } catch (error) {
     return routeErrorResponse(error, requestId);
@@ -140,17 +166,11 @@ export async function POST(request: NextRequest) {
       analysisPayload,
       authentication,
     );
-    const authorizedUser = await hydrateOperationalAccess(
+    await assertModuleAccess(
       authentication,
+      boundPayload.snapshot.source.module,
       request.signal,
     );
-    const canViewModule =
-      boundPayload.snapshot.source.module === "counting"
-        ? canViewCounting(authorizedUser)
-        : canViewOccupancy(authorizedUser);
-    if (!canViewModule) {
-      throw new RouteFailure("module_access_denied", 403);
-    }
 
     const capacity = aiInsightsRateLimiter.acquire(
       rateLimitKey(authentication.user.id),
@@ -171,21 +191,43 @@ export async function POST(request: NextRequest) {
       constraints: settings.constraints.trim() || null,
       model: settings.model,
       objective: settings.prompt,
+      requestId,
       safetyUserId: authentication.user.id,
       signal: request.signal,
       snapshot: boundPayload.snapshot,
     });
     const response = AiInsightsApiResponseSchema.parse(result);
+    const report = AiInsightsReportSchema.parse({
+      id: randomUUID(),
+      ...response,
+    });
+    await saveLatestAiInsightsReport(authentication.companyId, report);
+    // Preserve the original POST contract so an older client remains compatible
+    // during rolling deployments. The report id is retrieved through scoped GET.
     return jsonResponse(response, 200, requestId);
   } catch (error) {
     const response = routeErrorResponse(error, requestId);
     if (response.status >= 500) {
-      console.error("[ai-insights] request failed", {
-        code: errorCode(error),
-        durationMs: Date.now() - startedAt,
-        requestId,
-        status: response.status,
-      });
+      const diagnostic =
+        error instanceof AiInsightsServiceError
+          ? {
+              incompleteReason: error.incompleteReason,
+              upstreamCode: error.upstreamCode,
+              upstreamRequestId: error.upstreamRequestId,
+              upstreamStatus: error.upstreamStatus,
+              usage: error.usage,
+            }
+          : null;
+      console.error(
+        "[ai-insights] request failed",
+        JSON.stringify({
+          code: errorCode(error),
+          diagnostic,
+          durationMs: Date.now() - startedAt,
+          requestId,
+          status: response.status,
+        }),
+      );
     }
     return response;
   } finally {
@@ -251,6 +293,18 @@ function buildStatusResponse(
         : runtime.model,
     role,
   });
+}
+
+function readOptionalReportScope(request: NextRequest) {
+  const rawModule = request.nextUrl.searchParams.get("module");
+  const rawSurface = request.nextUrl.searchParams.get("surface");
+  if (rawModule === null && rawSurface === null) return null;
+  const parsedModule = AiInsightModuleSchema.safeParse(rawModule);
+  const surface = AiInsightSurfaceSchema.safeParse(rawSurface);
+  if (!parsedModule.success || !surface.success) {
+    throw new RouteFailure("invalid_report_scope", 400);
+  }
+  return { module: parsedModule.data, surface: surface.data };
 }
 
 function credentialFingerprint(apiKey: string) {
@@ -477,6 +531,22 @@ async function hydrateOperationalAccess(
   };
 }
 
+async function assertModuleAccess(
+  authentication: AuthenticatedRouteContext,
+  module: "counting" | "occupancy",
+  signal: AbortSignal,
+) {
+  const authorizedUser = await hydrateOperationalAccess(
+    authentication,
+    signal,
+  );
+  const allowed =
+    module === "counting"
+      ? canViewCounting(authorizedUser)
+      : canViewOccupancy(authorizedUser);
+  if (!allowed) throw new RouteFailure("module_access_denied", 403);
+}
+
 async function backendFetchJson(
   backendBaseUrl: string,
   pathname: string,
@@ -490,11 +560,18 @@ async function backendFetchJson(
   const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`${backendBaseUrl}${pathname}`, {
-      cache: "no-store",
-      headers: { Authorization: authorization },
-      signal: controller.signal,
-    }).catch(() => null);
+    let response: Response | null = null;
+    try {
+      response = await fetch(`${backendBaseUrl}${pathname}`, {
+        cache: "no-store",
+        headers: { Authorization: authorization },
+        signal: controller.signal,
+      });
+    } catch {
+      if (sourceSignal.aborted) {
+        throw new RouteFailure("request_aborted", 499);
+      }
+    }
     if (!response) return { ok: false as const, status: 0 };
     if (!response.ok) return { ok: false as const, status: response.status };
     const payload = await response.json().catch(() => null);
@@ -586,6 +663,14 @@ function routeErrorResponse(error: unknown, requestId: string) {
       requestId,
     );
   }
+  if (error instanceof AiInsightsReportStorageError) {
+    return errorResponse(
+      "O histórico seguro do IA Advisor está indisponível neste momento.",
+      503,
+      error.code,
+      requestId,
+    );
+  }
   return errorResponse(
     "Não foi possível gerar a análise neste momento.",
     500,
@@ -603,6 +688,21 @@ function serviceErrorMapping(error: AiInsightsServiceError) {
         message: "A análise por IA não está configurada neste ambiente.",
         status: 503,
       };
+    case "connection":
+      return {
+        message: "Não foi possível conectar ao serviço de IA. Tente novamente.",
+        status: 502,
+      };
+    case "content_filtered":
+      return {
+        message: "A análise foi interrompida pelo filtro de conteúdo da IA.",
+        status: 422,
+      };
+    case "context_too_large":
+      return {
+        message: "Os dados desta visão excedem a janela aceita pelo modelo configurado.",
+        status: 422,
+      };
     case "invalid_api_key":
       return {
         message: "A chave da OpenAI é inválida ou não está autorizada.",
@@ -613,10 +713,30 @@ function serviceErrorMapping(error: AiInsightsServiceError) {
         message: "O modelo solicitado não está permitido neste ambiente.",
         status: 400,
       };
+    case "model_incompatible":
+      return {
+        message: "O modelo configurado não aceita o formato seguro exigido pela análise.",
+        status: 422,
+      };
+    case "model_unavailable":
+      return {
+        message: "O modelo configurado não está disponível para esta chave ou projeto.",
+        status: 422,
+      };
+    case "output_limit":
+      return {
+        message: "A IA atingiu o limite de geração antes de concluir a análise.",
+        status: 502,
+      };
+    case "quota_exceeded":
+      return {
+        message: "A cota ou o faturamento da OpenAI não permite gerar esta análise.",
+        status: 422,
+      };
     case "rate_limited":
       return {
-        message: "O serviço de IA está temporariamente indisponível.",
-        status: 503,
+        message: "O limite temporário do serviço de IA foi atingido.",
+        status: 429,
       };
     case "timeout":
       return {
@@ -662,6 +782,7 @@ function publicRouteErrorMessage(code: string) {
     empty_body: "A captura está vazia.",
     invalid_json: "A captura contém JSON inválido.",
     invalid_payload: "A captura não segue o contrato esperado.",
+    invalid_report_scope: "O módulo ou a tela solicitada para a análise é inválido.",
     invalid_configuration: "A configuração dos Insights IA é inválida.",
     invalid_body: "Não foi possível ler a captura.",
     request_aborted: "A solicitação foi cancelada.",
@@ -718,7 +839,8 @@ function errorCode(error: unknown) {
   if (
     error instanceof RouteFailure ||
     error instanceof AiInsightsServiceError ||
-    error instanceof AiInsightsCompanySettingsStorageError
+    error instanceof AiInsightsCompanySettingsStorageError ||
+    error instanceof AiInsightsReportStorageError
   ) {
     return error.code;
   }

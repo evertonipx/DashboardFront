@@ -21,6 +21,10 @@ tsconfig.tsbuildinfo
 .ipxdata/ai-insights-config.v1.key
 .ipxdata/ai-insights-config.v1.lock
 .ipxdata/ai-insights-config.v1.*.tmp
+.ipxdata/ai-insights-reports.v1.json
+.ipxdata/ai-insights-reports.v1.key
+.ipxdata/ai-insights-reports.v1.lock
+.ipxdata/ai-insights-reports.v1.*.tmp
 
 .DS_Store
 Thumbs.db

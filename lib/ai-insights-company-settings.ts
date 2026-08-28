@@ -17,7 +17,7 @@ import {
 import type { CurrentUser } from "@/lib/types";
 
 export const AI_INSIGHTS_COMPANY_PROMPT_MAX_LENGTH = 4_000;
-export const AI_INSIGHTS_COMPANY_CONSTRAINTS_MAX_LENGTH = 2_000;
+export const AI_INSIGHTS_COMPANY_CONSTRAINTS_MAX_LENGTH = 24_000;
 
 const STORE_FORMAT = "ipxdata-ai-insights-company-settings";
 const STORE_VERSION = 1;

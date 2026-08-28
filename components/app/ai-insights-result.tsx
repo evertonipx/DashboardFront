@@ -41,10 +41,10 @@ export function AiInsightsLoading() {
         <CardHeader>
           <div className="flex items-center gap-2 text-sm font-medium text-primary">
             <Loader2 className="h-4 w-4 animate-spin" />
-            Cruzando tendências e evidências
+            Lendo a série completa e os comparativos
           </div>
           <CardDescription>
-            A IA está estruturando um plano mensurável a partir desta visão.
+            A IA está examinando os dias disponíveis e vinculando cada medida a evidências numéricas.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -106,22 +106,24 @@ export function AiInsightsResult({
     (left, right) =>
       PRIORITY_ORDER[left.priority] - PRIORITY_ORDER[right.priority],
   );
+  const primaryAction = actions[0] ?? null;
+  const hasMaterialPremises =
+    result.dataQuality.status !== "suficiente" ||
+    result.dataQuality.notes.length > 0 ||
+    result.questions.length > 0;
 
   return (
     <div className="min-w-0 space-y-4">
       <Card className="overflow-hidden border-primary/20 shadow-none">
         <CardHeader className="border-b border-border bg-primary/[0.035] p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle
-              ref={headingRef}
-              tabIndex={-1}
-              className="flex items-center gap-2 text-base focus:outline-none"
-            >
-              <Sparkles className="h-4 w-4 text-primary" />
-              Diagnóstico executivo
-            </CardTitle>
-            <DataQualityBadge status={result.dataQuality.status} />
-          </div>
+          <CardTitle
+            ref={headingRef}
+            tabIndex={-1}
+            className="flex items-center gap-2 text-base focus:outline-none"
+          >
+            <Sparkles className="h-4 w-4 text-primary" />
+            Direção recomendada
+          </CardTitle>
           <CardDescription>
             {moduleLabel(result.source.module)} · {surfaceLabel(result.source.surface)} · {result.period.label}
           </CardDescription>
@@ -130,19 +132,17 @@ export function AiInsightsResult({
           <p className="whitespace-pre-line text-sm leading-6 text-foreground">
             {result.summary}
           </p>
-          {result.dataQuality.notes.length ? (
-            <div className="rounded-md border border-border bg-muted/25 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Qualidade e limites dos dados
+          {primaryAction ? (
+            <div className="rounded-md border border-primary/20 bg-primary/[0.045] p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-primary">
+                Próximo movimento
               </p>
-              <ul className="mt-2 space-y-1 text-xs leading-5 text-muted-foreground">
-                {result.dataQuality.notes.map((note, index) => (
-                  <li key={`${index}-${note}`} className="flex items-start gap-2">
-                    <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-muted-foreground" />
-                    <span>{note}</span>
-                  </li>
-                ))}
-              </ul>
+              <p className="mt-1 text-sm font-semibold leading-5 text-foreground">
+                {primaryAction.title}
+              </p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                {primaryAction.expectedEffect} · Validar em {primaryAction.measurementWindow}.
+              </p>
             </div>
           ) : null}
         </CardContent>
@@ -152,7 +152,7 @@ export function AiInsightsResult({
         <section aria-labelledby="ai-findings-heading">
           <div className="mb-2 flex items-center justify-between gap-3">
             <h3 id="ai-findings-heading" className="text-sm font-semibold text-foreground">
-              Evidências e oportunidades
+              Oportunidades de resultado
             </h3>
             <Badge variant="outline">{result.findings.length}</Badge>
           </div>
@@ -168,15 +168,20 @@ export function AiInsightsResult({
                   </div>
                   <div>
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      Evidência
+                      Sinal observado
                     </p>
                     <p className="mt-1 text-sm leading-5 text-foreground">
                       {finding.evidence}
                     </p>
                   </div>
-                  <p className="text-xs leading-5 text-muted-foreground">
-                    {finding.interpretation}
-                  </p>
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      O que isso abre para o próximo ciclo
+                    </p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {finding.interpretation}
+                    </p>
+                  </div>
                   {finding.widget ? (
                     <Badge variant="secondary" className="max-w-full truncate" title={finding.widget}>
                       {finding.widget}
@@ -193,10 +198,10 @@ export function AiInsightsResult({
         <div className="mb-2 flex items-center justify-between gap-3">
           <div>
             <h3 id="ai-actions-heading" className="text-sm font-semibold text-foreground">
-              Plano de ação priorizado
+              Plano para capturar o resultado
             </h3>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Valide o impacto por experimento e acompanhamento do KPI.
+              O que executar agora, como medir e quando escalar.
             </p>
           </div>
           <Badge variant="outline">{actions.length}</Badge>
@@ -217,12 +222,17 @@ export function AiInsightsResult({
                         </h4>
                         <PriorityBadge value={action.priority} />
                       </div>
-                      <p className="text-sm leading-6 text-muted-foreground">
-                        {action.whyNow}
-                      </p>
                       <div>
                         <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                          Como executar
+                          Por que pode mover o resultado
+                        </p>
+                        <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                          {action.whyNow}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          Execução
                         </p>
                         <ol className="mt-2 space-y-2">
                           {action.steps.map((step, stepIndex) => (
@@ -238,7 +248,7 @@ export function AiInsightsResult({
                       {action.risks.length ? (
                         <div className="rounded-md border border-amber-200 bg-amber-50/70 p-3 dark:border-amber-400/20 dark:bg-amber-400/[0.07]">
                           <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">
-                            Cuidados
+                            Condições para funcionar
                           </p>
                           <p className="mt-1 text-xs leading-5 text-amber-900/80 dark:text-amber-100/75">
                             {action.risks.join(" · ")}
@@ -248,7 +258,7 @@ export function AiInsightsResult({
                     </div>
                     <div className="min-w-0 border-t border-border bg-muted/20 p-4 lg:border-l lg:border-t-0">
                       <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                        Resultado e medição
+                        Impacto e meta
                       </p>
                       <p className="mt-2 text-sm font-medium leading-5 text-foreground">
                         {action.expectedEffect}
@@ -260,14 +270,14 @@ export function AiInsightsResult({
                         {action.baseline || action.target ? (
                           <MetricRow
                             icon={ArrowRight}
-                            label="Baseline → meta"
+                            label="Ponto de partida → meta"
                             value={`${action.baseline ?? "A medir"} → ${action.target ?? "Definir no piloto"}`}
                           />
                         ) : null}
-                        <MetricRow icon={CalendarClock} label="Janela" value={action.measurementWindow} />
+                        <MetricRow icon={CalendarClock} label="Prazo de validação" value={action.measurementWindow} />
                         <MetricRow icon={CircleGauge} label="Esforço" value={capitalize(action.effort)} />
                         {action.owner ? (
-                          <MetricRow icon={Target} label="Responsável" value={action.owner} />
+                          <MetricRow icon={Target} label="Dono sugerido" value={action.owner} />
                         ) : null}
                       </dl>
                     </div>
@@ -285,22 +295,39 @@ export function AiInsightsResult({
         )}
       </section>
 
-      {result.questions.length ? (
-        <Card className="shadow-none">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Dados que aumentariam a precisão</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ul className="grid gap-2 text-sm leading-5 text-muted-foreground md:grid-cols-2">
-              {result.questions.map((question, index) => (
-                <li key={`${index}-${question}`} className="flex items-start gap-2">
-                  <Lightbulb className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                  <span>{question}</span>
-                </li>
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
+      {hasMaterialPremises ? (
+        <details className="rounded-md border border-border bg-muted/15 px-4 py-3 text-sm">
+          <summary className="cursor-pointer font-medium text-foreground">
+            Base e premissas
+          </summary>
+          <div className="mt-3 space-y-3 text-xs leading-5 text-muted-foreground">
+            {result.dataQuality.notes.length ? (
+              <ul className="space-y-1">
+                {result.dataQuality.notes.map((note, index) => (
+                  <li key={`${index}-${note}`} className="flex items-start gap-2">
+                    <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-muted-foreground" />
+                    <span>{note}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {result.questions.length ? (
+              <div>
+                <p className="font-semibold text-foreground">
+                  O que destrava a próxima decisão
+                </p>
+                <ul className="mt-1 grid gap-1 md:grid-cols-2">
+                  {result.questions.map((question, index) => (
+                    <li key={`${index}-${question}`} className="flex items-start gap-2">
+                      <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                      <span>{question}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        </details>
       ) : null}
 
       <p className="px-1 text-[11px] leading-5 text-muted-foreground">
@@ -330,20 +357,6 @@ function MetricRow({
   );
 }
 
-function DataQualityBadge({
-  status,
-}: {
-  status: AiInsightsResponse["dataQuality"]["status"];
-}) {
-  if (status === "suficiente") {
-    return <Badge variant="success">Dados suficientes</Badge>;
-  }
-  if (status === "parcial") {
-    return <Badge variant="warning">Dados parciais</Badge>;
-  }
-  return <Badge variant="destructive">Dados insuficientes</Badge>;
-}
-
 function ConfidenceBadge({
   value,
 }: {
@@ -358,7 +371,7 @@ function ConfidenceBadge({
         value === "baixa" && "border-amber-300 text-amber-700 dark:border-amber-400/30 dark:text-amber-300",
       )}
     >
-      Confiança {value}
+      Força do sinal · {value}
     </Badge>
   );
 }

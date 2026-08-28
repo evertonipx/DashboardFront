@@ -3659,7 +3659,8 @@ export function RealtimeDashboard({
     };
   }
 
-  async function buildConfiguredLiveReportPayload() {
+  async function buildConfiguredLiveReportPayload(signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const chartByCardId = new Map(configuredLiveChartEntries);
     if (
       visibleLiveCardIds.includes(LIVE_DAY_MINUTES_ID) &&
@@ -3699,6 +3700,7 @@ export function RealtimeDashboard({
               liveComparisonHourlySource,
               companyTimeZone,
               companyScopeId,
+              { signal },
             );
             const reportChart = buildScenarioComparisonReportChart({
               definition,
@@ -3716,6 +3718,7 @@ export function RealtimeDashboard({
               ),
             });
           } catch (error) {
+            signal?.throwIfAborted();
             const detail =
               error instanceof Error
                 ? error.message
@@ -3726,6 +3729,7 @@ export function RealtimeDashboard({
           }
         }),
     );
+    signal?.throwIfAborted();
 
     return composeLiveReportPayload(
       visibleLiveCardIds
@@ -3734,6 +3738,74 @@ export function RealtimeDashboard({
           Boolean(chart),
         ),
     );
+  }
+
+  async function buildAiLiveReportPayload(signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const payload = await buildConfiguredLiveReportPayload(signal);
+    signal?.throwIfAborted();
+    if (!selectedScope) {
+      throw new Error(
+        "Selecione uma visão para montar a série diária completa da IA.",
+      );
+    }
+    if (currentMonthDayState?.error) {
+      throw new Error(
+        `A série diária completa não está disponível: ${currentMonthDayState.error}`,
+      );
+    }
+    if (currentMonthDayState?.granularity !== "day") {
+      throw new Error(
+        "A base diária certificada do mês atual não está disponível para a IA.",
+      );
+    }
+
+    const dailyDefinition = buildCurrentMonthDaysDefinition(clock);
+    const dailyFrom = dailyDefinition.from;
+    const dailyTo = dailyDefinition.to;
+    const dayCount = requireRealtimeAiDailyRangeWithinLimit(
+      dailyFrom,
+      dailyTo,
+    );
+    const dailyPoints = buildScopePoints(
+      dailyDefinition,
+      currentMonthDayRows,
+      selectedScope,
+    );
+    if (dailyPoints.length !== dayCount) {
+      throw new Error(
+        "A série diária completa do Ao Vivo não pôde ser reconciliada para a IA.",
+      );
+    }
+
+    const periodLabel = `${formatRealtimeCivilDate(dailyFrom)} a ${formatRealtimeCivilDate(addDays(dailyTo, -1))}`;
+    return {
+      ...payload,
+      context: [
+        `Período civil analisado: ${periodLabel}`,
+        ...(payload.context ?? []),
+      ],
+      tables: [
+        ...(payload.tables ?? []),
+        {
+          columns: [
+            { key: "date", label: "Data", width: 24 },
+            {
+              key: "total",
+              label: "Fluxo total atual",
+              numeric: true,
+              width: 22,
+            },
+          ],
+          description: `Base diária canônica completa da visão ${selectedScope.name} em ${periodLabel}; dias sem registros permanecem com total zero.`,
+          rows: dailyPoints.map((point) => ({
+            date: formatRealtimeCivilDate(new Date(point.bucket)),
+            total: point.total,
+          })),
+          title: "Série diária canônica da Contagem",
+        },
+      ],
+    } satisfies ReportPayload;
   }
 
   const liveReportPayload = composeLiveReportPayload(
@@ -3908,7 +3980,7 @@ export function RealtimeDashboard({
                       Boolean(liveDataCertificationError) ||
                       Boolean(liveAnnualComparisonError)
                     }
-                    getPayload={buildConfiguredLiveReportPayload}
+                    getPayload={buildAiLiveReportPayload}
                     manager={manager}
                     payload={liveReportPayload}
                     source={{ module: "counting", surface: "live" }}
@@ -8969,6 +9041,34 @@ function realtimeReportDateSlug(value: Date) {
     String(value.getHours()).padStart(2, "0"),
     String(value.getMinutes()).padStart(2, "0"),
   ].join("-");
+}
+
+function formatRealtimeCivilDate(value: Date) {
+  return [
+    value.getFullYear(),
+    String(value.getMonth() + 1).padStart(2, "0"),
+    String(value.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function requireRealtimeAiDailyRangeWithinLimit(from: Date, to: Date) {
+  let cursor = startOfDay(from);
+  let dayCount = 0;
+
+  while (cursor < to) {
+    dayCount += 1;
+    if (dayCount > MAX_REALTIME_BUCKETS) {
+      throw new RangeError(
+        `O período possui mais de ${formatNumber(MAX_REALTIME_BUCKETS)} dias. Reduza a consulta para gerar uma análise diária completa, sem amostragem.`,
+      );
+    }
+    cursor = addDays(cursor, 1);
+  }
+
+  if (!dayCount) {
+    throw new RangeError("O período diário da análise está vazio.");
+  }
+  return dayCount;
 }
 
 function daysInCalendarMonth(date: Date) {

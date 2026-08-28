@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
+  FileUp,
   KeyRound,
   Loader2,
   RefreshCw,
@@ -82,6 +83,8 @@ const LEGACY_PROMPT_SCOPES: ReadonlyArray<{
   { module: "occupancy", surface: "reports" },
 ];
 
+const AI_INSIGHTS_CONTEXT_FILE_MAX_BYTES = 64 * 1024;
+
 export function AiInsightsDashboard() {
   const { user } = useAuth();
   const userId = user?.id ?? "";
@@ -98,6 +101,7 @@ export function AiInsightsDashboard() {
   const [legacyConfigurationFound, setLegacyConfigurationFound] =
     React.useState(false);
   const requestSequence = React.useRef(0);
+  const contextFileInputRef = React.useRef<HTMLInputElement>(null);
   const configured = status?.configuration;
   const apiKeyError = apiKey && !AiInsightsApiKeySchema.safeParse(apiKey).success
     ? "Use a chave completa, sem espaços, entre 20 e 512 caracteres."
@@ -260,6 +264,44 @@ export function AiInsightsDashboard() {
     setConfirmingRemoval(false);
   }
 
+  async function importStrategicContext(
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith(".txt")) {
+      setError("Selecione um arquivo de texto no formato .txt.");
+      return;
+    }
+    if (file.size > AI_INSIGHTS_CONTEXT_FILE_MAX_BYTES) {
+      setError("O arquivo de contexto deve ter no máximo 64 KB.");
+      return;
+    }
+
+    try {
+      const content = (await file.text()).replace(/^\uFEFF/, "").trim();
+      if (!content) {
+        setError("O arquivo selecionado está vazio.");
+        return;
+      }
+      if (content.length > AI_INSIGHTS_CONFIGURATION_LIMITS.constraints) {
+        setError(
+          `O conteúdo excede ${AI_INSIGHTS_CONFIGURATION_LIMITS.constraints.toLocaleString("pt-BR")} caracteres. Resuma ou divida o material antes de importar.`,
+        );
+        return;
+      }
+
+      updateForm("constraints", content);
+      setAnnouncement("Contexto estratégico importado. Salve a configuração para aplicá-lo.");
+      toast.success("Contexto importado. Revise e salve a configuração.");
+    } catch {
+      setError("Não foi possível ler o arquivo de contexto.");
+    }
+  }
+
   if (loading) return <ConfigurationSkeleton />;
 
   if (error && !form) {
@@ -408,7 +450,7 @@ export function AiInsightsDashboard() {
             <CardHeader className="border-b border-border p-4">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <Bot className="h-4 w-4 text-primary" />
-                Diretriz da análise
+                Diretriz e contexto da análise
               </CardTitle>
               <CardDescription>
                 Este prompt roda por trás do botão. O usuário final não pode visualizá-lo nem alterá-lo.
@@ -433,11 +475,35 @@ export function AiInsightsDashboard() {
                 />
               </div>
               <div className="space-y-1.5">
-                <div className="flex min-w-0 items-center justify-between gap-3">
-                  <Label htmlFor="ai-insights-constraints">Restrições operacionais</Label>
-                  <span className="text-[11px] tabular-nums text-muted-foreground">
-                    {form.constraints.length}/{AI_INSIGHTS_CONFIGURATION_LIMITS.constraints}
-                  </span>
+                <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                  <Label htmlFor="ai-insights-constraints">
+                    Contexto estratégico da empresa
+                  </Label>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] tabular-nums text-muted-foreground">
+                      {form.constraints.length}/{AI_INSIGHTS_CONFIGURATION_LIMITS.constraints}
+                    </span>
+                    <input
+                      ref={contextFileInputRef}
+                      type="file"
+                      accept=".txt,text/plain"
+                      className="sr-only"
+                      tabIndex={-1}
+                      onChange={(event) => void importStrategicContext(event)}
+                      disabled={saving}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8"
+                      onClick={() => contextFileInputRef.current?.click()}
+                      disabled={saving}
+                    >
+                      <FileUp className="h-3.5 w-3.5" />
+                      Importar .txt
+                    </Button>
+                  </div>
                 </div>
                 <Textarea
                   id="ai-insights-constraints"
@@ -445,9 +511,12 @@ export function AiInsightsDashboard() {
                   onChange={(event) => updateForm("constraints", event.target.value)}
                   maxLength={AI_INSIGHTS_CONFIGURATION_LIMITS.constraints}
                   disabled={saving}
-                  className="min-h-[96px] resize-y leading-5"
-                  placeholder="Ex.: respeitar capacidade, orçamento e equipe atual; priorizar testes de baixo risco."
+                  className="min-h-[180px] resize-y leading-5"
+                  placeholder="Registre aprendizados históricos, eventos, públicos e hipóteses da empresa. Identifique datas e marque claramente o que foi realizado, planejado ou projetado."
                 />
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  O conteúdo fica cifrado e isolado na empresa selecionada. Ele orienta hipóteses e ações futuras, mas não substitui as medições certificadas da visão.
+                </p>
               </div>
             </CardContent>
           </Card>

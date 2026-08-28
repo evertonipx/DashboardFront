@@ -155,6 +155,7 @@ import {
 } from "@/lib/period-analysis-widgets";
 import type { ReportPayload } from "@/lib/report-export";
 import {
+  buildCombinedScenarioPoints,
   formatOccupancyStartHour,
   scenarioSelectionSummary,
   type ScenarioAnalyticsGranularity,
@@ -181,6 +182,7 @@ type PeriodAnalysisDashboardProps = {
 };
 
 const MINUTE_MS = 60_000;
+const MAX_AI_DAILY_ROWS = 2_000;
 const MAX_ANALYSIS_MINUTE_BUCKETS = 20_000;
 const MAX_ANALYSIS_DAY_CACHE_ENTRIES = 64;
 const DEFAULT_METRIC_TYPE = "count";
@@ -1187,6 +1189,74 @@ export function PeriodAnalysisDashboard({
     timeZone: companyTimeZone,
   });
 
+  function buildAiPeriodAnalysisPayload(): ReportPayload {
+    if (data.day.error) {
+      throw new Error(
+        `A série diária completa não está disponível: ${data.day.error}`,
+      );
+    }
+
+    const dataCompleteUntil = periodAnalysisDataCompleteUntil(
+      period,
+      new Date(),
+    );
+    const dailyTo = new Date(
+      Math.min(
+        period.to.getTime(),
+        addDays(startOfDay(dataCompleteUntil), 1).getTime(),
+      ),
+    );
+    const dayCount = requireAiDailyRangeWithinLimit(period.from, dailyTo);
+    const dailyPoints = buildCombinedScenarioPoints({
+      from: period.from,
+      granularity: "day",
+      includeOverlappingSourceBuckets:
+        data.day.partialBoundariesReconciled === true,
+      rows: data.day.rows,
+      scenarios,
+      sourceGranularity: data.day.granularity,
+      to: dailyTo,
+    });
+
+    if (dailyPoints.length !== dayCount) {
+      throw new Error(
+        "A série diária completa não pôde ser reconciliada para a análise de IA.",
+      );
+    }
+
+    const dailyPeriod = formatPeriodAnalysisRange({
+      from: period.from,
+      to: dailyTo,
+    });
+    return {
+      ...reportPayload,
+      context: [
+        `Período civil analisado: ${dailyPeriod}`,
+        ...(reportPayload.context ?? []),
+      ],
+      tables: [
+        ...(reportPayload.tables ?? []),
+        {
+          columns: [
+            { key: "date", label: "Data", width: 24 },
+            {
+              key: "total",
+              label: "Fluxo total atual",
+              numeric: true,
+              width: 22,
+            },
+          ],
+          description: `Base diária canônica completa de todos os cenários em ${dailyPeriod}; dias sem registros permanecem com total zero.`,
+          rows: dailyPoints.map((point, index) => ({
+            date: formatFileDate(addDays(startOfDay(period.from), index)),
+            total: point.total,
+          })),
+          title: "Série diária canônica da Contagem",
+        },
+      ],
+    };
+  }
+
   function commitAnalysisSettings(nextSettings: PeriodAnalysisSettings) {
     const requestedFrom =
       nextSettings.mode === "day"
@@ -1548,6 +1618,7 @@ export function PeriodAnalysisDashboard({
                   Boolean(analysisCertificationError)
                 }
                 manager={manager}
+                getPayload={buildAiPeriodAnalysisPayload}
                 payload={reportPayload}
                 source={{ module: "counting", surface: "analysis" }}
               />
@@ -3097,6 +3168,10 @@ function startOfHour(date: Date) {
   return startOfAggregateBucket(date, "hour");
 }
 
+function startOfDay(date: Date) {
+  return startOfAggregateBucket(date, "day");
+}
+
 function addMinutes(date: Date, amount: number) {
   return new Date(date.getTime() + amount * MINUTE_MS);
 }
@@ -3117,6 +3192,26 @@ function addDays(date: Date, amount: number) {
     isDayBoundary ? 0 : date.getSeconds(),
     isDayBoundary ? 0 : date.getMilliseconds(),
   );
+}
+
+function requireAiDailyRangeWithinLimit(from: Date, to: Date) {
+  let cursor = startOfDay(from);
+  let dayCount = 0;
+
+  while (cursor < to) {
+    dayCount += 1;
+    if (dayCount > MAX_AI_DAILY_ROWS) {
+      throw new RangeError(
+        `O período possui mais de ${formatNumber(MAX_AI_DAILY_ROWS)} dias. Reduza a consulta para gerar uma análise diária completa, sem amostragem.`,
+      );
+    }
+    cursor = addDays(cursor, 1);
+  }
+
+  if (!dayCount) {
+    throw new RangeError("O período diário da análise está vazio.");
+  }
+  return dayCount;
 }
 
 function periodAnalysisComparisonSeriesCount(

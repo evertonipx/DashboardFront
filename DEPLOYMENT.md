@@ -18,6 +18,8 @@ Este projeto e um frontend Next.js. Em producao ele atende o navegador e faz pro
 - `.ipxdata/dashboard-views.json`: layouts salvos de cards do dashboard.
 - `.ipxdata/ai-insights-config.v1.json`: configuracoes empresariais cifradas de IA.
 - `.ipxdata/ai-insights-config.v1.key`: chave local de cifragem; preservar junto ao volume e nunca distribuir publicamente.
+- `.ipxdata/ai-insights-reports.v1.json`: ultimo relatorio do IA Advisor por empresa, modulo e tela, cifrado no servidor.
+- `.ipxdata/ai-insights-reports.v1.key`: chave de cifragem do historico; preservar junto ao arquivo e ao backup.
 
 ## Instalacao em outro computador
 
@@ -61,11 +63,13 @@ A credencial e write-only: o `PUT /api/v1/ai/insights` aceita uma substituicao
 somente de um superadmin autenticado, mas nenhum `GET` retorna a chave. O arquivo
 `.ipxdata/ai-insights-config.v1.json` guarda o documento cifrado com AES-256-GCM;
 a chave local de cifragem fica separada em
-`.ipxdata/ai-insights-config.v1.key`. Ambos devem permanecer fora de commits,
-logs, capturas e pacotes publicos. O volume precisa ser persistente, protegido e
-incluido no backup do cliente. A perda do arquivo `.key` torna a configuracao
-ilegivel. Use HTTPS, chave de projeto restrita, limites de gasto e rotacao
-periodica. Para colocar esses dois arquivos em outro volume, defina
+`.ipxdata/ai-insights-config.v1.key`. O ultimo relatorio compartilhado usa o cofre
+separado `ai-insights-reports.v1.json` + `ai-insights-reports.v1.key`. Esses quatro
+arquivos devem permanecer fora de commits, logs, capturas e pacotes publicos. O
+volume precisa ser persistente, protegido e incluido no backup do cliente. A
+perda de qualquer arquivo `.key` torna o respectivo cofre ilegivel. Use HTTPS,
+chave de projeto restrita, limites de gasto e rotacao periodica. Para colocar os
+cofres em outro volume, defina
 `IPXDATA_AI_SETTINGS_DIRECTORY` com o diretorio persistente antes de iniciar o
 Next.js.
 
@@ -117,7 +121,8 @@ Para usar um backend em outro host:
 - `IPXDATA_API_URL` deve apontar para o endereco interno ou publico confiavel da API.
 - Alteracoes em `IPXDATA_API_URL`, `IPXDATA_API_PROTOCOL` ou `IPXDATA_API_PORT` exigem reiniciar o processo do frontend, mas nao exigem novo build.
 - `OPENAI_MODEL` define o padrao (`gpt-5.6-terra`) e `OPENAI_ALLOWED_MODELS` limita, em CSV, os modelos selecionaveis pelo superadmin; o padrao e sempre incluido.
-- A rota de Insights IA envia somente a captura analitica validada, usa `store: false`, limita o corpo a 200 KiB e remove JWT, e-mail ou credenciais antes de chamar a OpenAI.
+- A rota de Insights IA envia somente a captura analitica validada, usa `store: false`, limita o corpo a 384 KiB e remove JWT, e-mail ou credenciais antes de chamar a OpenAI.
+- A geracao dos Insights IA pode permanecer aberta por ate 90 segundos em relatorios extensos. Configure o timeout de leitura do proxy/load balancer acima de 100 segundos para que ele nao encerre uma resposta valida antes do Next.js.
 - O limite local de Insights IA e de 3 chamadas por minuto e 20 por hora por usuario, com uma chamada simultanea por usuario e quatro globais. Esse limitador vive na memoria do processo; ao usar varias instancias, substitua-o por um armazenamento de rate limit compartilhado.
 - Configure tambem limites de gasto e alertas no projeto da OpenAI. O limite local protege rajadas, mas nao substitui a governanca de consumo da conta.
 - Em desenvolvimento, onde o fallback dinamico ainda existe, nao aceite `X-Forwarded-Host` enviado diretamente por clientes nao confiaveis.
@@ -126,7 +131,7 @@ Para usar um backend em outro host:
 - A tela de login pode ser customizada por empresa via `NEXT_PUBLIC_IPXDATA_LOGIN_BRANDS`. A empresa e resolvida antes do login por query string, como `/login?empresa=cliente-a`, ou por subdominio, como `cliente-a.seudominio.com`.
 - O vinculo `Location -> Worker` implementado no frontend fica salvo no navegador por empresa ate o backend expor `worker_id` em `Location` ou uma tabela de relacao. Em producao multiusuario, o backend precisa persistir esse vinculo para todos enxergarem a mesma configuracao.
 - Widgets personalizados, configuracoes de cenarios por periodo e grupos locais de cameras ainda usam `localStorage`. Eles nao acompanham outro navegador ou computador ate serem persistidos pelo backend.
-- `.ipxdata/dashboard-views.json` e os dois arquivos `ai-insights-config.v1.*` precisam ficar em volume persistente com backup. Para varias instancias do frontend, substitua esses arquivos por persistencia compartilhada no backend/DB ou secret manager.
+- `.ipxdata/dashboard-views.json`, `ai-insights-config.v1.*` e `ai-insights-reports.v1.*` precisam ficar em volume persistente compartilhado e com backup. Sem esse volume, reiniciar ou recriar a instancia apaga configuracao e historico; com varias instancias usando discos separados, o operador pode nao encontrar a ultima analise. Quando um volume compartilhado nao for possivel, use uma unica replica/sticky session ou mova a persistencia para backend/DB ou secret manager.
 - Execute `npm audit` em cada entrega. Na revisao de 12/08/2026, nenhuma vulnerabilidade de dependencia foi reportada.
 
 ## Login customizado por empresa

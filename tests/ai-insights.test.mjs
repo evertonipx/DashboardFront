@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
@@ -81,6 +82,105 @@ test("contrato preserva null como ausência e rejeita limites globais", () => {
   assert.equal(
     contract.AiInsightsRequestSchema.safeParse(excessive).success,
     false,
+  );
+});
+
+test("servidor novo normaliza coverage amostrado do contrato v1", () => {
+  const legacyRequest = validRequest();
+  const coverage = legacyRequest.snapshot.report.datasets[0].coverage;
+  coverage.originalRows = 365;
+  coverage.includedRows = 2;
+  coverage.strategy = "sampled";
+  delete coverage.canonical;
+  delete coverage.granularity;
+  delete coverage.omittedRows;
+
+  const parsed = contract.AiInsightsRequestSchema.parse(legacyRequest);
+  assert.deepEqual(parsed.snapshot.report.datasets[0].coverage, {
+    canonical: false,
+    granularity: "other",
+    includedRows: 2,
+    notes: [],
+    omittedRows: 363,
+    originalRows: 365,
+    strategy: "sampled",
+  });
+
+  const legacyHourlyRequest = validRequest();
+  legacyHourlyRequest.snapshot.report.datasets[0].coverage.notes = [
+    "Granularidade certificada: hour.",
+  ];
+  const parsedHourly = contract.AiInsightsRequestSchema.parse(
+    legacyHourlyRequest,
+  );
+  assert.equal(
+    parsedHourly.snapshot.report.datasets[0].coverage.granularity,
+    "hour",
+  );
+});
+
+test("contrato do servidor certifica datas da série canônica contra o período", () => {
+  const request = validRequest();
+  request.snapshot.report.period = {
+    from: "2026-08-25",
+    label: "25/08/2026 a 27/08/2026",
+    to: "2026-08-27",
+  };
+  request.snapshot.report.datasets = [
+    {
+      columns: [
+        { key: "date", label: "Data", role: "dimension", unit: null },
+        { key: "total", label: "Total", role: "measure", unit: null },
+      ],
+      coverage: {
+        canonical: true,
+        granularity: "day",
+        includedRows: 3,
+        notes: [],
+        omittedRows: 0,
+        originalRows: 3,
+        strategy: "complete",
+      },
+      description: null,
+      id: "daily-flow",
+      rows: [
+        ["2026-08-25", 100],
+        ["2026-08-26", 120],
+        ["2026-08-27", 130],
+      ],
+      statistics: [],
+      title: "Fluxo diário",
+    },
+  ];
+  assert.equal(contract.AiInsightsRequestSchema.safeParse(request).success, true);
+
+  const duplicate = structuredClone(request);
+  duplicate.snapshot.report.datasets[0].rows[1][0] = "2026-08-25";
+  assert.equal(
+    contract.AiInsightsRequestSchema.safeParse(duplicate).success,
+    false,
+    "datas repetidas ou fora de ordem não podem ser declaradas canônicas",
+  );
+
+  const incomplete = structuredClone(request);
+  incomplete.snapshot.report.datasets[0].rows.pop();
+  incomplete.snapshot.report.datasets[0].coverage.includedRows = 2;
+  incomplete.snapshot.report.datasets[0].coverage.originalRows = 2;
+  assert.equal(
+    contract.AiInsightsRequestSchema.safeParse(incomplete).success,
+    false,
+    "o servidor deve rejeitar uma janela diária incompleta",
+  );
+
+  const duplicatedCanonicalDataset = structuredClone(request);
+  duplicatedCanonicalDataset.snapshot.report.datasets.push({
+    ...structuredClone(request.snapshot.report.datasets[0]),
+    id: "daily-flow-copy",
+  });
+  assert.equal(
+    contract.AiInsightsRequestSchema.safeParse(duplicatedCanonicalDataset).success,
+    false,
+    "somente uma linha do tempo pode ser a referência oficial",
   );
 });
 
@@ -190,18 +290,70 @@ test("leitor limita o corpo UTF-8 completo por bytes", async () => {
 
 test("resposta executiva exige todos os campos e usa nullable em vez de optional", () => {
   const insights = validInsights();
+  const apiResponse = {
+    insights,
+    meta: {
+      generatedAt: "2026-08-26T15:00:00.000Z",
+      model: "gpt-5.6-terra",
+      usage: { inputTokens: 100, outputTokens: 200, totalTokens: 300 },
+    },
+  };
   assert.equal(contract.AiInsightsResponseSchema.safeParse(insights).success, true);
   assert.equal(
-    contract.AiInsightsApiResponseSchema.safeParse({
-      insights,
-      meta: {
-        generatedAt: "2026-08-26T15:00:00.000Z",
-        model: "gpt-5.6-terra",
-        usage: { inputTokens: 100, outputTokens: 200, totalTokens: 300 },
-      },
+    contract.AiInsightsApiResponseSchema.safeParse(apiResponse).success,
+    true,
+  );
+  assert.equal(
+    contract.AiInsightsReportSchema.safeParse({
+      id: "analysis-1",
+      ...apiResponse,
     }).success,
     true,
   );
+
+  const modelOutput = {
+    summary: insights.summary,
+    findings: insights.findings,
+    actions: insights.actions,
+  };
+  assert.equal(
+    contract.AiInsightsModelOutputSchema.safeParse(modelOutput).success,
+    true,
+  );
+  assert.equal(
+    contract.AiInsightsModelOutputSchema.safeParse({
+      ...modelOutput,
+      dataQuality: insights.dataQuality,
+    }).success,
+    false,
+    "o modelo não deve consumir a resposta com uma auditoria de qualidade",
+  );
+
+  const legacyVerboseResponse = structuredClone(apiResponse);
+  legacyVerboseResponse.insights.findings = Array.from(
+    { length: 8 },
+    (_, index) => ({
+      ...insights.findings[0],
+      title: `Achado legado ${index + 1}`,
+    }),
+  );
+  legacyVerboseResponse.insights.actions = Array.from(
+    { length: 8 },
+    (_, index) => ({
+      ...insights.actions[0],
+      title: `Ação legada ${index + 1}`,
+    }),
+  );
+  legacyVerboseResponse.insights.questions = Array.from(
+    { length: 6 },
+    (_, index) => `Pergunta legada ${index + 1}?`,
+  );
+  const normalizedLegacy = contract.AiInsightsCompatibleApiResponseSchema.parse(
+    legacyVerboseResponse,
+  );
+  assert.equal(normalizedLegacy.insights.findings.length, 3);
+  assert.equal(normalizedLegacy.insights.actions.length, 3);
+  assert.equal(normalizedLegacy.insights.questions.length, 3);
 
   const missingNullableField = structuredClone(insights);
   delete missingNullableField.actions[0].target;
@@ -232,6 +384,62 @@ test("SDK converte o contrato Zod 4 para Structured Outputs sem rede", () => {
       "source",
       "summary",
     ].sort(),
+  );
+
+  const modelFormat = zodTextFormat(
+    contract.AiInsightsModelOutputSchema,
+    "ipxdata_outcome_advisor_test",
+  );
+  assert.deepEqual(
+    [...modelFormat.schema.required].sort(),
+    ["actions", "findings", "summary"],
+  );
+});
+
+test("cobertura técnica é certificada pelo servidor, não pelo modelo", () => {
+  const partial = contract.AiInsightsRequestSchema.parse(validRequest()).snapshot;
+  assert.deepEqual(openAIService.certifySnapshotCoverage(partial), {
+    status: "parcial",
+    notes: [
+      "A visão não forneceu uma série diária canônica para certificar todo o período.",
+    ],
+  });
+
+  const canonicalRequest = validRequest();
+  canonicalRequest.snapshot.report.datasets[0] = {
+    ...canonicalRequest.snapshot.report.datasets[0],
+    columns: [
+      { key: "date", label: "Data", role: "dimension", unit: null },
+      { key: "total", label: "Total", role: "measure", unit: "pessoas" },
+    ],
+    rows: [["2026-08-26", 120]],
+    coverage: {
+      canonical: true,
+      granularity: "day",
+      originalRows: 1,
+      includedRows: 1,
+      strategy: "complete",
+      notes: [],
+    },
+  };
+  const canonical = contract.AiInsightsRequestSchema.parse(canonicalRequest).snapshot;
+  assert.deepEqual(openAIService.certifySnapshotCoverage(canonical), {
+    status: "suficiente",
+    notes: [],
+  });
+
+  const emptyRequest = validRequest();
+  emptyRequest.snapshot.report.datasets[0].rows = [];
+  emptyRequest.snapshot.report.datasets[0].coverage = {
+    originalRows: 0,
+    includedRows: 0,
+    strategy: "complete",
+    notes: [],
+  };
+  const empty = contract.AiInsightsRequestSchema.parse(emptyRequest).snapshot;
+  assert.equal(
+    openAIService.certifySnapshotCoverage(empty).status,
+    "insuficiente",
   );
 });
 
@@ -290,6 +498,21 @@ test("status expõe papel e disponibilidade sem devolver a chave empresarial", (
       }).success,
       false,
       "uma empresa sem credencial não pode anunciar IA disponível",
+    );
+    assert.equal(
+      contract.AiInsightsScopedStatusResponseSchema.safeParse({
+        latestReport: validReport(),
+        status: adminStatus,
+      }).success,
+      true,
+    );
+    assert.equal(
+      contract.AiInsightsScopedStatusResponseSchema.safeParse({
+        latestReport: validReport(),
+        status: { ...adminStatus, available: false },
+      }).success,
+      false,
+      "um perfil desabilitado não pode receber a última análise",
     );
     assert.equal(
       contract.AiInsightsStatusResponseSchema.safeParse({
@@ -367,11 +590,53 @@ test("integração OpenAI permanece server-only, estruturada e sem binding sens�
     "utf8",
   );
   assert.match(source, /^import "server-only";/);
-  assert.match(source, /client\.responses\.parse\(/);
-  assert.match(source, /zodTextFormat\([\s\S]*?AiInsightsResponseSchema/);
+  assert.match(
+    source,
+    /client\.responses\s*\.create\([\s\S]*?\)\s*\.withResponse\(\)/,
+    "a chamada deve preservar os headers upstream para correlação segura",
+  );
+  assert.doesNotMatch(
+    source,
+    /client\.responses\.parse\(/,
+    "o status upstream precisa ser inspecionado antes de tentar interpretar JSON parcial",
+  );
+  assert.match(source, /AiInsightsModelOutputSchema/);
+  assert.match(source, /zodTextFormat\([\s\S]*?AiInsightsModelOutputSchema/);
+  assert.match(source, /OPENAI_INSIGHTS_MAX_OUTPUT_TOKENS = 12_000/);
+  assert.match(source, /OPENAI_INSIGHTS_TIMEOUT_MS = 90_000/);
+  assert.match(
+    source,
+    /reasoning:\s*\{\s*effort:\s*"low"\s*,?\s*\}/,
+    "o modelo não pode consumir silenciosamente o orçamento inteiro com reasoning médio",
+  );
+  assert.match(
+    source,
+    /text:\s*\{[\s\S]*?verbosity:\s*"low"[\s\S]*?\}/,
+    "a resposta executiva deve pedir baixa verbosidade sem abandonar o schema",
+  );
+  assert.match(
+    source,
+    /response\.incomplete_details\?\.reason/,
+    "o motivo de uma resposta incompleta deve ser certificado antes do parse",
+  );
+  assert.match(source, /response\.output_text/);
   assert.match(source, /store: false/);
   assert.match(source, /DEFAULT_OPENAI_MODEL = "gpt-5\.6-terra"/);
   assert.match(source, /safety_identifier: hashSafetyIdentifier/);
+  assert.match(source, /Examine cada linha do dataset diário/);
+  assert.match(source, /canonical=true/);
+  assert.match(source, /referência comparável e delta determinístico/);
+  assert.match(source, /no máximo 3 achados/);
+  assert.match(
+    source,
+    /mudança quantificada → oportunidade → próxima ação → meta de validação/,
+  );
+  assert.match(source, /businessPlaybook é contexto estratégico/);
+  assert.match(source, /Projeções e cenários nunca são resultados realizados/);
+  assert.match(source, /Não produzir seção de qualidade, metodologia, limitações ou perguntas/);
+  assert.match(source, /businessPlaybook: constraints/);
+  assert.match(source, /dataQuality: certifySnapshotCoverage\(snapshot\)/);
+  assert.match(source, /questions: \[\]/);
   assert.match(
     source,
     /const snapshotWithoutBinding = \{[\s\S]*?report:[\s\S]*?source:[\s\S]*?version:/,
@@ -394,7 +659,48 @@ test("integração OpenAI permanece server-only, estruturada e sem binding sens�
     source,
     /error\.status === 401 \|\| error\.status === 403[\s\S]*?"invalid_api_key"/,
   );
+  assert.match(
+    source,
+    /error\.status === 404 \|\| isModelError\(error\)[\s\S]*?"model_unavailable"/,
+    "modelo inexistente ou indisponível deve ter diagnóstico próprio",
+  );
   assert.doesNotMatch(source, /NEXT_PUBLIC_OPENAI/);
+});
+
+test("falhas da OpenAI registram somente diagnóstico seguro e acionável", () => {
+  const service = readFileSync(
+    resolve(projectRoot, "lib/openai-insights.ts"),
+    "utf8",
+  );
+  const route = readFileSync(
+    resolve(projectRoot, "app/api/v1/ai/insights/route.ts"),
+    "utf8",
+  );
+  const diagnosticsSource = `${service}\n${route}`;
+
+  for (const field of [
+    "incompleteReason",
+    "upstreamCode",
+    "upstreamRequestId",
+    "upstreamStatus",
+  ]) {
+    assert.match(
+      diagnosticsSource,
+      new RegExp(`\\b${field}\\b`),
+      `diagnóstico seguro ausente: ${field}`,
+    );
+  }
+
+  const logMarker = route.indexOf('"[ai-insights] request failed"');
+  const logStart = route.lastIndexOf("console.error(", logMarker);
+  assert.notEqual(logStart, -1, "a falha precisa manter correlação operacional");
+  const logEnd = route.indexOf(");", logMarker);
+  assert.notEqual(logEnd, -1, "não foi possível delimitar o log da rota IA");
+  const logBlock = route.slice(logStart, logEnd + 2);
+
+  assert.match(logBlock, /diagnostic|incompleteReason|upstreamStatus/i);
+  assert.doesNotMatch(logBlock, /error\.message|error\.error|settings\.apiKey/);
+  assert.doesNotMatch(logBlock, /authorization|headers|payload|requestApiKey/i);
 });
 
 test("rota IA usa configuração por empresa e separa status, escrita e geração", () => {
@@ -461,6 +767,21 @@ test("rota IA usa configuração por empresa e separa status, escrita e geraçã
   );
   assert.match(route, /issue\.path\[0\] === "apiKey"/);
   assert.match(route, /aiInsightsRateLimiter\.acquire/);
+  assert.match(route, /readOptionalReportScope\(request\)/);
+  assert.match(route, /readLatestAiInsightsReport/);
+  assert.match(route, /AiInsightsScopedStatusResponseSchema\.parse/);
+  assert.match(route, /saveLatestAiInsightsReport\(authentication\.companyId, report\)/);
+  assert.match(route, /AiInsightsReportSchema\.parse\(\{/);
+  assert.match(
+    route,
+    /catch \{[\s\S]*?if \(sourceSignal\.aborted\)[\s\S]*?RouteFailure\("request_aborted", 499\)/,
+    "cancelar a tela deve preservar o aborto também nas certificações do backend",
+  );
+  assert.match(
+    route,
+    /return jsonResponse\(response, 200, requestId\)/,
+    "o POST deve preservar o contrato legado durante deploys mistos",
+  );
   assert.match(route, /Retry-After/);
   assert.match(route, /"Cache-Control": "no-store, max-age=0"/);
   assert.doesNotMatch(route, /process\.env\.OPENAI_API_KEY/);
@@ -473,7 +794,7 @@ test("rota IA usa configuração por empresa e separa status, escrita e geraçã
   assert.doesNotMatch(envExample, /NEXT_PUBLIC_OPENAI/);
 });
 
-test("ação consulta disponibilidade, envia só snapshot e abre resultado em diálogo", () => {
+test("ação abre a última análise, gera sob demanda e exporta o IA Advisor", () => {
   const action = readFileSync(
     resolve(projectRoot, "components/app/ai-analysis-action.tsx"),
     "utf8",
@@ -482,16 +803,35 @@ test("ação consulta disponibilidade, envia só snapshot e abre resultado em di
 
   assert.match(
     action,
-    /apiFetch<unknown>\("\/ai\/insights", \{\s*companyScopeId,\s*\}\)/,
-    "o ícone deve consultar o status no escopo selecionado",
+    /`\/ai\/insights\?module=\$\{source\.module\}&surface=\$\{source\.surface\}`/,
+    "o ícone deve consultar o último relatório no escopo selecionado",
   );
+  assert.match(action, /AiInsightsScopedStatusResponseSchema\.safeParse\(statusPayload\)/);
   assert.match(action, /AiInsightsStatusResponseSchema\.safeParse\(statusPayload\)/);
-  assert.match(action, /setAvailable\(parsed\.success && parsed\.data\.available\)/);
+  assert.match(action, /storeNewestScopedReport\(scoped\.data\.latestReport\)/);
   assert.match(action, /if \(!available\) return null/);
   assert.match(action, /createAiAnalysisSnapshot/);
-  assert.match(action, /body: \{ snapshot \}/);
+  assert.match(action, /createLegacyCompatibleAiInsightsRequest\(snapshot\)/);
+  assert.match(action, /assertServiceAcceptsSnapshot\(snapshot, requestPayload, serviceLimits\)/);
+  assert.match(action, /LEGACY_AI_MAX_TOTAL_CELLS = 6_000/);
+  assert.match(action, /totalCells > LEGACY_AI_MAX_TOTAL_CELLS/);
+  assert.match(action, /body: requestPayload/);
+  assert.match(action, /AiInsightsReportSchema\.safeParse\(responsePayload\)/);
+  assert.match(action, /AiInsightsCompatibleApiResponseSchema\.safeParse\(responsePayload\)/);
   assert.match(action, /<Dialog open=\{dialogOpen\}/);
-  assert.match(action, /<AiInsightsResult[\s\S]*?result=\{result\}/);
+  assert.match(action, /onClick=\{openAdvisor\}/);
+  assert.match(action, /function openAdvisor\(\)[\s\S]*?refreshAvailability\(\)/);
+  assert.match(action, /Gerar novo relatório/);
+  assert.match(action, /Exportar PDF/);
+  assert.match(action, /exportAiInsightsToPdf\(report, \{/);
+  assert.match(action, /companyLabel/);
+  assert.match(action, /aria-describedby/);
+  assert.match(action, /<AiInsightsResult[\s\S]*?result=\{report\.insights\}/);
+  assert.doesNotMatch(
+    action,
+    /aria-label="Abrir IA Advisor[^>]*[\s\S]{0,300}onClick=\{\(\) => void generateInsights\(\)\}/,
+    "abrir o diálogo não pode consumir uma nova chamada da OpenAI",
+  );
   assert.match(action, /abortAnalysis\(\s*analysisControllerRef\.current/);
   assert.match(action, /analysisRequestSequence\.current \+= 1/);
   assert.match(action, /role="status" aria-live="polite"/);
@@ -536,20 +876,51 @@ test("ação consulta disponibilidade, envia só snapshot e abre resultado em di
     "utf8",
   );
   assert.match(occupancyReports, /surface: analysis \? "analysis" : "reports"/);
-  assert.match(
-    readFileSync(
-      resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
-      "utf8",
-    ),
-    /<AiAnalysisAction[\s\S]*?getPayload=\{buildConfiguredLiveReportPayload\}/,
+  assert.match(occupancyReports, /getPayload=\{getOccupancyAiPayload\}/);
+  assert.match(occupancyReports, /AI_OCCUPANCY_DAILY_CHUNK_DAYS = 62/);
+  assert.match(occupancyReports, /Série diária completa de ocupação/);
+  const realtimeDashboard = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
   );
   assert.match(
-    readFileSync(
-      resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
-      "utf8",
-    ),
-    /<AiAnalysisAction[\s\S]*?getPayload=\{buildConfiguredScenarioReportPayload\}/,
+    realtimeDashboard,
+    /<AiAnalysisAction[\s\S]*?getPayload=\{buildAiLiveReportPayload\}/,
   );
+  assert.match(
+    realtimeDashboard,
+    /async function buildConfiguredLiveReportPayload\(signal\?: AbortSignal\)[\s\S]*?fetchScenarioComparisonRows\([\s\S]*?\{ signal \},[\s\S]*?signal\?\.throwIfAborted\(\)/,
+    "a captura do Ao Vivo deve cancelar também os comparativos em andamento",
+  );
+  assert.match(
+    realtimeDashboard,
+    /buildAiLiveReportPayload\(signal\?: AbortSignal\)[\s\S]*?buildConfiguredLiveReportPayload\(signal\)/,
+  );
+  const scenarioReports = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(
+    scenarioReports,
+    /<AiAnalysisAction[\s\S]*?getPayload=\{buildAiScenarioReportPayload\}/,
+  );
+  assert.match(
+    scenarioReports,
+    /buildAiScenarioReportPayload\(signal\?: AbortSignal\)[\s\S]*?resolveScenarioReportPayloadForContext\(\s*requestSignal,\s*"análise da IA"/,
+    "a IA de Relatórios deve usar o sinal recebido sem tocar no controller da exportação",
+  );
+  assert.doesNotMatch(
+    scenarioReports,
+    /buildAiScenarioReportPayload\(signal\?: AbortSignal\)[\s\S]{0,400}buildConfiguredScenarioReportPayload\(\)/,
+  );
+  assert.match(periodAnalysis, /getPayload=\{buildAiPeriodAnalysisPayload\}/);
+  for (const source of [
+    periodAnalysis,
+    realtimeDashboard,
+    scenarioReports,
+  ]) {
+    assert.match(source, /Série diária canônica da Contagem/);
+  }
 });
 
 test("dashboard master persiste no servidor e usa localStorage somente na migração", () => {
@@ -596,6 +967,30 @@ test("dashboard master persiste no servidor e usa localStorage somente na migra�
   assert.match(dashboard, /write-only/);
   assert.match(dashboard, /servidor do frontend/);
   assert.match(dashboard, /cifrada em repouso/);
+  assert.match(dashboard, /Contexto estratégico da empresa/);
+  assert.match(dashboard, /accept="\.txt,text\/plain"/);
+  assert.match(dashboard, /file\.text\(\)/);
+  assert.equal(contract.AI_INSIGHTS_CONFIGURATION_LIMITS.constraints, 24_000);
+  assert.equal(companySettings.AI_INSIGHTS_COMPANY_CONSTRAINTS_MAX_LENGTH, 24_000);
+});
+
+test("resultado visual prioriza decisão futura e recolhe premissas técnicas", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/ai-insights-result.tsx"),
+    "utf8",
+  );
+
+  for (const expected of [
+    "Direção recomendada",
+    "Próximo movimento",
+    "Oportunidades de resultado",
+    "Plano para capturar o resultado",
+    "O que isso abre para o próximo ciclo",
+  ]) {
+    assert.match(source, new RegExp(expected));
+  }
+  assert.match(source, /<details[\s\S]*?Base e premissas/);
+  assert.doesNotMatch(source, /Conclusão orientada por dados|Evidências quantitativas|Qualidade e limites dos dados/);
 });
 
 test("store empresarial é server-only, cifrado, atômico e serializado por lock", () => {
@@ -685,6 +1080,122 @@ test("store empresarial é server-only, cifrado, atômico e serializado por lock
       ignoresWholeStore || gitignore.split(/\r?\n/).includes(artifact),
       `artefato sensível sem ignore: ${artifact}`,
     );
+  }
+});
+
+test("histórico do IA Advisor usa cofre separado, cifrado e limitado", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "lib/ai-insights-report-store.ts"),
+    "utf8",
+  );
+  const settingsSource = readFileSync(
+    resolve(projectRoot, "lib/ai-insights-company-settings.ts"),
+    "utf8",
+  );
+  const gitignore = readFileSync(resolve(projectRoot, ".gitignore"), "utf8");
+
+  assert.match(source, /^import "server-only";/);
+  assert.match(source, /ai-insights-reports\.v1\.json/);
+  assert.match(source, /ENCRYPTION_ALGORITHM = "aes-256-gcm"/);
+  assert.match(source, /MAX_REPORTS_PER_COMPANY = 6/);
+  assert.match(source, /MAX_PLAINTEXT_BYTES/);
+  assert.match(source, /MAX_ENCRYPTED_FILE_BYTES/);
+  assert.match(source, /Buffer\.byteLength\(serializedEnvelope, "utf8"\)/);
+  assert.match(source, /readLatestAiInsightsReport/);
+  assert.match(source, /saveLatestAiInsightsReport/);
+  assert.match(source, /candidate\.insights\.source\.module === module/);
+  assert.match(source, /candidate\.insights\.source\.surface === surface/);
+  assert.match(source, /writeFileAtomically\(dataFile/);
+  assert.match(source, /acquireStoreLock\(\)/);
+  assert.doesNotMatch(
+    settingsSource,
+    /latestReports|AiInsightsReportSchema|saveLatestAiInsightsReport/,
+    "o histórico não pode mudar o formato do cofre de credenciais v1",
+  );
+  for (const artifact of [
+    ".ipxdata/ai-insights-reports.v1.json",
+    ".ipxdata/ai-insights-reports.v1.key",
+    ".ipxdata/ai-insights-reports.v1.lock",
+    ".ipxdata/ai-insights-reports.v1.*.tmp",
+  ]) {
+    assert.ok(
+      gitignore.split(/\r?\n/).includes(artifact),
+      `artefato do histórico sem ignore: ${artifact}`,
+    );
+  }
+});
+
+test("cofre do IA Advisor substitui somente o mesmo escopo e isola empresas", async () => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "ipxdata-ai-reports-"));
+  const previousDirectory = process.env.IPXDATA_AI_SETTINGS_DIRECTORY;
+  process.env.IPXDATA_AI_SETTINGS_DIRECTORY = temporaryDirectory;
+
+  try {
+    const reportStore = loadTypeScriptModule("lib/ai-insights-report-store.ts");
+    const first = validReport();
+    await reportStore.saveLatestAiInsightsReport("company-a", first);
+
+    assert.equal(
+      (await reportStore.readLatestAiInsightsReport("company-a", "counting", "live"))?.id,
+      first.id,
+    );
+    assert.equal(
+      await reportStore.readLatestAiInsightsReport("company-b", "counting", "live"),
+      null,
+    );
+    assert.equal(
+      await reportStore.readLatestAiInsightsReport("company-a", "occupancy", "live"),
+      null,
+    );
+
+    const replacement = structuredClone(first);
+    replacement.id = "analysis-2";
+    replacement.meta.generatedAt = "2026-08-26T16:00:00.000Z";
+    replacement.insights.summary = "Conclusão mais recente e isolada.";
+    await reportStore.saveLatestAiInsightsReport("company-a", replacement);
+    const latest = await reportStore.readLatestAiInsightsReport(
+      "company-a",
+      "counting",
+      "live",
+    );
+    assert.equal(latest?.id, replacement.id);
+    assert.equal(latest?.insights.summary, replacement.insights.summary);
+
+    const delayedOlderReport = structuredClone(first);
+    delayedOlderReport.id = "analysis-delayed-older";
+    delayedOlderReport.meta.generatedAt = "2026-08-26T15:30:00.000Z";
+    const preserved = await reportStore.saveLatestAiInsightsReport(
+      "company-a",
+      delayedOlderReport,
+    );
+    assert.equal(
+      preserved.id,
+      replacement.id,
+      "uma gravação atrasada não pode substituir o relatório cronologicamente mais novo",
+    );
+    assert.equal(
+      (
+        await reportStore.readLatestAiInsightsReport(
+          "company-a",
+          "counting",
+          "live",
+        )
+      )?.id,
+      replacement.id,
+    );
+
+    const encryptedFile = readFileSync(
+      join(temporaryDirectory, "ai-insights-reports.v1.json"),
+      "utf8",
+    );
+    assert.doesNotMatch(encryptedFile, /Conclusão mais recente|company-a/);
+    assert.match(encryptedFile, /"algorithm":"aes-256-gcm"/);
+  } finally {
+    restoreEnvironment(
+      "IPXDATA_AI_SETTINGS_DIRECTORY",
+      previousDirectory,
+    );
+    rmSync(temporaryDirectory, { force: true, recursive: true });
   }
 });
 
@@ -935,6 +1446,18 @@ function validConfigurationUpdate() {
     enabledForOperators: false,
     model: "gpt-5.6-terra",
     prompt: "Analise os dados certificados e proponha ações mensuráveis.",
+  };
+}
+
+function validReport() {
+  return {
+    id: "analysis-1",
+    insights: validInsights(),
+    meta: {
+      generatedAt: "2026-08-26T15:00:00.000Z",
+      model: "gpt-5.6-terra",
+      usage: { inputTokens: 100, outputTokens: 200, totalTokens: 300 },
+    },
   };
 }
 

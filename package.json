@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test:analytics": "node --test tests/analytics-time.test.mjs",
     "test:auth": "node --test tests/auth-session.test.mjs",
-    "test:ai": "node --test tests/ai-insights.test.mjs tests/ai-analysis-snapshot.test.mjs",
+    "test:ai": "node --test tests/ai-insights.test.mjs tests/ai-analysis-snapshot.test.mjs tests/ai-insights-pdf.test.mjs",
     "test:login-ui": "node --test tests/login-ui.test.mjs",
     "test:modules": "node --test tests/module-access.test.mjs",
     "test:occupancy-range": "node --test tests/occupancy-range-plan.test.mjs",

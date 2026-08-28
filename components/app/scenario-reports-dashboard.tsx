@@ -238,6 +238,7 @@ type ReportCustomWidgetForm = {
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
+const MAX_AI_DAILY_ROWS = 2_000;
 const DEFAULT_METRIC_TYPE = "count";
 const PREVIOUS_SUFFIX = "__previous";
 const CURRENT_HOUR_MINUTES_ID = "report_current_hour_minutes";
@@ -2008,25 +2009,116 @@ export function ScenarioReportsDashboard({
   async function buildConfiguredScenarioReportPayload() {
     exportRequestControllerRef.current?.abort();
     const controller = new AbortController();
-    const requestContextKey = reportContextKey;
     exportRequestControllerRef.current = controller;
 
     try {
-      const payload = await resolveConfiguredScenarioReportPayload(
+      return await resolveScenarioReportPayloadForContext(
         controller.signal,
+        "exportação",
       );
-      controller.signal.throwIfAborted();
-      if (latestReportContextKeyRef.current !== requestContextKey) {
-        throw new Error(
-          "A empresa ou visão mudou durante a exportação. Gere o relatório novamente.",
-        );
-      }
-      return payload;
     } finally {
       if (exportRequestControllerRef.current === controller) {
         exportRequestControllerRef.current = null;
       }
     }
+  }
+
+  async function buildAiScenarioReportPayload(signal?: AbortSignal) {
+    const requestSignal = signal ?? new AbortController().signal;
+    requestSignal.throwIfAborted();
+    const payload = await resolveScenarioReportPayloadForContext(
+      requestSignal,
+      "análise da IA",
+    );
+    requestSignal.throwIfAborted();
+    if (!selectedScope) {
+      throw new Error(
+        "Selecione uma visão para montar a série diária completa da IA.",
+      );
+    }
+    const dailyState = chartData[CURRENT_MONTH_DAYS_ID];
+    if (dailyState?.error) {
+      throw new Error(
+        `A série diária completa não está disponível: ${dailyState.error}`,
+      );
+    }
+    if (dailyState?.granularity !== "day") {
+      throw new Error(
+        "A base diária certificada do relatório não está disponível para a IA.",
+      );
+    }
+
+    const dailyFrom = startOfDay(effectivePeriodDates.from);
+    const dataCompleteUntil = payload.dataCompleteUntil ?? clock;
+    const dailyTo = new Date(
+      Math.min(
+        effectivePeriodDates.to.getTime(),
+        addDays(startOfDay(dataCompleteUntil), 1).getTime(),
+      ),
+    );
+    const totals = aggregateReportScopeRowsByBucket(
+      dailyState.rows,
+      selectedScope,
+      "day",
+    );
+    const rows: ReportTable["rows"] = [];
+    let cursor = dailyFrom;
+    while (cursor < dailyTo) {
+      if (rows.length >= MAX_AI_DAILY_ROWS) {
+        throw new RangeError(
+          `O período possui mais de ${formatNumber(MAX_AI_DAILY_ROWS)} dias. Reduza a consulta para gerar uma análise diária completa, sem amostragem.`,
+        );
+      }
+      rows.push({
+        date: formatReportCivilDate(cursor),
+        total: totals.get(bucketKeyForGranularity(cursor, "day")) ?? 0,
+      });
+      cursor = addDays(cursor, 1);
+    }
+    if (!rows.length) {
+      throw new RangeError("O período diário da análise está vazio.");
+    }
+
+    const periodLabel = `${formatReportCivilDate(dailyFrom)} a ${formatReportCivilDate(addDays(dailyTo, -1))}`;
+    return {
+      ...payload,
+      context: [
+        `Período civil analisado: ${periodLabel}`,
+        ...(payload.context ?? []),
+      ],
+      tables: [
+        ...(payload.tables ?? []),
+        {
+          columns: [
+            { key: "date", label: "Data", width: 24 },
+            {
+              key: "total",
+              label: "Fluxo total atual",
+              numeric: true,
+              width: 22,
+            },
+          ],
+          description: `Base diária canônica completa da visão ${selectedScope.name} em ${periodLabel}; dias sem registros permanecem com total zero.`,
+          rows,
+          title: "Série diária canônica da Contagem",
+        },
+      ],
+    } satisfies ReportPayload;
+  }
+
+  async function resolveScenarioReportPayloadForContext(
+    signal: AbortSignal,
+    activityLabel: string,
+  ) {
+    const requestContextKey = reportContextKey;
+    const payload = await resolveConfiguredScenarioReportPayload(signal);
+    signal.throwIfAborted();
+    if (latestReportContextKeyRef.current !== requestContextKey) {
+      throw new Error(
+        `A empresa ou visão mudou durante a ${activityLabel}. Gere o relatório novamente.`,
+      );
+    }
+    return payload;
   }
 
   async function resolveConfiguredScenarioReportPayload(signal: AbortSignal) {
@@ -2343,7 +2435,7 @@ export function ScenarioReportsDashboard({
                         !selectedScope ||
                         Boolean(reportComparisonDisabledReason)
                       }
-                      getPayload={buildConfiguredScenarioReportPayload}
+                      getPayload={buildAiScenarioReportPayload}
                       manager={manager}
                       payload={scenarioReportPayload}
                       source={{ module: "counting", surface: "reports" }}
@@ -4475,4 +4567,12 @@ function addYears(date: Date, years: number) {
 
 function reportDateSlug(date: Date) {
   return date.toISOString().slice(0, 16).replace(/[:T]/g, "-");
+}
+
+function formatReportCivilDate(date: Date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }

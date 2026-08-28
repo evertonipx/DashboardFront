@@ -1,24 +1,31 @@
 import { z } from "zod";
 
 export const AI_INSIGHTS_LIMITS = {
-  bodyBytes: 200 * 1024,
+  bodyBytes: 384 * 1024,
   contextItems: 24,
-  datasets: 16,
+  datasets: 24,
   datasetColumns: 12,
-  datasetRows: 120,
+  dailyDatasetRows: 2_000,
+  datasetRows: 2_000,
   datasetStatistics: 16,
   metrics: 40,
-  totalCells: 6_000,
-  totalRows: 1_920,
+  sampledDatasetRows: 120,
+  totalCells: 12_000,
+  totalRows: 3_920,
 } as const;
 
 export const AI_INSIGHTS_CONFIGURATION_LIMITS = {
-  constraints: 2_000,
+  constraints: 24_000,
   prompt: 4_000,
 } as const;
 
 export const DEFAULT_AI_INSIGHTS_PROMPT =
-  "Analise os dados consolidados da visão, identifique evidências relevantes e proponha medidas práticas, priorizadas e mensuráveis para melhorar o resultado operacional sem inventar causas ou informações ausentes.";
+  "Transforme os dados certificados em uma tese de resultado e em poucas iniciativas futuras, concretas e mensuráveis. Cruze período, dia e horário, quantifique cada oportunidade contra uma base comparável e priorize alavancas repetíveis. Não descreva gráficos nem produza uma auditoria de qualidade; conecte mudança, oportunidade, próxima ação, meta e regra de validação sem inventar causas ou eventos.";
+
+export const AI_INSIGHTS_CANONICAL_DAILY_NOTE_PREFIX =
+  "Série diária canônica:";
+export const AI_INSIGHTS_GRANULARITY_NOTE_PREFIX =
+  "Granularidade certificada:";
 
 export const AiInsightModuleSchema = z.enum(["counting", "occupancy"]);
 export const AiInsightSurfaceSchema = z.enum([
@@ -109,16 +116,58 @@ const AiAnalysisDatasetStatisticSchema = z
   })
   .strict();
 
+const AiAnalysisDatasetGranularitySchema = z.enum([
+  "minute",
+  "hour",
+  "day",
+  "week",
+  "month",
+  "other",
+]);
+
 const AiAnalysisDatasetCoverageSchema = z
   .object({
+    canonical: z.boolean().optional(),
+    granularity: AiAnalysisDatasetGranularitySchema.optional(),
     originalRows: z.number().int().nonnegative().max(1_000_000_000),
     includedRows: z.number().int().nonnegative().max(
       AI_INSIGHTS_LIMITS.datasetRows,
     ),
+    omittedRows: z.number().int().nonnegative().max(1_000_000_000).optional(),
     strategy: z.enum(["complete", "sampled", "aggregated", "statistics"]),
     notes: z.array(z.string().trim().min(1).max(240)).max(6),
   })
-  .strict();
+  .strict()
+  .transform((coverage) => {
+    // Clients from the previous contract do not send these three fields. The
+    // canonical marker travels in the already-supported notes collection so a
+    // mixed deployment can still be certified by the new server.
+    const canonicalFromLegacyMarker = coverage.notes.some((note) =>
+      note.startsWith(AI_INSIGHTS_CANONICAL_DAILY_NOTE_PREFIX),
+    );
+    const canonical = coverage.canonical ?? canonicalFromLegacyMarker;
+    const granularityFromLegacyMarker = coverage.notes
+      .find((note) => note.startsWith(AI_INSIGHTS_GRANULARITY_NOTE_PREFIX))
+      ?.slice(AI_INSIGHTS_GRANULARITY_NOTE_PREFIX.length)
+      .trim()
+      .replace(/\.$/, "");
+    const parsedLegacyGranularity =
+      AiAnalysisDatasetGranularitySchema.safeParse(granularityFromLegacyMarker);
+    return {
+      ...coverage,
+      canonical,
+      granularity:
+        coverage.granularity ??
+        (parsedLegacyGranularity.success
+          ? parsedLegacyGranularity.data
+          : canonical
+            ? ("day" as const)
+            : ("other" as const)),
+      omittedRows:
+        coverage.omittedRows ??
+        Math.max(0, coverage.originalRows - coverage.includedRows),
+    };
+  });
 
 const AiAnalysisDatasetSchema = z
   .object({
@@ -153,6 +202,38 @@ const AiAnalysisDatasetSchema = z
         code: "custom",
         message: "originalRows não pode ser menor que as linhas enviadas.",
         path: ["coverage", "originalRows"],
+      });
+    }
+    if (
+      dataset.coverage.omittedRows !==
+      dataset.coverage.originalRows - dataset.coverage.includedRows
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "omittedRows deve corresponder às linhas não enviadas.",
+        path: ["coverage", "omittedRows"],
+      });
+    }
+    if (
+      dataset.coverage.strategy === "complete" &&
+      dataset.coverage.omittedRows !== 0
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Cobertura completa não pode omitir linhas.",
+        path: ["coverage", "strategy"],
+      });
+    }
+    if (
+      dataset.coverage.canonical &&
+      (dataset.coverage.granularity !== "day" ||
+        dataset.coverage.strategy !== "complete" ||
+        dataset.coverage.omittedRows !== 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "A série canônica deve conter todos os dias sem omissões.",
+        path: ["coverage", "canonical"],
       });
     }
     dataset.rows.forEach((row, rowIndex) => {
@@ -195,12 +276,24 @@ export const AiAnalysisSnapshotSchema = z
   .superRefine((snapshot, context) => {
     let totalRows = 0;
     let totalCells = 0;
+    let canonicalDatasets = 0;
     for (const dataset of snapshot.report.datasets) {
       totalRows += dataset.rows.length;
       totalCells += dataset.rows.reduce(
         (count, row) => count + row.length,
         0,
       );
+      if (dataset.coverage.canonical) {
+        canonicalDatasets += 1;
+        validateCanonicalDatasetAgainstPeriod(snapshot, dataset, context);
+      }
+    }
+    if (canonicalDatasets > 1) {
+      context.addIssue({
+        code: "custom",
+        message: "A captura pode conter somente uma série diária canônica.",
+        path: ["report", "datasets"],
+      });
     }
     if (totalRows > AI_INSIGHTS_LIMITS.totalRows) {
       context.addIssue({
@@ -217,6 +310,70 @@ export const AiAnalysisSnapshotSchema = z
       });
     }
   });
+
+function validateCanonicalDatasetAgainstPeriod(
+  snapshot: { report: z.infer<typeof AiAnalysisReportSchema> },
+  dataset: z.infer<typeof AiAnalysisDatasetSchema>,
+  context: z.RefinementCtx,
+) {
+  const fromOrdinal = civilDateOrdinal(snapshot.report.period.from);
+  const toOrdinal = civilDateOrdinal(snapshot.report.period.to);
+  const datasetIndex = snapshot.report.datasets.indexOf(dataset);
+  const path = ["report", "datasets", datasetIndex] as const;
+  if (
+    fromOrdinal === null ||
+    toOrdinal === null ||
+    fromOrdinal > toOrdinal ||
+    dataset.columns[0]?.role !== "dimension"
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "A série canônica exige período civil certificado e dimensão de data.",
+      path: [...path, "coverage", "canonical"],
+    });
+    return;
+  }
+
+  const expectedRows = toOrdinal - fromOrdinal + 1;
+  if (dataset.rows.length !== expectedRows) {
+    context.addIssue({
+      code: "custom",
+      message: "A série canônica deve conter exatamente uma linha por dia do período.",
+      path: [...path, "rows"],
+    });
+    return;
+  }
+
+  dataset.rows.forEach((row, rowIndex) => {
+    if (civilDateOrdinal(row[0]) !== fromOrdinal + rowIndex) {
+      context.addIssue({
+        code: "custom",
+        message: "As datas da série canônica devem ser ISO, únicas, contíguas e ordenadas.",
+        path: [...path, "rows", rowIndex, 0],
+      });
+    }
+  });
+}
+
+function civilDateOrdinal(value: unknown) {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1900 || year > 2200) return null;
+  const timestamp = Date.UTC(year, month - 1, day);
+  const date = new Date(timestamp);
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return Math.floor(timestamp / 86_400_000);
+}
 
 export const AiInsightsRequestSchema = z
   .object({
@@ -324,18 +481,23 @@ const AiInsightsActionSchema = z
   })
   .strict();
 
-export const AiInsightsResponseSchema = z
+const AiInsightsOutcomeSchema = z
   .object({
     summary: z.string().max(1_200),
-    period: AiInsightsPeriodSchema,
-    source: AiInsightsSourceSchema,
-    dataQuality: AiInsightsDataQualitySchema,
-    findings: z.array(AiInsightsFindingSchema).max(8),
-    actions: z.array(AiInsightsActionSchema).max(8),
-    questions: z.array(z.string().max(360)).max(6),
-    disclaimer: z.string().max(600),
+    findings: z.array(AiInsightsFindingSchema).max(3),
+    actions: z.array(AiInsightsActionSchema).max(3),
   })
   .strict();
+
+export const AiInsightsModelOutputSchema = AiInsightsOutcomeSchema;
+
+export const AiInsightsResponseSchema = AiInsightsOutcomeSchema.extend({
+  dataQuality: AiInsightsDataQualitySchema,
+  questions: z.array(z.string().max(360)).max(3),
+  period: AiInsightsPeriodSchema,
+  source: AiInsightsSourceSchema,
+  disclaimer: z.string().max(600),
+}).strict();
 
 export const AiInsightsApiResponseSchema = z
   .object({
@@ -353,6 +515,50 @@ export const AiInsightsApiResponseSchema = z
           .strict(),
       })
       .strict(),
+  })
+  .strict();
+
+const AiInsightsCompatibleResponseSchema = z
+  .object({
+    summary: z.string().max(1_200),
+    period: AiInsightsPeriodSchema,
+    source: AiInsightsSourceSchema,
+    dataQuality: AiInsightsDataQualitySchema,
+    findings: z.array(AiInsightsFindingSchema).max(8),
+    actions: z.array(AiInsightsActionSchema).max(8),
+    questions: z.array(z.string().max(360)).max(6),
+    disclaimer: z.string().max(600),
+  })
+  .strict();
+
+/**
+ * Accepts the response limits used by the previous deployment and normalizes
+ * them to the current concise report. This is client-side rolling-deploy
+ * compatibility; the current server still generates at most three items.
+ */
+export const AiInsightsCompatibleApiResponseSchema = z
+  .object({
+    insights: AiInsightsCompatibleResponseSchema,
+    meta: AiInsightsApiResponseSchema.shape.meta,
+  })
+  .strict()
+  .transform((response) =>
+    AiInsightsApiResponseSchema.parse({
+      ...response,
+      insights: {
+        ...response.insights,
+        actions: response.insights.actions.slice(0, 3),
+        findings: response.insights.findings.slice(0, 3),
+        questions: response.insights.questions.slice(0, 3),
+      },
+    }),
+  );
+
+export const AiInsightsReportSchema = z
+  .object({
+    id: identifierSchema,
+    insights: AiInsightsResponseSchema,
+    meta: AiInsightsApiResponseSchema.shape.meta,
   })
   .strict();
 
@@ -415,6 +621,22 @@ export const AiInsightsStatusResponseSchema = z
     }
   });
 
+export const AiInsightsScopedStatusResponseSchema = z
+  .object({
+    latestReport: AiInsightsReportSchema.nullable(),
+    status: AiInsightsStatusResponseSchema,
+  })
+  .strict()
+  .superRefine((payload, context) => {
+    if (payload.latestReport && !payload.status.available) {
+      context.addIssue({
+        code: "custom",
+        message: "A última análise só pode ser entregue a um perfil habilitado.",
+        path: ["latestReport"],
+      });
+    }
+  });
+
 export type AiInsightModule = z.infer<typeof AiInsightModuleSchema>;
 export type AiInsightSurface = z.infer<typeof AiInsightSurfaceSchema>;
 export type AiInsightCell = z.infer<typeof AiInsightCellSchema>;
@@ -429,10 +651,17 @@ export type AiInsightsConfigurationUpdate = z.infer<
   typeof AiInsightsConfigurationUpdateSchema
 >;
 export type AiInsightsRequest = z.infer<typeof AiInsightsRequestSchema>;
+export type AiInsightsModelOutput = z.infer<
+  typeof AiInsightsModelOutputSchema
+>;
 export type AiInsightsResponse = z.infer<typeof AiInsightsResponseSchema>;
 export type AiInsightsApiResponse = z.infer<
   typeof AiInsightsApiResponseSchema
 >;
+export type AiInsightsReport = z.infer<typeof AiInsightsReportSchema>;
 export type AiInsightsStatusResponse = z.infer<
   typeof AiInsightsStatusResponseSchema
+>;
+export type AiInsightsScopedStatusResponse = z.infer<
+  typeof AiInsightsScopedStatusResponseSchema
 >;
