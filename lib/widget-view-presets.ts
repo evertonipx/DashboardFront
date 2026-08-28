@@ -7,6 +7,10 @@ import {
 } from "@/lib/master-company-scope";
 import { requestUserGridSync } from "@/lib/user-grid";
 import {
+  removeUserGridPreference,
+  writeUserGridPreference,
+} from "@/lib/user-grid-local";
+import {
   CARD_ZOOM_LEVELS,
   loadSavedScopedCardPreferences,
   loadScopedCardPreferences,
@@ -132,7 +136,7 @@ export function loadWidgetViewPresets(
       .filter((preset): preset is WidgetViewPreset => Boolean(preset));
     const result = enforceSingleDefault(normalized);
     if (storedEntry && storedEntry.key !== storageKey) {
-      window.localStorage.setItem(storageKey, JSON.stringify(result));
+      writeUserGridPreference(storageKey, JSON.stringify(result));
       requestUserGridSync();
     }
     return result;
@@ -155,7 +159,7 @@ export function saveWidgetViewPresets(
   );
   if (typeof window === "undefined") return normalized;
 
-  window.localStorage.setItem(
+  writeUserGridPreference(
     presetsStorageKey(
       resolvePresetNamespace(menuKey, presetNamespace),
       companyId,
@@ -308,7 +312,7 @@ export function applyWidgetViewPreset(
 
   clearMenuStorage(snapshot.menuKey, companyId, userId, targetViewId);
   snapshot.storage.forEach((entry) => {
-    window.localStorage.setItem(
+    writeUserGridPreference(
       scopedStorageKey(entry.baseKey, companyId, userId, targetViewId),
       remapSerializedValue(
         entry.value,
@@ -325,7 +329,7 @@ export function applyWidgetViewPreset(
     userId,
     targetViewId,
   );
-  window.localStorage.setItem(
+  writeUserGridPreference(
     appliedPresetStorageKey(
       resolvePresetNamespace(snapshot.menuKey, presetNamespace),
       companyId,
@@ -426,7 +430,7 @@ function clearMenuStorage(
     if (baseKey && matchesMenuStorage(menuKey, baseKey)) keys.push(key);
   }
 
-  keys.forEach((key) => window.localStorage.removeItem(key));
+  keys.forEach((key) => removeUserGridPreference(key));
 }
 
 function hasScopedWidgetViewState(
@@ -612,7 +616,7 @@ function migrateLegacyOccupancyPresets({
       .filter((preset) => occupancyPresetBelongsToNamespace(preset, namespace)),
   );
   const serialized = JSON.stringify(migrated);
-  window.localStorage.setItem(storageKey, serialized);
+  writeUserGridPreference(storageKey, serialized);
   requestUserGridSync();
   return serialized;
 }

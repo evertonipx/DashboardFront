@@ -5,6 +5,7 @@ import {
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
 import { requestUserGridSync } from "@/lib/user-grid";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 
 export type SavedLiveView = {
   createdAt: string;
@@ -109,7 +110,7 @@ export function saveVideoWallProfiles(
     .map(normalizeVideoWallProfile)
     .filter((profile): profile is VideoWallProfile => Boolean(profile));
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(
+    writeUserGridPreference(
       getUserViewScopedStorageKey(
         VIDEO_WALLS_STORAGE_KEY,
         companyId,
@@ -161,7 +162,7 @@ function writeSavedLiveViews(
   userId?: string | null,
 ) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(
+  writeUserGridPreference(
     getUserViewScopedStorageKey(
       SAVED_VIEWS_STORAGE_KEY,
       companyId,
@@ -214,7 +215,7 @@ function readScopedArray<T>(
     // namespace. This makes the recovered configuration visible immediately
     // and eligible for the regular /users/me/grid synchronization.
     if (stored.key !== currentKey) {
-      window.localStorage.setItem(currentKey, JSON.stringify(normalized));
+      writeUserGridPreference(currentKey, JSON.stringify(normalized));
       requestUserGridSync();
     }
 

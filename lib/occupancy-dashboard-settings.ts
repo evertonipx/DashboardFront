@@ -5,6 +5,7 @@ import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 
 export type OccupancyMetricVisibility = {
   average: boolean;
@@ -91,7 +92,7 @@ export function saveOccupancyDashboardSettings(
   const normalized = normalizeOccupancyDashboardSettings(settings);
   if (typeof window === "undefined") return normalized;
 
-  window.localStorage.setItem(
+  writeUserGridPreference(
     occupancyDashboardSettingsStorageKey(companyId, userId, viewId),
     JSON.stringify(normalized),
   );

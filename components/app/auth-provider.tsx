@@ -22,6 +22,7 @@ import {
 } from "@/lib/api";
 import {
   accessTokenExplicitlyMismatchesUserIdentity,
+  accessTokensShareUserIdentity,
   reconcileCurrentUserWithAccessToken,
 } from "@/lib/access-token-claims";
 import { enrichAuthenticatedPermissionMetadata } from "@/lib/authenticated-permission-metadata";
@@ -34,13 +35,11 @@ import {
   writeCompanyCache,
 } from "@/lib/company-cache";
 import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
-import { migrateLegacyLiveDefault } from "@/lib/legacy-dashboard-view-migration";
 import {
   clearStoredCurrentCompanyScope,
   clearStoredMasterCompanyScope,
   getCompanyTimeZoneResolutionForScope,
   getCurrentUserCompanyId,
-  getEffectiveCompanyScopeId,
   getStoredMasterCompanyScope,
   setStoredCurrentCompanyScope,
   setStoredMasterCompanyScope,
@@ -54,6 +53,7 @@ import type {
 } from "@/lib/types";
 import {
   clearUserGridSync,
+  flushUserGridSync,
   hydrateUserGridFromServer,
   startUserGridSync,
   USER_GRID_SYNC_STATUS_EVENT,
@@ -290,11 +290,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [resolveManagerAccess]);
 
   const logout = React.useCallback(async () => {
-    const accessToken = getStoredSession()?.access_token ?? "";
-    const refreshToken = getStoredRefreshToken();
+    const initialSession = getStoredSession();
+    const initialAccessToken = initialSession?.access_token ?? "";
+    const principalAtLogout = userRef.current;
 
-    // Local logout is immediate. The revocation request is pinned to the old
-    // credentials so its late completion can never clear a newer login.
+    // Give debounced personal preferences a short opportunity to reach the
+    // authenticated user-grid before the old token is removed. Failure never
+    // blocks logout or lets a later session inherit this sync generation.
+    await Promise.race([
+      flushUserGridSync().catch(() => false),
+      new Promise<false>((resolve) => {
+        window.setTimeout(() => resolve(false), 1_500);
+      }),
+    ]);
+
+    const currentSession = getStoredSession();
+    const sessionWasReplaced = Boolean(
+      initialAccessToken &&
+        currentSession?.access_token &&
+        currentSession.access_token !== initialAccessToken &&
+        !accessTokensShareUserIdentity(
+          initialAccessToken,
+          currentSession.access_token,
+        ),
+    );
+    if (
+      sessionWasReplaced ||
+      (currentSession &&
+        principalAtLogout &&
+        accessTokenExplicitlyMismatchesUserIdentity(
+          currentSession.access_token,
+          principalAtLogout,
+        ))
+    ) {
+      // A distinct login won the race while the old grid was flushing. Never
+      // clear or revoke the newer principal from this stale logout action.
+      return;
+    }
+
+    const accessToken = currentSession?.access_token ?? initialAccessToken;
+    const refreshToken = currentSession?.refresh_token ?? getStoredRefreshToken();
+
+    // Local logout remains authoritative. The revocation request is pinned to
+    // the latest token in the same principal lineage, including a refresh that
+    // happened while the personal grid was being flushed.
     clearStoredSession();
     clearUserGridSync();
     userRef.current = null;
@@ -428,16 +467,6 @@ async function hydrateAuthenticatedUser(
     shouldApply: sessionIsCurrent,
   });
   assertAuthenticatedSessionCurrent(authenticatedSession);
-  const companyId = getEffectiveCompanyScopeId(hydratedUser);
-  if (companyId) {
-    await migrateLegacyLiveDefault({
-      companyId,
-      expectedAccessToken: accessToken,
-      shouldApply: sessionIsCurrent,
-      userId: hydratedUser.id,
-    }).catch(() => false);
-    assertAuthenticatedSessionCurrent(authenticatedSession);
-  }
   return hydratedUser;
 }
 

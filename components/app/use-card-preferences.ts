@@ -4,7 +4,7 @@ import * as React from "react";
 
 import {
   CARD_VIEW_UPDATED_EVENT,
-  getCardViewStorageKey,
+  getCardViewStorageReadKeys,
   loadScopedCardPreferences,
   type CardMenuKey,
   type CardPreference,
@@ -51,12 +51,12 @@ export function useCardPreferences(
     );
 
     function syncFromStorage(event: StorageEvent) {
-      const scopedStorageKey = getCardViewStorageKey(
+      const scopedStorageKeys = getCardViewStorageReadKeys(
         companyId,
         userId,
         viewId,
       );
-      if (event.key && event.key !== scopedStorageKey) {
+      if (event.key && !scopedStorageKeys.includes(event.key)) {
         return;
       }
 
@@ -74,9 +74,12 @@ export function useCardPreferences(
     function syncFromCustomEvent(event: Event) {
       const detail = (event as CustomEvent<CardViewUpdatedDetail>).detail;
       if (detail?.menuKey && detail.menuKey !== menuKey) return;
-      if (detail && (detail.companyId ?? null) !== (companyId ?? null)) return;
-      if (detail && (detail.userId ?? null) !== (userId ?? null)) return;
-      if (detail && (detail.viewId ?? null) !== (viewId ?? null)) return;
+      if (
+        detail?.companyId != null &&
+        detail.companyId !== (companyId ?? null)
+      ) return;
+      if (detail?.userId != null && detail.userId !== (userId ?? null)) return;
+      if (detail?.viewId != null && detail.viewId !== (viewId ?? null)) return;
       setPreferences(
         loadScopedCardPreferences(
           menuKey,

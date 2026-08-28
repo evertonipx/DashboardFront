@@ -3883,6 +3883,11 @@ test("login é transacional e impede submissões concorrentes", () => {
     /hydrateUserPermissions\([\s\S]*?expectedAccessToken: authenticatedSession\.accessToken[\s\S]*?hydrateUserCompanyModules\([\s\S]*?expectedAccessToken: authenticatedSession\.accessToken/,
     "a hidratação complementar não pode trocar de Bearer durante a sessão",
   );
+  assert.match(
+    authProviderSource,
+    /await Promise\.race\([\s\S]*?flushUserGridSync\(\)[\s\S]*?const currentSession = getStoredSession\(\)[\s\S]*?accessTokensShareUserIdentity[\s\S]*?sessionWasReplaced[\s\S]*?return;[\s\S]*?clearStoredSession\(\)/,
+    "logout deve salvar preferências e nunca apagar uma sessão substituta",
+  );
 });
 
 test("bootstrap próprio usa a identidade do JWT sem herdar a empresa visual do master", () => {

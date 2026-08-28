@@ -11,14 +11,20 @@ const projectRoot = resolve(testsDirectory, "..");
 const moduleCache = new Map();
 const pdf = loadTypeScriptModule("lib/ai-insights-pdf.ts");
 
-test("composição do IA Advisor prioriza resultado e preserva o conteúdo executivo", () => {
+test("composição do IA Advisor separa o cabeçalho e preserva somente conteúdo executivo", () => {
   const report = validReport();
   const originalPriorities = report.insights.actions.map((action) => action.priority);
-  const blocks = pdf.buildAiInsightsPdfBlocks(report, {
+  const header = pdf.buildAiInsightsPdfHeader(report, {
     companyId: "company-a",
     companyLabel: "Shopping Exemplo",
   });
+  const blocks = pdf.buildAiInsightsPdfBlocks(report);
   const serialized = JSON.stringify(blocks);
+
+  assert.deepEqual(header, {
+    company: "Shopping Exemplo",
+    period: "01/08/2026 a 26/08/2026",
+  });
 
   for (const expected of [
     report.insights.summary,
@@ -28,24 +34,32 @@ test("composição do IA Advisor prioriza resultado e preserva o conteúdo execu
     report.insights.actions[0].whyNow,
     report.insights.actions[0].steps[0],
     report.insights.actions[0].expectedEffect,
+    report.insights.actions[0].target,
     report.insights.actions[0].risks[0],
-    report.insights.dataQuality.notes[0],
-    report.insights.questions[0],
-    report.insights.disclaimer,
-    "Shopping Exemplo",
-    "Plano de resultado",
-    "Próximo movimento",
-    "Alavancas de resultado",
-    "Plano para capturar o resultado",
-    "Base e premissas",
+    "Direção recomendada",
+    "Oportunidades de resultado",
+    "Plano de ação",
   ]) {
     assert.ok(serialized.includes(expected), `conteúdo ausente: ${expected}`);
   }
   for (const technicalDetail of [
     report.id,
     report.meta.model,
+    report.insights.dataQuality.notes[0],
+    report.insights.questions[0],
+    report.insights.disclaimer,
+    "Shopping Exemplo",
     "Tokens de entrada",
     "Tokens de saída",
+    "Visão de origem",
+    "Módulo / visão",
+    "Período analisado",
+    "Intervalo civil",
+    "Dados consolidados até",
+    "Plano gerado em",
+    "Origem na visão",
+    "Base e premissas",
+    "Próximo movimento",
     "Qualidade dos dados",
     "Diagnóstico executivo",
   ]) {
@@ -55,6 +69,15 @@ test("composição do IA Advisor prioriza resultado e preserva o conteúdo execu
       `detalhe técnico não deve disputar espaço no relatório executivo: ${technicalDetail}`,
     );
   }
+
+  const targetBlock = blocks.find(
+    (block) => block.kind === "paragraph" && block.label === "Meta do piloto",
+  );
+  assert.deepEqual(targetBlock, {
+    kind: "paragraph",
+    label: "Meta do piloto",
+    text: "1.050 visitas por hora",
+  });
 
   const actionHeadings = blocks
     .filter(
@@ -73,17 +96,44 @@ test("composição do IA Advisor prioriza resultado e preserva o conteúdo execu
   );
 });
 
-test("PDF omite o apêndice técnico quando não há premissa material", () => {
+test("PDF executivo omite governança técnica mesmo quando a captura é parcial", () => {
   const report = validReport();
-  report.insights.dataQuality = { status: "suficiente", notes: [] };
-  report.insights.questions = [];
 
   const serialized = JSON.stringify(pdf.buildAiInsightsPdfBlocks(report));
   assert.equal(serialized.includes("Base e premissas"), false);
   assert.equal(serialized.includes("Qualidade"), false);
   assert.equal(serialized.includes("Tokens"), false);
-  assert.ok(serialized.includes("Tese de resultado"));
+  assert.equal(serialized.includes(report.insights.dataQuality.notes[0]), false);
+  assert.equal(serialized.includes(report.insights.questions[0]), false);
+  assert.equal(serialized.includes(report.insights.disclaimer), false);
+  assert.ok(serialized.includes("Direção recomendada"));
   assert.ok(serialized.includes("Impacto a validar"));
+});
+
+test("normalização PDF remove NUL e mojibake sem acionar Unicode incompatível", () => {
+  const expected = ">=+5% em 2 de 3 domingos com a ação.";
+  const interleavedNul =
+    "≥+\u00005\u0000%\u0000 \u0000e\u0000m\u0000 \u00002\u0000 \u0000d\u0000e\u0000 \u00003\u0000 \u0000d\u0000o\u0000m\u0000i\u0000n\u0000g\u0000o\u0000s\u0000 \u0000c\u0000o\u0000m\u0000 \u0000a\u0000 \u0000a\u0000ç\u0000ã\u0000o\u0000.";
+  const interleavedReplacement =
+    "≥�+�5�%� �e�m� �2� �d�e� �3� �d�o�m�i�n�g�o�s� �c�o�m� �a� �a�ç�ã�o�.";
+
+  assert.equal(pdf.normalizeAiInsightsPdfText(interleavedNul), expected);
+  assert.equal(pdf.normalizeAiInsightsPdfText(interleavedReplacement), expected);
+  assert.equal(
+    pdf.normalizeAiInsightsPdfText("Meta → escala · limite ≥ 5%"),
+    "Meta -> escala · limite >= 5%",
+  );
+  assert.doesNotMatch(
+    pdf.normalizeAiInsightsPdfText(interleavedReplacement),
+    /[\u0000\uFFFD\u2265]/,
+  );
+
+  const report = validReport();
+  report.insights.actions[1].target = interleavedNul;
+  const targetBlock = pdf
+    .buildAiInsightsPdfBlocks(report)
+    .find((block) => block.kind === "paragraph" && block.label === "Meta do piloto");
+  assert.equal(targetBlock?.text, expected);
 });
 
 test("paginação pura consome todas as linhas sem elipse ou perda", () => {
@@ -194,6 +244,17 @@ test("exportador não depende de screenshots, captura do DOM ou impressão", () 
   assert.match(source, /drawPageFooters/);
   assert.match(source, /Página \$\{page\} de \$\{pageCount\}/);
   assert.match(source, /splitAiInsightsPdfLines/);
+  assert.match(source, /EMPRESA · \$\{companyLabel\}/);
+  assert.match(source, /PERÍODO ANALISADO · \$\{periodLabel\}/);
+  assert.doesNotMatch(source, /sectionTitle/);
+  for (const removedLabel of [
+    "Visão de origem",
+    "Módulo / visão",
+    "Intervalo civil",
+    "Dados consolidados até",
+  ]) {
+    assert.equal(source.includes(removedLabel), false);
+  }
 });
 
 function validReport() {

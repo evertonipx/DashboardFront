@@ -5,6 +5,7 @@ import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 import type { AggregateGranularity } from "@/lib/types";
 
 export type RealtimeCustomWidgetGranularity = Extract<
@@ -131,7 +132,7 @@ export function saveRealtimeCustomWidgets(
 ) {
   if (typeof window === "undefined") return;
 
-  window.localStorage.setItem(
+  writeUserGridPreference(
     getRealtimeCustomWidgetsKey(companyId, scope),
     JSON.stringify(widgets.filter(isRealtimeCustomWidget)),
   );

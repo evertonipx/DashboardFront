@@ -28,7 +28,10 @@ import { ThemeToggle } from "@/components/app/theme-provider";
 import { usePremiumShellMotion } from "@/components/app/use-premium-motion";
 import { hasMasterAccess } from "@/lib/access";
 import { requestLiveRefresh } from "@/lib/live-refresh";
+import { migrateLegacyDashboardDefaults } from "@/lib/legacy-dashboard-view-migration";
 import {
+  getEffectiveCompanyScopeId,
+  getUserViewScopedStorageKey,
   getStoredMasterCompanyScope,
   MASTER_COMPANY_SCOPE_EVENT,
   type MasterCompanyScope,
@@ -43,6 +46,12 @@ import {
 } from "@/lib/permissions";
 import { cn, initials } from "@/lib/utils";
 import type { CurrentUser } from "@/lib/types";
+import { USER_GRID_HYDRATED_EVENT } from "@/lib/user-grid";
+import {
+  claimLegacyUserGridPreference,
+  hasUserGridKnownDeletion,
+  writeUserGridPreference,
+} from "@/lib/user-grid-local";
 
 type AppShellProps = {
   mode: "manager" | "client";
@@ -153,7 +162,15 @@ export function AppShell({
     React.useState<MasterCompanyScope | null>(null);
   const [masterScopeReady, setMasterScopeReady] = React.useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
+  const sidebarStorageKey = getUserViewScopedStorageKey(
+    SIDEBAR_COLLAPSED_STORAGE_KEY,
+    null,
+    user?.id,
+  );
   const companyName = getCompanyDisplayName(user, masterCompanyScope, mode);
+  const effectiveCompanyScopeId = isMaster
+    ? masterCompanyScope?.id ?? ""
+    : getEffectiveCompanyScopeId(user);
   const visibleClientNavItems = clientNavItems.filter(
     (item) => !item.canShow || item.canShow(user),
   );
@@ -199,32 +216,68 @@ export function AppShell({
   }, [isMaster, user]);
 
   React.useEffect(() => {
-    let storedPreference: string | null = null;
-    try {
-      storedPreference = window.localStorage.getItem(
-        SIDEBAR_COLLAPSED_STORAGE_KEY,
+    const userId = user?.id?.trim() ?? "";
+    const companyId = effectiveCompanyScopeId.trim();
+    if (!userId || !companyId) return;
+
+    let active = true;
+    void migrateLegacyDashboardDefaults({
+      companyId,
+      shouldApply: () =>
+        active && getEffectiveCompanyScopeId(user) === companyId,
+      userId,
+    });
+    return () => {
+      active = false;
+    };
+  }, [effectiveCompanyScopeId, user]);
+
+  React.useEffect(() => {
+    const synchronizeSidebar = () => {
+      let storedPreference: string | null = null;
+      try {
+        storedPreference = window.localStorage.getItem(sidebarStorageKey);
+        if (
+          storedPreference === null &&
+          sidebarStorageKey !== SIDEBAR_COLLAPSED_STORAGE_KEY &&
+          user?.id &&
+          !hasUserGridKnownDeletion(sidebarStorageKey)
+        ) {
+          storedPreference = claimLegacyUserGridPreference(
+            SIDEBAR_COLLAPSED_STORAGE_KEY,
+            user.id,
+          );
+          if (storedPreference !== null) {
+            writeUserGridPreference(sidebarStorageKey, storedPreference);
+          }
+        }
+      } catch {
+        // The responsive default remains available when storage is blocked.
+      }
+      setSidebarCollapsed(
+        storedPreference === null
+          ? window.matchMedia("(max-width: 1279px)").matches
+          : storedPreference === "true",
       );
-    } catch {
-      // The responsive default remains available when storage is blocked.
-    }
-    setSidebarCollapsed(
-      storedPreference === null
-        ? window.matchMedia("(max-width: 1279px)").matches
-        : storedPreference === "true",
-    );
-  }, []);
+    };
+    const synchronizeSidebarFromStorage = (event: StorageEvent) => {
+      if (event.key && event.key !== sidebarStorageKey) return;
+      synchronizeSidebar();
+    };
+
+    synchronizeSidebar();
+    window.addEventListener(USER_GRID_HYDRATED_EVENT, synchronizeSidebar);
+    window.addEventListener("storage", synchronizeSidebarFromStorage);
+    return () => {
+      window.removeEventListener(USER_GRID_HYDRATED_EVENT, synchronizeSidebar);
+      window.removeEventListener("storage", synchronizeSidebarFromStorage);
+    };
+  }, [sidebarStorageKey, user?.id]);
 
   function toggleSidebar() {
     setSidebarCollapsed((collapsed) => {
       const next = !collapsed;
-      try {
-        window.localStorage.setItem(
-          SIDEBAR_COLLAPSED_STORAGE_KEY,
-          String(next),
-        );
-      } catch {
-        // Keep the in-memory preference for the current session.
-      }
+      writeUserGridPreference(sidebarStorageKey, String(next));
       return next;
     });
   }

@@ -5,7 +5,17 @@ import * as React from "react";
 import { useAuth } from "@/components/app/auth-provider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  getUserViewScopedStorageKey,
+  useEffectiveCompanyScopeId,
+} from "@/lib/master-company-scope";
 import { canViewCounting, canViewOccupancy } from "@/lib/permissions";
+import {
+  claimLegacyUserGridPreference,
+  hasUserGridKnownDeletion,
+  removeUserGridPreference,
+  writeUserGridPreference,
+} from "@/lib/user-grid-local";
 
 type DashboardModule = "counting" | "occupancy";
 
@@ -19,7 +29,10 @@ export function DashboardModuleTabs({
   occupancy: React.ReactNode;
 }) {
   const { loading, user } = useAuth();
-  const storageKey = dashboardModuleStorageKey(user?.id);
+  const companyScopeId = useEffectiveCompanyScopeId(user);
+  const storageKey = dashboardModuleStorageKey(companyScopeId, user?.id);
+  const legacyUserStorageKey = dashboardModuleStorageKey(null, user?.id);
+  const legacyRawUserStorageKey = legacyDashboardModuleStorageKey(user?.id);
   const availableModules = React.useMemo(
     () => dashboardModulesForUser(user),
     [user],
@@ -27,6 +40,7 @@ export function DashboardModuleTabs({
   const availableModuleKey = availableModules.join(":");
   const [module, setModule] = React.useState<DashboardModule | null>(null);
   const [ready, setReady] = React.useState(false);
+  const activeStorageKeyRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     if (loading) {
@@ -34,29 +48,48 @@ export function DashboardModuleTabs({
       return;
     }
 
-    const synchronize = () => {
+    const allowInitialQueryModule = activeStorageKeyRef.current === null;
+    activeStorageKeyRef.current = storageKey;
+
+    const synchronize = (allowQueryModule = false) => {
       const selection = readDashboardModuleSelection(
         storageKey,
+        [legacyUserStorageKey, legacyRawUserStorageKey],
         availableModules,
+        { allowQueryModule, userId: user?.id },
       );
       setModule(selection);
       persistDashboardModuleSelection(storageKey, selection);
       setReady(true);
     };
     const synchronizeStorage = (event: StorageEvent) => {
-      if (event.key === storageKey || event.key === DASHBOARD_MODULE_STORAGE_KEY) {
-        synchronize();
+      if (
+        event.key === storageKey ||
+        event.key === legacyUserStorageKey ||
+        event.key === legacyRawUserStorageKey ||
+        event.key === DASHBOARD_MODULE_STORAGE_KEY
+      ) {
+        synchronize(false);
       }
     };
+    const synchronizeNavigation = () => synchronize(true);
 
-    synchronize();
-    window.addEventListener("popstate", synchronize);
+    synchronize(allowInitialQueryModule);
+    window.addEventListener("popstate", synchronizeNavigation);
     window.addEventListener("storage", synchronizeStorage);
     return () => {
-      window.removeEventListener("popstate", synchronize);
+      window.removeEventListener("popstate", synchronizeNavigation);
       window.removeEventListener("storage", synchronizeStorage);
     };
-  }, [availableModuleKey, availableModules, loading, storageKey]);
+  }, [
+    availableModuleKey,
+    availableModules,
+    legacyRawUserStorageKey,
+    legacyUserStorageKey,
+    loading,
+    storageKey,
+    user?.id,
+  ]);
 
   const selectModule = React.useCallback(
     (value: string) => {
@@ -140,19 +173,47 @@ function isDashboardModule(value: unknown): value is DashboardModule {
 
 function readDashboardModuleSelection(
   storageKey: string,
+  legacyStorageKeys: string[],
   availableModules: readonly DashboardModule[],
+  {
+    allowQueryModule,
+    userId,
+  }: { allowQueryModule: boolean; userId?: string | null },
 ): DashboardModule | null {
   const queryModule = new URLSearchParams(window.location.search).get("module");
-  if (isDashboardModule(queryModule) && availableModules.includes(queryModule)) {
+  if (
+    allowQueryModule &&
+    isDashboardModule(queryModule) &&
+    availableModules.includes(queryModule)
+  ) {
     return queryModule;
   }
 
   try {
-    const storedModule =
-      window.localStorage.getItem(storageKey) ??
-      window.localStorage.getItem(DASHBOARD_MODULE_STORAGE_KEY);
+    const exactModule = window.localStorage.getItem(storageKey);
+    if (isDashboardModule(exactModule) && availableModules.includes(exactModule)) {
+      return exactModule;
+    }
+
+    if (hasUserGridKnownDeletion(storageKey)) {
+      return availableModules[0] ?? null;
+    }
+
+    const storedModule = legacyStorageKeys
+      .map((key) => window.localStorage.getItem(key))
+      .find((value) => value !== null);
     if (isDashboardModule(storedModule) && availableModules.includes(storedModule)) {
       return storedModule;
+    }
+
+    const globalLegacyModule = userId
+      ? claimLegacyUserGridPreference(DASHBOARD_MODULE_STORAGE_KEY, userId)
+      : null;
+    if (
+      isDashboardModule(globalLegacyModule) &&
+      availableModules.includes(globalLegacyModule)
+    ) {
+      return globalLegacyModule;
     }
   } catch {
     // The query string and the default remain available without storage.
@@ -161,15 +222,22 @@ function readDashboardModuleSelection(
   return availableModules[0] ?? null;
 }
 
+function legacyDashboardModuleStorageKey(userId?: string | null) {
+  const normalizedUserId = userId?.trim();
+  return normalizedUserId
+    ? `${DASHBOARD_MODULE_STORAGE_KEY}.user.${normalizedUserId}`
+    : DASHBOARD_MODULE_STORAGE_KEY;
+}
+
 function persistDashboardModuleSelection(
   storageKey: string,
   module: DashboardModule | null,
 ) {
   try {
     if (module) {
-      window.localStorage.setItem(storageKey, module);
+      writeUserGridPreference(storageKey, module);
     } else {
-      window.localStorage.removeItem(storageKey);
+      removeUserGridPreference(storageKey);
     }
   } catch {
     // The URL still preserves the selection when storage is unavailable.
@@ -186,11 +254,15 @@ function persistDashboardModuleSelection(
   }
 }
 
-function dashboardModuleStorageKey(userId?: string | null) {
-  const normalizedUserId = userId?.trim();
-  return normalizedUserId
-    ? `${DASHBOARD_MODULE_STORAGE_KEY}.user.${normalizedUserId}`
-    : DASHBOARD_MODULE_STORAGE_KEY;
+function dashboardModuleStorageKey(
+  companyId?: string | null,
+  userId?: string | null,
+) {
+  return getUserViewScopedStorageKey(
+    DASHBOARD_MODULE_STORAGE_KEY,
+    companyId,
+    userId,
+  );
 }
 
 function dashboardModulesForUser(

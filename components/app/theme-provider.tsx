@@ -4,7 +4,15 @@ import * as React from "react";
 import { Moon, Sun } from "lucide-react";
 import { Toaster } from "sonner";
 
+import { useAuth } from "@/components/app/auth-provider";
 import { Button } from "@/components/ui/button";
+import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import { USER_GRID_HYDRATED_EVENT } from "@/lib/user-grid";
+import {
+  claimLegacyUserGridPreference,
+  hasUserGridKnownDeletion,
+  writeUserGridPreference,
+} from "@/lib/user-grid-local";
 import { cn } from "@/lib/utils";
 
 type Theme = "light" | "dark" | "system";
@@ -20,6 +28,8 @@ const THEME_STORAGE_KEY = "ipxdata-theme";
 const ThemeContext = React.createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  const userId = user?.id?.trim() ?? "";
   const [theme, setThemeState] = React.useState<Theme>(() => readStoredTheme());
   const [systemTheme, setSystemTheme] = React.useState<EffectiveTheme>(() =>
     readSystemTheme(),
@@ -28,7 +38,25 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const effectiveTheme = theme === "system" ? systemTheme : theme;
 
   React.useEffect(() => {
-    setThemeState(readStoredTheme());
+    const synchronizeTheme = () => {
+      const storedTheme = readStoredTheme(userId);
+      setThemeState(storedTheme);
+      cacheThemeForBoot(storedTheme);
+      if (
+        userId &&
+        !readThemeAtKey(themeStorageKey(userId)) &&
+        !hasUserGridKnownDeletion(themeStorageKey(userId))
+      ) {
+        writeUserGridPreference(themeStorageKey(userId), storedTheme);
+      }
+    };
+    const synchronizeThemeFromStorage = (event: StorageEvent) => {
+      const scopedKey = userId ? themeStorageKey(userId) : THEME_STORAGE_KEY;
+      if (event.key && event.key !== scopedKey) return;
+      synchronizeTheme();
+    };
+
+    synchronizeTheme();
 
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
     const syncSystemTheme = () => {
@@ -37,11 +65,15 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
     syncSystemTheme();
     mediaQuery.addEventListener("change", syncSystemTheme);
+    window.addEventListener(USER_GRID_HYDRATED_EVENT, synchronizeTheme);
+    window.addEventListener("storage", synchronizeThemeFromStorage);
 
     return () => {
       mediaQuery.removeEventListener("change", syncSystemTheme);
+      window.removeEventListener(USER_GRID_HYDRATED_EVENT, synchronizeTheme);
+      window.removeEventListener("storage", synchronizeThemeFromStorage);
     };
-  }, []);
+  }, [userId]);
 
   React.useEffect(() => {
     const root = document.documentElement;
@@ -49,14 +81,16 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     root.style.colorScheme = effectiveTheme;
   }, [effectiveTheme]);
 
-  const setTheme = React.useCallback((nextTheme: Theme) => {
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
-    } catch {
-      // Theme switching must remain usable when storage is unavailable.
-    }
-    setThemeState(nextTheme);
-  }, []);
+  const setTheme = React.useCallback(
+    (nextTheme: Theme) => {
+      cacheThemeForBoot(nextTheme);
+      if (userId) {
+        writeUserGridPreference(themeStorageKey(userId), nextTheme);
+      }
+      setThemeState(nextTheme);
+    },
+    [userId],
+  );
 
   const value = React.useMemo(
     () => ({ theme, effectiveTheme, setTheme }),
@@ -66,20 +100,47 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
-function readStoredTheme(): Theme {
+function readStoredTheme(userId = ""): Theme {
   if (typeof window === "undefined") return "system";
 
-  let storedTheme: string | null = null;
-  try {
-    storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
-  } catch {
-    return "system";
-  }
+  const scopedTheme = userId ? readThemeAtKey(themeStorageKey(userId)) : null;
+  const legacyTheme = scopedTheme || hasUserGridKnownDeletion(themeStorageKey(userId))
+    ? null
+    : userId
+      ? normalizeTheme(claimLegacyUserGridPreference(THEME_STORAGE_KEY, userId))
+      : readThemeAtKey(THEME_STORAGE_KEY);
+  const storedTheme = scopedTheme ?? legacyTheme;
   if (storedTheme === "light" || storedTheme === "dark" || storedTheme === "system") {
     return storedTheme;
   }
 
   return "system";
+}
+
+function normalizeTheme(value: unknown): Theme | null {
+  return value === "light" || value === "dark" || value === "system"
+    ? value
+    : null;
+}
+
+function readThemeAtKey(storageKey: string): Theme | null {
+  try {
+    return normalizeTheme(window.localStorage.getItem(storageKey));
+  } catch {
+    return null;
+  }
+}
+
+function cacheThemeForBoot(theme: Theme) {
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // Theme switching must remain usable when storage is unavailable.
+  }
+}
+
+function themeStorageKey(userId: string) {
+  return getUserViewScopedStorageKey(THEME_STORAGE_KEY, null, userId);
 }
 
 function readSystemTheme(): EffectiveTheme {

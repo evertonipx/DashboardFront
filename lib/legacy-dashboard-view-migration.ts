@@ -7,9 +7,11 @@ import {
   getUserViewScopedStorageKey,
 } from "@/lib/master-company-scope";
 import { requestUserGridSync } from "@/lib/user-grid";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 import {
   loadSavedScopedCardPreferences,
   saveCardPreferences,
+  type CardMenuKey,
   type CardPreference,
 } from "@/lib/view-preferences";
 import {
@@ -24,13 +26,25 @@ type LegacyDashboardViewResponse = {
   preferences?: CardPreference[];
 };
 
-const LEGACY_DEFAULT_PRESET_ID = "legacy-live-default-v1";
-const LEGACY_MIGRATION_KEY =
-  "ipxdata.legacy-dashboard-default-migration.v1.live";
-
-const legacyLiveCardAliases: Record<string, string> = {
-  live_today_total: "live_intraday_comparison",
+type LegacyDashboardMigrationDefinition = {
+  aliases?: Record<string, string>;
+  menuKey: CardMenuKey;
+  presetName: string;
 };
+
+const LEGACY_MIGRATION_KEY =
+  "ipxdata.legacy-dashboard-default-migration.v2";
+
+const LEGACY_DASHBOARD_MIGRATIONS: LegacyDashboardMigrationDefinition[] = [
+  {
+    aliases: { live_today_total: "live_intraday_comparison" },
+    menuKey: "live",
+    presetName: "Padrão Ao Vivo",
+  },
+  { menuKey: "analysis", presetName: "Padrão Análises" },
+  { menuKey: "reports", presetName: "Padrão Relatórios" },
+  { menuKey: "occupancy", presetName: "Padrão Ocupação" },
+];
 
 export async function migrateLegacyLiveDefault({
   companyId,
@@ -43,6 +57,51 @@ export async function migrateLegacyLiveDefault({
   shouldApply?: () => boolean;
   userId: string;
 }) {
+  return migrateLegacyDashboardDefault(
+    LEGACY_DASHBOARD_MIGRATIONS[0],
+    { companyId, expectedAccessToken, shouldApply, userId },
+  );
+}
+
+export async function migrateLegacyDashboardDefaults({
+  companyId,
+  expectedAccessToken,
+  shouldApply = () => true,
+  userId,
+}: {
+  companyId: string;
+  expectedAccessToken?: string;
+  shouldApply?: () => boolean;
+  userId: string;
+}) {
+  let imported = false;
+  for (const definition of LEGACY_DASHBOARD_MIGRATIONS) {
+    if (!shouldApply()) return imported;
+    imported =
+      (await migrateLegacyDashboardDefault(definition, {
+        companyId,
+        expectedAccessToken,
+        shouldApply,
+        userId,
+      })) || imported;
+  }
+  return imported;
+}
+
+async function migrateLegacyDashboardDefault(
+  definition: LegacyDashboardMigrationDefinition,
+  {
+    companyId,
+    expectedAccessToken,
+    shouldApply,
+    userId,
+  }: {
+    companyId: string;
+    expectedAccessToken?: string;
+    shouldApply: () => boolean;
+    userId: string;
+  },
+) {
   const requestedCompanyId = companyId.trim();
   const requestedUserId = userId.trim();
   if (
@@ -63,21 +122,46 @@ export async function migrateLegacyLiveDefault({
     LEGACY_MIGRATION_KEY,
     requestedCompanyId,
     requestedUserId,
+    definition.menuKey,
   );
   if (window.localStorage.getItem(migrationKey)) return false;
 
   const currentPresets = loadWidgetViewPresets(
-    "live",
+    definition.menuKey,
     requestedCompanyId,
     requestedUserId,
   );
-  if (currentPresets.some((preset) => preset.isDefault)) {
-    markMigrationComplete(migrationKey, "existing-default");
+  const currentDefault = currentPresets.find((preset) => preset.isDefault);
+  if (currentDefault) {
+    const { cardIds, preferences } = currentDefault.snapshot;
+    const repaired = Boolean(
+      preferences.length &&
+      !loadSavedScopedCardPreferences(
+        definition.menuKey,
+        cardIds,
+        requestedCompanyId,
+        requestedUserId,
+      ),
+    );
+    if (repaired) {
+      saveCardPreferences(
+        definition.menuKey,
+        preferences,
+        cardIds,
+        requestedCompanyId,
+        requestedUserId,
+      );
+    }
+    markMigrationComplete(
+      migrationKey,
+      repaired ? "repaired-personal-scope" : "existing-default",
+    );
     requestUserGridSync();
-    return false;
+    return repaired;
   }
 
-  const legacyView = await fetchLegacyLiveView(
+  const legacyView = await fetchLegacyDashboardView(
+    definition.menuKey,
     requestedCompanyId,
     expectedAccessToken,
   );
@@ -88,47 +172,60 @@ export async function migrateLegacyLiveDefault({
     return false;
   }
 
-  const responseCompanyId = legacyView?.company_id?.trim() ?? "";
+  if (!legacyView) return false;
+
+  const responseCompanyId = legacyView.company_id?.trim() ?? "";
   if (
-    !legacyView?.found ||
     !responseCompanyId ||
-    responseCompanyId !== requestedCompanyId ||
-    !Array.isArray(legacyView.preferences) ||
-    !legacyView.preferences.length
+    responseCompanyId !== requestedCompanyId
   ) {
     return false;
   }
+  if (
+    !legacyView.found ||
+    !Array.isArray(legacyView.preferences) ||
+    !legacyView.preferences.length
+  ) {
+    markMigrationComplete(migrationKey, "not-found");
+    return false;
+  }
 
-  const preferences = migrateLegacyPreferences(legacyView.preferences);
+  const preferences = migrateLegacyPreferences(
+    legacyView.preferences,
+    definition.aliases,
+  );
   const cardIds = preferences.map((preference) => preference.id);
   if (
     !loadSavedScopedCardPreferences(
-      "live",
+      definition.menuKey,
       cardIds,
       responseCompanyId,
+      requestedUserId,
     )
   ) {
     saveCardPreferences(
-      "live",
+      definition.menuKey,
       preferences,
       cardIds,
       responseCompanyId,
+      requestedUserId,
     );
   }
 
+  const presetId = `legacy-${definition.menuKey}-default-v2`;
   const now = new Date().toISOString();
   const existingMigrationPreset = currentPresets.find(
-    (preset) => preset.id === LEGACY_DEFAULT_PRESET_ID,
+    (preset) => preset.id === presetId,
   );
   const defaultPreset: WidgetViewPreset = {
     createdAt: existingMigrationPreset?.createdAt ?? now,
-    id: LEGACY_DEFAULT_PRESET_ID,
+    id: presetId,
     isDefault: true,
-    name: "Padrão Ao Vivo",
+    name: definition.presetName,
     snapshot: {
       cardIds,
       capturedAt: now,
-      menuKey: "live",
+      menuKey: definition.menuKey,
       preferences,
       sourceScope: null,
       storage: [],
@@ -137,10 +234,10 @@ export async function migrateLegacyLiveDefault({
     updatedAt: now,
   };
   saveWidgetViewPresets(
-    "live",
+    definition.menuKey,
     existingMigrationPreset
       ? currentPresets.map((preset) =>
-          preset.id === LEGACY_DEFAULT_PRESET_ID ? defaultPreset : preset,
+          preset.id === presetId ? defaultPreset : preset,
         )
       : [...currentPresets, defaultPreset],
     responseCompanyId,
@@ -151,14 +248,15 @@ export async function migrateLegacyLiveDefault({
   return true;
 }
 
-async function fetchLegacyLiveView(
+async function fetchLegacyDashboardView(
+  menuKey: CardMenuKey,
   companyScopeId: string,
   expectedAccessToken?: string,
 ) {
-  return apiFetch<LegacyDashboardViewResponse>("/dashboard-views/live", {
-    companyScopeId,
-    expectedAccessToken,
-  }).catch(() => null);
+  return apiFetch<LegacyDashboardViewResponse>(
+    `/dashboard-views/${menuKey}`,
+    { companyScopeId, expectedAccessToken },
+  ).catch(() => null);
 }
 
 function currentStoredCompanyScopeId() {
@@ -169,11 +267,14 @@ function currentStoredCompanyScopeId() {
   );
 }
 
-function migrateLegacyPreferences(preferences: CardPreference[]) {
+function migrateLegacyPreferences(
+  preferences: CardPreference[],
+  aliases: Record<string, string> = {},
+) {
   const migrated = new Map<string, CardPreference>();
 
   preferences.forEach((preference) => {
-    const id = legacyLiveCardAliases[preference.id] ?? preference.id;
+    const id = aliases[preference.id] ?? preference.id;
     migrated.set(id, { ...preference, id });
   });
 
@@ -181,7 +282,7 @@ function migrateLegacyPreferences(preferences: CardPreference[]) {
 }
 
 function markMigrationComplete(key: string, result: string) {
-  window.localStorage.setItem(
+  writeUserGridPreference(
     key,
     JSON.stringify({ migratedAt: new Date().toISOString(), result }),
   );

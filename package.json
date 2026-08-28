@@ -15,7 +15,7 @@
     "test:modules": "node --test tests/module-access.test.mjs",
     "test:occupancy-range": "node --test tests/occupancy-range-plan.test.mjs",
     "test:tenant-scope": "node --test tests/tenant-scope-propagation.test.mjs",
-    "test:user-grid": "node --test tests/user-grid.test.mjs",
+    "test:user-grid": "node --test tests/user-grid.test.mjs tests/user-preferences-persistence.test.mjs",
     "test": "npm run test:analytics && npm run test:auth && npm run test:ai && npm run test:login-ui && npm run test:modules && npm run test:occupancy-range && npm run test:tenant-scope && npm run test:user-grid",
     "check:production": "npm run lint && npm run typecheck && npm test && npm run build",
     "context:skeleton": "node tools/generate-code-skeleton.mjs",

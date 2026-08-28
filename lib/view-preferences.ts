@@ -2,7 +2,14 @@ import {
   normalizeCardLayoutLevel,
   type CardLayoutLevel,
 } from "@/lib/card-layout-sizing";
-import { getScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  getScopedStorageKey,
+  getUserViewScopedStorageKey,
+} from "@/lib/master-company-scope";
+import {
+  hasUserGridKnownDeletion,
+  writeUserGridPreference,
+} from "@/lib/user-grid-local";
 
 export type CardMenuKey = "live" | "reports" | "analysis" | "occupancy";
 
@@ -374,7 +381,7 @@ export function saveCardPreferences(
   const nextPreferences = normalizeCardPreferences(menuKey, preferences, cardIds);
   const store = readStoredPreferences(companyId, userId, viewId);
   store[menuKey] = nextPreferences;
-  window.localStorage.setItem(
+  writeUserGridPreference(
     getCardViewStorageKey(companyId, userId, viewId),
     JSON.stringify(store),
   );
@@ -405,15 +412,12 @@ export function getCardViewStorageKey(
   userId?: string | null,
   viewId?: string | null,
 ) {
-  const segments = [
-    companyId?.trim() ? `company.${encodeURIComponent(companyId.trim())}` : "",
-    userId?.trim() ? `user.${encodeURIComponent(userId.trim())}` : "",
-    viewId?.trim() ? `view.${encodeURIComponent(viewId.trim())}` : "",
-  ].filter(Boolean);
-
-  return segments.length
-    ? `${CARD_VIEW_STORAGE_KEY}.${segments.join(".")}`
-    : CARD_VIEW_STORAGE_KEY;
+  return getUserViewScopedStorageKey(
+    CARD_VIEW_STORAGE_KEY,
+    companyId,
+    userId,
+    viewId,
+  );
 }
 
 function readScopedMenuPreferences(
@@ -423,6 +427,14 @@ function readScopedMenuPreferences(
   viewId?: string | null,
 ) {
   if (typeof window === "undefined") return undefined;
+
+  const personalKey = getCardViewStorageKey(companyId, userId, viewId);
+  const personalBaseKey = getCardViewStorageKey(companyId, userId);
+  const legacyFallbackBlocked = Boolean(
+    userId?.trim() &&
+      (hasUserGridKnownDeletion(personalKey) ||
+        hasUserGridKnownDeletion(personalBaseKey)),
+  );
 
   for (const key of getCardViewStorageReadKeys(
     companyId,
@@ -436,6 +448,20 @@ function readScopedMenuPreferences(
       const parsed = JSON.parse(stored) as CardPreferenceStore;
       if (!parsed || typeof parsed !== "object") return undefined;
       if (Object.prototype.hasOwnProperty.call(parsed, menuKey)) {
+        const alreadyPersonal = Boolean(
+          userId?.trim() &&
+          (key === personalBaseKey || key.startsWith(`${personalBaseKey}.view.`)),
+        );
+        if (!alreadyPersonal && legacyFallbackBlocked) continue;
+        if (userId?.trim() && !alreadyPersonal && key !== personalKey) {
+          const personalStore = readStoredPreferences(
+            companyId,
+            userId,
+            viewId,
+          );
+          personalStore[menuKey] = parsed[menuKey];
+          writeUserGridPreference(personalKey, JSON.stringify(personalStore));
+        }
         return parsed[menuKey];
       }
     } catch {
@@ -446,7 +472,7 @@ function readScopedMenuPreferences(
   return undefined;
 }
 
-function getCardViewStorageReadKeys(
+export function getCardViewStorageReadKeys(
   companyId?: string | null,
   userId?: string | null,
   viewId?: string | null,
@@ -456,19 +482,37 @@ function getCardViewStorageReadKeys(
   const cleanViewId = viewId?.trim() ?? "";
   const keys = [
     getCardViewStorageKey(cleanCompanyId, cleanUserId, cleanViewId),
+    getLegacyCardViewStorageKey(cleanCompanyId, cleanUserId, cleanViewId),
   ];
 
   if (cleanViewId) {
     keys.push(getCardViewStorageKey(cleanCompanyId, cleanUserId));
+    keys.push(getLegacyCardViewStorageKey(cleanCompanyId, cleanUserId));
   }
   if (cleanCompanyId && (cleanUserId || cleanViewId)) {
     keys.push(getCardViewStorageKey(cleanCompanyId));
+    keys.push(getLegacyCardViewStorageKey(cleanCompanyId));
   }
   if (cleanCompanyId) {
     keys.push(getScopedStorageKey(CARD_VIEW_STORAGE_KEY, cleanCompanyId));
   }
 
   return Array.from(new Set(keys));
+}
+
+function getLegacyCardViewStorageKey(
+  companyId?: string | null,
+  userId?: string | null,
+  viewId?: string | null,
+) {
+  const segments = [
+    companyId?.trim() ? `company.${encodeURIComponent(companyId.trim())}` : "",
+    userId?.trim() ? `user.${encodeURIComponent(userId.trim())}` : "",
+    viewId?.trim() ? `view.${encodeURIComponent(viewId.trim())}` : "",
+  ].filter(Boolean);
+  return segments.length
+    ? `${CARD_VIEW_STORAGE_KEY}.${segments.join(".")}`
+    : CARD_VIEW_STORAGE_KEY;
 }
 
 function readStoredPreferences(

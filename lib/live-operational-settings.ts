@@ -3,6 +3,7 @@ import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 
 export type LiveOperationalSettings = {
   heatmapScenarioIds: string[];
@@ -65,7 +66,7 @@ export function loadLiveOperationalSettings(
     const normalized = normalizeLiveOperationalSettings(
       JSON.parse(storedEntry.value) as unknown,
     );
-    window.localStorage.setItem(
+    writeUserGridPreference(
       storedEntry.key,
       JSON.stringify(normalized),
     );
@@ -82,7 +83,7 @@ export function saveLiveOperationalSettings(
 ) {
   const normalized = normalizeLiveOperationalSettings(settings);
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(
+    writeUserGridPreference(
       storageKey(companyId, scope),
       JSON.stringify(normalized),
     );

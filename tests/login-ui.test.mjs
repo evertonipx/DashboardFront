@@ -6,6 +6,8 @@ import ts from "typescript";
 
 const loginSource = readFileSync("app/login/page.tsx", "utf8");
 const brandingSource = readFileSync("lib/login-branding.ts", "utf8");
+const layoutSource = readFileSync("app/layout.tsx", "utf8");
+const themeSource = readFileSync("components/app/theme-provider.tsx", "utf8");
 
 function loadLoginBrandingModule() {
   const compiled = ts.transpileModule(brandingSource, {
@@ -43,6 +45,17 @@ test("login enterprise é responsivo, tematizável e mantém contraste da marca"
   assert.match(loginSource, /backgroundColor: "#07111f"/);
   assert.match(loginSource, /<ThemeToggle/);
   assert.match(loginSource, /LOGIN_CAPABILITIES\.map/);
+});
+
+test("tema autenticado usa o user-grid sem perder o tema inicial do login", () => {
+  assert.match(
+    layoutSource,
+    /<AuthProvider>[\s\S]*?<ThemeProvider>[\s\S]*?<AppToaster \/>[\s\S]*?<\/ThemeProvider>[\s\S]*?<\/AuthProvider>/,
+  );
+  assert.match(themeSource, /themeStorageKey\(userId\)/);
+  assert.match(themeSource, /writeUserGridPreference\(themeStorageKey\(userId\)/);
+  assert.match(themeSource, /USER_GRID_HYDRATED_EVENT/);
+  assert.match(themeSource, /cacheThemeForBoot/);
 });
 
 test("apresentação do login permanece enterprise e textualmente minimalista", () => {

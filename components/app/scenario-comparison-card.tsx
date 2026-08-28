@@ -80,6 +80,10 @@ import type {
   AggregateGranularity,
   Scenario,
 } from "@/lib/types";
+import {
+  removeUserGridPreference,
+  writeUserGridPreference,
+} from "@/lib/user-grid-local";
 import { cn, formatNumber, formatTime, toDateTimeLocalValue } from "@/lib/utils";
 
 type ScenarioComparisonCardProps = {
@@ -1909,7 +1913,7 @@ export function deleteScenarioComparisonSettings(
   scope: ViewPreferenceScope = {},
 ) {
   if (typeof window === "undefined") return;
-  window.localStorage.removeItem(
+  removeUserGridPreference(
     settingsStorageKey(storageKey, companyId, scope),
   );
 }
@@ -1947,7 +1951,7 @@ function saveSettings(
 ) {
   if (typeof window === "undefined") return;
 
-  window.localStorage.setItem(
+  writeUserGridPreference(
     settingsStorageKey(storageKey, companyId, scope),
     JSON.stringify(settings),
   );

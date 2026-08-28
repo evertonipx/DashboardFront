@@ -15,7 +15,9 @@ Este projeto e um frontend Next.js. Em producao ele atende o navegador e faz pro
 - `.env.production`: configuracao real de producao, nao deve ir para o Git.
 - `.env.production.example`: modelo para criar o `.env.production`.
 - `package-lock.json`: deve ser mantido junto com o projeto para `npm ci`.
-- `.ipxdata/dashboard-views.json`: layouts salvos de cards do dashboard.
+- `.ipxdata/dashboard-views.json`: legado temporario de layouts por empresa;
+  o fluxo atual do frontend apenas o consulta para migracao ao `user-grid`
+  pessoal, embora a rota de compatibilidade antiga ainda exista.
 - `.ipxdata/ai-insights-config.v1.json`: configuracoes empresariais cifradas de IA.
 - `.ipxdata/ai-insights-config.v1.key`: chave local de cifragem; preservar junto ao volume e nunca distribuir publicamente.
 - `.ipxdata/ai-insights-reports.v1.json`: ultimo relatorio do IA Advisor por empresa, modulo e tela, cifrado no servidor.
@@ -130,8 +132,9 @@ Para usar um backend em outro host:
 - `NEXT_PUBLIC_REPORT_HISTORY_START_YEAR` define o primeiro ano consultado pela matriz anual de Relatorios. O padrao e `2020`; ajuste para o inicio real da base antes do build e mantenha o valor estavel.
 - A tela de login pode ser customizada por empresa via `NEXT_PUBLIC_IPXDATA_LOGIN_BRANDS`. A empresa e resolvida antes do login por query string, como `/login?empresa=cliente-a`, ou por subdominio, como `cliente-a.seudominio.com`.
 - O vinculo `Location -> Worker` implementado no frontend fica salvo no navegador por empresa ate o backend expor `worker_id` em `Location` ou uma tabela de relacao. Em producao multiusuario, o backend precisa persistir esse vinculo para todos enxergarem a mesma configuracao.
-- Widgets personalizados, configuracoes de cenarios por periodo e grupos locais de cameras ainda usam `localStorage`. Eles nao acompanham outro navegador ou computador ate serem persistidos pelo backend.
-- `.ipxdata/dashboard-views.json`, `ai-insights-config.v1.*` e `ai-insights-reports.v1.*` precisam ficar em volume persistente compartilhado e com backup. Sem esse volume, reiniciar ou recriar a instancia apaga configuracao e historico; com varias instancias usando discos separados, o operador pode nao encontrar a ultima analise. Quando um volume compartilhado nao for possivel, use uma unica replica/sticky session ou mova a persistencia para backend/DB ou secret manager.
+- Tema, sidebar, modulo selecionado, filtros, periodos, layouts, widgets personalizados, presets, visoes e video wall sao persistidos em `GET/PUT /api/v1/users/me/grid`, sempre no usuario autenticado pelo JWT. O `localStorage` e somente cache imediato, fonte de migracao e outbox temporario para alteracoes ainda nao confirmadas; nao e a fonte definitiva dessas preferencias. Escritas e exclusoes pendentes sobrevivem a reload/rotacao do JWT e so saem do outbox depois da confirmacao remota.
+- Grupos locais de cameras e vinculos camera-worker/location-worker continuam no navegador porque representam configuracao operacional compartilhada, nao preferencia pessoal. Eles precisam de uma rota de dominio no backend para que todos os usuarios da empresa enxerguem o mesmo valor; nao devem ser colocados no `user-grid` de um usuario.
+- `.ipxdata/dashboard-views.json` deve ser preservado durante a janela de migracao das visoes antigas. `ai-insights-config.v1.*` e `ai-insights-reports.v1.*` precisam ficar em volume persistente compartilhado e com backup. Sem esse volume, reiniciar ou recriar a instancia apaga configuracao e historico; com varias instancias usando discos separados, o operador pode nao encontrar a ultima analise. Quando um volume compartilhado nao for possivel, use uma unica replica/sticky session ou mova a persistencia para backend/DB ou secret manager.
 - Execute `npm audit` em cada entrega. Na revisao de 12/08/2026, nenhuma vulnerabilidade de dependencia foi reportada.
 
 ## Login customizado por empresa

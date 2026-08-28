@@ -4,6 +4,7 @@ import {
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 
 export type CountingReportPeriod = {
   from: string;
@@ -126,7 +127,7 @@ export function saveCountingReportPeriod(
 ) {
   const normalized = normalizeCountingReportPeriod(period, now);
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(
+    writeUserGridPreference(
       storageKey(companyId, scope),
       JSON.stringify(normalized),
     );

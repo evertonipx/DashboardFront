@@ -55,16 +55,16 @@ test("gerenciador de visões invalida a consulta quando a empresa muda", () => {
   assert.match(source, /return \(\) => \{\s*active = false;/);
 });
 
-test("migração legada usa empresa explícita e revalida o escopo", () => {
+test("migração legada importa todas as superfícies no escopo pessoal e revalida a empresa", () => {
   const source = readSource("lib/legacy-dashboard-view-migration.ts");
 
   assert.match(
     source,
-    /fetchLegacyLiveView\(\s*requestedCompanyId,\s*expectedAccessToken,\s*\)/,
+    /LEGACY_DASHBOARD_MIGRATIONS[\s\S]*?menuKey: "live"[\s\S]*?menuKey: "analysis"[\s\S]*?menuKey: "reports"[\s\S]*?menuKey: "occupancy"/,
   );
   assert.match(
     source,
-    /apiFetch<LegacyDashboardViewResponse>\("\/dashboard-views\/live", \{\s*companyScopeId,\s*expectedAccessToken/,
+    /apiFetch<LegacyDashboardViewResponse>\(\s*`\/dashboard-views\/\$\{menuKey\}`[\s\S]*?companyScopeId, expectedAccessToken/,
   );
   assert.match(
     source,
@@ -73,6 +73,14 @@ test("migração legada usa empresa explícita e revalida o escopo", () => {
   assert.match(
     source,
     /!shouldApply\(\) \|\|\s*currentStoredCompanyScopeId\(\) !== initialStoredCompanyId[\s\S]*?return false/,
+  );
+  assert.match(
+    source,
+    /loadSavedScopedCardPreferences\([\s\S]*?definition\.menuKey,[\s\S]*?cardIds,[\s\S]*?responseCompanyId,[\s\S]*?requestedUserId/,
+  );
+  assert.match(
+    source,
+    /saveCardPreferences\([\s\S]*?definition\.menuKey,[\s\S]*?preferences,[\s\S]*?cardIds,[\s\S]*?responseCompanyId,[\s\S]*?requestedUserId/,
   );
 });
 

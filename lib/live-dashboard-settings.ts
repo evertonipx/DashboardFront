@@ -3,6 +3,7 @@ import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 
 export type LiveDashboardSettings = {
   showPreviousPeriod: boolean;
@@ -55,7 +56,7 @@ export function saveLiveDashboardSettings(
 ) {
   if (typeof window === "undefined") return;
 
-  window.localStorage.setItem(
+  writeUserGridPreference(
     getLiveDashboardSettingsKey(companyId, scope),
     JSON.stringify(settings),
   );

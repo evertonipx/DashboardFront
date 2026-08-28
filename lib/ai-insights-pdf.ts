@@ -24,6 +24,11 @@ export type AiInsightsPdfMetadataEntry = {
   value: string;
 };
 
+export type AiInsightsPdfHeader = {
+  company: string;
+  period: string;
+};
+
 export type AiInsightsPdfBlock =
   | {
       kind: "section";
@@ -60,13 +65,12 @@ type PdfDocument = import("jspdf").jsPDF;
 type PdfRenderState = {
   bodyBottom: number;
   bodyTop: number;
+  companyLabel: string;
   contentWidth: number;
   doc: PdfDocument;
-  exportedAt: Date;
   pageHeight: number;
   pageWidth: number;
-  report: AiInsightsPdfReport;
-  sectionTitle: string;
+  periodLabel: string;
   x: number;
   y: number;
 };
@@ -136,84 +140,50 @@ export async function createAiInsightsPdfDocument(
   const filename = options.filename
     ? ensurePdfExtension(safeAiInsightsPdfFilename(options.filename))
     : createAiInsightsPdfFilename(report, exportedAt, options.companyLabel);
-  const companyLabel = cleanPdfText(
-    options.companyLabel || options.companyId || "",
-  );
+  const header = buildAiInsightsPdfHeader(report, options);
 
   doc.setProperties({
     author: "IPXData",
     creator: "IPXData",
     keywords: "IPXData, IA Advisor, inteligência operacional, plano de ação",
-    subject: `${companyLabel ? `${companyLabel} · ` : ""}${moduleLabel(report.insights.source.module)} · ${surfaceLabel(report.insights.source.surface)} · ${report.insights.period.label}`,
-    title: `IA Advisor · ${companyLabel ? `${companyLabel} · ` : ""}${report.insights.source.reportTitle}`,
+    subject: cleanPdfText(`${header.company} · ${header.period}`),
+    title: cleanPdfText(`IA Advisor · ${header.company}`),
   });
 
-  renderAiInsightsPdf(doc, report, exportedAt, options);
+  renderAiInsightsPdf(doc, report, options);
   return { doc, filename };
+}
+
+export function buildAiInsightsPdfHeader(
+  report: AiInsightsPdfReport,
+  options: Pick<AiInsightsPdfOptions, "companyId" | "companyLabel"> = {},
+): AiInsightsPdfHeader {
+  return {
+    company: normalizeAiInsightsPdfText(
+      options.companyLabel || options.companyId || "Empresa não informada",
+    ),
+    period: analyzedPeriodLabel(report.insights),
+  };
 }
 
 export function buildAiInsightsPdfBlocks(
   report: AiInsightsPdfReport,
-  options: Pick<AiInsightsPdfOptions, "companyId" | "companyLabel"> = {},
 ): AiInsightsPdfBlock[] {
-  const { insights, meta } = report;
-  const periodRange = civilPeriodRange(insights);
-  const timeZone = certifiedIanaTimeZone(insights.period.timeZone);
+  const { insights } = report;
   const actions = [...insights.actions].sort(
     (left, right) =>
       PRIORITY_ORDER[left.priority] - PRIORITY_ORDER[right.priority],
   );
   const blocks: AiInsightsPdfBlock[] = [
     {
-      eyebrow: "IA ADVISOR · DIREÇÃO EXECUTIVA",
+      eyebrow: "SÍNTESE EXECUTIVA",
       kind: "section",
       startOnNewPage: false,
-      title: "Plano de resultado",
-    },
-    {
-      entries: [
-        ...(options.companyLabel || options.companyId
-          ? [
-              {
-                label: "Empresa",
-                value: cleanPdfText(
-                  options.companyLabel || options.companyId || "",
-                ),
-              },
-            ]
-          : []),
-        {
-          label: "Visão de origem",
-          value: cleanPdfText(insights.source.reportTitle),
-        },
-        {
-          label: "Módulo / visão",
-          value: `${moduleLabel(insights.source.module)} · ${surfaceLabel(insights.source.surface)}`,
-        },
-        { label: "Período analisado", value: cleanPdfText(insights.period.label) },
-        ...(periodRange
-          ? [{ label: "Intervalo civil", value: periodRange }]
-          : []),
-        {
-          label: "Dados consolidados até",
-          value: insights.source.dataCompleteUntil
-            ? formatAiInsightsPdfDateTime(
-                insights.source.dataCompleteUntil,
-                timeZone,
-              )
-            : "Corte temporal não certificado",
-        },
-        {
-          label: "Plano gerado em",
-          value: formatAiInsightsPdfDateTime(meta.generatedAt, timeZone),
-        },
-      ],
-      kind: "metadata",
+      title: "Direção recomendada",
     },
     {
       emphasis: true,
       kind: "paragraph",
-      label: "Tese de resultado",
       text: contentOrFallback(
         insights.summary,
         "A análise não apresentou uma conclusão executiva.",
@@ -221,20 +191,11 @@ export function buildAiInsightsPdfBlocks(
     },
   ];
 
-  if (actions[0]) {
-    blocks.push({
-      emphasis: true,
-      kind: "paragraph",
-      label: "Próximo movimento",
-      text: `${contentOrFallback(actions[0].title, "Ação prioritária")}. ${contentOrFallback(actions[0].expectedEffect, "Impacto a validar")}. Validar em ${contentOrFallback(actions[0].measurementWindow, "janela comparável")}.`,
-    });
-  }
-
   blocks.push({
-    eyebrow: `${insights.findings.length} ALAVANCA(S)`,
+    eyebrow: countLabel(insights.findings.length, "ALAVANCA", "ALAVANCAS"),
     kind: "section",
     startOnNewPage: true,
-    title: "Alavancas de resultado",
+    title: "Oportunidades de resultado",
   });
 
   if (!insights.findings.length) {
@@ -251,18 +212,6 @@ export function buildAiInsightsPdfBlocks(
         eyebrow: `ALAVANCA ${index + 1} · FORÇA DO SINAL ${confidenceLabel(finding.confidence).toUpperCase()}`,
         kind: "item-heading",
         title: contentOrFallback(finding.title, `Alavanca ${index + 1}`),
-      },
-      {
-        entries: [
-          { label: "Força do sinal", value: confidenceLabel(finding.confidence) },
-          {
-            label: "Origem na visão",
-            value: finding.widget
-              ? cleanPdfText(finding.widget)
-              : "Visão consolidada",
-          },
-        ],
-        kind: "metadata",
       },
       {
         kind: "paragraph",
@@ -282,10 +231,10 @@ export function buildAiInsightsPdfBlocks(
   });
 
   blocks.push({
-    eyebrow: `${actions.length} INICIATIVA(S) PRIORIZADA(S)`,
+    eyebrow: countLabel(actions.length, "INICIATIVA PRIORIZADA", "INICIATIVAS PRIORIZADAS"),
     kind: "section",
     startOnNewPage: true,
-    title: "Plano para capturar o resultado",
+    title: "Plano de ação",
   });
 
   if (!actions.length) {
@@ -337,12 +286,18 @@ export function buildAiInsightsPdfBlocks(
               ? cleanPdfText(action.baseline)
               : "A medir",
           },
-          {
-            label: "Meta do piloto",
-            value: action.target
-              ? cleanPdfText(action.target)
-              : "A definir no piloto",
-          },
+        ],
+        kind: "metadata",
+      },
+      {
+        kind: "paragraph",
+        label: "Meta do piloto",
+        text: action.target
+          ? normalizeAiInsightsPdfText(action.target)
+          : "A definir no piloto",
+      },
+      {
+        entries: [
           {
             label: "Prazo de validação",
             value: contentOrFallback(
@@ -352,10 +307,10 @@ export function buildAiInsightsPdfBlocks(
           },
           {
             label: "Dono sugerido",
-            value: action.owner ? cleanPdfText(action.owner) : "A definir",
+            value: action.owner
+              ? normalizeAiInsightsPdfText(action.owner)
+              : "A definir",
           },
-          { label: "Esforço", value: effortLabel(action.effort) },
-          { label: "Confiança", value: confidenceLabel(action.confidence) },
         ],
         kind: "metadata",
       },
@@ -369,45 +324,6 @@ export function buildAiInsightsPdfBlocks(
         tone: "warning",
       });
     }
-  });
-
-  const hasMaterialPremises =
-    insights.dataQuality.status !== "suficiente" ||
-    insights.dataQuality.notes.length > 0 ||
-    insights.questions.length > 0;
-  if (hasMaterialPremises) {
-    blocks.push({
-      eyebrow: "APÊNDICE",
-      kind: "section",
-      startOnNewPage: true,
-      title: "Base e premissas",
-    });
-    if (insights.dataQuality.notes.length) {
-      blocks.push({
-        items: insights.dataQuality.notes.map((note) => cleanPdfText(note)),
-        kind: "list",
-        label: "Premissas materiais",
-        tone: "muted",
-      });
-    }
-    if (insights.questions.length) {
-      blocks.push({
-        items: insights.questions.map((question) => cleanPdfText(question)),
-        kind: "list",
-        label: "O que destrava a próxima decisão",
-        ordered: true,
-      });
-    }
-  }
-
-  blocks.push({
-    kind: "paragraph",
-    label: "Nota de responsabilidade",
-    text: contentOrFallback(
-      insights.disclaimer,
-      "As recomendações devem ser validadas com acompanhamento dos indicadores definidos.",
-    ),
-    tone: "muted",
   });
 
   return blocks;
@@ -473,34 +389,32 @@ export function formatAiInsightsPdfDateTime(
 function renderAiInsightsPdf(
   doc: PdfDocument,
   report: AiInsightsPdfReport,
-  exportedAt: Date,
   options: Pick<AiInsightsPdfOptions, "companyId" | "companyLabel">,
 ) {
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
+  const header = buildAiInsightsPdfHeader(report, options);
   const state: PdfRenderState = {
     bodyBottom: pageHeight - PAGE_FOOTER_HEIGHT,
     bodyTop: PAGE_BODY_TOP,
+    companyLabel: header.company,
     contentWidth: pageWidth - PAGE_MARGIN_X * 2,
     doc,
-    exportedAt,
     pageHeight,
     pageWidth,
-    report,
-    sectionTitle: "Plano de resultado",
+    periodLabel: header.period,
     x: PAGE_MARGIN_X,
     y: PAGE_BODY_TOP,
   };
 
   drawPageHeader(state);
-  const blocks = buildAiInsightsPdfBlocks(report, options);
+  const blocks = buildAiInsightsPdfBlocks(report);
   blocks.forEach((block) => renderBlock(state, block));
   drawPageFooters(state);
 }
 
 function renderBlock(state: PdfRenderState, block: AiInsightsPdfBlock) {
   if (block.kind === "section") {
-    state.sectionTitle = block.title;
     if (block.startOnNewPage) addPage(state);
     drawSectionHeading(state, block.eyebrow, block.title);
     return;
@@ -521,38 +435,50 @@ function renderBlock(state: PdfRenderState, block: AiInsightsPdfBlock) {
 }
 
 function drawPageHeader(state: PdfRenderState) {
-  const { doc, pageWidth } = state;
+  const { companyLabel, doc, pageWidth, periodLabel } = state;
   doc.setFillColor(`#${COLORS.accent}`);
-  doc.rect(0, 0, pageWidth, 10, "F");
-  drawText(doc, "IPXData", PAGE_MARGIN_X, 34, 10, COLORS.accent, true);
+  doc.rect(0, 0, pageWidth, 8, "F");
+  drawText(doc, "IPXDATA", PAGE_MARGIN_X, 29, 10, COLORS.accent, true);
   drawText(
     doc,
     "IA ADVISOR",
     pageWidth - PAGE_MARGIN_X,
-    34,
+    29,
     8,
     COLORS.accent,
     true,
     "right",
   );
-  drawText(
+  const headerGap = 18;
+  const headerColumnWidth = (state.contentWidth - headerGap) / 2;
+  drawFittedText(
     doc,
-    state.sectionTitle,
+    `EMPRESA · ${companyLabel}`,
     PAGE_MARGIN_X,
-    57,
-    15,
+    53,
+    headerColumnWidth,
+    8.5,
     COLORS.dark,
     true,
   );
+  drawFittedText(
+    doc,
+    `PERÍODO ANALISADO · ${periodLabel}`,
+    pageWidth - PAGE_MARGIN_X,
+    53,
+    headerColumnWidth,
+    8.5,
+    COLORS.dark,
+    true,
+    "right",
+  );
   doc.setDrawColor(`#${COLORS.border}`);
-  doc.line(PAGE_MARGIN_X, 70, pageWidth - PAGE_MARGIN_X, 70);
+  doc.line(PAGE_MARGIN_X, 68, pageWidth - PAGE_MARGIN_X, 68);
 }
 
 function drawPageFooters(state: PdfRenderState) {
-  const { doc, pageHeight, pageWidth, report } = state;
+  const { doc, pageHeight, pageWidth } = state;
   const pageCount = doc.getNumberOfPages();
-  const timeZone = certifiedIanaTimeZone(report.insights.period.timeZone);
-  const exportedLabel = `Exportado em ${formatAiInsightsPdfDateTime(state.exportedAt, timeZone)}`;
   for (let page = 1; page <= pageCount; page += 1) {
     doc.setPage(page);
     doc.setDrawColor(`#${COLORS.border}`);
@@ -564,22 +490,12 @@ function drawPageFooters(state: PdfRenderState) {
     );
     drawText(
       doc,
-      "IPXData · IA Advisor",
+      "IPXData · IA Advisor · Validar recomendações em piloto controlado",
       PAGE_MARGIN_X,
       pageHeight - 18,
       7.5,
       COLORS.muted,
       true,
-    );
-    drawText(
-      doc,
-      exportedLabel,
-      pageWidth / 2,
-      pageHeight - 18,
-      7.5,
-      COLORS.muted,
-      false,
-      "center",
     );
     drawText(
       doc,
@@ -806,7 +722,7 @@ function drawList(
 
   block.items.forEach((item, index) => {
     ensureSpace(state, style.lineHeight + 4);
-    const prefix = block.ordered ? `${index + 1}.` : "•";
+    const prefix = block.ordered ? `${index + 1}.` : "-";
     const indent = block.ordered ? 24 : 18;
     const lines = wrapPdfText(
       state.doc,
@@ -937,6 +853,38 @@ function drawText(
   doc.text(cleanPdfText(text), x, y, { align });
 }
 
+function drawFittedText(
+  doc: PdfDocument,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  size: number,
+  color: string,
+  bold = false,
+  align: "left" | "center" | "right" = "left",
+) {
+  let fittedText = cleanPdfText(text);
+  let fittedSize = size;
+  doc.setFont("helvetica", bold ? "bold" : "normal");
+  doc.setFontSize(fittedSize);
+  while (fittedSize > 6.5 && doc.getTextWidth(fittedText) > maxWidth) {
+    fittedSize -= 0.5;
+    doc.setFontSize(fittedSize);
+  }
+  if (doc.getTextWidth(fittedText) > maxWidth) {
+    const suffix = "...";
+    while (
+      fittedText.length > 1 &&
+      doc.getTextWidth(`${fittedText}${suffix}`) > maxWidth
+    ) {
+      fittedText = fittedText.slice(0, -1).trimEnd();
+    }
+    fittedText = `${fittedText}${suffix}`;
+  }
+  drawText(doc, fittedText, x, y, fittedSize, color, bold, align);
+}
+
 function paragraphStyle(
   tone: Extract<AiInsightsPdfBlock, { kind: "paragraph" | "list" }>["tone"],
 ): PdfTextStyle {
@@ -952,21 +900,76 @@ function paragraphStyle(
   };
 }
 
-function cleanPdfText(value: string) {
-  return String(value ?? "")
+export function normalizeAiInsightsPdfText(value: string) {
+  const normalized = String(value ?? "")
+    .normalize("NFC")
+    .replace(/[\u0000\uFEFF\uFFFD]/g, "")
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F]/g, "")
     .replace(/\r\n?/g, "\n")
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ")
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/[\u2022\u2043\u2219]/g, "-")
+    .replace(/\u2192/g, "->")
+    .replace(/\u2190/g, "<-")
+    .replace(/\u2191/g, " acima")
+    .replace(/\u2193/g, " abaixo")
+    .replace(/\u2265/g, ">=")
+    .replace(/\u2264/g, "<=")
+    .replace(/\u2248/g, "~")
+    .replace(/\u00A0/g, " ")
+    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, " ")
+    .replace(/[^\u0009\u000A\u000D\u0020-\u00FF]/gu, (character) =>
+      character
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036F]/g, "")
+        .replace(/[^\u0020-\u00FF]/g, ""),
+    );
+
+  return normalized
+    .split("\n")
+    .map((line) => line.replace(/[\t ]+/g, " ").trimEnd())
+    .join("\n")
     .trim();
+}
+
+function cleanPdfText(value: string) {
+  return normalizeAiInsightsPdfText(value);
 }
 
 function contentOrFallback(value: string, fallback: string) {
   return cleanPdfText(value) || fallback;
 }
 
-function civilPeriodRange(insights: AiInsightsResponse) {
-  const { from, to } = insights.period;
+function analyzedPeriodLabel(insights: AiInsightsResponse) {
+  const from = formatCivilDate(insights.period.from);
+  const to = formatCivilDate(insights.period.to);
   if (from && to) return from === to ? from : `${from} a ${to}`;
-  return from ?? to ?? null;
+  const fallback = cleanPdfText(insights.period.label);
+  return from ?? to ?? (fallback || "Não informado");
+}
+
+function formatCivilDate(value: string | null) {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return `${match[3]}/${match[2]}/${match[1]}`;
+}
+
+function countLabel(count: number, singular: string, plural: string) {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function certifiedIanaTimeZone(value: string) {
@@ -1002,16 +1005,6 @@ function ensurePdfExtension(value: string) {
   return `${value.replace(/\.pdf$/i, "") || "ia-advisor"}.pdf`;
 }
 
-function moduleLabel(module: AiInsightsResponse["source"]["module"]) {
-  return module === "counting" ? "Contagem" : "Ocupação";
-}
-
-function surfaceLabel(surface: AiInsightsResponse["source"]["surface"]) {
-  if (surface === "live") return "Ao Vivo";
-  if (surface === "analysis") return "Análises";
-  return "Relatórios";
-}
-
 function priorityLabel(
   priority: AiInsightsResponse["actions"][number]["priority"],
 ) {
@@ -1029,10 +1022,4 @@ function confidenceLabel(
   if (confidence === "alta") return "Alta";
   if (confidence === "media") return "Média";
   return "Baixa";
-}
-
-function effortLabel(effort: AiInsightsResponse["actions"][number]["effort"]) {
-  if (effort === "alto") return "Alto";
-  if (effort === "medio") return "Médio";
-  return "Baixo";
 }

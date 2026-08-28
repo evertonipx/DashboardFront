@@ -276,6 +276,8 @@ export function OccupancyReportsDashboard({
   const companyTimeZoneResolution =
     useEffectiveCompanyTimeZoneResolution(user);
   const companyTimeZone = companyTimeZoneResolution.timeZone;
+  const settingsViewId = analysis ? "analysis" : "reports";
+  const liveSettingsScope = { userId, viewId: settingsViewId };
   const dashboardFocusSurface = analysis
     ? "occupancy-analysis" as const
     : "occupancy-reports" as const;
@@ -295,11 +297,15 @@ export function OccupancyReportsDashboard({
   >({});
   const [chartDataScopeKey, setChartDataScopeKey] = React.useState("");
   const [showPreviousPeriod, setShowPreviousPeriod] = React.useState(
-    () => loadLiveDashboardSettings(companyScopeId).showPreviousPeriod,
+    () =>
+      loadLiveDashboardSettings(companyScopeId, liveSettingsScope)
+        .showPreviousPeriod,
   );
   const [intradayComparison, setIntradayComparison] =
     React.useState<IntradayComparisonMode>(
-      () => loadLiveDashboardSettings(companyScopeId).intradayComparison,
+      () =>
+        loadLiveDashboardSettings(companyScopeId, liveSettingsScope)
+          .intradayComparison,
     );
   const metricVisibilityScopeKey = `${companyScopeId}|${user?.id ?? ""}|${
     analysis ? "analysis" : "reports"
@@ -793,7 +799,10 @@ export function OccupancyReportsDashboard({
     chartAbortControllerRef.current?.abort();
     chartAbortControllerRef.current = null;
     closedSegmentCacheRef.current.clear();
-    const settings = loadLiveDashboardSettings(companyScopeId);
+    const settings = loadLiveDashboardSettings(companyScopeId, {
+      userId: user?.id,
+      viewId: settingsViewId,
+    });
     setMetadataError("");
     setChartLoadError("");
     setScenarios([]);
@@ -833,6 +842,7 @@ export function OccupancyReportsDashboard({
     companyScopeId,
     companyTimeZone,
     metricVisibilityScopeKey,
+    settingsViewId,
     user?.id,
   ]);
 
@@ -1039,7 +1049,7 @@ export function OccupancyReportsDashboard({
     saveLiveDashboardSettings({
       intradayComparison,
       showPreviousPeriod: value,
-    }, companyScopeId);
+    }, companyScopeId, { userId, viewId: settingsViewId });
   }
 
   function updateIntradayComparison(value: IntradayComparisonMode) {
@@ -1049,7 +1059,7 @@ export function OccupancyReportsDashboard({
     saveLiveDashboardSettings({
       intradayComparison: value,
       showPreviousPeriod,
-    }, companyScopeId);
+    }, companyScopeId, { userId, viewId: settingsViewId });
   }
 
   const metricCards = [

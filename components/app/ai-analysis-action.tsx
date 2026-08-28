@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { BrainCircuit, Download, Loader2, RefreshCw } from "lucide-react";
+import { Download, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -388,24 +388,27 @@ export function AiAnalysisAction({
         type="button"
         variant="outline"
         size="icon"
-        className="h-8 w-8 shrink-0"
+        className="h-8 w-8 shrink-0 border-primary/25 bg-primary/[0.045] text-primary shadow-sm transition-colors hover:border-primary/45 hover:bg-primary/10 hover:text-primary focus-visible:ring-primary/40"
         aria-label="Abrir IA Advisor desta visão"
+        aria-haspopup="dialog"
+        aria-expanded={dialogOpen}
         title="Abrir IA Advisor"
         onClick={openAdvisor}
       >
-        <BrainCircuit className="h-4 w-4" />
-        <span className="sr-only">Abrir IA Advisor</span>
+        <Sparkles className="h-4 w-4" strokeWidth={1.8} aria-hidden="true" />
       </Button>
 
       <Dialog open={dialogOpen} onOpenChange={changeDialogOpen}>
         <DialogContent className="max-w-6xl gap-3 p-4 sm:p-5">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <BrainCircuit className="h-5 w-5 text-primary" />
+              <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/10 text-primary ring-1 ring-primary/15">
+                <Sparkles className="h-4 w-4" strokeWidth={1.8} aria-hidden="true" />
+              </span>
               IA Advisor
             </DialogTitle>
             <DialogDescription>
-              Interpretação quantitativa dos dados e medidas concretas para esta visão.
+              Direção executiva e ações mensuráveis para esta visão.
             </DialogDescription>
           </DialogHeader>
           <div className="flex min-w-0 flex-col gap-2 rounded-md border border-border bg-muted/20 p-2.5 sm:flex-row sm:items-center sm:justify-between">
@@ -492,7 +495,9 @@ export function AiAnalysisAction({
               </div>
             ) : (
               <div className="flex min-h-52 flex-col items-center justify-center rounded-md border border-dashed border-border p-6 text-center">
-                <BrainCircuit className="h-8 w-8 text-primary" />
+                <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15">
+                  <Sparkles className="h-5 w-5" strokeWidth={1.8} aria-hidden="true" />
+                </span>
                 <h3 className="mt-3 text-sm font-semibold text-foreground">
                   Nenhum relatório disponível
                 </h3>

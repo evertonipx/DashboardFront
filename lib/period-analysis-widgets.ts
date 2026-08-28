@@ -4,6 +4,7 @@ import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 import type {
   ScenarioAnalyticsGranularity,
   ScenarioSelectionMode,
@@ -287,7 +288,7 @@ export function savePeriodAnalysisWidgets(
   const normalized = widgets
     .map(normalizeWidget)
     .filter((widget): widget is PeriodAnalysisWidget => Boolean(widget));
-  window.localStorage.setItem(
+  writeUserGridPreference(
     scopedKey(WIDGETS_STORAGE_KEY, companyId, userId),
     JSON.stringify(normalized),
   );
@@ -387,7 +388,7 @@ export function savePeriodAnalysisSettings(
   userId?: string | null,
 ) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(
+    writeUserGridPreference(
       scopedKey(SETTINGS_STORAGE_KEY, companyId, userId),
       JSON.stringify(settings),
     );
@@ -539,11 +540,11 @@ function migratePeriodAnalysisWidgets(
       corrected,
     );
 
-  window.localStorage.setItem(
+  writeUserGridPreference(
     scopedKey(WIDGETS_STORAGE_KEY, companyId, userId),
     JSON.stringify(migrated),
   );
-  window.localStorage.setItem(versionKey, "5");
+  writeUserGridPreference(versionKey, "5");
   return migrated;
 }
 

@@ -38,10 +38,11 @@ Esse endurecimento não substitui a autoridade do backend. A liberação para cl
 - O proxy de produção exige `IPXDATA_API_URL` fixo; o destino da API não é mais derivado de headers enviados pelo cliente.
 - O proxy encaminha apenas headers permitidos, usa host/protocolo confiáveis, propaga cancelamento e impõe timeout. A rota especializada de snapshots também cancela e limita chamadas ao backend.
 - A seleção de empresa do superadmin é propagada ao carregamento de metadados, cenários e agregados, sem reutilizar silenciosamente o contexto anterior.
-- A grade de preferências do usuário passou a sincronizar somente chaves pessoais permitidas. Uma falha de leitura remota não autoriza escrita subsequente, dados de outras empresas não são mesclados e a ausência remota não é interpretada como exclusão.
-- Preferências locais de módulo são isoladas por usuário. A persistência de visões no fallback em arquivo usa fila, lock interprocesso e substituição atômica, e não sobrescreve um arquivo corrompido como se estivesse vazio.
+- A grade de preferências do usuário sincroniza somente chaves pessoais permitidas. Uma falha de leitura remota não autoriza escrita subsequente, o cliente tenta hidratar novamente e dados de outras empresas não são misturados.
+- Exclusões pessoais são representadas por tombstones e o documento remoto é relido/mesclado antes da substituição completa exigida pelo Swagger. Um outbox local durável mantém escritas e exclusões até o GET de confirmação, inclusive após reload ou rotação do JWT.
+- Tema, sidebar e módulo são isolados por usuário; o módulo também é isolado por empresa. O arquivo antigo de visões usa fila, lock interprocesso e escrita atômica somente durante a migração para o `user-grid`.
 - Falhas transitórias de rede/5xx ao atualizar o usuário não encerram mais a sessão nem apagam permissões já conhecidas. Respostas de login/refresh são validadas antes de substituir tokens e sua expiração.
-- O `localStorage` permanece como cache e fallback de preferências do cliente; ele não deve mais ser descrito como a única persistência de toda a grade. A disponibilidade compartilhada ainda depende do endpoint de preferências do backend.
+- O `localStorage` permanece apenas como cache imediato e entrada de migração. A fonte persistente das preferências pessoais e visões é `/users/me/grid`; segredos, autorização e configuração empresarial compartilhada permanecem fora dele.
 
 ### Padronização funcional
 
@@ -115,7 +116,7 @@ Para representar ocupação real por vaga, mesa, posto, área ou fila, o domíni
 
 ### P1 — Concorrência da grade pessoal
 
-O endpoint `/users/me/grid` ainda recebe o documento completo por `PUT` e não publica revisão, `ETag`, `If-Match` ou operação incremental por chave. O frontend impede escrita depois de uma leitura falha, preserva chaves desconhecidas e faz merge defensivo, mas duas abas ou dispositivos que partam da mesma revisão ainda podem sobrescrever alterações distintas na ordem inversa de chegada.
+O endpoint `/users/me/grid` ainda recebe o documento completo por `PUT` e não publica revisão, `ETag`, `If-Match` ou operação incremental por chave. O frontend impede escrita depois de uma leitura falha, preserva chaves desconhecidas, confirma cada PUT e mantém divergências no outbox para reconciliação, mas não pode oferecer atomicidade linearizável entre dispositivos sem suporte condicional do backend.
 
 O contrato recomendado é `PATCH` por chave com tombstone explícito, ou leitura/escrita otimista com revisão e resposta `409` para remerge. A homologação deve incluir dois clientes editando preferências diferentes simultaneamente.
 

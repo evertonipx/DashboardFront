@@ -413,6 +413,11 @@ test("Dashboard monta somente módulos concedidos e corrige seleção persistida
 
   assert.match(source, /canViewCounting\(user\)/);
   assert.match(source, /canViewOccupancy\(user\)/);
+  assert.match(source, /useEffectiveCompanyScopeId\(user\)/);
+  assert.match(
+    source,
+    /dashboardModuleStorageKey\(companyScopeId, user\?\.id\)/,
+  );
   assert.match(
     source,
     /availableModules\.includes\("counting"\)[\s\S]*?<TabsContent[\s\S]*?value="counting"/,
@@ -422,6 +427,12 @@ test("Dashboard monta somente módulos concedidos e corrige seleção persistida
     /availableModules\.includes\("occupancy"\)[\s\S]*?<TabsContent[\s\S]*?value="occupancy"/,
   );
   assert.match(source, /persistDashboardModuleSelection\(storageKey, selection\)/);
+  assert.match(
+    source,
+    /allowInitialQueryModule = activeStorageKeyRef\.current === null[\s\S]*?synchronize\(false\)/,
+    "a query da empresa anterior não pode sobrescrever a preferência da nova empresa",
+  );
+  assert.match(source, /claimLegacyUserGridPreference\(DASHBOARD_MODULE_STORAGE_KEY/);
   assert.match(source, /data-dashboard-module="none"/);
   assert.match(source, /Nenhum módulo disponível/);
 });

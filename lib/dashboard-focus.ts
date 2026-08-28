@@ -1,5 +1,6 @@
 import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
 import { requestUserGridSync } from "@/lib/user-grid";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 
 export const DASHBOARD_FOCUS_STORAGE_KEY = "ipxdata.dashboard-focus.v1";
 
@@ -143,19 +144,15 @@ export function saveDashboardFocus<Mode extends DashboardFocusScopeMode>(
     return false;
   }
 
-  try {
-    window.localStorage.setItem(
-      getDashboardFocusStorageKey(cleanCompanyId, cleanUserId, surface),
-      JSON.stringify({
-        scopeMode: preference.scopeMode,
-        selectedId: cleanSelectedId,
-      }),
-    );
-    requestUserGridSync();
-    return true;
-  } catch {
-    return false;
-  }
+  const stored = writeUserGridPreference(
+    getDashboardFocusStorageKey(cleanCompanyId, cleanUserId, surface),
+    JSON.stringify({
+      scopeMode: preference.scopeMode,
+      selectedId: cleanSelectedId,
+    }),
+  );
+  if (stored) requestUserGridSync();
+  return stored;
 }
 
 export function getDashboardFocusStorageKey(

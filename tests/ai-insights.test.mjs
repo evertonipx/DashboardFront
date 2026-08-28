@@ -820,6 +820,10 @@ test("ação abre a última análise, gera sob demanda e exporta o IA Advisor", 
   assert.match(action, /AiInsightsCompatibleApiResponseSchema\.safeParse\(responsePayload\)/);
   assert.match(action, /<Dialog open=\{dialogOpen\}/);
   assert.match(action, /onClick=\{openAdvisor\}/);
+  assert.match(action, /<Sparkles[\s\S]*?strokeWidth=\{1\.8\}/);
+  assert.match(action, /aria-haspopup="dialog"/);
+  assert.match(action, /aria-expanded=\{dialogOpen\}/);
+  assert.doesNotMatch(action, /BrainCircuit/);
   assert.match(action, /function openAdvisor\(\)[\s\S]*?refreshAvailability\(\)/);
   assert.match(action, /Gerar novo relatório/);
   assert.match(action, /Exportar PDF/);

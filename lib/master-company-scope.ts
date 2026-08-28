@@ -12,6 +12,10 @@ import {
   type CompanyTimeZoneResolution,
 } from "@/lib/company-time-zone";
 import type { CurrentUser } from "@/lib/types";
+import {
+  hasUserGridKnownDeletion,
+  writeUserGridPreference,
+} from "@/lib/user-grid-local";
 import { isMasterUser } from "@/lib/user-role";
 
 export type MasterCompanyScope = {
@@ -346,6 +350,23 @@ export function readUserViewScopedStorageEntry(
 ) {
   if (typeof window === "undefined") return null;
 
+  const personalKey = getUserViewScopedStorageKey(
+    baseKey,
+    companyId,
+    userId,
+    viewId,
+  );
+  const personalBaseKey = getUserViewScopedStorageKey(
+    baseKey,
+    companyId,
+    userId,
+  );
+  const legacyFallbackBlocked = Boolean(
+    userId?.trim() &&
+      (hasUserGridKnownDeletion(personalKey) ||
+        hasUserGridKnownDeletion(personalBaseKey)),
+  );
+
   for (const key of getUserViewScopedStorageReadKeys(
     baseKey,
     companyId,
@@ -353,7 +374,18 @@ export function readUserViewScopedStorageEntry(
     viewId,
   )) {
     const value = window.localStorage.getItem(key);
-    if (value !== null) return { key, value };
+    if (value === null) continue;
+
+    const alreadyPersonal = Boolean(
+      userId?.trim() &&
+      (key === personalBaseKey || key.startsWith(`${personalBaseKey}.view.`)),
+    );
+    if (!alreadyPersonal && legacyFallbackBlocked) continue;
+    if (userId?.trim() && !alreadyPersonal && personalKey !== key) {
+      writeUserGridPreference(personalKey, value);
+      return { key: personalKey, value };
+    }
+    return { key, value };
   }
 
   return null;

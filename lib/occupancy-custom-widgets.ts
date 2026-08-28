@@ -4,6 +4,7 @@ import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 
 export type OccupancyCustomWidgetGranularity =
   | "minute"
@@ -116,7 +117,7 @@ export function saveOccupancyCustomWidgets(
   const normalized = normalizeOccupancyCustomWidgets(widgets);
   if (typeof window === "undefined") return normalized;
 
-  window.localStorage.setItem(
+  writeUserGridPreference(
     getOccupancyCustomWidgetsKey(companyId, scope),
     JSON.stringify(normalized),
   );

@@ -4,6 +4,7 @@ import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
 import type { AggregateGranularity } from "@/lib/types";
 
@@ -93,7 +94,7 @@ export function saveReportCustomWidgets(
 ) {
   if (typeof window === "undefined") return;
 
-  window.localStorage.setItem(
+  writeUserGridPreference(
     getReportCustomWidgetsKey(companyId, scope),
     JSON.stringify(widgets.filter(isReportCustomWidget)),
   );

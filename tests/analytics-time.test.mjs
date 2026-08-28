@@ -157,6 +157,7 @@ const scenarioValidation = loadTypeScriptModule(
   "lib/scenario-validation.ts",
 );
 const viewPreferences = loadTypeScriptModule("lib/view-preferences.ts");
+const userGridLocal = loadTypeScriptModule("lib/user-grid-local.ts");
 const videoWall = loadTypeScriptModule("lib/video-wall.ts");
 const widgetViewPresets = loadTypeScriptModule("lib/widget-view-presets.ts");
 
@@ -3843,6 +3844,15 @@ test("configurações antigas reaparecem por visão sem atravessar usuário ou e
         precedenceBase,
         ...precedenceScope,
       ).value,
+      "company",
+      "o fallback legado lido foi materializado no namespace pessoal da visão",
+    );
+    storage.removeItem(viewKey);
+    assert.equal(
+      masterCompanyScope.readUserViewScopedStorageEntry(
+        precedenceBase,
+        ...precedenceScope,
+      ).value,
       "legacy-company",
     );
     assert.equal(
@@ -4154,6 +4164,130 @@ test("configurações antigas reaparecem por visão sem atravessar usuário ou e
       comparisonSource,
       /readUserViewScopedStorageEntry\([\s\S]*?scenarioComparisonStorageBaseKey\(storageKey\)/,
       "comparativos customizados também devem herdar a configuração anterior",
+    );
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    if (previousCustomEvent === undefined) delete globalThis.CustomEvent;
+    else globalThis.CustomEvent = previousCustomEvent;
+  }
+});
+
+test("migração de card views preserva menus, IDs pontuados e exclusões", () => {
+  const storage = memoryStorage();
+  const previousWindow = globalThis.window;
+  const previousCustomEvent = globalThis.CustomEvent;
+  globalThis.CustomEvent = class CustomEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  };
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    const companyId = "company-card-merge";
+    const userId = "admin.card@example.com";
+    const viewId = "scenario.main";
+    const personalKey = viewPreferences.getCardViewStorageKey(
+      companyId,
+      userId,
+      viewId,
+    );
+    storage.setItem(
+      personalKey,
+      JSON.stringify({
+        live: [{ id: "live_intraday_comparison", visible: false }],
+      }),
+    );
+    storage.setItem(
+      `${viewPreferences.CARD_VIEW_STORAGE_KEY}.${companyId}`,
+      JSON.stringify({
+        analysis: [{ id: "analysis_summary", visible: false }],
+      }),
+    );
+
+    assert.equal(
+      viewPreferences.loadScopedCardPreferences(
+        "analysis",
+        ["analysis_summary"],
+        companyId,
+        userId,
+        viewId,
+      )[0].visible,
+      false,
+    );
+    const mergedStore = JSON.parse(storage.getItem(personalKey));
+    assert.equal(mergedStore.live[0].visible, false);
+    assert.equal(mergedStore.analysis[0].visible, false);
+
+    const dottedCompanyId = "company.legacy";
+    const dottedUserId = "teste.usuario@teste.com";
+    const dottedViewId = "view.main";
+    const rawLegacyKey = [
+      viewPreferences.CARD_VIEW_STORAGE_KEY,
+      `company.${encodeURIComponent(dottedCompanyId)}`,
+      `user.${encodeURIComponent(dottedUserId)}`,
+      `view.${encodeURIComponent(dottedViewId)}`,
+    ].join(".");
+    storage.setItem(
+      rawLegacyKey,
+      JSON.stringify({
+        live: [{ id: "live_intraday_comparison", visible: false }],
+      }),
+    );
+    assert.equal(
+      viewPreferences.loadScopedCardPreferences(
+        "live",
+        ["live_intraday_comparison"],
+        dottedCompanyId,
+        dottedUserId,
+        dottedViewId,
+      )[0].visible,
+      false,
+    );
+    assert.ok(
+      storage.getItem(
+        viewPreferences.getCardViewStorageKey(
+          dottedCompanyId,
+          dottedUserId,
+          dottedViewId,
+        ),
+      ),
+      "a chave antiga com pontos deve ser materializada na forma canônica",
+    );
+
+    const deletedCompanyId = "company-deleted";
+    const deletedUserId = "user-deleted";
+    const deletedViewId = "view-deleted";
+    const deletedPersonalKey = viewPreferences.getCardViewStorageKey(
+      deletedCompanyId,
+      deletedUserId,
+      deletedViewId,
+    );
+    storage.setItem(
+      `${viewPreferences.CARD_VIEW_STORAGE_KEY}.${deletedCompanyId}`,
+      JSON.stringify({
+        live: [{ id: "live_intraday_comparison", visible: false }],
+      }),
+    );
+    assert.equal(
+      userGridLocal.removeUserGridPreference(deletedPersonalKey),
+      true,
+    );
+    assert.equal(
+      viewPreferences.loadScopedCardPreferences(
+        "live",
+        ["live_intraday_comparison"],
+        deletedCompanyId,
+        deletedUserId,
+        deletedViewId,
+      )[0].visible,
+      true,
+      "um tombstone pessoal não pode reimportar o layout company-wide",
     );
   } finally {
     if (previousWindow === undefined) delete globalThis.window;

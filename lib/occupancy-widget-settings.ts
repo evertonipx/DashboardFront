@@ -4,6 +4,7 @@ import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 import {
   DEFAULT_OCCUPANCY_COLOR_PALETTE_ID,
   normalizeOccupancyColorPaletteId,
@@ -250,7 +251,7 @@ export function saveOccupancyWidgetSettings(
 ) {
   const normalized = normalizeOccupancyWidgetSettings(settings);
   if (typeof window === "undefined") return normalized;
-  window.localStorage.setItem(
+  writeUserGridPreference(
     occupancyWidgetSettingsStorageKey(companyId, userId, viewId),
     JSON.stringify(normalized),
   );

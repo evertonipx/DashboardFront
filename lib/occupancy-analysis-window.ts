@@ -2,6 +2,7 @@ import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { writeUserGridPreference } from "@/lib/user-grid-local";
 
 export type ClosedOccupancyHistoricalGranularity = "week" | "month";
 
@@ -236,7 +237,7 @@ export function saveOccupancyAnalysisDateRange(
 ) {
   if (typeof window !== "undefined") {
     try {
-      window.localStorage.setItem(
+      writeUserGridPreference(
         occupancyAnalysisDateRangeStorageKey(companyId, userId),
         JSON.stringify(range),
       );
