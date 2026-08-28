@@ -71,7 +71,7 @@ test("grant somente leitura sem action nunca vira permissão de escrita", () => 
   assert.equal(permissions.canManageViews(admin), true);
 });
 
-test("grant amplo do módulo não concede recursos administrativos implicitamente", () => {
+test("grant administrativo do módulo libera o layout, sem ampliar recursos sensíveis", () => {
   const countingWrite = permission({
     action: "manage",
     module: {
@@ -107,7 +107,7 @@ test("grant amplo do módulo não concede recursos administrativos implicitament
     permissions.userHasModuleManagementPermission(admin, "occupancy"),
     false,
   );
-  assert.equal(permissions.canManageWidgets(admin), false);
+  assert.equal(permissions.canManageWidgets(admin), true);
   assert.equal(permissions.canManageViews(admin), false);
   assert.equal(permissions.canManageWorkers(admin), false);
   assert.equal(permissions.canManageCameras(admin), false);
@@ -134,13 +134,27 @@ test("Admin gerencia somente cada recurso concedido explicitamente", () => {
     });
 
     for (const [, check] of capabilityChecks) {
+      const widgetComesWithModuleAdministration =
+        slug === "occupancy_manage" && check === "canManageWidgets";
       assert.equal(
         permissions[check](admin),
-        check === selectedCheck,
+        check === selectedCheck || widgetComesWithModuleAdministration,
         `${slug} não pode liberar ${check}`,
       );
     }
   }
+});
+
+test("Admin de Contagem também pode configurar os widgets do módulo", () => {
+  const admin = user({
+    role: "admin",
+    permissions: [permission({ action: "manage", slug: "counting_manage" })],
+  });
+
+  assert.equal(permissions.canManageWidgets(admin), true);
+  assert.equal(permissions.canManageWorkers(admin), false);
+  assert.equal(permissions.canManageCameras(admin), false);
+  assert.equal(permissions.canManageLocations(admin), false);
 });
 
 test("Operador nunca recebe mutação e flags somente leitura vencem action conflitante", () => {
@@ -273,8 +287,10 @@ test("módulo desabilitado na empresa bloqueia visualização e não amplia recu
   });
 
   assert.equal(permissions.canViewCounting(disabledAdmin), false);
+  assert.equal(permissions.canManageWidgets(disabledAdmin), false);
   assert.equal(permissions.canManageWorkers(disabledAdmin), false);
   assert.equal(permissions.canViewCounting(enabledAdmin), true);
+  assert.equal(permissions.canManageWidgets(enabledAdmin), true);
   assert.equal(permissions.canManageWorkers(enabledAdmin), false);
 
   const authSource = readFileSync(

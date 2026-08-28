@@ -245,7 +245,16 @@ export function createOperationalPermissionState(
 export function canManageWidgets(user: CurrentUser | null) {
   if (isMasterUser(user)) return true;
   if (!isOperationalAdmin(user)) return false;
-  return permissionsAllowWidgetManagement(user?.permissions, user);
+
+  // Widget layout is part of administering the operational dashboard itself.
+  // Some API/JWT versions publish a dedicated widget grant, while others only
+  // expose the write-capable grant for Counting or Occupancy. Accept either
+  // representation without widening access to infrastructure resources.
+  return (
+    permissionsAllowWidgetManagement(user?.permissions, user) ||
+    userHasModuleManagementPermission(user, "counting") ||
+    userHasModuleManagementPermission(user, "occupancy")
+  );
 }
 
 export function canManageLocations(user: CurrentUser | null) {
