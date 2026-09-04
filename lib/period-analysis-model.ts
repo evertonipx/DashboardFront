@@ -121,6 +121,8 @@ export function buildPeriodAnalysisWidgetModel({
   period,
   scenarios,
   scopeOptions = [],
+  sourceSeriesCount = scenarios.length,
+  theme = "light",
   widget,
 }: {
   chartType?: CardChartType;
@@ -130,6 +132,8 @@ export function buildPeriodAnalysisWidgetModel({
   period: PeriodAnalysisRange;
   scenarios: Scenario[];
   scopeOptions?: PeriodAnalysisScopeOption[];
+  sourceSeriesCount?: number;
+  theme?: "light" | "dark";
   widget: PeriodAnalysisWidget;
 }): PeriodAnalysisWidgetModel {
   if (widget.kind === "hourly_occupancy") {
@@ -211,6 +215,7 @@ export function buildPeriodAnalysisWidgetModel({
       period,
       selectedScenarios,
       color,
+      sourceSeriesCount,
     );
   }
   if (widget.kind === "comparison") {
@@ -220,13 +225,20 @@ export function buildPeriodAnalysisWidgetModel({
       period,
       selectedScenarios,
       color,
+      sourceSeriesCount,
     );
   }
   if (widget.kind === "ranking") {
     return buildRankingModel(scopedData, period, selectedScenarios, color);
   }
   if (widget.kind === "heatmap") {
-    return buildHeatmapModel(scopedData, period, selectedScenarios, color);
+    return buildHeatmapModel(
+      scopedData,
+      period,
+      selectedScenarios,
+      color,
+      theme,
+    );
   }
   if (widget.kind === "cumulative") {
     return buildCumulativeModel(
@@ -383,6 +395,7 @@ export function periodAnalysisOperationalRange(
 export function periodAnalysisEffectiveGranularity(
   widget: PeriodAnalysisWidget,
   period?: PeriodAnalysisRange,
+  sourceSeriesCount = 1,
 ) {
   if (widget.kind === "hourly_occupancy") return "hour";
   if (
@@ -394,6 +407,7 @@ export function periodAnalysisEffectiveGranularity(
   return resolveCountingAnalysisVisualGranularity(
     widget.granularity,
     period,
+    Math.max(1, sourceSeriesCount),
   );
 }
 
@@ -733,9 +747,9 @@ function buildCurrentYearModel(
       );
       value = sumSelectedScenarioRows({
         from,
-        rows: data.day.rows,
+        rows: data.month.rows,
         scenarios,
-        sourceGranularity: data.day.granularity,
+        sourceGranularity: data.month.granularity,
         to,
       });
     }
@@ -757,7 +771,7 @@ function buildCurrentYearModel(
       ? `Soma progressiva dos meses de ${year} até a data consultada.`
       : `Valores mensais de ${year} até a data consultada e média mensal tracejada.`,
     emptyText: "Sem dados mensais para o ano da data consultada.",
-    error: data.month.error ?? data.day.error,
+    error: data.month.error,
     hasData: recorded.some((point) => (point.value ?? 0) !== 0),
     height: 340,
     insights: latest
@@ -882,8 +896,13 @@ function buildTimelineModel(
   period: PeriodAnalysisRange,
   scenarios: Scenario[],
   color: string,
+  sourceSeriesCount: number,
 ): PeriodAnalysisWidgetModel {
-  const granularity = periodAnalysisEffectiveGranularity(widget, period);
+  const granularity = periodAnalysisEffectiveGranularity(
+    widget,
+    period,
+    sourceSeriesCount,
+  );
   const resolutionAdapted = granularity !== widget.granularity;
   const effectivePeriod = periodRangeThroughNow(period);
   const dataset = analysisDatasetForGranularity(data, granularity);
@@ -946,11 +965,12 @@ function buildComparisonModel(
   period: PeriodAnalysisRange,
   scenarios: Scenario[],
   color: string,
+  sourceSeriesCount: number,
 ): PeriodAnalysisWidgetModel {
   const granularity = resolveCountingAnalysisVisualGranularity(
     widget.granularity,
     period,
-    Math.max(1, scenarios.length),
+    Math.max(1, sourceSeriesCount),
   );
   const resolutionAdapted = granularity !== widget.granularity;
   const effectivePeriod = periodRangeThroughNow(period);
@@ -1729,7 +1749,16 @@ function buildHeatmapModel(
   period: PeriodAnalysisRange,
   scenarios: Scenario[],
   color: string,
+  theme: "light" | "dark" = "light",
 ): PeriodAnalysisWidgetModel {
+  const cellBorderColor =
+    theme === "dark"
+      ? "rgba(226, 232, 240, 0.12)"
+      : "rgba(15, 23, 42, 0.09)";
+  const activeCellBorderColor =
+    theme === "dark"
+      ? "rgba(248, 250, 252, 0.24)"
+      : "rgba(15, 23, 42, 0.20)";
   const hourlyDataset = data.contextHour;
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
@@ -1798,13 +1827,19 @@ function buildHeatmapModel(
           data: heatmapData,
           emphasis: {
             itemStyle: {
-              borderColor: "#13233A",
+              borderColor: activeCellBorderColor,
               borderWidth: 1,
-              shadowBlur: 8,
-              shadowColor: "rgba(18, 35, 58, 0.24)",
+              shadowBlur: 4,
+              shadowColor:
+                theme === "dark"
+                  ? "rgba(248, 250, 252, 0.12)"
+                  : "rgba(15, 23, 42, 0.14)",
             },
           },
-          itemStyle: { borderWidth: 0 },
+          itemStyle: {
+            borderColor: cellBorderColor,
+            borderWidth: 1,
+          },
           markArea: buildCalendarMarkArea(days),
           name: "Intensidade horária",
           progressive: 1_000,
@@ -1830,7 +1865,7 @@ function buildHeatmapModel(
       },
       visualMap: {
         calculable: true,
-        inRange: { color: monochromeHeatmapPalette(color) },
+        inRange: { color: monochromeHeatmapPalette(color, theme) },
         itemHeight: 210,
         itemWidth: 10,
         left: "center",

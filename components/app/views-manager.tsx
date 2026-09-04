@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   Copy,
+  CopyPlus,
   ExternalLink,
   Link2,
   MonitorUp,
@@ -26,6 +27,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -35,7 +37,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Tabs,
   TabsContent,
@@ -45,13 +46,21 @@ import {
 import {
   filterScopedApiRows,
   getStoredMasterCompanyScope,
+  usesMasterCrossCompanyScope,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
 import { apiFetch } from "@/lib/api";
 import { canManageViews } from "@/lib/permissions";
+import { requireScenarioRows } from "@/lib/scenario-validation";
+import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type { Scenario } from "@/lib/types";
-import { toDateTimeLocalValue } from "@/lib/utils";
+import { cn, toDateTimeLocalValue } from "@/lib/utils";
 import { saveLiveViewPreset } from "@/lib/video-wall";
+import {
+  buildOpaqueViewUrl,
+  createViewLinkReference,
+  saveViewLinkTarget,
+} from "@/lib/view-link-reference";
 
 const viewOptions = [
   {
@@ -99,6 +108,19 @@ type ViewWidget = {
   to?: string;
 };
 
+type ScenarioCatalog = {
+  companyId: string;
+  rows: Scenario[];
+};
+
+type ViewWidgetWorkspace = {
+  companyId: string;
+  widgets: ViewWidget[];
+};
+
+const EMPTY_SCENARIOS: Scenario[] = [];
+const EMPTY_VIEW_WIDGETS: ViewWidget[] = [];
+
 const scenarioCompareGranularityOptions: Array<{
   label: string;
   value: ScenarioCompareGranularity;
@@ -125,11 +147,17 @@ export function ViewsManager() {
   const { user } = useAuth();
   const canAccessViews = canManageViews(user);
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const masterCrossCompanyScope = usesMasterCrossCompanyScope(
+    user,
+    companyScopeId,
+  );
   const [workspaceTab, setWorkspaceTab] = React.useState("video-wall");
   const [origin, setOrigin] = React.useState("");
+  const [viewReference, setViewReference] = React.useState("");
   const [chart, setChart] = React.useState<ViewChart>("today-scenario");
   const [title, setTitle] = React.useState("Hoje por cenário");
-  const [scenarios, setScenarios] = React.useState<Scenario[]>([]);
+  const [scenarioCatalog, setScenarioCatalog] =
+    React.useState<ScenarioCatalog>({ companyId: "", rows: [] });
   const [scenarioCompareGranularity, setScenarioCompareGranularity] =
     React.useState<ScenarioCompareGranularity>("hour");
   const [scenarioComparePeriod, setScenarioComparePeriod] =
@@ -173,12 +201,50 @@ export function ViewsManager() {
   const [widgetScenarioCompareTo, setWidgetScenarioCompareTo] = React.useState(
     () => toDateTimeLocalValue(new Date()),
   );
-  const [viewWidgets, setViewWidgets] = React.useState<ViewWidget[]>([]);
+  const [viewWidgetWorkspace, setViewWidgetWorkspace] =
+    React.useState<ViewWidgetWorkspace>({
+      companyId: companyScopeId,
+      widgets: [],
+    });
+  const [selectedViewWidgetIds, setSelectedViewWidgetIds] = React.useState<
+    Set<string>
+  >(() => new Set());
   const [loadingScenarios, setLoadingScenarios] = React.useState(false);
   const companyScopeIdRef = React.useRef(companyScopeId);
   const scenarioRequestSequenceRef = React.useRef(0);
+  const scenarios =
+    scenarioCatalog.companyId === companyScopeId
+      ? scenarioCatalog.rows
+      : EMPTY_SCENARIOS;
+  const viewWidgets =
+    viewWidgetWorkspace.companyId === companyScopeId
+      ? viewWidgetWorkspace.widgets
+      : EMPTY_VIEW_WIDGETS;
+  const scenarioIdSet = React.useMemo(
+    () => new Set(scenarios.map((scenario) => scenario.id)),
+    [scenarios],
+  );
+  const selectedScenarioIdsForScope = React.useMemo(
+    () => selectedScenarioIds.filter((id) => scenarioIdSet.has(id)),
+    [scenarioIdSet, selectedScenarioIds],
+  );
+  const widgetSelectedScenarioIdsForScope = React.useMemo(
+    () => widgetSelectedScenarioIds.filter((id) => scenarioIdSet.has(id)),
+    [scenarioIdSet, widgetSelectedScenarioIds],
+  );
   const selectedView = viewOptions.find((option) => option.value === chart);
-  const selectedScenarioNames = selectedScenarioIds
+  const selectedViewWidgets = React.useMemo(
+    () => viewWidgets.filter((widget) => selectedViewWidgetIds.has(widget.id)),
+    [selectedViewWidgetIds, viewWidgets],
+  );
+  const allViewWidgetsSelected =
+    viewWidgets.length > 0 && selectedViewWidgets.length === viewWidgets.length;
+  const viewWidgetSelectionState = allViewWidgetsSelected
+    ? true
+    : selectedViewWidgets.length
+      ? "indeterminate"
+      : false;
+  const selectedScenarioNames = selectedScenarioIdsForScope
     .map((id) => scenarios.find((scenario) => scenario.id === id)?.name)
     .filter(Boolean);
   const scenarioSelectionSummary =
@@ -193,7 +259,7 @@ export function ViewsManager() {
   const selectedWidgetView = viewOptions.find(
     (option) => option.value === widgetChart,
   );
-  const widgetSelectedScenarioNames = widgetSelectedScenarioIds
+  const widgetSelectedScenarioNames = widgetSelectedScenarioIdsForScope
     .map((id) => scenarios.find((scenario) => scenario.id === id)?.name)
     .filter(Boolean);
   const widgetScenarioSelectionSummary =
@@ -208,9 +274,7 @@ export function ViewsManager() {
     widgetScenarioComparePeriod,
   )} · ${widgetScenarioSelectionSummary}`;
   const masterScope = getStoredMasterCompanyScope();
-  const generatedUrl = React.useMemo(() => {
-    if (!origin) return "";
-
+  const generatedTargetPath = React.useMemo(() => {
     const params = new URLSearchParams({
       chart,
       refresh: "5",
@@ -256,7 +320,10 @@ export function ViewsManager() {
       params.set("granularity", scenarioCompareGranularity);
       params.set("period", scenarioComparePeriod);
       if (scenarioSelectionMode === "custom") {
-        params.set("scenario_ids", selectedScenarioIds.join(",") || "__none");
+        params.set(
+          "scenario_ids",
+          selectedScenarioIdsForScope.join(",") || "__none",
+        );
       }
       if (scenarioComparePeriod === "custom") {
         const from = parseLocalDateTimeInput(scenarioCompareFrom);
@@ -266,24 +333,36 @@ export function ViewsManager() {
       }
     }
 
-    return `${origin}/views/live?${params.toString()}`;
+    return `/views/live?${params.toString()}`;
   }, [
     chart,
     companyScopeId,
-    origin,
     scenarioCompareFrom,
     scenarioCompareGranularity,
     scenarioComparePeriod,
     scenarioCompareTo,
     scenarioSelectionMode,
-    selectedScenarioIds,
+    selectedScenarioIdsForScope,
     title,
     viewWidgets,
   ]);
+  const generatedUrl = React.useMemo(
+    () =>
+      origin && viewReference
+        ? buildOpaqueViewUrl("/views/live", viewReference, origin)
+        : "",
+    [origin, viewReference],
+  );
 
   React.useEffect(() => {
     setOrigin(window.location.origin);
   }, []);
+
+  React.useEffect(() => {
+    setViewReference(user?.id ? createViewLinkReference() : "");
+    setSelectedViewWidgetIds(new Set());
+    setViewWidgetWorkspace({ companyId: companyScopeId, widgets: [] });
+  }, [companyScopeId, user?.id]);
 
   React.useEffect(() => {
     if (chart !== "scenario-hour") setScenarioSettingsOpen(false);
@@ -300,6 +379,7 @@ export function ViewsManager() {
   React.useEffect(() => {
     const requestedCompanyScopeId = companyScopeId.trim();
     const requestSequence = ++scenarioRequestSequenceRef.current;
+    const controller = new AbortController();
     let active = true;
     const isCurrentRequest = () =>
       active &&
@@ -307,7 +387,7 @@ export function ViewsManager() {
       companyScopeIdRef.current.trim() === requestedCompanyScopeId;
 
     async function loadScenarios() {
-      setScenarios([]);
+      setScenarioCatalog({ companyId: requestedCompanyScopeId, rows: [] });
       setSelectedScenarioIds([]);
       setWidgetSelectedScenarioIds([]);
       if (!requestedCompanyScopeId) {
@@ -317,16 +397,28 @@ export function ViewsManager() {
 
       setLoadingScenarios(true);
       try {
-        const rows = await apiFetch<Scenario[]>("/scenarios", {
+        const response = await apiFetch<unknown>("/scenarios", {
           companyScopeId: requestedCompanyScopeId,
+          signal: controller.signal,
         });
+        const payload = masterCrossCompanyScope
+          ? selectExplicitCompanyScopedRows(
+              response,
+              requestedCompanyScopeId,
+              { label: "cenários de Contagem" },
+            ).rows
+          : response;
+        const rows = requireScenarioRows(payload, requestedCompanyScopeId);
         const scopedRows = filterScopedApiRows(
           rows,
           requestedCompanyScopeId,
         );
         if (!isCurrentRequest()) return;
 
-        setScenarios(scopedRows);
+        setScenarioCatalog({
+          companyId: requestedCompanyScopeId,
+          rows: scopedRows,
+        });
         setSelectedScenarioIds((current) =>
           current.filter((id) => scopedRows.some((scenario) => scenario.id === id)),
         );
@@ -337,7 +429,10 @@ export function ViewsManager() {
         );
       } catch {
         if (!isCurrentRequest()) return;
-        setScenarios([]);
+        setScenarioCatalog({
+          companyId: requestedCompanyScopeId,
+          rows: [],
+        });
         setSelectedScenarioIds([]);
         setWidgetSelectedScenarioIds([]);
       } finally {
@@ -348,8 +443,22 @@ export function ViewsManager() {
     void loadScenarios();
     return () => {
       active = false;
+      controller.abort();
     };
-  }, [companyScopeId]);
+  }, [companyScopeId, masterCrossCompanyScope]);
+
+  function updateViewWidgets(
+    update: (current: ViewWidget[]) => ViewWidget[],
+  ) {
+    setViewWidgetWorkspace((current) => ({
+      companyId: companyScopeId,
+      widgets: update(
+        current.companyId === companyScopeId
+          ? current.widgets
+          : EMPTY_VIEW_WIDGETS,
+      ),
+    }));
+  }
 
   function updateChart(value: ViewChart) {
     setChart(value);
@@ -361,7 +470,7 @@ export function ViewsManager() {
     if (
       widgetChart === "scenario-hour" &&
       widgetScenarioSelectionMode === "custom" &&
-      !widgetSelectedScenarioIds.length
+      !widgetSelectedScenarioIdsForScope.length
     ) {
       toast.error("Selecione ao menos um cenário para adicionar este widget.");
       return;
@@ -387,7 +496,7 @@ export function ViewsManager() {
             )}`
           : "Cenários por período"
         : selectedWidgetView?.label ?? "Widget";
-    setViewWidgets((current) => [
+    updateViewWidgets((current) => [
       ...current,
       {
         chart: widgetChart,
@@ -406,7 +515,9 @@ export function ViewsManager() {
             ? widgetScenarioComparePeriod
             : undefined,
         scenarioIds:
-          widgetChart === "scenario-hour" ? widgetSelectedScenarioIds : [],
+          widgetChart === "scenario-hour"
+            ? widgetSelectedScenarioIdsForScope
+            : [],
         selectionMode:
           widgetChart === "scenario-hour"
             ? widgetScenarioSelectionMode
@@ -423,33 +534,103 @@ export function ViewsManager() {
   }
 
   function removeWidget(widgetId: string) {
-    setViewWidgets((current) =>
+    updateViewWidgets((current) =>
       current.filter((widget) => widget.id !== widgetId),
+    );
+    setSelectedViewWidgetIds((current) => {
+      if (!current.has(widgetId)) return current;
+      const next = new Set(current);
+      next.delete(widgetId);
+      return next;
+    });
+  }
+
+  function toggleViewWidget(widgetId: string, selected: boolean) {
+    setSelectedViewWidgetIds((current) => {
+      const next = new Set(current);
+      if (selected) next.add(widgetId);
+      else next.delete(widgetId);
+      return next;
+    });
+  }
+
+  function toggleAllViewWidgets(selected: boolean) {
+    setSelectedViewWidgetIds(
+      selected ? new Set(viewWidgets.map((widget) => widget.id)) : new Set(),
+    );
+  }
+
+  function duplicateSelectedViewWidgets() {
+    if (!selectedViewWidgets.length) return;
+    const copies = selectedViewWidgets.map((widget) => ({
+      ...widget,
+      id: createWidgetId(),
+      scenarioIds: [...widget.scenarioIds],
+      title: `${widget.title} (cópia)`,
+    }));
+    updateViewWidgets((current) => [...current, ...copies]);
+    setSelectedViewWidgetIds(new Set(copies.map((widget) => widget.id)));
+    toast.success(
+      `${copies.length} widget${copies.length === 1 ? " duplicado" : "s duplicados"}.`,
+    );
+  }
+
+  function removeSelectedViewWidgets() {
+    if (!selectedViewWidgets.length) return;
+    if (
+      selectedViewWidgets.length > 1 &&
+      !window.confirm(
+        `Remover ${selectedViewWidgets.length} widgets desta visão?`,
+      )
+    ) {
+      return;
+    }
+    const selectedIds = new Set(selectedViewWidgets.map((widget) => widget.id));
+    updateViewWidgets((current) =>
+      current.filter((widget) => !selectedIds.has(widget.id)),
+    );
+    setSelectedViewWidgetIds(new Set());
+    toast.success(
+      `${selectedIds.size} widget${selectedIds.size === 1 ? " removido" : "s removidos"}.`,
     );
   }
 
   async function copyUrl() {
-    if (!generatedUrl) return;
+    const url = materializeGeneratedView();
+    if (!url) {
+      toast.error("Não foi possível preparar o link.");
+      return;
+    }
 
     try {
-      await navigator.clipboard.writeText(generatedUrl);
-      toast.success("URL copiada.");
+      await navigator.clipboard.writeText(url);
+      setViewReference(createViewLinkReference());
+      toast.success("Link copiado.");
     } catch {
-      toast.error("Não foi possível copiar a URL.");
+      toast.error("Não foi possível copiar o link.");
     }
   }
 
   function openUrl() {
-    if (!generatedUrl) return;
-    window.open(generatedUrl, "_blank", "noopener,noreferrer");
+    const url = materializeGeneratedView();
+    if (!url) {
+      toast.error("Não foi possível preparar esta visão.");
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+    setViewReference(createViewLinkReference());
   }
 
   function saveGeneratedView() {
-    if (!generatedUrl) return;
+    const url = materializeGeneratedView();
+    if (!url) {
+      toast.error("Não foi possível preparar esta visão.");
+      return;
+    }
     const saved = saveLiveViewPreset(
       {
         name: title.trim() || "Visão Ao Vivo",
-        url: generatedUrl,
+        url,
       },
       companyScopeId,
       user?.id,
@@ -458,7 +639,20 @@ export function ViewsManager() {
       toast.error("Não foi possível salvar esta visão.");
       return;
     }
+    setViewReference(createViewLinkReference());
     toast.success("Visão salva na biblioteca do video wall.");
+  }
+
+  function materializeGeneratedView() {
+    if (!generatedUrl || !user?.id || !viewReference) return "";
+    const reference = saveViewLinkTarget(
+      generatedTargetPath,
+      user.id,
+      viewReference,
+    );
+    return reference
+      ? buildOpaqueViewUrl("/views/live", reference, origin)
+      : "";
   }
 
   if (!canAccessViews) {
@@ -467,7 +661,7 @@ export function ViewsManager() {
         <CardHeader>
           <CardTitle>Sem acesso a Visões</CardTitle>
           <CardDescription>
-            Seu usuário não possui permissão para configurar URLs de visões.
+            Seu usuário não possui permissão para configurar visões.
           </CardDescription>
         </CardHeader>
       </Card>
@@ -507,8 +701,7 @@ export function ViewsManager() {
               Gerador de visão
             </CardTitle>
             <CardDescription>
-              Configure uma URL autenticada para exibir somente o gráfico em tela
-              inteira do conteúdo.
+              Monte uma visualização em tela cheia para painéis e monitores.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -569,7 +762,7 @@ export function ViewsManager() {
 
                 {scenarioSettingsOpen ? (
                   <div className="mt-3 grid gap-3 md:grid-cols-3">
-                    <FormField label="Granularidade">
+                    <FormField label="Agrupamento">
                       <Select
                         value={scenarioCompareGranularity}
                         onValueChange={(value) =>
@@ -620,7 +813,7 @@ export function ViewsManager() {
                         onModeChange={setScenarioSelectionMode}
                         onSelectedIdsChange={setSelectedScenarioIds}
                         scenarios={scenarios}
-                        selectedIds={selectedScenarioIds}
+                        selectedIds={selectedScenarioIdsForScope}
                       />
                     </div>
 
@@ -687,7 +880,7 @@ export function ViewsManager() {
                 <div>
                   <div className="text-sm font-semibold">Widgets da visão</div>
                   <div className="text-xs text-muted-foreground">
-                    Combine gráficos de cenários diferentes na mesma URL.
+                    Combine gráficos de cenários diferentes na mesma visão.
                   </div>
                 </div>
                 {viewWidgets.length ? (
@@ -756,7 +949,7 @@ export function ViewsManager() {
 
                   {widgetScenarioSettingsOpen ? (
                     <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <FormField label="Granularidade">
+                      <FormField label="Agrupamento">
                         <Select
                           value={widgetScenarioCompareGranularity}
                           onValueChange={(value) =>
@@ -807,7 +1000,7 @@ export function ViewsManager() {
                           onModeChange={setWidgetScenarioSelectionMode}
                           onSelectedIdsChange={setWidgetSelectedScenarioIds}
                           scenarios={scenarios}
-                          selectedIds={widgetSelectedScenarioIds}
+                          selectedIds={widgetSelectedScenarioIdsForScope}
                         />
                       </div>
 
@@ -857,7 +1050,7 @@ export function ViewsManager() {
                     disabled={
                       widgetChart === "scenario-hour" &&
                       widgetScenarioSelectionMode === "custom" &&
-                      !widgetSelectedScenarioIds.length
+                      !widgetSelectedScenarioIdsForScope.length
                     }
                   >
                     <Plus className="h-4 w-4" />
@@ -867,6 +1060,54 @@ export function ViewsManager() {
 
               {viewWidgets.length ? (
                 <div className="mt-3 space-y-2">
+                  <div
+                    className="flex min-w-0 flex-col gap-2 rounded-md border bg-muted/20 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+                    role="toolbar"
+                    aria-label="Ações dos widgets da visão"
+                  >
+                    <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
+                      <Checkbox
+                        checked={viewWidgetSelectionState}
+                        onCheckedChange={(checked) =>
+                          toggleAllViewWidgets(checked === true)
+                        }
+                        aria-label="Selecionar todos os widgets da visão"
+                      />
+                      {selectedViewWidgets.length
+                        ? `${selectedViewWidgets.length} selecionado${selectedViewWidgets.length === 1 ? "" : "s"}`
+                        : "Selecionar todos"}
+                    </label>
+                    {selectedViewWidgets.length ? (
+                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={duplicateSelectedViewWidgets}
+                        >
+                          <CopyPlus className="h-3.5 w-3.5" />
+                          Duplicar
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="sm"
+                          onClick={removeSelectedViewWidgets}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Remover selecionados
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setSelectedViewWidgetIds(new Set())}
+                        >
+                          Limpar seleção
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
                   {viewWidgets.map((widget) => {
                     const widgetView = viewOptions.find(
                       (option) => option.value === widget.chart,
@@ -875,9 +1116,20 @@ export function ViewsManager() {
                     return (
                       <div
                         key={widget.id}
-                        className="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2"
+                        className={cn(
+                          "flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2 transition-colors",
+                          selectedViewWidgetIds.has(widget.id) &&
+                            "border-primary/40 bg-primary/5",
+                        )}
                       >
-                        <div className="min-w-0">
+                        <Checkbox
+                          checked={selectedViewWidgetIds.has(widget.id)}
+                          onCheckedChange={(checked) =>
+                            toggleViewWidget(widget.id, checked === true)
+                          }
+                          aria-label={`Selecionar widget ${widget.title}`}
+                        />
+                        <div className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium">
                             {widget.title}
                           </div>
@@ -912,8 +1164,7 @@ export function ViewsManager() {
                     masterScope?.name ||
                     user?.company_name ||
                     user?.company?.name ||
-                    companyScopeId ||
-                    "Empresa do login"
+                    "Empresa selecionada"
                   }
                 />
               </FormField>
@@ -921,23 +1172,21 @@ export function ViewsManager() {
 
             <div className="rounded-md border border-border bg-muted/20 p-3">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline">Autenticada</Badge>
-                <Badge variant="outline">Sem sidebar</Badge>
-                <Badge variant="outline">100vw x 100vh</Badge>
+                <Badge variant="outline">Acesso protegido</Badge>
+                <Badge variant="outline">Tela limpa</Badge>
+                <Badge variant="outline">Tela cheia</Badge>
               </div>
               <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                Essa URL usa a sessão do navegador. Se abrir sem login ativo, o
-                sistema redireciona para o login antes de mostrar o gráfico.
+                O link respeita o acesso do usuário. Quando necessário, o sistema
+                solicitará a entrada antes de mostrar a visão.
               </p>
             </div>
 
-            <FormField label="URL gerada">
-              <Textarea
-                readOnly
-                className="min-h-[110px] font-mono text-xs"
-                value={generatedUrl}
-              />
-            </FormField>
+            <div className="rounded-md border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+              {generatedUrl
+                ? "Link de exibição pronto para salvar, copiar ou abrir."
+                : "Conclua a configuração para gerar o link de exibição."}
+            </div>
 
             <div className="flex flex-wrap gap-2">
               <Button
@@ -955,7 +1204,7 @@ export function ViewsManager() {
                 disabled={!generatedUrl}
               >
                 <Copy className="h-4 w-4" />
-                Copiar URL
+                Copiar link
               </Button>
               <Button
                 type="button"
@@ -976,7 +1225,7 @@ export function ViewsManager() {
               <Link2 className="h-4 w-4 text-primary" />
               Resumo
             </CardTitle>
-            <CardDescription>Parâmetros enviados na URL.</CardDescription>
+            <CardDescription>Confira como a visão será apresentada.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             <SummaryRow
@@ -991,7 +1240,7 @@ export function ViewsManager() {
               label="Descrição"
               value={
                 viewWidgets.length
-                  ? "URL com múltiplos gráficos configurados."
+                  ? "Composição com múltiplos gráficos configurados."
                   : selectedView?.description ?? "Visão configurada."
               }
             />
@@ -1026,8 +1275,13 @@ export function ViewsManager() {
               />
             ) : null}
             <SummaryRow
-              label="company_id"
-              value={companyScopeId || "Empresa do usuário logado"}
+              label="Empresa"
+              value={
+                masterScope?.name ||
+                user?.company_name ||
+                user?.company?.name ||
+                "Empresa selecionada"
+              }
             />
           </CardContent>
         </Card>

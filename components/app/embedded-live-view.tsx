@@ -4,7 +4,7 @@ import * as React from "react";
 import { useSearchParams } from "next/navigation";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
 import {
   MonitorModeButton,
   MonitorModeExitHint,
@@ -14,17 +14,21 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import {
   aggregateBucketInRange,
-  aggregateQueryIso,
   endOfAggregateBucket,
-  requireAggregateGranularity,
-  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
   clearHourlyAggregateCache,
-  fetchHourlyAggregateRanges,
+  fetchBoundedHourlyAggregateRanges,
   type HourlyAggregateCache,
 } from "@/lib/aggregate-hour-query";
+import {
+  clearMinuteDayAggregateCache,
+  fetchMinuteDayAggregateBootstrap,
+  refreshMinuteDayAggregateCache,
+  type MinuteDayAggregateCache,
+} from "@/lib/aggregate-minute-day-query";
+import { fetchCompleteAggregateRange } from "@/lib/aggregate-range-query";
 import {
   reconcileAggregateRows,
   rollupAggregateRows,
@@ -61,6 +65,7 @@ import {
   requireWorkerRows,
 } from "@/lib/metadata-validation";
 import { requireScenarioRows } from "@/lib/scenario-validation";
+import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import {
   RESOURCE_METADATA_REFRESH_INTERVAL_MS,
   shouldAutoRefreshResources,
@@ -73,7 +78,9 @@ import type {
   Scenario,
   Worker,
 } from "@/lib/types";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import { formatNumber, formatTime } from "@/lib/utils";
+import { useViewLinkTarget } from "@/lib/view-link-reference";
 import {
   partitionWorkersByCompanyScope,
   sortWorkersByActivity,
@@ -139,6 +146,8 @@ type ScopeComparisonOption = {
 
 const DEFAULT_METRIC_TYPE = "count";
 const REFRESH_SECONDS = 5;
+const MIN_DATA_REFRESH_INTERVAL_MS = REFRESH_SECONDS * 1000 - 250;
+const MAX_EMBEDDED_SCENARIO_CACHE_ENTRIES = 32;
 
 type EmbeddedLoadOptions = {
   force?: boolean;
@@ -184,8 +193,22 @@ export function EmbeddedLiveView() {
   const storedCompanyScopeId = useEffectiveCompanyScopeId(user);
   const companyTimeZoneResolution =
     useEffectiveCompanyTimeZoneResolution(user);
-  const chart = normalizeChart(searchParams.get("chart"));
-  const queryCompanyId = searchParams.get("company_id")?.trim() ?? "";
+  const viewReference = searchParams.get("view")?.trim() ?? "";
+  const referencedTarget = useViewLinkTarget(
+    viewReference,
+    user?.id,
+    "/views/live",
+  );
+  const viewSearchParams = React.useMemo(
+    () =>
+      referencedTarget
+        ? new URLSearchParams(referencedTarget.search)
+        : searchParams,
+    [referencedTarget, searchParams],
+  );
+  const referenceUnavailable = Boolean(viewReference && !referencedTarget);
+  const chart = normalizeChart(viewSearchParams.get("chart"));
+  const queryCompanyId = viewSearchParams.get("company_id")?.trim() ?? "";
   const companyScopeId = queryCompanyId || storedCompanyScopeId;
   const requireExplicitWorkerCompanyId =
     hasMasterAccess(user) &&
@@ -193,6 +216,11 @@ export function EmbeddedLiveView() {
     getCurrentUserCompanyId(user) !== companyScopeId;
   const companyScopeCertification = React.useMemo(() => {
     try {
+      if (referenceUnavailable) {
+        throw new Error(
+          "Esta visão não está disponível para o usuário autenticado.",
+        );
+      }
       if (queryCompanyId) {
         const certification = certifyCompanyScopeTimeZoneOverride(
           user,
@@ -200,7 +228,7 @@ export function EmbeddedLiveView() {
         );
         if (certification.error || !certification.timeZone) {
           throw new Error(
-            certification.error ?? "Fuso da empresa do video wall não certificado.",
+            certification.error ?? "Não foi possível validar o fuso horário desta visualização.",
           );
         }
         return {
@@ -217,26 +245,31 @@ export function EmbeddedLiveView() {
       };
     } catch (certificationError) {
       return {
-        error:
-          certificationError instanceof Error
-            ? certificationError.message
-            : "Escopo temporal do video wall não certificado.",
+        error: embeddedViewErrorMessage(
+          certificationError,
+          "Não foi possível preparar o período desta visualização.",
+        ),
         timeZone: "",
       };
     }
-  }, [companyTimeZoneResolution, queryCompanyId, user]);
-  const scopeId = searchParams.get("scope_id")?.trim() ?? "";
-  const scenarioIdsParam = searchParams.get("scenario_ids");
-  const granularityParam = searchParams.get("granularity");
-  const periodParam = searchParams.get("period");
-  const fromParam = searchParams.get("from")?.trim() || undefined;
-  const toParam = searchParams.get("to")?.trim() || undefined;
+  }, [
+    companyTimeZoneResolution,
+    queryCompanyId,
+    referenceUnavailable,
+    user,
+  ]);
+  const scopeId = viewSearchParams.get("scope_id")?.trim() ?? "";
+  const scenarioIdsParam = viewSearchParams.get("scenario_ids");
+  const granularityParam = viewSearchParams.get("granularity");
+  const periodParam = viewSearchParams.get("period");
+  const fromParam = viewSearchParams.get("from")?.trim() || undefined;
+  const toParam = viewSearchParams.get("to")?.trim() || undefined;
   const scenarioIds = React.useMemo(
     () => parseScenarioIdList(scenarioIdsParam),
     [scenarioIdsParam],
   );
-  const title = searchParams.get("title")?.trim() || chartLabels[chart];
-  const widgetsParam = searchParams.get("widgets");
+  const title = viewSearchParams.get("title")?.trim() || chartLabels[chart];
+  const widgetsParam = viewSearchParams.get("widgets");
   const widgetConfigs = React.useMemo(
     () =>
       parseWidgetConfigs(widgetsParam, {
@@ -263,36 +296,54 @@ export function EmbeddedLiveView() {
     ],
   );
   const multiWidgetMode = Boolean(widgetsParam);
+  const widgetQueryIdentityKey = JSON.stringify(
+    widgetConfigs.map(embeddedWidgetQueryConfig),
+  );
+  const queryWidgetConfigs = React.useMemo(
+    () => JSON.parse(widgetQueryIdentityKey) as EmbeddedWidgetConfig[],
+    [widgetQueryIdentityKey],
+  );
   const viewIdentityKey = React.useMemo(
     () =>
       JSON.stringify([
         companyScopeId ?? "",
         companyScopeCertification.timeZone,
-        widgetConfigs,
+        widgetQueryIdentityKey,
       ]),
-    [companyScopeCertification.timeZone, companyScopeId, widgetConfigs],
+    [companyScopeCertification.timeZone, companyScopeId, widgetQueryIdentityKey],
   );
   const [widgetStates, setWidgetStates] = React.useState<EmbeddedWidgetState[]>(
     [],
   );
   const [loadedViewIdentityKey, setLoadedViewIdentityKey] = React.useState("");
+  const loadedViewIdentityKeyRef = React.useRef("");
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [metadataWarning, setMetadataWarning] = React.useState("");
   const [scenarioMetadataWarning, setScenarioMetadataWarning] =
     React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
-  const viewIdentityKeyRef = React.useRef(viewIdentityKey);
+  const viewIdentityKeyRef = React.useRef("");
+  const componentMountedRef = React.useRef(false);
+  const componentDetachTimerRef = React.useRef<number | null>(null);
   const metadataSnapshotRef = React.useRef<EmbeddedMetadataSnapshot | null>(null);
   const metadataLoadedAtRef = React.useRef(0);
   const metadataRequestSequenceRef = React.useRef(0);
   const metadataRequestControllerRef = React.useRef<AbortController | null>(null);
+  const metadataRequestIdentityKeyRef = React.useRef("");
   const metadataRequestRunningRef = React.useRef(false);
   const dataRequestSequenceRef = React.useRef(0);
   const dataRequestControllerRef = React.useRef<AbortController | null>(null);
   const dataRequestRunningRef = React.useRef(false);
+  const dataLoadedAtRef = React.useRef(0);
   const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
     new Map(),
+  );
+  const minuteAggregateCacheRef = React.useRef<MinuteDayAggregateCache>(
+    new Map(),
+  );
+  const scenarioDatasetCacheRef = React.useRef(
+    new Map<string, AggregateEventRow[]>(),
   );
 
   const loadData = React.useCallback(async (
@@ -302,7 +353,12 @@ export function EmbeddedLiveView() {
   ) => {
     if (companyScopeCertification.error) {
       if (!silent) {
-        setError(companyScopeCertification.error);
+        setError(
+          embeddedViewErrorMessage(
+            new Error(companyScopeCertification.error),
+            "Não foi possível preparar esta visão.",
+          ),
+        );
         setLoading(false);
       }
       return;
@@ -326,51 +382,115 @@ export function EmbeddedLiveView() {
     }
 
     try {
-      const request: EmbeddedApiRequest = <T,>(path: string) =>
-        apiFetch<T>(path, {
+      const pendingRequests = new Map<string, Promise<unknown>>();
+      const request: EmbeddedApiRequest = <T,>(path: string) => {
+        const pending = pendingRequests.get(path);
+        if (pending) return pending as Promise<T>;
+
+        const nextRequest = apiFetch<T>(path, {
           companyScopeId: companyScopeId ?? undefined,
           signal: controller.signal,
         });
+        pendingRequests.set(path, nextRequest);
+        return nextRequest;
+      };
       const now = new Date();
       const liveHourDefinition = buildAggregateDefinition(now, "hour");
-      const liveMinuteDefinition = buildAggregateDefinition(now, "minute");
-      const [hourRows, minuteRows] = await Promise.all([
-        fetchHourlyAggregateRanges({
-          cache: hourlyAggregateCacheRef.current,
-          cacheScope: `embedded:${companyScopeId ?? "jwt-company"}`,
-          companyScopeId: companyScopeId ?? undefined,
-          now,
-          ranges: [liveHourDefinition],
-          signal: controller.signal,
-        }),
-        fetchAggregateRows(liveMinuteDefinition, request),
-      ]);
-      const liveHourRows = hydrateCurrentHourRows(hourRows, minuteRows, now);
+      const currentMinuteDefinition: AggregateDefinition = {
+        from: startOfMinute(now),
+        granularity: "minute",
+        to: addMinutes(startOfMinute(now), 1),
+      };
+      const minuteCacheScope = `embedded:${companyScopeId ?? "jwt-company"}:${companyScopeCertification.timeZone}:current-hour`;
+      const queryableConfigs = embeddedQueryableWidgetConfigs(
+        queryWidgetConfigs,
+        metadataSnapshot,
+      );
+      const liveSourceRequired = queryableConfigs.some(
+        (config) => config.chart !== "scenario-hour",
+      );
+      const [hourRows, minuteBootstrapRows, currentMinuteRows] = liveSourceRequired
+        ? await Promise.all([
+            fetchBoundedHourlyAggregateRanges({
+              cache: hourlyAggregateCacheRef.current,
+              cacheScope: `embedded:${companyScopeId ?? "jwt-company"}:${companyScopeCertification.timeZone}`,
+              companyScopeId: companyScopeId ?? undefined,
+              now,
+              ranges: [liveHourDefinition],
+              signal: controller.signal,
+            }),
+            fetchMinuteDayAggregateBootstrap({
+              cache: minuteAggregateCacheRef.current,
+              cacheScope: minuteCacheScope,
+              companyScopeId: companyScopeId ?? undefined,
+              from: startOfHour(now),
+              now,
+              signal: controller.signal,
+              to: currentMinuteDefinition.from,
+            }),
+            fetchAggregateRows(currentMinuteDefinition, request, controller.signal),
+          ])
+        : [[], [], []];
+      const minuteRows = liveSourceRequired
+        ? (await refreshMinuteDayAggregateCache({
+            cache: minuteAggregateCacheRef.current,
+            cacheScope: minuteCacheScope,
+            companyScopeId: companyScopeId ?? undefined,
+            from: startOfHour(now),
+            now,
+            signal: controller.signal,
+            sourceFrom: currentMinuteDefinition.from,
+            sourceRows: currentMinuteRows,
+            sourceTo: currentMinuteDefinition.to,
+          })) ?? minuteBootstrapRows
+        : [];
+      const liveHourRows = liveSourceRequired
+        ? hydrateCurrentHourRows(hourRows, minuteRows, now)
+        : [];
+      const scenarioRequests = new Map<
+        string,
+        Promise<AggregateEventRow[]>
+      >();
       const scenarioRowsByConfigId = new Map(
         await Promise.all(
-          widgetConfigs
-            .filter(
-              (config) =>
-                config.chart === "scenario-hour" &&
-                !metadataSnapshot.scenarioError,
-            )
-            .map(async (config) => [
-              config.id,
-              await fetchScenarioComparisonRows(
-                config,
-                now,
-                liveHourRows,
-                liveHourDefinition,
-                hourlyAggregateCacheRef.current,
-                `embedded:${companyScopeId ?? "jwt-company"}`,
-                companyScopeId ?? undefined,
-                request,
-                controller.signal,
-              ),
-            ] as const),
+          queryableConfigs
+            .filter((config) => config.chart === "scenario-hour")
+            .map(async (config) => {
+              const definition = buildScenarioComparisonDefinition(config, now);
+              const queryKey = `${companyScopeId ?? "jwt-company"}|${embeddedScenarioQueryKey(config, now)}`;
+              const cached = scenarioDatasetCacheRef.current.get(queryKey);
+              const pending =
+                scenarioRequests.get(queryKey) ??
+                (cached
+                  ? Promise.resolve(cached)
+                  : fetchScenarioComparisonRows(
+                      config,
+                      now,
+                      liveHourRows,
+                      liveHourDefinition,
+                      liveSourceRequired,
+                      hourlyAggregateCacheRef.current,
+                      `embedded:${companyScopeId ?? "jwt-company"}:${companyScopeCertification.timeZone}`,
+                      companyScopeId ?? undefined,
+                      request,
+                      controller.signal,
+                    ));
+              scenarioRequests.set(queryKey, pending);
+              const rows = await pending;
+              controller.signal.throwIfAborted();
+              if (!cached && definition.to <= now) {
+                cacheEmbeddedScenarioDataset(
+                  scenarioDatasetCacheRef.current,
+                  queryKey,
+                  rows,
+                );
+              }
+              return [config.id, rows] as const;
+            }),
         ),
       );
       if (
+        !componentMountedRef.current ||
         controller.signal.aborted ||
         requestSequence !== dataRequestSequenceRef.current ||
         viewIdentityKeyRef.current !== requestedIdentityKey ||
@@ -381,7 +501,7 @@ export function EmbeddedLiveView() {
 
       setError("");
       setWidgetStates(
-        widgetConfigs.map((config) =>
+        queryWidgetConfigs.map((config) =>
           buildEmbeddedWidgetState({
             config,
             liveHourRows,
@@ -395,9 +515,12 @@ export function EmbeddedLiveView() {
         ),
       );
       setLoadedViewIdentityKey(requestedIdentityKey);
+      loadedViewIdentityKeyRef.current = requestedIdentityKey;
       setLastUpdated(now);
+      dataLoadedAtRef.current = Date.now();
     } catch (loadError) {
       if (
+        !componentMountedRef.current ||
         controller.signal.aborted ||
         requestSequence !== dataRequestSequenceRef.current ||
         viewIdentityKeyRef.current !== requestedIdentityKey ||
@@ -407,22 +530,24 @@ export function EmbeddedLiveView() {
         return;
       }
       setError(
-        loadError instanceof Error
-          ? loadError.message
-          : "Não foi possível carregar a visão.",
+        embeddedViewErrorMessage(
+          loadError,
+          "Não foi possível carregar a visão.",
+        ),
       );
     } finally {
       if (dataRequestControllerRef.current === controller) {
         dataRequestControllerRef.current = null;
         dataRequestRunningRef.current = false;
-        if (!silent) setLoading(false);
+        if (!silent && componentMountedRef.current) setLoading(false);
       }
     }
   }, [
     companyScopeCertification.error,
+    companyScopeCertification.timeZone,
     companyScopeId,
+    queryWidgetConfigs,
     viewIdentityKey,
-    widgetConfigs,
   ]);
 
   const loadMetadata = React.useCallback(async (
@@ -432,7 +557,12 @@ export function EmbeddedLiveView() {
       metadataRequestControllerRef.current?.abort();
       dataRequestControllerRef.current?.abort();
       metadataSnapshotRef.current = null;
-      setError(companyScopeCertification.error);
+      setError(
+        embeddedViewErrorMessage(
+          new Error(companyScopeCertification.error),
+          "Não foi possível preparar esta visão.",
+        ),
+      );
       setMetadataWarning("");
       setScenarioMetadataWarning("");
       setLoading(false);
@@ -448,15 +578,29 @@ export function EmbeddedLiveView() {
       setLoading(false);
       return;
     }
+    if (
+      metadataRequestRunningRef.current &&
+      metadataRequestIdentityKeyRef.current === viewIdentityKey
+    ) {
+      return;
+    }
     if (metadataRequestRunningRef.current) {
-      if (!force) return;
       metadataRequestControllerRef.current?.abort();
+    }
+    if (
+      !force &&
+      metadataSnapshotRef.current?.identityKey === viewIdentityKey &&
+      Date.now() - metadataLoadedAtRef.current <
+        RESOURCE_METADATA_REFRESH_INTERVAL_MS
+    ) {
+      return;
     }
 
     const requestedIdentityKey = viewIdentityKey;
     const requestSequence = ++metadataRequestSequenceRef.current;
     const controller = new AbortController();
     metadataRequestControllerRef.current = controller;
+    metadataRequestIdentityKeyRef.current = requestedIdentityKey;
     metadataRequestRunningRef.current = true;
     if (!silent) {
       setError("");
@@ -471,14 +615,14 @@ export function EmbeddedLiveView() {
           companyScopeId: companyScopeId ?? undefined,
           signal: controller.signal,
         });
-      const needsScenarios = widgetConfigs.some(
+      const needsScenarios = queryWidgetConfigs.some(
         (widget) =>
           widget.chart === "today-scenario" || widget.chart === "scenario-hour",
       );
-      const needsLocation = widgetConfigs.some(
+      const needsLocation = queryWidgetConfigs.some(
         (widget) => widget.chart === "today-location",
       );
-      const needsSubLocation = widgetConfigs.some(
+      const needsSubLocation = queryWidgetConfigs.some(
         (widget) => widget.chart === "today-sub-location",
       );
       const needsInfrastructure = needsLocation || needsSubLocation;
@@ -523,17 +667,34 @@ export function EmbeddedLiveView() {
         workerResult.status === "fulfilled"
           ? workerResult.value
           : unavailableWorkerMetadata(workerResult.reason);
+      const cameraPayload = requireExplicitWorkerCompanyId
+        ? selectExplicitCompanyScopedRows(cameraResult.value, companyScopeId, {
+            label: "câmeras",
+          }).rows
+        : cameraResult.value;
+      const locationPayload = requireExplicitWorkerCompanyId
+        ? selectExplicitCompanyScopedRows(
+            locationResult.value,
+            companyScopeId,
+            { label: "locais" },
+          ).rows
+        : locationResult.value;
       const scopedCameras = filterScopedApiRows(
-        requireCameraRows(cameraResult.value, companyScopeId),
+        requireCameraRows(cameraPayload, companyScopeId),
         companyScopeId,
       );
       const scopedLocations = filterScopedApiRows(
-        requireLocationRows(locationResult.value, companyScopeId),
+        requireLocationRows(locationPayload, companyScopeId),
         companyScopeId,
       );
       const scopedSubLocations = needsSubLocation
         ? filterScopedApiRows(
-            await fetchSubLocations(scopedLocations, companyScopeId, request),
+            await fetchSubLocations(
+              scopedLocations,
+              companyScopeId,
+              request,
+              requireExplicitWorkerCompanyId,
+            ),
             companyScopeId,
           )
         : undefined;
@@ -570,6 +731,7 @@ export function EmbeddedLiveView() {
           : [],
       };
       if (
+        !componentMountedRef.current ||
         controller.signal.aborted ||
         requestSequence !== metadataRequestSequenceRef.current ||
         viewIdentityKeyRef.current !== requestedIdentityKey
@@ -579,11 +741,28 @@ export function EmbeddedLiveView() {
 
       setMetadataWarning(workerMetadata.warning);
       setScenarioMetadataWarning(scenarioMetadata.warning);
+      const metadataChanged =
+        embeddedMetadataContentKey(metadataSnapshotRef.current) !==
+        embeddedMetadataContentKey(nextMetadata);
       metadataSnapshotRef.current = nextMetadata;
       metadataLoadedAtRef.current = Date.now();
-      await loadData(nextMetadata, { force: true, silent });
+      const liveDataStale =
+        embeddedViewNeedsLiveRefresh(
+          embeddedQueryableWidgetConfigs(queryWidgetConfigs, nextMetadata),
+          new Date(),
+        ) &&
+        !dataRequestRunningRef.current &&
+        Date.now() - dataLoadedAtRef.current >= MIN_DATA_REFRESH_INTERVAL_MS;
+      if (
+        metadataChanged ||
+        loadedViewIdentityKeyRef.current !== requestedIdentityKey ||
+        liveDataStale
+      ) {
+        await loadData(nextMetadata, { force: true, silent });
+      }
     } catch (loadError) {
       if (
+        !componentMountedRef.current ||
         controller.signal.aborted ||
         requestSequence !== metadataRequestSequenceRef.current ||
         viewIdentityKeyRef.current !== requestedIdentityKey ||
@@ -592,14 +771,16 @@ export function EmbeddedLiveView() {
         return;
       }
       setError(
-        loadError instanceof Error
-          ? loadError.message
-          : "Não foi possível carregar os metadados da visão.",
+        embeddedViewErrorMessage(
+          loadError,
+          "Não foi possível carregar a configuração desta visão.",
+        ),
       );
       setLoading(false);
     } finally {
       if (metadataRequestControllerRef.current === controller) {
         metadataRequestControllerRef.current = null;
+        metadataRequestIdentityKeyRef.current = "";
         metadataRequestRunningRef.current = false;
       }
     }
@@ -607,43 +788,65 @@ export function EmbeddedLiveView() {
     companyScopeCertification.error,
     companyScopeId,
     loadData,
+    queryWidgetConfigs,
     requireExplicitWorkerCompanyId,
     user,
     viewIdentityKey,
-    widgetConfigs,
   ]);
 
   React.useEffect(() => {
-    viewIdentityKeyRef.current = viewIdentityKey;
-    metadataRequestSequenceRef.current += 1;
-    dataRequestSequenceRef.current += 1;
-    metadataRequestControllerRef.current?.abort();
-    dataRequestControllerRef.current?.abort();
-    metadataRequestControllerRef.current = null;
-    dataRequestControllerRef.current = null;
-    metadataRequestRunningRef.current = false;
-    dataRequestRunningRef.current = false;
-    metadataSnapshotRef.current = null;
-    metadataLoadedAtRef.current = 0;
-    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
-    setWidgetStates([]);
-    setLoadedViewIdentityKey("");
-    setLastUpdated(null);
-    setError("");
-    setMetadataWarning("");
-    setScenarioMetadataWarning("");
-    setLoading(true);
-    void loadMetadata({ force: true });
-
-    return () => {
+    componentMountedRef.current = true;
+    if (componentDetachTimerRef.current !== null) {
+      window.clearTimeout(componentDetachTimerRef.current);
+      componentDetachTimerRef.current = null;
+    }
+    const identityChanged = viewIdentityKeyRef.current !== viewIdentityKey;
+    if (identityChanged) {
+      viewIdentityKeyRef.current = viewIdentityKey;
       metadataRequestSequenceRef.current += 1;
       dataRequestSequenceRef.current += 1;
       metadataRequestControllerRef.current?.abort();
       dataRequestControllerRef.current?.abort();
       metadataRequestControllerRef.current = null;
+      metadataRequestIdentityKeyRef.current = "";
       dataRequestControllerRef.current = null;
       metadataRequestRunningRef.current = false;
       dataRequestRunningRef.current = false;
+      dataLoadedAtRef.current = 0;
+      metadataSnapshotRef.current = null;
+      metadataLoadedAtRef.current = 0;
+      clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+      clearMinuteDayAggregateCache(minuteAggregateCacheRef.current);
+      scenarioDatasetCacheRef.current.clear();
+      setWidgetStates([]);
+      setLoadedViewIdentityKey("");
+      loadedViewIdentityKeyRef.current = "";
+      setLastUpdated(null);
+      setError("");
+      setMetadataWarning("");
+      setScenarioMetadataWarning("");
+      setLoading(true);
+    }
+    void loadMetadata();
+
+    return () => {
+      componentMountedRef.current = false;
+      // Strict Mode immediately replays this effect. Defer cancellation one
+      // task so the replay can reattach to the same semantic request, while a
+      // real unmount still terminates both metadata and aggregate work.
+      componentDetachTimerRef.current = window.setTimeout(() => {
+        componentDetachTimerRef.current = null;
+        if (componentMountedRef.current) return;
+        metadataRequestSequenceRef.current += 1;
+        dataRequestSequenceRef.current += 1;
+        metadataRequestControllerRef.current?.abort();
+        dataRequestControllerRef.current?.abort();
+        metadataRequestControllerRef.current = null;
+        dataRequestControllerRef.current = null;
+        metadataRequestIdentityKeyRef.current = "";
+        metadataRequestRunningRef.current = false;
+        dataRequestRunningRef.current = false;
+      }, 0);
     };
   }, [loadMetadata, viewIdentityKey]);
 
@@ -663,15 +866,10 @@ export function EmbeddedLiveView() {
       }
       void loadMetadata({ silent: true });
     };
-    const interval = window.setInterval(
-      refreshMetadataWhenVisible,
-      RESOURCE_METADATA_REFRESH_INTERVAL_MS,
-    );
     window.addEventListener("focus", refreshMetadataWhenVisible);
     document.addEventListener("visibilitychange", refreshMetadataWhenVisible);
 
     return () => {
-      window.clearInterval(interval);
       window.removeEventListener("focus", refreshMetadataWhenVisible);
       document.removeEventListener(
         "visibilitychange",
@@ -691,7 +889,15 @@ export function EmbeddedLiveView() {
         }) ||
         metadataRequestRunningRef.current ||
         dataRequestRunningRef.current ||
-        metadataSnapshot?.identityKey !== viewIdentityKeyRef.current
+        metadataSnapshot?.identityKey !== viewIdentityKeyRef.current ||
+        Date.now() - dataLoadedAtRef.current < MIN_DATA_REFRESH_INTERVAL_MS ||
+        !embeddedViewNeedsLiveRefresh(
+          embeddedQueryableWidgetConfigs(
+            queryWidgetConfigs,
+            metadataSnapshot,
+          ),
+          new Date(),
+        )
       ) {
         return;
       }
@@ -709,10 +915,18 @@ export function EmbeddedLiveView() {
       window.removeEventListener("focus", refreshDataWhenVisible);
       document.removeEventListener("visibilitychange", refreshDataWhenVisible);
     };
-  }, [companyScopeId, loadData, user]);
+  }, [companyScopeId, loadData, queryWidgetConfigs, user]);
 
+  const currentConfigById = new Map(
+    widgetConfigs.map((config) => [config.id, config]),
+  );
   const currentWidgetStates =
-    loadedViewIdentityKey === viewIdentityKey ? widgetStates : [];
+    loadedViewIdentityKey === viewIdentityKey
+      ? widgetStates.map((state) => ({
+          ...state,
+          config: currentConfigById.get(state.config.id) ?? state.config,
+        }))
+      : [];
   const visibleStates = currentWidgetStates.length
     ? currentWidgetStates
     : widgetConfigs.map((config) => ({ config, error: "", points: [] }));
@@ -944,6 +1158,98 @@ function parseWidgetConfigs(
   }
 }
 
+function embeddedWidgetQueryConfig(
+  config: EmbeddedWidgetConfig,
+): EmbeddedWidgetConfig {
+  return {
+    chart: config.chart,
+    from: config.from,
+    granularity: config.granularity,
+    id: config.id,
+    period: config.period,
+    scenarioIds: [...config.scenarioIds].sort(),
+    scopeId: config.scopeId,
+    title: "",
+    to: config.to,
+  };
+}
+
+function embeddedQueryableWidgetConfigs(
+  configs: EmbeddedWidgetConfig[],
+  metadata: EmbeddedMetadataSnapshot | null,
+) {
+  if (!metadata) return [];
+
+  return configs.filter((config) => {
+    if (config.chart === "today-location") {
+      return metadata.locationOptions.length > 0;
+    }
+    if (config.chart === "today-sub-location") {
+      return metadata.subLocationOptions.length > 0;
+    }
+    if (metadata.scenarioError) return false;
+    if (config.chart === "today-scenario") {
+      return metadata.scenarios.length > 0;
+    }
+    return selectScenarioComparisonScenarios(
+      metadata.scenarios,
+      config.scenarioIds,
+    ).length > 0;
+  });
+}
+
+function embeddedMetadataContentKey(
+  metadata: EmbeddedMetadataSnapshot | null,
+) {
+  if (!metadata) return "";
+  return JSON.stringify([
+    metadata.locationOptions,
+    metadata.scenarioError,
+    metadata.scenarios,
+    metadata.subLocationOptions,
+  ]);
+}
+
+function cacheEmbeddedScenarioDataset(
+  cache: Map<string, AggregateEventRow[]>,
+  key: string,
+  rows: AggregateEventRow[],
+) {
+  cache.delete(key);
+  cache.set(key, rows);
+  while (cache.size > MAX_EMBEDDED_SCENARIO_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (typeof oldestKey !== "string") return;
+    cache.delete(oldestKey);
+  }
+}
+
+function embeddedScenarioQueryKey(
+  config: EmbeddedWidgetConfig,
+  now: Date,
+) {
+  const definition = buildScenarioComparisonDefinition(config, now);
+  return JSON.stringify([
+    definition.granularity,
+    definition.from.toISOString(),
+    definition.to.toISOString(),
+  ]);
+}
+
+function embeddedViewNeedsLiveRefresh(
+  configs: EmbeddedWidgetConfig[],
+  now: Date,
+) {
+  return configs.some((config) => {
+    if (config.chart !== "scenario-hour") return true;
+    if (config.period === "yesterday") return false;
+    if (config.period !== "custom") return true;
+
+    const customTo = config.to ? Date.parse(config.to) : Number.NaN;
+    return !Number.isFinite(customTo) || customTo > now.getTime();
+  });
+}
+
 function buildEmbeddedWidgetState({
   config,
   liveHourRows,
@@ -1059,25 +1365,16 @@ function buildAggregateDefinition(
 async function fetchAggregateRows(
   definition: AggregateDefinition,
   request: EmbeddedApiRequest,
+  signal?: AbortSignal,
 ) {
-  const params = new URLSearchParams({
+  return fetchCompleteAggregateRange({
+    from: definition.from,
     granularity: definition.granularity,
-    from: aggregateQueryIso(definition.from, definition.granularity),
-    to: aggregateQueryIso(definition.to, definition.granularity),
-    metric_type: DEFAULT_METRIC_TYPE,
+    metricType: DEFAULT_METRIC_TYPE,
+    request: (path) => request<AggregateEventsResponse>(path),
+    signal,
+    to: definition.to,
   });
-  const response = await request<AggregateEventsResponse>(
-    `/analytics/aggregate?${params.toString()}`,
-  );
-  requireAggregateGranularity(response.granularity, definition.granularity);
-
-  return requireAggregateRowsInRange(
-    response.data,
-    definition.granularity,
-    definition.from,
-    definition.to,
-    DEFAULT_METRIC_TYPE,
-  );
 }
 
 async function fetchScenarioComparisonRows(
@@ -1085,6 +1382,7 @@ async function fetchScenarioComparisonRows(
   now: Date,
   liveHourRows: AggregateEventRow[],
   liveHourDefinition: AggregateDefinition,
+  liveSourceAvailable: boolean,
   hourlyAggregateCache: HourlyAggregateCache,
   cacheScope: string,
   companyScopeId: string | undefined,
@@ -1106,11 +1404,12 @@ async function fetchScenarioComparisonRows(
   if (hourlyDefinition.from >= hourlyDefinition.to) return [];
 
   const liveSourceCoversRange =
+    liveSourceAvailable &&
     liveHourDefinition.from <= hourlyDefinition.from &&
     liveHourDefinition.to >= hourlyDefinition.to;
   let hourlyRows = liveSourceCoversRange
     ? []
-    : await fetchHourlyAggregateRanges({
+    : await fetchBoundedHourlyAggregateRanges({
         cache: hourlyAggregateCache,
         cacheScope,
         companyScopeId,
@@ -1131,7 +1430,7 @@ async function fetchScenarioComparisonRows(
     ),
   );
 
-  if (overlapFrom < overlapTo) {
+  if (liveSourceAvailable && overlapFrom < overlapTo) {
     hourlyRows = reconcileAggregateRows(
       hourlyRows,
       "hour",
@@ -1142,7 +1441,11 @@ async function fetchScenarioComparisonRows(
     );
   }
 
-  const boundaryRanges = embeddedPartialHourRanges(definition, now);
+  const boundaryRanges = embeddedPartialHourRanges(
+    definition,
+    now,
+    liveSourceAvailable,
+  );
   const boundaryEntries = await Promise.all(
     boundaryRanges.map(async (range) => ({
       range,
@@ -1179,6 +1482,7 @@ async function fetchScenarioComparisonRows(
 function embeddedPartialHourRanges(
   definition: AggregateDefinition,
   now: Date,
+  liveSourceAvailable = true,
 ) {
   const ranges = new Map<
     number,
@@ -1199,6 +1503,7 @@ function embeddedPartialHourRanges(
   const currentHourStart = startOfHour(now);
   const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
   const currentOpenHourAlreadyCanonical =
+    liveSourceAvailable &&
     lastHourStart.getTime() === currentHourStart.getTime() &&
     definition.from <= lastHourStart &&
     definition.to >= currentMinuteEnd;
@@ -1226,19 +1531,23 @@ async function fetchEmbeddedWorkers(
   { requireExplicitCompanyId }: WorkerMetadataValidationOptions,
   request: EmbeddedApiRequest = apiFetch,
 ): Promise<OptionalWorkerMetadata> {
-  const rows = await request<unknown>("/workers").then((value) =>
-    requireWorkerRows(value, requireExplicitCompanyId ? undefined : companyId),
-  );
-  const { foreignRows, scopedRows } = partitionWorkersByCompanyScope(
+  const rows = await request<unknown>("/workers").then((value) => {
+    const payload = requireExplicitCompanyId
+      ? selectExplicitCompanyScopedRows(value, companyId!, {
+          collectionKeys: ["data", "workers", "items", "results"],
+          label: "workers",
+        })
+      : null;
+    return requireWorkerRows(payload?.rows ?? value, companyId);
+  });
+  const { scopedRows } = partitionWorkersByCompanyScope(
     rows,
     companyId,
   );
 
   return {
     rows: sortWorkersByActivity(scopedRows),
-    warning: foreignRows.length
-      ? `${formatNumber(foreignRows.length)} worker(s) fora da empresa selecionada foram ocultados. A visão continua com os metadados certificados.`
-      : "",
+    warning: "",
   };
 }
 
@@ -1247,30 +1556,32 @@ async function fetchEmbeddedScenarios(
   { requireExplicitCompanyId }: WorkerMetadataValidationOptions,
   request: EmbeddedApiRequest = apiFetch,
 ): Promise<OptionalScenarioMetadata> {
-  const rows = await request<unknown>("/scenarios").then((value) =>
-    requireScenarioRows(
-      value,
-      requireExplicitCompanyId ? undefined : companyId,
-    ),
-  );
+  let foreignRowCount = 0;
+  const rows = await request<unknown>("/scenarios").then((value) => {
+    const payload = requireExplicitCompanyId
+      ? selectExplicitCompanyScopedRows(value, companyId!, {
+          label: "cenários de Contagem",
+        })
+      : null;
+    foreignRowCount = payload?.foreignCount ?? 0;
+    return requireScenarioRows(payload?.rows ?? value, companyId);
+  });
   const scopedRows = filterScopedApiRows(rows, companyId);
-  const foreignRowCount = rows.length - scopedRows.length;
+  foreignRowCount += rows.length - scopedRows.length;
 
   return {
     error:
       foreignRowCount && !scopedRows.length
-        ? "Nenhum cenário de Contagem certificado para a empresa selecionada."
+        ? "Nenhum cenário de Contagem disponível para a empresa selecionada."
         : "",
     rows: scopedRows,
-    warning: foreignRowCount
-      ? `${formatNumber(foreignRowCount)} cenário(s) de Contagem fora da empresa selecionada foram ocultados. Widgets de Location e Sub-location continuam disponíveis.`
-      : "",
+    warning: "",
   };
 }
 
 function unavailableScenarioMetadata(): OptionalScenarioMetadata {
   const message =
-    "Cenários de Contagem indisponíveis para a empresa selecionada. Widgets de Location e Sub-location continuam disponíveis.";
+    "Cenários de Contagem indisponíveis para a empresa selecionada. As visões por local e sublocal continuam disponíveis.";
   return {
     error: message,
     rows: [],
@@ -1279,26 +1590,39 @@ function unavailableScenarioMetadata(): OptionalScenarioMetadata {
 }
 
 function unavailableWorkerMetadata(error: unknown): OptionalWorkerMetadata {
-  const detail =
-    error instanceof Error
-      ? error.message
-      : "A API não certificou os workers desta empresa.";
+  const detail = embeddedViewErrorMessage(
+    error,
+    "Os vínculos operacionais desta empresa ainda não estão disponíveis.",
+  );
 
   return {
     rows: [],
-    warning: `Vínculos de workers indisponíveis: ${detail}`,
+    warning: `Vínculos operacionais indisponíveis: ${detail}`,
   };
+}
+
+function embeddedViewErrorMessage(error: unknown, fallback: string) {
+  return userFacingErrorMessage(error, fallback);
 }
 
 async function fetchSubLocations(
   locations: Location[],
   companyId?: string | null,
   request: EmbeddedApiRequest = apiFetch,
+  requireExplicitCompanyId = false,
 ) {
   const rows = await Promise.all(
     locations.map((location) =>
       request<unknown>(`/locations/${location.id}/sub-locations`).then(
-        (value) => requireSubLocationRows(value, companyId),
+        (value) =>
+          requireSubLocationRows(
+            requireExplicitCompanyId
+              ? selectExplicitCompanyScopedRows(value, companyId!, {
+                  label: "sublocais",
+                }).rows
+              : value,
+            companyId,
+          ),
       ),
     ),
   );

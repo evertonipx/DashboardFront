@@ -215,7 +215,7 @@ export function validateOccupancyHexEditorDocument(
       errors.push({
         cellId: cell.id,
         code: "duplicate-cell-id",
-        message: `O identificador de célula "${cell.id}" está duplicado.`,
+        message: "O layout contém uma célula duplicada. Remova-a antes de salvar.",
         severity: "error",
       });
     } else {
@@ -243,7 +243,7 @@ export function validateOccupancyHexEditorDocument(
         cellId: cell.id,
         code: "cell-out-of-grid",
         column: cell.column,
-        message: `A célula "${cell.id}" está fora dos limites do layout.`,
+        message: "Há uma célula fora dos limites do layout.",
         row: cell.row,
         severity: "error",
       });
@@ -253,7 +253,7 @@ export function validateOccupancyHexEditorDocument(
       warnings.push({
         cellId: cell.id,
         code: "unlinked-cell",
-        message: `A célula "${cell.id}" não possui cenário vinculado.`,
+        message: "Há uma célula sem cenário vinculado.",
         severity: "warning",
       });
       return;
@@ -263,7 +263,7 @@ export function validateOccupancyHexEditorDocument(
       errors.push({
         cellId: cell.id,
         code: "duplicate-scenario",
-        message: `O cenário "${cell.scenarioId}" está vinculado a mais de uma célula.`,
+        message: "Um cenário está vinculado a mais de uma célula.",
         scenarioId: cell.scenarioId,
         severity: "error",
       });
@@ -278,7 +278,7 @@ export function validateOccupancyHexEditorDocument(
       warnings.push({
         cellId: cell.id,
         code: "unavailable-scenario",
-        message: `O cenário "${cell.scenarioId}" não está disponível no escopo atual.`,
+        message: "Uma célula está vinculada a um cenário indisponível para esta seleção.",
         scenarioId: cell.scenarioId,
         severity: "warning",
       });
@@ -298,7 +298,7 @@ export function validateOccupancyHexEditorDocument(
       }
       errors.push({
         code: "invalid-capacity",
-        message: `A capacidade de "${scenarioId}" deve ser um inteiro entre 1 e ${OCCUPANCY_HEX_EDITOR_MAX_CAPACITY}.`,
+        message: `Há uma capacidade inválida. Informe um número inteiro entre 1 e ${OCCUPANCY_HEX_EDITOR_MAX_CAPACITY}.`,
         scenarioId,
         severity: "error",
       });

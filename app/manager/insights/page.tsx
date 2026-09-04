@@ -1,17 +1,5 @@
-import { AiInsightsDashboard } from "@/components/app/ai-insights-dashboard";
-import { AppShell } from "@/components/app/app-shell";
-import { AuthGuard } from "@/components/app/auth-guard";
+import { redirect } from "next/navigation";
 
 export default function ManagerInsightsPage() {
-  return (
-    <AuthGuard requireManager requireMaster>
-      <AppShell
-        mode="manager"
-        title="Configuração IA"
-        description="Configure credenciais, modelos e parâmetros da análise por IA no escopo empresarial selecionado."
-      >
-        <AiInsightsDashboard />
-      </AppShell>
-    </AuthGuard>
-  );
+  redirect("/manager/master?section=insights");
 }

@@ -1,17 +1,5 @@
-import { AppShell } from "@/components/app/app-shell";
-import { AuthGuard } from "@/components/app/auth-guard";
-import { InfrastructureManager } from "@/components/app/infrastructure-manager";
+import { DeferredInfrastructureManager as InfrastructureManager } from "@/components/app/deferred-route-panels";
 
 export default function ManagerCamerasPage() {
-  return (
-    <AuthGuard requireManager requireResource="cameras">
-      <AppShell
-        mode="manager"
-        title="Câmeras"
-        description="Cadastro de câmeras e line counts para apuração de pessoas."
-      >
-        <InfrastructureManager view="cameras" />
-      </AppShell>
-    </AuthGuard>
-  );
+  return <InfrastructureManager view="cameras" />;
 }

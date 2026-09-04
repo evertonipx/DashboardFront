@@ -24,10 +24,12 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { AiAnalysisAction } from "@/components/app/ai-analysis-action";
+import { AiAnalysisAction } from "@/components/app/deferred-ai-analysis-action";
+import { useTheme } from "@/components/app/theme-provider";
 import {
   CardLayout,
   ReorderModeButton,
+  type LayoutCardRenderContext,
 } from "@/components/app/card-layout";
 import {
   COMPACT_METRIC_LAYOUT_DEFAULTS,
@@ -35,10 +37,10 @@ import {
 } from "@/components/app/compact-metric-card";
 import {
   EChart,
-  applyChartTypePreference,
   type EnterpriseChartOption,
-} from "@/components/app/echart";
+} from "@/components/app/deferred-echart";
 import { ReportExportActions } from "@/components/app/report-export-actions";
+import { applyChartTypePreference } from "@/lib/chart-type-preference";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
 import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
@@ -115,9 +117,10 @@ import {
 } from "@/lib/aggregate-time";
 import {
   clearHourlyAggregateCache,
-  fetchHourlyAggregateRanges,
+  fetchBoundedHourlyAggregateRanges,
   type HourlyAggregateCache,
 } from "@/lib/aggregate-hour-query";
+import { fetchCompleteAggregateRange } from "@/lib/aggregate-range-query";
 import {
   clearMinuteDayAggregateCache,
   fetchMinuteDayAggregateBootstrap,
@@ -223,7 +226,6 @@ import {
 import {
   buildLiveAnnualComparisonModel,
   resolveLiveAnnualComparisonRanges,
-  rollupLiveAnnualHistoryRows,
 } from "@/lib/live-annual-comparison";
 import {
   OPERATIONAL_TREND_LEGEND_DATA,
@@ -235,6 +237,7 @@ import type {
   ReportTable,
 } from "@/lib/report-export";
 import {
+  buildCombinedScenarioMultiplierMap,
   buildScenarioCivilHourMagnitudePoints,
   buildScenarioCumulativeTotals,
   buildScenarioHourlyOccupancy,
@@ -246,8 +249,13 @@ import {
   type ScenarioHourlyOccupancyPoint,
   type ScenarioPeakDayPoint,
 } from "@/lib/scenario-analytics";
+import {
+  resolveWidgetScenarios,
+  widgetScenarioSelectionLabel,
+} from "@/lib/widget-scenario-selection";
 import { inferOccupancyScenarios } from "@/lib/scenario-direction";
 import { requireScenarioRows } from "@/lib/scenario-validation";
+import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -258,6 +266,8 @@ import type {
   SubLocation,
   Worker,
 } from "@/lib/types";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
+import { USER_GRID_LOCAL_CHANGE_EVENT } from "@/lib/user-grid-local";
 import { cn, formatNumber, formatTime } from "@/lib/utils";
 import {
   collapseWorkerIdentityChains,
@@ -291,6 +301,25 @@ type RealtimeChartState = {
   rows: AggregateEventRow[];
   granularity: AggregateGranularity;
   error?: string;
+};
+
+type RealtimeNativeAggregateQuery = Readonly<{
+  from: Date;
+  granularity: AggregateGranularity;
+  to: Date;
+}>;
+
+type RealtimeHourlyCoverageCache = {
+  cacheScope: string;
+  ranges: Array<{ from: Date; to: Date }>;
+  rows: AggregateEventRow[];
+};
+
+type RealtimeRollingMinuteCache = {
+  cacheScope: string;
+  coveredFrom: Date | null;
+  coveredTo: Date | null;
+  rows: AggregateEventRow[];
 };
 
 type OptionalWorkerMetadata = {
@@ -361,10 +390,43 @@ type RealtimeScopeOption = {
   location?: Location;
   parentName?: string;
   scenario?: Scenario;
+  scenarios?: Scenario[];
   subLocation?: SubLocation;
   worker?: Worker;
   workerId?: string;
 };
+
+type RealtimeWidgetModel = {
+  baselineDailyAverage: number;
+  comparisonComparableTotal: number;
+  comparisonDelta: number | null;
+  currentHourPartialTotal: number;
+  currentMonthRealtimeTotal: number;
+  lastYearMonthComparableTotal: number;
+  lastYearMonthDelta: number | null;
+  liveAnnualComparisonModel: CountingIntelligenceModel | null;
+  monthComparisonPoints: OperationalMonthComparisonPoint[];
+  operationalTrendPoints: OperationalTrendPoint[];
+  previousMonthComparableTotal: number;
+  previousMonthDelta: number | null;
+  scope: RealtimeScopeOption | null;
+  todayTotal: number;
+};
+
+type RealtimeDataPlan = Readonly<{
+  annualComparisonSource: boolean;
+  comparisonSource: boolean;
+  definitionIds: readonly string[];
+  heatmapSource: boolean;
+  minuteDay: boolean;
+  refreshIntervalMs: number;
+  rollingMinute: boolean;
+}>;
+
+type RealtimeDataPlanState = Readonly<{
+  key: string;
+  scopeKey: string;
+}>;
 
 type RealtimeCustomWidgetForm = {
   comparisonSettings: ScenarioComparisonSettings;
@@ -384,6 +446,10 @@ type CustomScenarioWidgetPatch = Partial<
 >;
 
 const REFRESH_MS = 5_000;
+const DAY_REFRESH_MS = 5 * 60_000;
+const MONTH_REFRESH_MS = 60 * 60_000;
+const AGGREGATE_RESPONSE_ROW_CEILING = 1_000;
+const ANNUAL_HISTORY_QUERY_CONCURRENCY = 2;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
@@ -397,24 +463,16 @@ const OPERATIONAL_TREND_DAYS_ID = "live_operational_trend_days";
 const OPERATIONAL_MONTH_HOURS_ID = "live_operational_month_hours";
 const OPERATIONAL_CURRENT_HOUR_MINUTES_ID =
   "live_operational_current_hour_minutes";
+const OPEN_COARSE_DAYS_ID = "live_open_coarse_days";
 const LIVE_DAY_MINUTES_ID = "live_chart_minute_day";
-const LIVE_ANNUAL_RECENT_MONTHS_ID = "live_annual_recent_months";
 const OCCUPANCY_HOURS_ID = "live_hourly_occupancy_data";
 const CANONICAL_HOUR_DERIVED_TARGETS: ReadonlyArray<{
-  granularity: "hour" | "day" | "week" | "month";
+  granularity: "hour";
   id: string;
 }> = [
   { id: "live_chart_hour", granularity: "hour" },
   { id: OCCUPANCY_HOURS_ID, granularity: "hour" },
   { id: OPERATIONAL_COMPARISON_HOURS_ID, granularity: "hour" },
-  { id: OPERATIONAL_PREVIOUS_MONTH_ID, granularity: "hour" },
-  { id: OPERATIONAL_LAST_YEAR_MONTH_ID, granularity: "hour" },
-  { id: "live_chart_day", granularity: "day" },
-  { id: CURRENT_MONTH_DAYS_ID, granularity: "day" },
-  { id: OPERATIONAL_TREND_DAYS_ID, granularity: "day" },
-  { id: "live_chart_week", granularity: "week" },
-  { id: "live_chart_month", granularity: "month" },
-  { id: LIVE_ANNUAL_RECENT_MONTHS_ID, granularity: "month" },
 ];
 const CANONICAL_HOUR_DERIVED_IDS = new Set(
   CANONICAL_HOUR_DERIVED_TARGETS.map((target) => target.id),
@@ -516,7 +574,7 @@ export function RealtimeDashboard({
   const companyScopeCertificationError =
     overrideScopeCertification?.error ??
     (!cleanCompanyIdOverride && companyTimeZoneResolution.fallback
-      ? "Fuso da empresa não certificado. Cadastre um timezone IANA válido antes de consultar dados civis."
+      ? "Não foi possível validar o fuso horário da empresa. Revise o fuso nas configurações da empresa."
       : "");
   const customGranularitySelectId = React.useId();
   const customKindSelectId = React.useId();
@@ -559,10 +617,16 @@ export function RealtimeDashboard({
   const [customWidgets, setCustomWidgets] = React.useState<
     RealtimeCustomWidget[]
   >([]);
+  const [comparisonSettingsRevision, setComparisonSettingsRevision] =
+    React.useState(0);
   const [customWidgetDialogOpen, setCustomWidgetDialogOpen] =
     React.useState(false);
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
   const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
+  const [livePreferencesReadyKey, setLivePreferencesReadyKey] =
+    React.useState("");
+  const [realtimeDataPlanState, setRealtimeDataPlanState] =
+    React.useState<RealtimeDataPlanState>({ key: "", scopeKey: "" });
   const [operationalSettingsOpen, setOperationalSettingsOpen] =
     React.useState(false);
   const [operationalSettings, setOperationalSettings] =
@@ -587,13 +651,32 @@ export function RealtimeDashboard({
   const runningRef = React.useRef(false);
   const hasLoadedChartsRef = React.useRef(false);
   const annualHistoryRequestSequenceRef = React.useRef(0);
-  const annualHistoryLoadedDayRef = React.useRef("");
-  const annualHistoryAttemptMinuteRef = React.useRef("");
+  const annualHistoryAttemptDayRef = React.useRef("");
   const metadataRequestSequenceRef = React.useRef(0);
+  const metadataRequestKeyRef = React.useRef("");
+  const metadataLoadedKeyRef = React.useRef("");
+  const metadataCatalogScopeKeyRef = React.useRef("");
+  const cameraGroupsRef = React.useRef<CameraGroup[]>([]);
+  const workerLocationAssignmentsRef =
+    React.useRef<WorkerLocationAssignments>({});
   const focusRef = React.useRef({ scopeMode, selectedId });
   const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
     new Map(),
   );
+  const hourlyCoverageCacheRef = React.useRef<RealtimeHourlyCoverageCache>({
+    cacheScope: "",
+    ranges: [],
+    rows: [],
+  });
+  const nativeAggregateCacheRef = React.useRef<
+    Map<string, readonly AggregateEventRow[]>
+  >(new Map());
+  const rollingMinuteCacheRef = React.useRef<RealtimeRollingMinuteCache>({
+    cacheScope: "",
+    coveredFrom: null,
+    coveredTo: null,
+    rows: [],
+  });
   const minuteDayAggregateCacheRef = React.useRef<MinuteDayAggregateCache>(
     new Map(),
   );
@@ -679,10 +762,46 @@ export function RealtimeDashboard({
     () => scopeOptions.find((option) => option.id === selectedId) ?? null,
     [scopeOptions, selectedId],
   );
+  const realtimeDataPlanScopeKey = [
+    companyScopeId ?? "",
+    userId ?? "",
+    selectedScope?.id ?? "",
+  ].join("|");
+  const realtimeDataPlanKey =
+    realtimeDataPlanState.scopeKey === realtimeDataPlanScopeKey
+      ? realtimeDataPlanState.key
+      : "";
+  const realtimeDataPlan = React.useMemo(
+    () => parseRealtimeDataPlanKey(realtimeDataPlanKey),
+    [realtimeDataPlanKey],
+  );
   const preferenceScope = React.useMemo(
     () => ({ userId: user?.id, viewId: selectedScope?.id }),
     [selectedScope?.id, user?.id],
   );
+  const openScenarioComparisonWidgetIds = React.useMemo(() => {
+    void comparisonSettingsRevision;
+    return new Set(
+      customWidgets.flatMap((widget) => {
+        if (widget.kind !== "scenario_comparison") return [];
+        const settings = loadScenarioComparisonSettings(
+          realtimeScenarioComparisonStorageKey(widget.id),
+          companyScopeId,
+          preferenceScope,
+        );
+        const definition = buildScenarioComparisonDefinition(settings, clock);
+        return scenarioComparisonDefinitionIncludesOpenHour(definition, clock)
+          ? [widget.id]
+          : [];
+      }),
+    );
+  }, [
+    clock,
+    companyScopeId,
+    comparisonSettingsRevision,
+    customWidgets,
+    preferenceScope,
+  ]);
 
   React.useEffect(() => {
     setOperationalSettings(
@@ -696,9 +815,6 @@ export function RealtimeDashboard({
   const occupancyHourState = chartData[OCCUPANCY_HOURS_ID];
   const occupancyHourRows =
     occupancyHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
-  const annualRecentMonthState = chartData[LIVE_ANNUAL_RECENT_MONTHS_ID];
-  const annualRecentMonthRows =
-    annualRecentMonthState?.rows ?? EMPTY_AGGREGATE_ROWS;
   const comparisonHourState = chartData[OPERATIONAL_COMPARISON_HOURS_ID];
   const comparisonHourRows =
     comparisonHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
@@ -716,9 +832,14 @@ export function RealtimeDashboard({
   const operationalMonthHourState = chartData[OPERATIONAL_MONTH_HOURS_ID];
   const operationalMonthHourRows =
     operationalMonthHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
+  const getAnnualComparisonDayRows = createRenderLazyValue(() => [
+    ...currentMonthDayRows,
+    ...lastYearMonthDayRows,
+  ]);
   const liveComparisonHourlySource =
     React.useMemo<ScenarioComparisonHourlySource | undefined>(() => {
       if (
+        !realtimeDataPlan.comparisonSource ||
         operationalMonthHourState?.granularity !== "hour" ||
         operationalMonthHourState.error
       ) {
@@ -738,8 +859,8 @@ export function RealtimeDashboard({
       companyScopeId,
       companyTimeZone,
       operationalMonthHourRows,
-      operationalMonthHourState?.error,
-      operationalMonthHourState?.granularity,
+      operationalMonthHourState,
+      realtimeDataPlan.comparisonSource,
     ]);
   const baselineMonthDayRows =
     operationalSettings.monthComparison === "last_year"
@@ -747,28 +868,57 @@ export function RealtimeDashboard({
       : previousMonthDayRows;
   const baselineMonthDayGranularity =
     operationalSettings.monthComparison === "last_year"
-      ? lastYearMonthDayState?.granularity ?? "hour"
-      : previousMonthDayState?.granularity ?? "hour";
+      ? lastYearMonthDayState?.granularity ?? "day"
+      : previousMonthDayState?.granularity ?? "day";
   const liveDataCertificationError =
     companyScopeCertificationError ||
     metadataError ||
-    chartLoadError ||
+    chartLoadError;
+  const liveReportCertificationError =
+    liveDataCertificationError ||
     Object.entries(chartData).find(
       ([id, state]) => id !== LIVE_DAY_MINUTES_ID && state.error,
     )?.[1].error;
+  const comparisonScopeCertificationError =
+    companyScopeCertificationError || metadataError;
+  const closedComparisonDisabledReason = comparisonScopeCertificationError
+    ? `Comparativo indisponível: ${comparisonScopeCertificationError}`
+    : undefined;
   const liveComparisonDisabledReason = liveDataCertificationError
-    ? `Comparativo não certificado: ${liveDataCertificationError}`
-    : !liveComparisonHourlySource
+    ? `Comparativo indisponível: ${liveDataCertificationError}`
+    : realtimeDataPlan.comparisonSource && !liveComparisonHourlySource
       ? loadingCharts
-        ? "Comparativo aguardando a fonte horária canônica."
-        : "Comparativo indisponível sem a fonte horária canônica certificada."
+        ? "Comparativo aguardando os dados por hora."
+        : "Comparativo indisponível porque a série horária ainda não está completa."
       : undefined;
 
   const loadScenarios = React.useCallback(async (
     { silent = false }: LoadOptions = {},
   ) => {
+    const metadataKey = JSON.stringify([
+      companyScopeId ?? "",
+      companyScopeCertificationError,
+      initialScopeMode,
+      infrastructureCatalogsAllowed,
+      manager,
+      personalFocusEnabled,
+      requireExplicitWorkerCompanyId,
+      userId ?? "",
+    ]);
+    // React development mode can execute the mount effect twice. Reuse the
+    // request already in flight (and the completed catalog) instead of
+    // sending an identical scenarios/cameras/locations/workers batch.
+    if (
+      metadataRequestKeyRef.current === metadataKey ||
+      metadataLoadedKeyRef.current === metadataKey
+    ) {
+      return;
+    }
+    metadataRequestKeyRef.current = metadataKey;
     const requestSequence = ++metadataRequestSequenceRef.current;
     if (companyScopeCertificationError) {
+      metadataRequestKeyRef.current = "";
+      metadataLoadedKeyRef.current = "";
       setScenarios([]);
       setCameras([]);
       setLocations([]);
@@ -826,17 +976,30 @@ export function RealtimeDashboard({
         workerResult.status === "fulfilled"
           ? workerResult.value
           : unavailableWorkerMetadata(workerResult.reason);
+      const cameraPayload = requireExplicitWorkerCompanyId
+        ? selectExplicitCompanyScopedRows(cameraResult.value, companyScopeId, {
+            label: "câmeras",
+          }).rows
+        : cameraResult.value;
+      const locationPayload = requireExplicitWorkerCompanyId
+        ? selectExplicitCompanyScopedRows(
+            locationResult.value,
+            companyScopeId,
+            { label: "locais" },
+          ).rows
+        : locationResult.value;
       const scopedCameras = filterScopedApiRows(
-        requireCameraRows(cameraResult.value, companyScopeId),
+        requireCameraRows(cameraPayload, companyScopeId),
         companyScopeId,
       );
       const scopedLocations = filterScopedApiRows(
-        requireLocationRows(locationResult.value, companyScopeId),
+        requireLocationRows(locationPayload, companyScopeId),
         companyScopeId,
       );
       const subLocationRows = await fetchSubLocations(
         scopedLocations,
         companyScopeId,
+        requireExplicitWorkerCompanyId,
       );
       requireInfrastructureRelations({
         cameras: scopedCameras,
@@ -848,6 +1011,9 @@ export function RealtimeDashboard({
         : scenarioMetadata.rows.filter((scenario) => scenario.active);
 
       if (requestSequence !== metadataRequestSequenceRef.current) return;
+      const currentCameraGroups = cameraGroupsRef.current;
+      const currentWorkerLocationAssignments =
+        workerLocationAssignmentsRef.current;
       setMetadataError("");
       setScenarioMetadataWarning(scenarioMetadata.warning);
       setWorkerMetadataWarning(workerMetadata.warning);
@@ -858,12 +1024,12 @@ export function RealtimeDashboard({
       setWorkers(workerMetadata.rows);
       const modes = buildRealtimeScopeModes({
         cameras: scopedCameras,
-        groups: cameraGroups,
+        groups: currentCameraGroups,
         locations: scopedLocations,
         manager,
         scenarios: visible,
         subLocations: subLocationRows,
-        workerLocationAssignments,
+        workerLocationAssignments: currentWorkerLocationAssignments,
         workers: workerMetadata.rows,
       });
       const resolvedFocus = resolveDashboardFocus<RealtimeScopeMode>({
@@ -872,13 +1038,13 @@ export function RealtimeDashboard({
         getOptions: (mode) =>
           buildRealtimeScopeOptions({
             cameras: scopedCameras,
-            groups: cameraGroups,
+            groups: currentCameraGroups,
             locations: scopedLocations,
             manager,
             mode,
             scenarios: visible,
             subLocations: subLocationRows,
-            workerLocationAssignments,
+            workerLocationAssignments: currentWorkerLocationAssignments,
             workers: workerMetadata.rows,
           }).map((option) => ({
             active: option.scenario?.active,
@@ -900,13 +1066,15 @@ export function RealtimeDashboard({
       focusRef.current = nextFocus;
       setScopeMode(nextFocus.scopeMode);
       setSelectedId(nextFocus.selectedId);
+      metadataLoadedKeyRef.current = metadataKey;
     } catch (error) {
       if (requestSequence !== metadataRequestSequenceRef.current) return;
+      metadataLoadedKeyRef.current = "";
       if (silent) return;
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar as visões de contagem.";
+      const message = dashboardErrorMessage(
+        error,
+        "Não foi possível carregar as visões de contagem.",
+      );
       setScenarios([]);
       setCameras([]);
       setLocations([]);
@@ -919,12 +1087,17 @@ export function RealtimeDashboard({
       setWorkerMetadataWarning("");
       toast.error(message);
     } finally {
+      if (
+        requestSequence === metadataRequestSequenceRef.current &&
+        metadataRequestKeyRef.current === metadataKey
+      ) {
+        metadataRequestKeyRef.current = "";
+      }
       if (!silent && requestSequence === metadataRequestSequenceRef.current) {
         setLoadingScenarios(false);
       }
     }
   }, [
-    cameraGroups,
     companyScopeCertificationError,
     companyScopeId,
     initialScopeMode,
@@ -933,11 +1106,12 @@ export function RealtimeDashboard({
     personalFocusEnabled,
     requireExplicitWorkerCompanyId,
     userId,
-    workerLocationAssignments,
   ]);
 
   const loadCharts = React.useCallback(
     async ({ force = false, silent = false }: LoadOptions = {}) => {
+      if (!realtimeDataPlanKey) return;
+
       if (companyScopeCertificationError) {
         requestRef.current?.abort();
         requestRef.current = null;
@@ -946,6 +1120,9 @@ export function RealtimeDashboard({
         runningRef.current = false;
         hasLoadedChartsRef.current = false;
         clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+        clearRealtimeHourlyCoverageCache(hourlyCoverageCacheRef.current);
+        nativeAggregateCacheRef.current.clear();
+        clearRealtimeRollingMinuteCache(rollingMinuteCacheRef.current);
         clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
         setChartData({});
         setAnnualHistoryState(null);
@@ -978,11 +1155,14 @@ export function RealtimeDashboard({
         runningRef.current = false;
         hasLoadedChartsRef.current = false;
         clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+        clearRealtimeHourlyCoverageCache(hourlyCoverageCacheRef.current);
+        nativeAggregateCacheRef.current.clear();
+        clearRealtimeRollingMinuteCache(rollingMinuteCacheRef.current);
         clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Fuso da empresa não disponível.";
+        const message = dashboardErrorMessage(
+          error,
+          "Fuso da empresa não disponível.",
+        );
         setChartData({});
         setAnnualHistoryState(null);
         setChartLoadError(message);
@@ -1019,20 +1199,93 @@ export function RealtimeDashboard({
         buildOperationalBaselineMonthDefinition(now, "previous_month"),
         buildOperationalBaselineMonthDefinition(now, "last_year"),
         buildOperationalTrendDaysDefinition(now),
-        buildOperationalMonthHoursDefinition(now),
-        buildLiveAnnualRecentMonthsDefinition(now),
-        buildOperationalCurrentHourMinutesDefinition(now),
         buildHourlyOccupancyDataDefinition(
           now,
           operationalSettings.occupancyStartHour,
         ),
       ];
-      const allDefinitions = [...definitions, ...supportDefinitions];
+      const requestedDefinitionIds = new Set(
+        realtimeDataPlan.definitionIds,
+      );
+      const requestedDefinitions = [...definitions, ...supportDefinitions]
+        .filter((definition) => requestedDefinitionIds.has(definition.id));
+      const requestedCoarseGranularities = requestedDefinitions.flatMap(
+        (definition) =>
+          definition.granularity === "week" ||
+          definition.granularity === "month"
+            ? [definition.granularity]
+            : [],
+      );
+      const dataDefinitions = dedupeRealtimeDefinitions([
+        ...requestedDefinitions,
+        ...(requestedCoarseGranularities.length
+          ? [
+              buildOpenCoarseDaysDefinition(
+                now,
+                requestedCoarseGranularities,
+              ),
+            ]
+          : []),
+      ]);
+      const canonicalHourRanges = buildRealtimeCanonicalHourRanges({
+        annualComparisonSource:
+          realtimeDataPlan.annualComparisonSource,
+        comparisonSource: realtimeDataPlan.comparisonSource,
+        definitions: dataDefinitions,
+        heatmapSource: realtimeDataPlan.heatmapSource,
+        now,
+      });
+      const canonicalDefinition = buildRealtimeCanonicalHourDefinition(
+        now,
+        canonicalHourRanges,
+      );
+      const needsRollingMinute = realtimeDataPlan.rollingMinute;
+      const rollingMinuteDefinition = definitions.find(
+        (definition) => definition.id === "live_chart_minute",
+      );
+      const minuteDayBootstrapTo = rollingMinuteDefinition
+        ? new Date(
+            Math.max(
+              minuteDayDefinition.from.getTime(),
+              Math.min(
+                minuteDayDefinition.to.getTime(),
+                rollingMinuteDefinition.from.getTime(),
+              ),
+            ),
+          )
+        : minuteDayDefinition.to;
+      const allDefinitions = dedupeRealtimeDefinitions([
+        ...dataDefinitions,
+        ...(canonicalDefinition ? [canonicalDefinition] : []),
+        ...(canonicalDefinition && needsRollingMinute
+          ? [buildOperationalCurrentHourMinutesDefinition(now)]
+          : []),
+        ...(needsRollingMinute && rollingMinuteDefinition
+          ? [rollingMinuteDefinition]
+          : []),
+      ]);
+      const nativeClosedQueries = buildRealtimeNativeClosedQueries(
+        dataDefinitions,
+        now,
+      );
+      const nativeClosedLoads = nativeClosedQueries.map((query) => ({
+        ...query,
+        promise: loadCachedRealtimeNativeQuery({
+          cache: nativeAggregateCacheRef.current,
+          cacheScope: `live-native:${companyScopeId}:${companyTimeZone}`,
+          companyScopeId,
+          query,
+          signal: controller.signal,
+        }),
+      }));
       try {
         const [entries, minuteDayBootstrapState] = await Promise.all([
           Promise.all(
             allDefinitions.map(async (definition) => {
-              if (CANONICAL_HOUR_DERIVED_IDS.has(definition.id)) {
+              if (
+                CANONICAL_HOUR_DERIVED_IDS.has(definition.id) ||
+                definition.id === OPERATIONAL_CURRENT_HOUR_MINUTES_ID
+              ) {
                 return [
                   definition.id,
                   {
@@ -1046,35 +1299,57 @@ export function RealtimeDashboard({
                 if (definition.id === OPERATIONAL_MONTH_HOURS_ID) {
                   const state: RealtimeChartState = {
                     granularity: "hour",
-                    rows: await fetchHourlyAggregateRanges({
-                      cache: hourlyAggregateCacheRef.current,
+                    rows: await fetchIncrementalRealtimeHourlyRanges({
                       cacheScope: `live:${companyScopeId}:${companyTimeZone}`,
                       companyScopeId,
+                      coverageCache: hourlyCoverageCacheRef.current,
+                      includeOpenHour: !needsRollingMinute,
                       now,
-                      ranges: [definition],
+                      queryCache: hourlyAggregateCacheRef.current,
+                      ranges: canonicalHourRanges,
                       signal: controller.signal,
                     }),
                   };
                   return [definition.id, state] as const;
                 }
 
-                const response = await apiFetch<AggregateEventsResponse>(
-                  aggregatePath(definition),
-                  { companyScopeId, signal: controller.signal },
-                );
-                const responseGranularity = requireAggregateGranularity(
-                  response.granularity,
-                  definition.granularity,
-                );
+                if (definition.granularity === "minute") {
+                  const state: RealtimeChartState = {
+                    granularity: "minute",
+                    rows: await fetchIncrementalRealtimeMinuteWindow({
+                      cache: rollingMinuteCacheRef.current,
+                      cacheScope: `live-minute:${companyScopeId}:${companyTimeZone}`,
+                      companyScopeId,
+                      definition,
+                      now,
+                      signal: controller.signal,
+                    }),
+                  };
+                  return [definition.id, state] as const;
+                }
+
+                const closedTo = realtimeNativeClosedTo(definition, now);
+                const nativeRows = definition.from < closedTo
+                  ? (
+                      await Promise.all(
+                        nativeClosedLoads
+                          .filter(
+                            (load) =>
+                              load.granularity === definition.granularity &&
+                              load.from < closedTo &&
+                              load.to > definition.from,
+                          )
+                          .map((load) => load.promise),
+                      )
+                    ).flat()
+                  : [];
                 const state: RealtimeChartState = {
-                  rows: requireAggregateRowsInRange(
-                    response.data,
-                    responseGranularity,
-                    definition.from,
-                    definition.to,
-                    DEFAULT_METRIC_TYPE,
+                  rows: selectRealtimeNativeDefinitionRows(
+                    nativeRows,
+                    definition,
+                    closedTo,
                   ),
-                  granularity: responseGranularity,
+                  granularity: definition.granularity,
                 };
 
                 return [definition.id, state] as const;
@@ -1083,42 +1358,47 @@ export function RealtimeDashboard({
                 const state: RealtimeChartState = {
                   rows: [],
                   granularity: definition.granularity,
-                  error:
-                    error instanceof Error
-                      ? error.message
-                      : "Não foi possível carregar este gráfico.",
+                  error: dashboardErrorMessage(
+                    error,
+                    "Não foi possível carregar este gráfico.",
+                  ),
                 };
 
                 return [definition.id, state] as const;
               }
             }),
           ),
-          fetchMinuteDayAggregateBootstrap({
-            cache: minuteDayAggregateCacheRef.current,
-            cacheScope: minuteDayCacheScope,
-            companyScopeId,
-            from: minuteDayDefinition.from,
-            now,
-            signal: controller.signal,
-            to: minuteDayDefinition.to,
-          })
-            .then(
-              (rows): RealtimeChartState => ({
-                granularity: "minute",
-                rows,
-              }),
-            )
-            .catch((error): RealtimeChartState => {
-              if (isAbortError(error)) throw error;
-              return {
-                error:
-                  error instanceof Error
-                    ? error.message
-                    : "Não foi possível carregar os minutos do dia.",
+          realtimeDataPlan.minuteDay
+            ? fetchMinuteDayAggregateBootstrap({
+                cache: minuteDayAggregateCacheRef.current,
+                cacheScope: minuteDayCacheScope,
+                companyScopeId,
+                from: minuteDayDefinition.from,
+                now,
+                signal: controller.signal,
+                to: minuteDayBootstrapTo,
+              })
+                .then(
+                  (rows): RealtimeChartState => ({
+                    granularity: "minute",
+                    rows,
+                  }),
+                )
+                .catch((error): RealtimeChartState => {
+                  if (isAbortError(error)) throw error;
+                  return {
+                    error: dashboardErrorMessage(
+                      error,
+                      "Não foi possível carregar os minutos do dia.",
+                    ),
+                    granularity: "minute",
+                    rows: [],
+                  };
+                })
+            : Promise.resolve<RealtimeChartState>({
                 granularity: "minute",
                 rows: [],
-              };
-            }),
+              }),
         ]);
 
         if (
@@ -1133,13 +1413,11 @@ export function RealtimeDashboard({
           allDefinitions,
           now,
         );
-        const rollingMinuteDefinition = definitions.find(
-          (definition) => definition.id === "live_chart_minute",
-        );
         const rollingMinuteState = nextData.live_chart_minute;
         let minuteDayRows = minuteDayBootstrapState.rows;
         let minuteDayError = minuteDayBootstrapState.error;
         if (
+          realtimeDataPlan.minuteDay &&
           !minuteDayError &&
           rollingMinuteDefinition &&
           rollingMinuteState &&
@@ -1166,25 +1444,34 @@ export function RealtimeDashboard({
               })) ?? minuteDayRows;
           } catch (error) {
             if (isAbortError(error)) throw error;
-            minuteDayError =
-              error instanceof Error
-                ? error.message
-                : "Não foi possível reconciliar os minutos do dia.";
+            minuteDayError = dashboardErrorMessage(
+              error,
+              "Não foi possível consolidar os minutos do dia.",
+            );
           }
         }
-        nextData[LIVE_DAY_MINUTES_ID] = {
-          granularity: "minute",
-          ...(minuteDayError ? { error: minuteDayError } : {}),
-          rows: minuteDayRows,
-        };
+        if (realtimeDataPlan.minuteDay) {
+          nextData[LIVE_DAY_MINUTES_ID] = {
+            granularity: "minute",
+            ...(minuteDayError ? { error: minuteDayError } : {}),
+            rows: minuteDayRows,
+          };
+        }
         const refreshedAt = new Date();
 
-        setChartData(nextData);
-        setChartLoadError("");
-        setClock(now);
-        setLastUpdated(refreshedAt);
-        setHasLoadedCharts(true);
         hasLoadedChartsRef.current = true;
+        const publishChartData = () => {
+          setChartData(nextData);
+          setChartLoadError("");
+          setClock(now);
+          setLastUpdated(refreshedAt);
+          setHasLoadedCharts(true);
+        };
+        if (silentLoad) {
+          React.startTransition(publishChartData);
+        } else {
+          publishChartData();
+        }
 
         if (
           (entries.some(([, state]) => state.error) ||
@@ -1192,15 +1479,15 @@ export function RealtimeDashboard({
           !silentLoad
         ) {
           toast.error(
-            "Alguns dados não puderam ser reconciliados; os valores afetados não estão certificados.",
+            "Alguns dados ainda não puderam ser consolidados; os valores afetados foram mantidos como indisponíveis.",
           );
         }
       } catch (error) {
         if (!isAbortError(error)) {
-          const message =
-            error instanceof Error
-              ? error.message
-              : "Não foi possível carregar os dados ao vivo.";
+          const message = dashboardErrorMessage(
+            error,
+            "Não foi possível carregar os dados ao vivo.",
+          );
           setChartLoadError(message);
           toast.error(message);
         }
@@ -1218,6 +1505,8 @@ export function RealtimeDashboard({
       companyTimeZone,
       operationalSettings.intradayComparison,
       operationalSettings.occupancyStartHour,
+      realtimeDataPlan,
+      realtimeDataPlanKey,
     ],
   );
 
@@ -1235,10 +1524,10 @@ export function RealtimeDashboard({
     try {
       requireCountingRuntimeTimeZone(companyTimeZone);
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Fuso da empresa não disponível.";
+      const message = dashboardErrorMessage(
+        error,
+        "Fuso da empresa não disponível.",
+      );
       setAnnualHistoryState({
         error: message,
         granularity: "month",
@@ -1252,48 +1541,37 @@ export function RealtimeDashboard({
     annualHistoryRequestRef.current = controller;
     setLoadingAnnualHistory(true);
     const now = new Date();
-    annualHistoryAttemptMinuteRef.current = [
+    const attemptDay = [
       now.getFullYear(),
       now.getMonth(),
       now.getDate(),
-      now.getHours(),
-      now.getMinutes(),
     ].join("-");
     const range = resolveLiveAnnualComparisonRanges(now);
 
     try {
-      const hourlyRows = await fetchHourlyAggregateRanges({
-        cache: hourlyAggregateCacheRef.current,
-        cacheScope: `live:${companyScopeId}:${companyTimeZone}`,
+      const monthlyRows = await fetchLiveAnnualMonthlyHistory({
         companyScopeId,
-        now,
-        ranges: [
-          {
-            from: range.historyFrom,
-            to: range.historyTo,
-          },
-        ],
+        from: range.historyFrom,
         signal: controller.signal,
+        to: range.periodTo,
       });
       if (requestSequence !== annualHistoryRequestSequenceRef.current) return;
 
       setAnnualHistoryState({
         granularity: "month",
-        rows: rollupLiveAnnualHistoryRows(hourlyRows, now),
+        rows: monthlyRows,
       });
-      annualHistoryLoadedDayRef.current = [
-        now.getFullYear(),
-        now.getMonth(),
-        now.getDate(),
-      ].join("-");
+      annualHistoryAttemptDayRef.current = attemptDay;
     } catch (error) {
       if (isAbortError(error)) return;
       if (requestSequence !== annualHistoryRequestSequenceRef.current) return;
 
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar o histórico anual.";
+      annualHistoryAttemptDayRef.current = attemptDay;
+
+      const message = dashboardErrorMessage(
+        error,
+        "Não foi possível carregar o histórico anual.",
+      );
       setAnnualHistoryState({
         error: message,
         granularity: "month",
@@ -1319,14 +1597,6 @@ export function RealtimeDashboard({
     clock.getMonth(),
     clock.getDate(),
   ].join("-");
-  const annualHistoryMinuteKey = [
-    annualHistoryDayKey,
-    clock.getHours(),
-    clock.getMinutes(),
-  ].join("-");
-  const annualHistoryRetryMinuteKey = annualHistoryState?.error
-    ? annualHistoryMinuteKey
-    : "";
 
   React.useEffect(() => {
     void loadScenarios();
@@ -1337,6 +1607,7 @@ export function RealtimeDashboard({
     {
       enabled:
         Boolean(companyScopeId) &&
+        Boolean(metadataError) &&
         !companyScopeCertificationError &&
         !loadingScenarios,
       intervalMs: RESOURCE_METADATA_REFRESH_INTERVAL_MS,
@@ -1346,14 +1617,20 @@ export function RealtimeDashboard({
   React.useEffect(() => {
     function syncCameraGroups() {
       if (!companyScopeId || companyScopeCertificationError) {
+        cameraGroupsRef.current = [];
+        workerLocationAssignmentsRef.current = {};
         setCameraGroups([]);
         setWorkerLocationAssignments({});
         return;
       }
-      setCameraGroups(readCameraGroups(companyScopeId));
-      setWorkerLocationAssignments(
-        readWorkerLocationAssignments(companyScopeId),
-      );
+      const nextCameraGroups = readCameraGroups(companyScopeId);
+      const nextWorkerLocationAssignments =
+        readWorkerLocationAssignments(companyScopeId);
+      cameraGroupsRef.current = nextCameraGroups;
+      workerLocationAssignmentsRef.current =
+        nextWorkerLocationAssignments;
+      setCameraGroups(nextCameraGroups);
+      setWorkerLocationAssignments(nextWorkerLocationAssignments);
     }
 
     syncCameraGroups();
@@ -1392,27 +1669,64 @@ export function RealtimeDashboard({
   }, [companyScopeId, preferenceScope]);
 
   React.useEffect(() => {
+    function syncComparisonSettingsPlan() {
+      setComparisonSettingsRevision((current) => current + 1);
+    }
+
+    window.addEventListener(
+      USER_GRID_LOCAL_CHANGE_EVENT,
+      syncComparisonSettingsPlan,
+    );
+    return () => {
+      window.removeEventListener(
+        USER_GRID_LOCAL_CHANGE_EVENT,
+        syncComparisonSettingsPlan,
+      );
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const metadataCatalogScopeKey = JSON.stringify([
+      companyScopeId ?? "",
+      companyScopeCertificationError,
+      infrastructureCatalogsAllowed,
+      manager,
+      requireExplicitWorkerCompanyId,
+      userId ?? "",
+    ]);
+    const metadataCatalogScopeChanged =
+      metadataCatalogScopeKeyRef.current !== metadataCatalogScopeKey;
+    metadataCatalogScopeKeyRef.current = metadataCatalogScopeKey;
+
     requestRef.current?.abort();
     requestRef.current = null;
     runningRef.current = false;
     annualHistoryRequestRef.current?.abort();
     annualHistoryRequestRef.current = null;
     annualHistoryRequestSequenceRef.current += 1;
-    annualHistoryLoadedDayRef.current = "";
-    annualHistoryAttemptMinuteRef.current = "";
+    annualHistoryAttemptDayRef.current = "";
     clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+    clearRealtimeHourlyCoverageCache(hourlyCoverageCacheRef.current);
+    nativeAggregateCacheRef.current.clear();
+    clearRealtimeRollingMinuteCache(rollingMinuteCacheRef.current);
     clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
-    setMetadataError("");
-    setScenarioMetadataWarning("");
-    setWorkerMetadataWarning("");
     setChartLoadError(companyScopeCertificationError);
     setAnnualHistoryState(null);
     setLoadingAnnualHistory(false);
-    setScenarios([]);
-    setCameras([]);
-    setLocations([]);
-    setSubLocations([]);
-    setWorkers([]);
+    // Timezone and initial-focus changes invalidate only temporal data. The
+    // resource catalog is tenant-scoped and remains valid; clearing it here
+    // could leave the screen empty because the semantic metadata request was
+    // already completed. Only a real catalog scope change invalidates it.
+    if (metadataCatalogScopeChanged) {
+      metadataLoadedKeyRef.current = "";
+      setScenarioMetadataWarning("");
+      setWorkerMetadataWarning("");
+      setScenarios([]);
+      setCameras([]);
+      setLocations([]);
+      setSubLocations([]);
+      setWorkers([]);
+    }
     focusRef.current = { scopeMode: initialScopeMode, selectedId: initialScopeId };
     setScopeMode(initialScopeMode);
     setSelectedId(initialScopeId);
@@ -1423,36 +1737,12 @@ export function RealtimeDashboard({
     companyScopeCertificationError,
     companyScopeId,
     companyTimeZone,
+    infrastructureCatalogsAllowed,
     initialScopeId,
     initialScopeMode,
-  ]);
-
-  React.useEffect(() => {
-    if (!hasLoadedCharts) return;
-    if (annualHistoryState?.error) {
-      if (
-        annualHistoryAttemptMinuteRef.current ===
-        annualHistoryRetryMinuteKey
-      ) {
-        return;
-      }
-    } else if (
-      annualHistoryLoadedDayRef.current === annualHistoryDayKey
-    ) {
-      return;
-    }
-
-    void loadAnnualHistory();
-
-    return () => {
-      annualHistoryRequestRef.current?.abort();
-    };
-  }, [
-    annualHistoryDayKey,
-    annualHistoryRetryMinuteKey,
-    annualHistoryState?.error,
-    hasLoadedCharts,
-    loadAnnualHistory,
+    manager,
+    requireExplicitWorkerCompanyId,
+    userId,
   ]);
 
   React.useEffect(() => {
@@ -1517,13 +1807,21 @@ export function RealtimeDashboard({
   }, [companyScopeId, personalFocusEnabled, selectedScope, userId]);
 
   React.useEffect(() => {
+    if (!realtimeDataPlanKey) {
+      requestRef.current?.abort();
+      requestRef.current = null;
+      runningRef.current = false;
+      setLoadingCharts(false);
+      return;
+    }
+
     loadCharts({ force: true });
 
     const interval = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         loadCharts({ silent: true });
       }
-    }, REFRESH_MS);
+    }, realtimeDataPlan.refreshIntervalMs);
 
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") {
@@ -1538,18 +1836,13 @@ export function RealtimeDashboard({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       requestRef.current?.abort();
     };
-  }, [loadCharts]);
+  }, [
+    loadCharts,
+    realtimeDataPlan.refreshIntervalMs,
+    realtimeDataPlanKey,
+  ]);
 
   const initialLoading = (loadingScenarios || loadingCharts) && !hasLoadedCharts;
-  const todayTotal = selectedScope
-    ? sumScopeRowsInRange(
-        hourRows,
-        selectedScope,
-        startOfDay(clock),
-        addDays(startOfDay(clock), 1),
-        hourState?.granularity ?? "hour",
-      )
-    : 0;
   const comparisonDayStart = operationalComparisonDayStart(
     clock,
     operationalSettings.intradayComparison,
@@ -1560,211 +1853,61 @@ export function RealtimeDashboard({
       (startOfHour(clock).getTime() - startOfDay(clock).getTime()) / HOUR_MS,
     ),
   );
-  const todayComparableTotal = selectedScope
-    ? sumScopeRowsInRange(
-        hourRows,
-        selectedScope,
-        startOfDay(clock),
-        startOfHour(clock),
-        hourState?.granularity ?? "hour",
-      )
-    : 0;
-  const comparisonComparableTotal = selectedScope
-    ? sumScopeRowsInRange(
-        comparisonHourRows,
-        selectedScope,
-        comparisonDayStart,
-        addHours(comparisonDayStart, completedHourCount),
-        comparisonHourState?.granularity ?? "hour",
-      )
-    : 0;
-  const comparisonDelta = percentageDelta(
-    todayComparableTotal,
-    comparisonComparableTotal,
-  );
-  const currentHourPartialTotal = todayTotal - todayComparableTotal;
   const completedMonthDayCount = Math.max(0, clock.getDate() - 1);
-  const currentMonthRealtimeTotal = selectedScope
-    ? sumScopeRowsInRange(
-        currentMonthDayRows,
-        selectedScope,
-        startOfMonth(clock),
-        addDays(startOfDay(clock), 1),
-        currentMonthDayState?.granularity ?? "day",
-      )
-    : 0;
-  const currentMonthClosedTotal = selectedScope
-    ? sumScopeRowsInRange(
-        currentMonthDayRows,
-        selectedScope,
-        startOfMonth(clock),
-        startOfDay(clock),
-        currentMonthDayState?.granularity ?? "day",
-      )
-    : 0;
   const previousMonthStart = addMonths(startOfMonth(clock), -1);
   const lastYearMonthStart = new Date(
     clock.getFullYear() - 1,
     clock.getMonth(),
     1,
   );
-  const previousMonthComparableTotal = selectedScope
-    ? sumScopeRowsInRange(
-        previousMonthDayRows,
-        selectedScope,
-        previousMonthStart,
-        comparableMonthEnd(previousMonthStart, completedMonthDayCount),
-        previousMonthDayState?.granularity ?? "hour",
-      )
-    : 0;
-  const lastYearMonthComparableTotal = selectedScope
-    ? sumScopeRowsInRange(
-        lastYearMonthDayRows,
-        selectedScope,
-        lastYearMonthStart,
-        comparableMonthEnd(lastYearMonthStart, completedMonthDayCount),
-        lastYearMonthDayState?.granularity ?? "hour",
-      )
-    : 0;
-  const previousMonthDelta = percentageDelta(
-    currentMonthClosedTotal,
-    previousMonthComparableTotal,
-  );
-  const lastYearMonthDelta = percentageDelta(
-    currentMonthClosedTotal,
-    lastYearMonthComparableTotal,
-  );
-  const monthComparisonPoints = React.useMemo(
-    () =>
-      selectedScope
-        ? buildOperationalMonthComparisonPoints(
-            currentMonthDayRows,
-            baselineMonthDayRows,
-            selectedScope,
-            clock,
-            operationalSettings.monthComparison,
-            currentMonthDayState?.granularity ?? "day",
-            baselineMonthDayGranularity,
-          )
-        : [],
-    [
-      baselineMonthDayRows,
-      baselineMonthDayGranularity,
-      clock,
-      currentMonthDayRows,
-      currentMonthDayState?.granularity,
-      operationalSettings.monthComparison,
-      selectedScope,
-    ],
-  );
-  const baselineDailyAverage = React.useMemo(() => {
-    const values = monthComparisonPoints.flatMap((point) =>
-      point.baseline === null ? [] : [point.baseline],
-    );
-    return values.length
-      ? values.reduce((sum, value) => sum + value, 0) / values.length
-      : 0;
-  }, [monthComparisonPoints]);
-  const operationalTrendPoints = React.useMemo(() => {
-    if (!selectedScope) return [];
-    const definition = buildOperationalTrendDaysDefinition(clock);
-    const currentMonthStart = startOfMonth(clock);
-    const trendPoints = buildScopePoints(
-      definition,
-      operationalTrendRows,
-      selectedScope,
-    );
-
-    return buildOperationalTrendPoints(trendPoints).filter((point) => {
-      const bucket = new Date(point.bucket);
-      return bucket >= currentMonthStart;
-    });
-  }, [clock, operationalTrendRows, selectedScope]);
-  const heatmapScenarios = React.useMemo(
-    () =>
-      selectScenarios(
-        scenarios,
-        operationalSettings.heatmapSelectionMode,
-        operationalSettings.heatmapScenarioIds,
-      ),
-    [
-      operationalSettings.heatmapScenarioIds,
+  const getHeatmapScenarios = createRenderLazyValue(() =>
+    selectScenarios(
+      scenarios,
       operationalSettings.heatmapSelectionMode,
-      scenarios,
-    ],
+      operationalSettings.heatmapScenarioIds,
+    ),
   );
-  const rankingScenarios = React.useMemo(
-    () =>
-      selectScenarios(
-        scenarios,
-        operationalSettings.rankingSelectionMode,
-        operationalSettings.rankingScenarioIds,
-      ),
-    [
-      operationalSettings.rankingScenarioIds,
+  const getRankingScenarios = createRenderLazyValue(() =>
+    selectScenarios(
+      scenarios,
       operationalSettings.rankingSelectionMode,
-      scenarios,
-    ],
+      operationalSettings.rankingScenarioIds,
+    ),
   );
-  const roseScenarios = React.useMemo(
-    () =>
-      selectScenarios(
-        scenarios,
-        operationalSettings.roseSelectionMode,
-        operationalSettings.roseScenarioIds,
-      ),
-    [
-      operationalSettings.roseScenarioIds,
+  const getRoseScenarios = createRenderLazyValue(() =>
+    selectScenarios(
+      scenarios,
       operationalSettings.roseSelectionMode,
-      scenarios,
-    ],
+      operationalSettings.roseScenarioIds,
+    ),
   );
-  const cumulativeScenarios = React.useMemo(
-    () =>
-      selectScenarios(
-        scenarios,
-        operationalSettings.cumulativeSelectionMode,
-        operationalSettings.cumulativeScenarioIds,
-      ),
-    [
-      operationalSettings.cumulativeScenarioIds,
+  const getCumulativeScenarios = createRenderLazyValue(() =>
+    selectScenarios(
+      scenarios,
       operationalSettings.cumulativeSelectionMode,
-      scenarios,
-    ],
+      operationalSettings.cumulativeScenarioIds,
+    ),
   );
-  const scenarioTableScenarios = React.useMemo(
-    () =>
-      selectScenarios(
-        scenarios,
-        operationalSettings.scenarioTableSelectionMode,
-        operationalSettings.scenarioTableIds,
-      ),
-    [
-      operationalSettings.scenarioTableIds,
+  const getScenarioTableScenarios = createRenderLazyValue(() =>
+    selectScenarios(
+      scenarios,
       operationalSettings.scenarioTableSelectionMode,
-      scenarios,
-    ],
+      operationalSettings.scenarioTableIds,
+    ),
   );
-  const peakDayScenarios = React.useMemo(
-    () =>
-      selectScenarios(
-        scenarios,
-        operationalSettings.peakDaySelectionMode,
-        operationalSettings.peakDayScenarioIds,
-      ),
-    [
-      operationalSettings.peakDayScenarioIds,
+  const getPeakDayScenarios = createRenderLazyValue(() =>
+    selectScenarios(
+      scenarios,
       operationalSettings.peakDaySelectionMode,
-      scenarios,
-    ],
+      operationalSettings.peakDayScenarioIds,
+    ),
   );
-  const automaticOccupancyScenarios = React.useMemo(
-    () => inferOccupancyScenarios(scenarios),
-    [scenarios],
+  const getAutomaticOccupancyScenarios = createRenderLazyValue(() =>
+    inferOccupancyScenarios(scenarios),
   );
-  const occupancyEntryScenarios = React.useMemo(() => {
+  const getOccupancyEntryScenarios = createRenderLazyValue(() => {
     if (operationalSettings.occupancySelectionMode === "auto") {
-      return automaticOccupancyScenarios.entries;
+      return getAutomaticOccupancyScenarios().entries;
     }
 
     return selectScenarios(
@@ -1772,246 +1915,120 @@ export function RealtimeDashboard({
       "custom",
       operationalSettings.occupancyEntryScenarioIds,
     );
-  }, [
-    automaticOccupancyScenarios.entries,
-    operationalSettings.occupancyEntryScenarioIds,
-    operationalSettings.occupancySelectionMode,
-    scenarios,
-  ]);
-  const occupancyExitScenarios = React.useMemo(() => {
+  });
+  const getOccupancyExitScenarios = createRenderLazyValue(() => {
     if (operationalSettings.occupancySelectionMode === "auto") {
-      return automaticOccupancyScenarios.exits;
+      return getAutomaticOccupancyScenarios().exits;
     }
 
-    const entryIds = new Set(occupancyEntryScenarios.map((scenario) => scenario.id));
+    const entryIds = new Set(
+      getOccupancyEntryScenarios().map((scenario) => scenario.id),
+    );
     return selectScenarios(
       scenarios,
       "custom",
       operationalSettings.occupancyExitScenarioIds,
     ).filter((scenario) => !entryIds.has(scenario.id));
-  }, [
-    automaticOccupancyScenarios.exits,
-    occupancyEntryScenarios,
-    operationalSettings.occupancyExitScenarioIds,
-    operationalSettings.occupancySelectionMode,
-    scenarios,
-  ]);
-  const operationalHeatmapPoints = React.useMemo(
-    () =>
-      buildScenarioCivilHourMagnitudePoints({
-        companyTimeZone,
-        from: startOfMonth(clock),
-        rows: operationalMonthHourRows,
-        scenarios: heatmapScenarios,
-        sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
-        to: endOfAggregateBucket(startOfHour(clock), "hour"),
-      }),
-    [
-      clock,
+  });
+  const getOperationalHeatmapPoints = createRenderLazyValue(() =>
+    buildScenarioCivilHourMagnitudePoints({
       companyTimeZone,
-      heatmapScenarios,
-      operationalMonthHourRows,
-      operationalMonthHourState?.granularity,
-    ],
+      from: startOfMonth(clock),
+      rows: operationalMonthHourRows,
+      scenarios: getHeatmapScenarios(),
+      sourceGranularity: operationalMonthHourState?.granularity ?? "hour",
+      to: endOfAggregateBucket(startOfHour(clock), "hour"),
+    }),
   );
-  const targetProgress = baselineDailyAverage
-    ? todayTotal / baselineDailyAverage
-    : null;
-  const monthlyAccessRankingPoints = React.useMemo(
-    () =>
-      buildScenarioPeriodComparisonPoints(
-        rankingScenarios,
-        currentMonthDayRows,
-        startOfMonth(clock),
-        addDays(startOfDay(clock), 1),
-        currentMonthDayState?.granularity ?? "day",
-      ),
-    [
-      clock,
+  const getMonthlyAccessRankingPoints = createRenderLazyValue(() =>
+    buildScenarioPeriodComparisonPoints(
+      getRankingScenarios(),
       currentMonthDayRows,
-      currentMonthDayState?.granularity,
-      rankingScenarios,
-    ],
+      startOfMonth(clock),
+      addDays(startOfDay(clock), 1),
+      currentMonthDayState?.granularity ?? "day",
+    ),
   );
-  const roseScenarioPoints = React.useMemo(
-    () =>
-      buildScenarioPeriodComparisonPoints(
-        roseScenarios,
-        currentMonthDayRows,
-        startOfMonth(clock),
-        addDays(startOfDay(clock), 1),
-        currentMonthDayState?.granularity ?? "day",
-      ),
-    [
-      clock,
+  const getRoseScenarioPoints = createRenderLazyValue(() =>
+    buildScenarioPeriodComparisonPoints(
+      getRoseScenarios(),
       currentMonthDayRows,
-      currentMonthDayState?.granularity,
-      roseScenarios,
-    ],
+      startOfMonth(clock),
+      addDays(startOfDay(clock), 1),
+      currentMonthDayState?.granularity ?? "day",
+    ),
   );
-  const cumulativeScenarioPoints = React.useMemo(
-    () =>
+  const getCumulativeScenarioPoints = createRenderLazyValue(() =>
+    buildScenarioCumulativeTotals({
+      from: startOfDay(clock),
+      rows: hourRows,
+      scenarios: getCumulativeScenarios(),
+      sourceGranularity: chartData.live_chart_hour?.granularity ?? "hour",
+      to: clock,
+    }),
+  );
+  const getScenarioTableRows = createRenderLazyValue(() =>
+    buildScenarioTotalsTableRows(
       buildScenarioCumulativeTotals({
         from: startOfDay(clock),
         rows: hourRows,
-        scenarios: cumulativeScenarios,
+        scenarios: getScenarioTableScenarios(),
         sourceGranularity: chartData.live_chart_hour?.granularity ?? "hour",
         to: clock,
       }),
-    [
-      chartData.live_chart_hour?.granularity,
-      clock,
-      cumulativeScenarios,
-      hourRows,
-    ],
-  );
-  const scenarioTableTodayPoints = React.useMemo(
-    () =>
-      buildScenarioCumulativeTotals({
-        from: startOfDay(clock),
-        rows: hourRows,
-        scenarios: scenarioTableScenarios,
-        sourceGranularity: chartData.live_chart_hour?.granularity ?? "hour",
-        to: clock,
-      }),
-    [
-      chartData.live_chart_hour?.granularity,
-      clock,
-      hourRows,
-      scenarioTableScenarios,
-    ],
-  );
-  const scenarioTableMonthPoints = React.useMemo(
-    () =>
       buildScenarioCumulativeTotals({
         from: startOfMonth(clock),
         rows: currentMonthDayRows,
-        scenarios: scenarioTableScenarios,
+        scenarios: getScenarioTableScenarios(),
         sourceGranularity: currentMonthDayState?.granularity ?? "day",
         to: clock,
       }),
-    [
-      clock,
-      currentMonthDayRows,
-      currentMonthDayState?.granularity,
-      scenarioTableScenarios,
-    ],
-  );
-  const scenarioTableRows = React.useMemo(
-    () =>
-      buildScenarioTotalsTableRows(
-        scenarioTableTodayPoints,
-        scenarioTableMonthPoints,
-      ),
-    [scenarioTableMonthPoints, scenarioTableTodayPoints],
-  );
-  const liveAnnualComparisonModel = React.useMemo(
-    () =>
-      selectedScope &&
-      annualHistoryState &&
-      !annualHistoryState.error &&
-      annualRecentMonthState?.granularity === "month" &&
-      !annualRecentMonthState.error &&
-      operationalMonthHourState?.granularity === "hour" &&
-      !operationalMonthHourState.error
-        ? buildLiveAnnualComparisonModel({
-            historicalMonthRows: annualHistoryState.rows,
-            hourlyRows: operationalMonthHourRows,
-            now: clock,
-            recentMonthRows: annualRecentMonthRows,
-            scenarios,
-            scope: selectedScope,
-          })
-        : null,
-    [
-      annualHistoryState,
-      annualRecentMonthRows,
-      annualRecentMonthState,
-      clock,
-      operationalMonthHourRows,
-      operationalMonthHourState,
-      scenarios,
-      selectedScope,
-    ],
+    ),
   );
   const liveAnnualComparisonError =
     annualHistoryState?.error ||
-    annualRecentMonthState?.error ||
+    currentMonthDayState?.error ||
+    lastYearMonthDayState?.error ||
     operationalMonthHourState?.error;
   const liveAnnualComparisonLoading =
     initialLoading || (!annualHistoryState && !liveAnnualComparisonError);
-  const peakDayPoints = React.useMemo(
-    () =>
-      buildTopScenarioPeakDays({
-        from: startOfMonth(clock),
-        rows: currentMonthDayRows,
-        scenarios: peakDayScenarios,
-        sourceGranularity: currentMonthDayState?.granularity ?? "day",
-        to: addDays(startOfDay(clock), 1),
-      }),
-    [
-      clock,
-      currentMonthDayRows,
-      currentMonthDayState?.granularity,
-      peakDayScenarios,
-    ],
+  const getPeakDayPoints = createRenderLazyValue(() =>
+    buildTopScenarioPeakDays({
+      from: startOfMonth(clock),
+      rows: currentMonthDayRows,
+      scenarios: getPeakDayScenarios(),
+      sourceGranularity: currentMonthDayState?.granularity ?? "day",
+      to: addDays(startOfDay(clock), 1),
+    }),
   );
-  const hourlyOccupancyPoints = React.useMemo(
-    () =>
-      buildScenarioHourlyOccupancy({
-        companyTimeZone,
-        day: clock,
-        entryScenarios: occupancyEntryScenarios,
-        exitScenarios: occupancyExitScenarios,
-        rows: occupancyHourRows,
-        sourceGranularity: occupancyHourState?.granularity ?? "hour",
-        startHour: operationalSettings.occupancyStartHour,
-        through: clock,
-      }),
-    [
-      clock,
+  const getHourlyOccupancyPoints = createRenderLazyValue(() =>
+    buildScenarioHourlyOccupancy({
       companyTimeZone,
-      occupancyEntryScenarios,
-      occupancyExitScenarios,
-      occupancyHourRows,
-      occupancyHourState?.granularity,
-      operationalSettings.occupancyStartHour,
-    ],
+      day: clock,
+      entryScenarios: getOccupancyEntryScenarios(),
+      exitScenarios: getOccupancyExitScenarios(),
+      rows: occupancyHourRows,
+      sourceGranularity: occupancyHourState?.granularity ?? "hour",
+      startHour: operationalSettings.occupancyStartHour,
+      through: clock,
+    }),
   );
-  const scenarioTodayComparisonPoints = React.useMemo(
+  const locationTodayComparisonScopes = React.useMemo(
     () =>
-      buildScenarioTodayComparisonPoints(
+      buildRealtimeScopeOptions({
+        cameras,
+        groups: cameraGroups,
+        locations,
+        manager,
+        mode: "location",
         scenarios,
-        hourRows,
-        clock,
-        hourState?.granularity ?? "hour",
-      ),
-    [clock, hourRows, hourState?.granularity, scenarios],
-  );
-  const locationTodayComparisonPoints = React.useMemo(
-    () =>
-      buildScopeTodayComparisonPoints(
-        buildRealtimeScopeOptions({
-          cameras,
-          groups: cameraGroups,
-          locations,
-          manager,
-          mode: "location",
-          scenarios,
-          subLocations,
-          workerLocationAssignments,
-          workers,
-        }),
-        hourRows,
-        clock,
-        hourState?.granularity ?? "hour",
-      ),
+        subLocations,
+        workerLocationAssignments,
+        workers,
+      }),
     [
       cameraGroups,
       cameras,
-      clock,
-      hourRows,
-      hourState?.granularity,
       locations,
       manager,
       scenarios,
@@ -2020,30 +2037,30 @@ export function RealtimeDashboard({
       workers,
     ],
   );
-  const subLocationTodayComparisonPoints = React.useMemo(
+  const getLocationTodayComparisonPoints = createRenderLazyValue(() =>
+    buildScopeTodayComparisonPoints(
+      locationTodayComparisonScopes,
+      hourRows,
+      clock,
+      hourState?.granularity ?? "hour",
+    ),
+  );
+  const subLocationTodayComparisonScopes = React.useMemo(
     () =>
-      buildScopeTodayComparisonPoints(
-        buildRealtimeScopeOptions({
-          cameras,
-          groups: cameraGroups,
-          locations,
-          manager,
-          mode: "sub_location",
-          scenarios,
-          subLocations,
-          workerLocationAssignments,
-          workers,
-        }),
-        hourRows,
-        clock,
-        hourState?.granularity ?? "hour",
-      ),
+      buildRealtimeScopeOptions({
+        cameras,
+        groups: cameraGroups,
+        locations,
+        manager,
+        mode: "sub_location",
+        scenarios,
+        subLocations,
+        workerLocationAssignments,
+        workers,
+      }),
     [
       cameraGroups,
       cameras,
-      clock,
-      hourRows,
-      hourState?.granularity,
       locations,
       manager,
       scenarios,
@@ -2051,6 +2068,14 @@ export function RealtimeDashboard({
       workerLocationAssignments,
       workers,
     ],
+  );
+  const getSubLocationTodayComparisonPoints = createRenderLazyValue(() =>
+    buildScopeTodayComparisonPoints(
+      subLocationTodayComparisonScopes,
+      hourRows,
+      clock,
+      hourState?.granularity ?? "hour",
+    ),
   );
 
   function getScopeOptionsForMode(mode: RealtimeCustomWidgetScopeMode) {
@@ -2359,12 +2384,257 @@ export function RealtimeDashboard({
     toast.success("Widget removido.");
   }
 
+  const inheritedWidgetScenarios = selectedScope?.scenario
+    ? [selectedScope.scenario]
+    : [];
+  const inheritedWidgetScenarioIds = inheritedWidgetScenarios.map(
+    (scenario) => scenario.id,
+  );
+  const inheritedWidgetScenarioLabel = selectedScope?.name ?? "filtro da tela";
+  const createRealtimeWidgetModel = (
+    scope: RealtimeScopeOption | null,
+    annualModelScenarios: Scenario[],
+  ): RealtimeWidgetModel => {
+    const getTodayTotal = createRenderLazyValue(() =>
+      scope
+        ? sumScopeRowsInRange(
+            hourRows,
+            scope,
+            startOfDay(clock),
+            addDays(startOfDay(clock), 1),
+            hourState?.granularity ?? "hour",
+          )
+        : 0,
+    );
+    const getTodayComparableTotal = createRenderLazyValue(() =>
+      scope
+        ? sumScopeRowsInRange(
+            hourRows,
+            scope,
+            startOfDay(clock),
+            startOfHour(clock),
+            hourState?.granularity ?? "hour",
+          )
+        : 0,
+    );
+    const getComparisonComparableTotal = createRenderLazyValue(() =>
+      scope
+        ? sumScopeRowsInRange(
+            comparisonHourRows,
+            scope,
+            comparisonDayStart,
+            addHours(comparisonDayStart, completedHourCount),
+            comparisonHourState?.granularity ?? "hour",
+          )
+        : 0,
+    );
+    const getCurrentMonthRealtimeTotal = createRenderLazyValue(() =>
+      scope
+        ? sumScopeRowsInRange(
+            currentMonthDayRows,
+            scope,
+            startOfMonth(clock),
+            addDays(startOfDay(clock), 1),
+            currentMonthDayState?.granularity ?? "day",
+          )
+        : 0,
+    );
+    const getCurrentMonthClosedTotal = createRenderLazyValue(() =>
+      scope
+        ? sumScopeRowsInRange(
+            currentMonthDayRows,
+            scope,
+            startOfMonth(clock),
+            startOfDay(clock),
+            currentMonthDayState?.granularity ?? "day",
+          )
+        : 0,
+    );
+    const getPreviousMonthComparableTotal = createRenderLazyValue(() =>
+      scope
+        ? sumScopeRowsInRange(
+            previousMonthDayRows,
+            scope,
+            previousMonthStart,
+            comparableMonthEnd(previousMonthStart, completedMonthDayCount),
+            previousMonthDayState?.granularity ?? "day",
+          )
+        : 0,
+    );
+    const getLastYearMonthComparableTotal = createRenderLazyValue(() =>
+      scope
+        ? sumScopeRowsInRange(
+            lastYearMonthDayRows,
+            scope,
+            lastYearMonthStart,
+            comparableMonthEnd(lastYearMonthStart, completedMonthDayCount),
+            lastYearMonthDayState?.granularity ?? "day",
+          )
+        : 0,
+    );
+    const getMonthComparisonPoints = createRenderLazyValue(() =>
+      scope
+        ? buildOperationalMonthComparisonPoints(
+            currentMonthDayRows,
+            baselineMonthDayRows,
+            scope,
+            clock,
+            operationalSettings.monthComparison,
+            currentMonthDayState?.granularity ?? "day",
+            baselineMonthDayGranularity,
+          )
+        : [],
+    );
+    const getBaselineDailyAverage = createRenderLazyValue(() => {
+      const values = getMonthComparisonPoints().flatMap((point) =>
+        point.baseline === null ? [] : [point.baseline],
+      );
+      return values.length
+        ? values.reduce((sum, value) => sum + value, 0) / values.length
+        : 0;
+    });
+    const getOperationalTrendPoints = createRenderLazyValue(() => {
+      if (!scope) return [];
+      const definition = buildOperationalTrendDaysDefinition(clock);
+      const currentMonthStart = startOfMonth(clock);
+      return buildOperationalTrendPoints(
+        buildScopePoints(definition, operationalTrendRows, scope),
+      ).filter((point) => new Date(point.bucket) >= currentMonthStart);
+    });
+    const getLiveAnnualComparisonModel = createRenderLazyValue(() =>
+      scope &&
+      annualHistoryState &&
+      !annualHistoryState.error &&
+      currentMonthDayState?.granularity === "day" &&
+      !currentMonthDayState.error &&
+      lastYearMonthDayState?.granularity === "day" &&
+      !lastYearMonthDayState.error &&
+      (!operationalMonthHourState ||
+        (operationalMonthHourState.granularity === "hour" &&
+          !operationalMonthHourState.error))
+        ? buildLiveAnnualComparisonModel({
+            comparableDailyRows: getAnnualComparisonDayRows(),
+            historicalMonthRows: annualHistoryState.rows,
+            hourlyRows: operationalMonthHourRows,
+            now: clock,
+            recentMonthRows: annualHistoryState.rows,
+            scenarios: annualModelScenarios,
+            scope,
+          })
+        : null,
+    );
+
+    return {
+      get baselineDailyAverage() {
+        return getBaselineDailyAverage();
+      },
+      get comparisonComparableTotal() {
+        return getComparisonComparableTotal();
+      },
+      get comparisonDelta() {
+        return percentageDelta(
+          getTodayComparableTotal(),
+          getComparisonComparableTotal(),
+        );
+      },
+      get currentHourPartialTotal() {
+        return getTodayTotal() - getTodayComparableTotal();
+      },
+      get currentMonthRealtimeTotal() {
+        return getCurrentMonthRealtimeTotal();
+      },
+      get lastYearMonthComparableTotal() {
+        return getLastYearMonthComparableTotal();
+      },
+      get lastYearMonthDelta() {
+        return percentageDelta(
+          getCurrentMonthClosedTotal(),
+          getLastYearMonthComparableTotal(),
+        );
+      },
+      get liveAnnualComparisonModel() {
+        return getLiveAnnualComparisonModel();
+      },
+      get monthComparisonPoints() {
+        return getMonthComparisonPoints();
+      },
+      get operationalTrendPoints() {
+        return getOperationalTrendPoints();
+      },
+      get previousMonthComparableTotal() {
+        return getPreviousMonthComparableTotal();
+      },
+      get previousMonthDelta() {
+        return percentageDelta(
+          getCurrentMonthClosedTotal(),
+          getPreviousMonthComparableTotal(),
+        );
+      },
+      scope,
+      get todayTotal() {
+        return getTodayTotal();
+      },
+    };
+  };
+  const defaultRealtimeWidgetModel = createRealtimeWidgetModel(
+    selectedScope ?? null,
+    scenarios,
+  );
+  const buildRealtimeWidgetModel = (
+    selection: LayoutCardRenderContext["scenarioSelection"],
+  ): RealtimeWidgetModel => {
+    if (selection.mode === "inherit") return defaultRealtimeWidgetModel;
+
+    const selectedScenarios = resolveWidgetScenarios(scenarios, selection);
+    const cacheKey = `${selection.mode}:${selectedScenarios
+      .map((scenario) => scenario.id)
+      .sort()
+      .join("|")}`;
+
+    const scopeName = widgetScenarioSelectionLabel(selectedScenarios, selection);
+    const scope: RealtimeScopeOption = {
+      cameraIds: [],
+      description: `Composição exclusiva deste widget: ${scopeName}`,
+      id: `widget-scenarios:${cacheKey}`,
+      mode: "scenario",
+      name: scopeName,
+      scenarios: selectedScenarios,
+    };
+    return createRealtimeWidgetModel(scope, selectedScenarios);
+  };
+  const realtimeWidgetModelCache = new Map<string, RealtimeWidgetModel>();
+  const resolveRealtimeWidgetModel = (
+    selection: LayoutCardRenderContext["scenarioSelection"],
+  ): RealtimeWidgetModel => {
+    if (selection.mode === "inherit") return defaultRealtimeWidgetModel;
+    const selectedScenarios = resolveWidgetScenarios(scenarios, selection);
+    const cacheKey = `${selection.mode}:${selectedScenarios
+      .map((scenario) => scenario.id)
+      .sort()
+      .join("|")}`;
+    const cached = realtimeWidgetModelCache.get(cacheKey);
+    if (cached) return cached;
+    const model = buildRealtimeWidgetModel(selection);
+    realtimeWidgetModelCache.set(cacheKey, model);
+    return model;
+  };
+  const scenarioConfigurableCardDefaults = {
+    inheritedScenarioIds: inheritedWidgetScenarioIds,
+    inheritedScenarioLabel: inheritedWidgetScenarioLabel,
+    scenarioConfigurable: true as const,
+  };
+  const renderWithRealtimeWidgetModel = (
+    render: (model: RealtimeWidgetModel) => React.ReactNode,
+  ) =>
+    ({ scenarioSelection }: LayoutCardRenderContext) =>
+      render(resolveRealtimeWidgetModel(scenarioSelection));
+
   const metricCards = [
     {
       id: "live_intraday_comparison",
       label: "Hoje até agora",
       defaultSize: "compact" as const,
-      node: (
+      node: renderWithRealtimeWidgetModel((model) => (
         <MetricCard
           error={
             chartData.live_chart_minute?.error ||
@@ -2373,58 +2643,63 @@ export function RealtimeDashboard({
           }
           icon={Clock3}
           label="Hoje até agora"
-          value={todayTotal}
+          value={model.todayTotal}
           loading={initialLoading}
           tone="primary"
           description={
             completedHourCount
               ? `${formatNumber(
-                  currentHourPartialTotal,
+                  model.currentHourPartialTotal,
                 )} na hora em andamento · ${formatDelta(
-                  comparisonDelta,
+                  model.comparisonDelta,
                 )} nas horas fechadas vs. ${intradayComparisonSeriesLabel(
                   operationalSettings.intradayComparison,
                 ).toLowerCase()} · base ${formatNumber(
-                  comparisonComparableTotal,
+                  model.comparisonComparableTotal,
                 )}`
               : "Atualização contínua; comparativo disponível após a primeira hora fechada"
           }
         />
-      ),
+      )),
     },
     {
       id: "live_target_progress",
       label: "Hoje x média-base",
       defaultSize: "compact" as const,
-      node: (
-        <MetricCard
-          error={hourState?.error || operationalMonthHourState?.error}
-          icon={Target}
-          label="Hoje x média-base"
-          value={
-            targetProgress === null
-              ? "Sem base"
-              : `${Math.round(targetProgress * 100)}%`
-          }
-          loading={initialLoading}
-          tone="indigo"
-          description={
-            baselineDailyAverage
-              ? `${formatNumber(todayTotal)} hoje · ${averageBaseDescription(
-                  operationalSettings.monthComparison,
-                ).toLowerCase()} de ${formatNumber(
-                  baselineDailyAverage,
-                )}`
-              : "sem histórico diário na base escolhida"
-          }
-        />
-      ),
+      node: renderWithRealtimeWidgetModel((model) => {
+        const resolvedTargetProgress = model.baselineDailyAverage
+          ? model.todayTotal / model.baselineDailyAverage
+          : null;
+        return (
+          <MetricCard
+            error={hourState?.error || operationalMonthHourState?.error}
+            icon={Target}
+            label="Hoje x média-base"
+            value={
+              resolvedTargetProgress === null
+                ? "Sem base"
+                : `${Math.round(resolvedTargetProgress * 100)}%`
+            }
+            loading={initialLoading}
+            tone="indigo"
+            description={
+              model.baselineDailyAverage
+                ? `${formatNumber(model.todayTotal)} hoje · ${averageBaseDescription(
+                    operationalSettings.monthComparison,
+                  ).toLowerCase()} de ${formatNumber(
+                    model.baselineDailyAverage,
+                  )}`
+                : "sem histórico diário na base escolhida"
+            }
+          />
+        );
+      }),
     },
     {
       id: "live_month_previous_comparison",
       label: "Acumulado x mês anterior",
       defaultSize: "compact" as const,
-      node: (
+      node: renderWithRealtimeWidgetModel((model) => (
         <MetricCard
           error={
             operationalMonthHourState?.error ||
@@ -2432,21 +2707,21 @@ export function RealtimeDashboard({
           }
           icon={Activity}
           label="Acumulado x mês anterior"
-          value={currentMonthRealtimeTotal}
-          comparison={formatDelta(previousMonthDelta)}
+          value={model.currentMonthRealtimeTotal}
+          comparison={formatDelta(model.previousMonthDelta)}
           loading={initialLoading}
           tone="sky"
           description={`${formatNumber(
-            previousMonthComparableTotal,
+            model.previousMonthComparableTotal,
           )} até o último dia fechado do mês anterior · comparação em ${completedMonthDayCount} dias fechados`}
         />
-      ),
+      )),
     },
     {
       id: "live_month_year_comparison",
       label: "Acumulado x ano anterior",
       defaultSize: "compact" as const,
-      node: (
+      node: renderWithRealtimeWidgetModel((model) => (
         <MetricCard
           error={
             operationalMonthHourState?.error ||
@@ -2454,19 +2729,20 @@ export function RealtimeDashboard({
           }
           icon={TrendingUp}
           label="Acumulado x ano anterior"
-          value={currentMonthRealtimeTotal}
-          comparison={formatDelta(lastYearMonthDelta)}
+          value={model.currentMonthRealtimeTotal}
+          comparison={formatDelta(model.lastYearMonthDelta)}
           loading={initialLoading}
           tone="indigo"
           description={`${formatNumber(
-            lastYearMonthComparableTotal,
+            model.lastYearMonthComparableTotal,
           )} até o último dia fechado do ano anterior · comparação em ${completedMonthDayCount} dias fechados`}
         />
-      ),
+      )),
     },
   ].map((card) => ({
     ...card,
     ...COMPACT_METRIC_LAYOUT_DEFAULTS,
+    ...scenarioConfigurableCardDefaults,
     titleEditable: true as const,
   }));
 
@@ -2489,18 +2765,20 @@ export function RealtimeDashboard({
       className: "sm:col-span-2 xl:col-span-4",
       titleEditable: true as const,
       zoomEnabled: true as const,
-      node: selectedScope ? (
-        <MinuteDayChartCard
-          clock={clock}
-          companyTimeZone={companyTimeZone}
-          definition={minuteDayDefinition}
-          loading={initialLoading}
-          rows={minuteDayRows}
-          scope={selectedScope}
-          state={minuteDayState}
-        />
-      ) : (
-        <EmptyRealtimeCard title="Minuto a minuto · Hoje" />
+      node: renderWithRealtimeWidgetModel((model) =>
+        model.scope ? (
+          <MinuteDayChartCard
+            clock={clock}
+            companyTimeZone={companyTimeZone}
+            definition={minuteDayDefinition}
+            loading={initialLoading}
+            rows={minuteDayRows}
+            scope={model.scope}
+            state={minuteDayState}
+          />
+        ) : (
+          <EmptyRealtimeCard title="Minuto a minuto · Hoje" />
+        ),
       ),
     },
     {
@@ -2511,26 +2789,27 @@ export function RealtimeDashboard({
       defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
-      node:
-        selectedScope && hourlyDefinition ? (
-        <OperationalHourlyChartCard
-          averageDescription={averageBaseDescription(
-            operationalSettings.monthComparison,
-          )}
-          comparisonDefinition={operationalComparisonDefinition}
-          comparisonLabel={intradayComparisonSeriesLabel(
-            operationalSettings.intradayComparison,
-          )}
-          comparisonRows={comparisonHourRows}
-          currentDefinition={hourlyDefinition}
-          currentRows={hourRows}
-          targetDailyAverage={baselineDailyAverage}
-          loading={initialLoading}
-          scope={selectedScope}
-          state={chartData.live_chart_hour}
-        />
-      ) : (
-        <EmptyRealtimeCard title="Hora a Hora" />
+      node: renderWithRealtimeWidgetModel((model) =>
+        model.scope && hourlyDefinition ? (
+          <OperationalHourlyChartCard
+            averageDescription={averageBaseDescription(
+              operationalSettings.monthComparison,
+            )}
+            comparisonDefinition={operationalComparisonDefinition}
+            comparisonLabel={intradayComparisonSeriesLabel(
+              operationalSettings.intradayComparison,
+            )}
+            comparisonRows={comparisonHourRows}
+            currentDefinition={hourlyDefinition}
+            currentRows={hourRows}
+            targetDailyAverage={model.baselineDailyAverage}
+            loading={initialLoading}
+            scope={model.scope}
+            state={chartData.live_chart_hour}
+          />
+        ) : (
+          <EmptyRealtimeCard title="Hora a Hora" />
+        ),
       ),
     },
     {
@@ -2541,15 +2820,15 @@ export function RealtimeDashboard({
       defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
-      node: (
+      node: renderWithRealtimeWidgetModel((model) => (
         <OperationalTrendCard
-          error={operationalMonthHourState?.error}
+          error={chartData[OPERATIONAL_TREND_DAYS_ID]?.error}
           loading={initialLoading}
           month={clock}
-          points={operationalTrendPoints}
-          scopeName={selectedScope?.name ?? "Visão selecionada"}
+          points={model.operationalTrendPoints}
+          scopeName={model.scope?.name ?? "Visão selecionada"}
         />
-      ),
+      )),
     },
     {
       id: "live_hourly_occupancy",
@@ -2559,7 +2838,12 @@ export function RealtimeDashboard({
       defaultHeightLevel: 5 as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
+      node: () => {
+        const automaticOccupancyScenarios =
+          getAutomaticOccupancyScenarios();
+        const occupancyEntryScenarios = getOccupancyEntryScenarios();
+        const occupancyExitScenarios = getOccupancyExitScenarios();
+        return (
         <HourlyOccupancyCard
           canConfigure={canEditVisual}
           entryScenarioIds={
@@ -2631,12 +2915,13 @@ export function RealtimeDashboard({
           onStartHourChange={(occupancyStartHour) =>
             updateOperationalSettings({ occupancyStartHour })
           }
-          points={hourlyOccupancyPoints}
+          points={getHourlyOccupancyPoints()}
           scenarios={scenarios}
           selectionMode={operationalSettings.occupancySelectionMode}
           startHour={operationalSettings.occupancyStartHour}
         />
-      ),
+        );
+      },
     },
     {
       id: "live_scenario_cumulative",
@@ -2644,7 +2929,7 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
+      node: () => (
         <ScenarioCumulativeTotalsCard
           canConfigure={canEditVisual}
           loading={initialLoading}
@@ -2655,7 +2940,7 @@ export function RealtimeDashboard({
           onSelectionModeChange={(cumulativeSelectionMode) =>
             updateOperationalSettings({ cumulativeSelectionMode })
           }
-          points={cumulativeScenarioPoints}
+          points={getCumulativeScenarioPoints()}
           scenarios={scenarios}
           selectedIds={operationalSettings.cumulativeScenarioIds}
           selectionMode={operationalSettings.cumulativeSelectionMode}
@@ -2668,7 +2953,7 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
+      node: () => (
         <ScenarioTotalsTableCard
           canConfigure={canEditVisual}
           loading={initialLoading}
@@ -2679,7 +2964,7 @@ export function RealtimeDashboard({
           onSelectionModeChange={(scenarioTableSelectionMode) =>
             updateOperationalSettings({ scenarioTableSelectionMode })
           }
-          rows={scenarioTableRows}
+          rows={getScenarioTableRows()}
           scenarios={scenarios}
           selectedIds={operationalSettings.scenarioTableIds}
           selectionMode={operationalSettings.scenarioTableSelectionMode}
@@ -2693,16 +2978,16 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
+      node: renderWithRealtimeWidgetModel((model) => (
         <LiveAnnualComparisonCard
           accumulated={false}
           error={liveAnnualComparisonError}
           loading={liveAnnualComparisonLoading}
-          model={liveAnnualComparisonModel}
+          model={model.liveAnnualComparisonModel}
           refreshing={loadingAnnualHistory && Boolean(annualHistoryState)}
-          scopeName={selectedScope?.name ?? "Visão selecionada"}
+          scopeName={model.scope?.name ?? "Visão selecionada"}
         />
-      ),
+      )),
     },
     {
       id: "live_current_year_accumulated",
@@ -2711,16 +2996,16 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
+      node: renderWithRealtimeWidgetModel((model) => (
         <LiveAnnualComparisonCard
           accumulated
           error={liveAnnualComparisonError}
           loading={liveAnnualComparisonLoading}
-          model={liveAnnualComparisonModel}
+          model={model.liveAnnualComparisonModel}
           refreshing={loadingAnnualHistory && Boolean(annualHistoryState)}
-          scopeName={selectedScope?.name ?? "Visão selecionada"}
+          scopeName={model.scope?.name ?? "Visão selecionada"}
         />
-      ),
+      )),
     },
     {
       id: "live_month_hour_heatmap",
@@ -2729,7 +3014,7 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
+      node: () => (
         <OperationalHeatmapCard
           canConfigure={canEditVisual}
           error={operationalMonthHourState?.error}
@@ -2742,7 +3027,7 @@ export function RealtimeDashboard({
           onSelectionModeChange={(heatmapSelectionMode) =>
             updateOperationalSettings({ heatmapSelectionMode })
           }
-          points={operationalHeatmapPoints}
+          points={getOperationalHeatmapPoints()}
           scenarios={scenarios}
           selectedIds={operationalSettings.heatmapScenarioIds}
           selectionLabel={scenarioSelectionSummary(
@@ -2761,7 +3046,7 @@ export function RealtimeDashboard({
       defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
-      node: (
+      node: () => (
         <MonthlyAccessRankingCard
           canConfigure={canEditVisual}
           loading={initialLoading}
@@ -2772,7 +3057,7 @@ export function RealtimeDashboard({
           onSelectionModeChange={(rankingSelectionMode) =>
             updateOperationalSettings({ rankingSelectionMode })
           }
-          points={monthlyAccessRankingPoints}
+          points={getMonthlyAccessRankingPoints()}
           scenarios={scenarios}
           selectedIds={operationalSettings.rankingScenarioIds}
           selectionMode={operationalSettings.rankingSelectionMode}
@@ -2786,7 +3071,7 @@ export function RealtimeDashboard({
       defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
-      node: (
+      node: () => (
         <PeakDaysRankingCard
           canConfigure={canEditVisual}
           loading={initialLoading}
@@ -2797,7 +3082,7 @@ export function RealtimeDashboard({
           onSelectionModeChange={(peakDaySelectionMode) =>
             updateOperationalSettings({ peakDaySelectionMode })
           }
-          points={peakDayPoints}
+          points={getPeakDayPoints()}
           scenarios={scenarios}
           selectedIds={operationalSettings.peakDayScenarioIds}
           selectionMode={operationalSettings.peakDaySelectionMode}
@@ -2812,7 +3097,7 @@ export function RealtimeDashboard({
       defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
-      node: (
+      node: () => (
         <ScenarioRoseCard
           canConfigure={canEditVisual}
           loading={initialLoading}
@@ -2823,7 +3108,7 @@ export function RealtimeDashboard({
           onSelectionModeChange={(roseSelectionMode) =>
             updateOperationalSettings({ roseSelectionMode })
           }
-          points={roseScenarioPoints}
+          points={getRoseScenarioPoints()}
           scenarios={scenarios}
           selectedIds={operationalSettings.roseScenarioIds}
           selectionMode={operationalSettings.roseSelectionMode}
@@ -2837,15 +3122,15 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
+      node: renderWithRealtimeWidgetModel((model) => (
         <OperationalMonthComparisonCard
           loading={initialLoading}
           month={clock}
           mode={operationalSettings.monthComparison}
-          points={monthComparisonPoints}
-          scopeName={selectedScope?.name ?? "Visão selecionada"}
+          points={model.monthComparisonPoints}
+          scopeName={model.scope?.name ?? "Visão selecionada"}
         />
-      ),
+      )),
     },
     {
       id: "live_operational_month_cumulative",
@@ -2854,78 +3139,147 @@ export function RealtimeDashboard({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
+      node: renderWithRealtimeWidgetModel((model) => (
         <OperationalMonthCumulativeCard
           loading={initialLoading}
           month={clock}
           mode={operationalSettings.monthComparison}
-          points={monthComparisonPoints}
-          scopeName={selectedScope?.name ?? "Visão selecionada"}
+          points={model.monthComparisonPoints}
+          scopeName={model.scope?.name ?? "Visão selecionada"}
         />
-      ),
+      )),
     },
   ].map((card) => ({
     ...card,
+    ...([
+      LIVE_DAY_MINUTES_ID,
+      "live_chart_hour",
+      "live_moving_average_trend",
+      "live_current_year_monthly",
+      "live_current_year_accumulated",
+      "live_operational_month_comparison",
+      "live_operational_month_cumulative",
+    ].includes(card.id)
+      ? scenarioConfigurableCardDefaults
+      : {}),
     colorEditable: card.id !== "live_scenario_totals_table",
     titleEditable: true as const,
     zoomEnabled: card.id !== "live_scenario_totals_table",
   }));
   const comparisonCards = [
-    scenarioTodayComparisonPoints.length > 1 &&
-    scenarioTodayComparisonPoints.some((point) => point.total > 0)
+    scenarios.length > 1
       ? {
           id: "live_today_scenario_comparison",
           chartTypeEnabled: true,
           label: "Hoje por cenário",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
-          node: (
-            <TodayComparisonCard
-              description="Comparativo do acumulado do dia entre os cenários cadastrados."
-              emptyText="Nenhum cenário disponível para comparar."
-              loading={initialLoading}
-              points={scenarioTodayComparisonPoints}
-              title="Hoje por cenário"
-            />
-          ),
+          inheritedScenarioIds: scenarios.map((scenario) => scenario.id),
+          inheritedScenarioLabel: "todos os cenários disponíveis",
+          scenarioConfigurable: true as const,
+          scenarioSelectionPolicy: "compare" as const,
+          node: ({ scenarioSelection }: LayoutCardRenderContext) => {
+            const selectedComparisonScenarios = resolveWidgetScenarios(
+              scenarios,
+              scenarioSelection,
+              scenarios,
+            );
+            const points = buildScenarioTodayComparisonPoints(
+              selectedComparisonScenarios,
+              hourRows,
+              clock,
+              chartData.live_chart_hour?.granularity ?? "hour",
+            );
+            return (
+              <TodayComparisonCard
+                description="Comparativo do acumulado do dia entre os cenários cadastrados."
+                emptyText="Nenhum cenário disponível para comparar."
+                loading={initialLoading}
+                points={points}
+                title="Hoje por cenário"
+              />
+            );
+          },
         }
       : null,
-    locationTodayComparisonPoints.length > 1 &&
-    locationTodayComparisonPoints.some((point) => point.total > 0)
+    locationTodayComparisonScopes.length > 1
       ? {
           id: "live_today_location_comparison",
           chartTypeEnabled: true,
           label: "Hoje por local",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
-          node: (
-            <TodayComparisonCard
-              description="Comparativo do acumulado do dia entre os locais cadastrados."
-              emptyText="Nenhum local disponível para comparar."
-              loading={initialLoading}
-              points={locationTodayComparisonPoints}
-              title="Hoje por local"
-            />
-          ),
+          inheritedScenarioIds: [],
+          inheritedScenarioLabel: "dados completos dos locais",
+          scenarioConfigurable: true as const,
+          scenarioSelectionPolicy: "aggregate" as const,
+          node: ({ scenarioSelection }: LayoutCardRenderContext) => {
+            const points =
+              scenarioSelection.mode === "inherit"
+                ? getLocationTodayComparisonPoints()
+                : buildScopeTodayComparisonPoints(
+                    locationTodayComparisonScopes.map((scope) =>
+                      resolveRealtimeWidgetScope(
+                        scope,
+                        scenarios,
+                        scenarioSelection,
+                        true,
+                      ),
+                    ),
+                    hourRows,
+                    clock,
+                    hourState?.granularity ?? "hour",
+                  );
+            return (
+              <TodayComparisonCard
+                description="Comparativo do acumulado do dia entre os locais cadastrados."
+                emptyText="Nenhum local disponível para comparar."
+                loading={initialLoading}
+                points={points}
+                title="Hoje por local"
+              />
+            );
+          },
         }
       : null,
-    subLocationTodayComparisonPoints.length > 1 &&
-    subLocationTodayComparisonPoints.some((point) => point.total > 0)
+    subLocationTodayComparisonScopes.length > 1
       ? {
           id: "live_today_sub_location_comparison",
           chartTypeEnabled: true,
           label: "Hoje por sublocal",
           defaultSize: "wide" as const,
           className: "sm:col-span-2 xl:col-span-2",
-          node: (
-            <TodayComparisonCard
-              description="Comparativo do acumulado do dia entre os sublocais cadastrados."
-              emptyText="Nenhum sublocal disponível para comparar."
-              loading={initialLoading}
-              points={subLocationTodayComparisonPoints}
-              title="Hoje por sublocal"
-            />
-          ),
+          inheritedScenarioIds: [],
+          inheritedScenarioLabel: "dados completos dos sublocais",
+          scenarioConfigurable: true as const,
+          scenarioSelectionPolicy: "aggregate" as const,
+          node: ({ scenarioSelection }: LayoutCardRenderContext) => {
+            const points =
+              scenarioSelection.mode === "inherit"
+                ? getSubLocationTodayComparisonPoints()
+                : buildScopeTodayComparisonPoints(
+                    subLocationTodayComparisonScopes.map((scope) =>
+                      resolveRealtimeWidgetScope(
+                        scope,
+                        scenarios,
+                        scenarioSelection,
+                        true,
+                      ),
+                    ),
+                    hourRows,
+                    clock,
+                    hourState?.granularity ?? "hour",
+                  );
+            return (
+              <TodayComparisonCard
+                description="Comparativo do acumulado do dia entre os sublocais cadastrados."
+                emptyText="Nenhum sublocal disponível para comparar."
+                loading={initialLoading}
+                points={points}
+                title="Hoje por sublocal"
+              />
+            );
+          },
         }
       : null,
   ]
@@ -2959,11 +3313,18 @@ export function RealtimeDashboard({
                 />
               ) : null
             }
-            autoRefresh
             companyId={companyScopeId}
             companyTimeZone={companyTimeZone}
-            disabledReason={liveComparisonDisabledReason}
-            hourlySource={liveComparisonHourlySource}
+            disabledReason={
+              openScenarioComparisonWidgetIds.has(widget.id)
+                ? liveComparisonDisabledReason
+                : closedComparisonDisabledReason
+            }
+            hourlySource={
+              openScenarioComparisonWidgetIds.has(widget.id)
+                ? liveComparisonHourlySource
+                : undefined
+            }
             monitorMode={monitorMode}
             preferenceScopeId={selectedScope?.id}
             scenarios={scenarios}
@@ -3049,12 +3410,8 @@ export function RealtimeDashboard({
     const scope = getScopeOptionsForMode(widget.scopeMode).find(
       (option) => option.id === widget.scopeId,
     );
-    const definition = buildCustomWidgetDefinition(
-      widget,
-      chartDefinitions,
-      scope,
-    );
     const state = chartStateForGranularity(chartData, widget.granularity);
+    const inheritedScenarioIds = scope?.scenario ? [scope.scenario.id] : [];
 
     return {
       id: `live_custom_${widget.id}`,
@@ -3065,38 +3422,62 @@ export function RealtimeDashboard({
       defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
-      node: scope ? (
-        <RealtimeChartCard
-          action={
-            canEditVisual && !monitorMode ? (
-              <CustomWidgetActions
-                onEdit={() => openCustomWidgetEditor(widget)}
-                onRemove={() => removeCustomWidget(widget.id)}
-                title={widget.title}
-              />
-            ) : null
-          }
-          definition={definition}
-          loading={initialLoading}
-          rows={state?.rows ?? []}
-          scope={scope}
-          state={state}
-        />
-      ) : (
-        <MissingCustomWidgetCard
-          title={widget.title}
-          onEdit={
-            canEditVisual && !monitorMode
-              ? () => openCustomWidgetEditor(widget)
-              : undefined
-          }
-          onRemove={
-            canEditVisual && !monitorMode
-              ? () => removeCustomWidget(widget.id)
-              : undefined
-          }
-        />
-      ),
+      inheritedScenarioIds,
+      inheritedScenarioLabel: scope?.scenario
+        ? scope.scenario.name
+        : scope
+          ? `dados completos de ${scope.name}`
+          : "visão salva",
+      scenarioConfigurable: Boolean(scope),
+      scenarioSelectionPolicy: "aggregate" as const,
+      node: ({ scenarioSelection }: LayoutCardRenderContext) => {
+        if (!scope) {
+          return (
+            <MissingCustomWidgetCard
+              title={widget.title}
+              onEdit={
+                canEditVisual && !monitorMode
+                  ? () => openCustomWidgetEditor(widget)
+                  : undefined
+              }
+              onRemove={
+                canEditVisual && !monitorMode
+                  ? () => removeCustomWidget(widget.id)
+                  : undefined
+              }
+            />
+          );
+        }
+
+        const resolvedScope = resolveRealtimeWidgetScope(
+          scope,
+          scenarios,
+          scenarioSelection,
+        );
+        const definition = buildCustomWidgetDefinition(
+          widget,
+          chartDefinitions,
+          resolvedScope,
+        );
+        return (
+          <RealtimeChartCard
+            action={
+              canEditVisual && !monitorMode ? (
+                <CustomWidgetActions
+                  onEdit={() => openCustomWidgetEditor(widget)}
+                  onRemove={() => removeCustomWidget(widget.id)}
+                  title={widget.title}
+                />
+              ) : null
+            }
+            definition={definition}
+            loading={initialLoading}
+            rows={state?.rows ?? []}
+            scope={resolvedScope}
+            state={state}
+          />
+        );
+      },
     };
   });
 
@@ -3117,6 +3498,16 @@ export function RealtimeDashboard({
       viewId: selectedScope?.id,
     },
   );
+  const livePreferencesScopeKey = realtimeDataPlanScopeKey;
+  const livePreferencesReady =
+    livePreferencesReadyKey === livePreferencesScopeKey;
+
+  // useCardPreferences synchronizes a new company/view in its own effect.
+  // Mark this scope ready one effect later so visibility-dependent requests
+  // never run with preferences left over from the previous scope.
+  React.useEffect(() => {
+    setLivePreferencesReadyKey(livePreferencesScopeKey);
+  }, [livePreferencesScopeKey]);
   const liveColorByCardId = React.useMemo(
     () =>
       new Map(
@@ -3153,7 +3544,36 @@ export function RealtimeDashboard({
       liveTitleByCardId.get(cardId) ?? fallback,
     [liveTitleByCardId],
   );
+  const liveScenarioSelectionByCardId = React.useMemo(
+    () =>
+      new Map(
+        livePreferences.map((preference) => [
+          preference.id,
+          {
+            mode: preference.scenarioSelectionMode ?? "inherit",
+            scenarioIds: preference.scenarioIds ?? [],
+          } satisfies LayoutCardRenderContext["scenarioSelection"],
+        ]),
+      ),
+    [livePreferences],
+  );
+  const resolveLiveScopeForCard = (
+    cardId: string,
+    scope: RealtimeScopeOption,
+    preserveName = false,
+  ) =>
+    resolveRealtimeWidgetScope(
+      scope,
+      scenarios,
+      liveScenarioSelectionByCardId.get(cardId) ?? {
+        mode: "inherit",
+        scenarioIds: [],
+      },
+      preserveName,
+    );
   const visibleLiveCardIds = React.useMemo(() => {
+    if (!livePreferencesReady) return [];
+
     const cardIds = new Set(liveCardIdsKey ? liveCardIdsKey.split("|") : []);
     const preferenceIds = new Set(
       livePreferences.map((preference) => preference.id),
@@ -3166,7 +3586,109 @@ export function RealtimeDashboard({
     );
 
     return [...ordered, ...missing];
-  }, [liveCardIdsKey, livePreferences]);
+  }, [liveCardIdsKey, livePreferences, livePreferencesReady]);
+  const requestedRealtimeDataPlanKey = React.useMemo(
+    () =>
+      livePreferencesReady && selectedScope
+          ? buildRealtimeDataPlanKey({
+            customWidgets,
+            monthComparison: operationalSettings.monthComparison,
+            openScenarioComparisonWidgetIds: Array.from(
+              openScenarioComparisonWidgetIds,
+            ),
+            visibleCardIds: visibleLiveCardIds,
+          })
+        : "",
+    [
+      customWidgets,
+      livePreferencesReady,
+      openScenarioComparisonWidgetIds,
+      operationalSettings.monthComparison,
+      selectedScope,
+      visibleLiveCardIds,
+    ],
+  );
+
+  React.useEffect(() => {
+    setRealtimeDataPlanState((current) =>
+      current.scopeKey === realtimeDataPlanScopeKey &&
+      current.key === requestedRealtimeDataPlanKey
+        ? current
+        : {
+            key: requestedRealtimeDataPlanKey,
+            scopeKey: realtimeDataPlanScopeKey,
+          },
+    );
+  }, [realtimeDataPlanScopeKey, requestedRealtimeDataPlanKey]);
+  const annualHistoryRequested = visibleLiveCardIds.some(
+    (cardId) =>
+      cardId === "live_current_year_monthly" ||
+      cardId === "live_current_year_accumulated",
+  );
+
+  React.useEffect(() => {
+    if (!annualHistoryRequested || !hasLoadedCharts) return;
+    if (annualHistoryRequestRef.current) return;
+    if (annualHistoryAttemptDayRef.current === annualHistoryDayKey) return;
+
+    void loadAnnualHistory();
+
+    return () => {
+      annualHistoryRequestRef.current?.abort();
+    };
+  }, [
+    annualHistoryDayKey,
+    annualHistoryRequested,
+    hasLoadedCharts,
+    loadAnnualHistory,
+  ]);
+  function buildLiveReportAssets() {
+  const reportWidgetModelCache = new Map<string, RealtimeWidgetModel>();
+  const resolveLiveWidgetModelForCard = (cardId: string) => {
+    const selection = liveScenarioSelectionByCardId.get(cardId) ?? {
+      mode: "inherit" as const,
+      scenarioIds: [],
+    };
+    if (selection.mode === "inherit") return defaultRealtimeWidgetModel;
+    const cacheKey = `${selection.mode}:${selection.scenarioIds
+      .slice()
+      .sort()
+      .join("|")}`;
+    const cached = reportWidgetModelCache.get(cacheKey);
+    if (cached) return cached;
+    const model = buildRealtimeWidgetModel(selection);
+    reportWidgetModelCache.set(cacheKey, model);
+    return model;
+  };
+  const liveWidgetScenarioContexts = visibleLiveCardIds.flatMap((cardId) => {
+    const selection = liveScenarioSelectionByCardId.get(cardId);
+    if (!selection || selection.mode === "inherit") return [];
+    const selectedScenarios = resolveWidgetScenarios(scenarios, selection);
+    const fallbackTitle =
+      liveLayoutCards.find((card) => card.id === cardId)?.label ?? "Widget";
+    return [
+      `Composição de “${resolveLiveTitle(cardId, fallbackTitle)}”: ${widgetScenarioSelectionLabel(
+        selectedScenarios,
+        selection,
+      )}`,
+    ];
+  });
+
+  const intradayReportModel = resolveLiveWidgetModelForCard(
+    "live_intraday_comparison",
+  );
+  const targetReportModel = resolveLiveWidgetModelForCard(
+    "live_target_progress",
+  );
+  const previousMonthReportModel = resolveLiveWidgetModelForCard(
+    "live_month_previous_comparison",
+  );
+  const lastYearMonthReportModel = resolveLiveWidgetModelForCard(
+    "live_month_year_comparison",
+  );
+  const reportTargetProgress = targetReportModel.baselineDailyAverage
+    ? targetReportModel.todayTotal / targetReportModel.baselineDailyAverage
+    : null;
 
   const liveMetricByCardId = new Map<string, ReportMetric>([
     [
@@ -3174,9 +3696,9 @@ export function RealtimeDashboard({
       {
         description: completedHourCount
           ? `${formatNumber(
-              currentHourPartialTotal,
+              intradayReportModel.currentHourPartialTotal,
             )} na hora em andamento · ${formatDelta(
-              comparisonDelta,
+              intradayReportModel.comparisonDelta,
             )} nas horas fechadas contra ${intradayComparisonSeriesLabel(
               operationalSettings.intradayComparison,
             ).toLowerCase()}`
@@ -3185,7 +3707,7 @@ export function RealtimeDashboard({
           "live_intraday_comparison",
           "Hoje até agora",
         ),
-        value: todayTotal,
+        value: intradayReportModel.todayTotal,
       },
     ],
     [
@@ -3199,35 +3721,35 @@ export function RealtimeDashboard({
           "Hoje x média-base",
         ),
         value:
-          targetProgress === null
+          reportTargetProgress === null
             ? "Sem base"
-            : `${Math.round(targetProgress * 100)}%`,
+            : `${Math.round(reportTargetProgress * 100)}%`,
       },
     ],
     [
       "live_month_previous_comparison",
       {
-        description: `${formatDelta(previousMonthDelta)} contra ${formatNumber(
-          previousMonthComparableTotal,
+        description: `${formatDelta(previousMonthReportModel.previousMonthDelta)} contra ${formatNumber(
+          previousMonthReportModel.previousMonthComparableTotal,
         )} até o último dia fechado do mês anterior`,
         label: resolveLiveTitle(
           "live_month_previous_comparison",
           "Acumulado x mês anterior",
         ),
-        value: currentMonthRealtimeTotal,
+        value: previousMonthReportModel.currentMonthRealtimeTotal,
       },
     ],
     [
       "live_month_year_comparison",
       {
-        description: `${formatDelta(lastYearMonthDelta)} contra ${formatNumber(
-          lastYearMonthComparableTotal,
+        description: `${formatDelta(lastYearMonthReportModel.lastYearMonthDelta)} contra ${formatNumber(
+          lastYearMonthReportModel.lastYearMonthComparableTotal,
         )} até o último dia fechado do ano anterior`,
         label: resolveLiveTitle(
           "live_month_year_comparison",
           "Acumulado x ano anterior",
         ),
-        value: currentMonthRealtimeTotal,
+        value: lastYearMonthReportModel.currentMonthRealtimeTotal,
       },
     ],
   ]);
@@ -3235,41 +3757,64 @@ export function RealtimeDashboard({
   const liveChartEntries: Array<
     readonly [string, ReportPayload["charts"][number]]
   > = [];
-  if (selectedScope && hourlyDefinition) {
-    liveChartEntries.push([
-      LIVE_DAY_MINUTES_ID,
-      buildMinuteDayReportChart({
-        clock,
-        companyTimeZone,
-        definition: minuteDayDefinition,
-        rows: minuteDayRows,
-        scope: selectedScope,
-        widgetColor: liveColorByCardId.get(LIVE_DAY_MINUTES_ID),
-      }),
-    ]);
-    liveChartEntries.push([
-      "live_chart_hour",
-      buildOperationalHourlyReportChart({
-        averageDescription: averageBaseDescription(
-          operationalSettings.monthComparison,
-        ),
-        comparisonDefinition: operationalComparisonDefinition,
-        comparisonLabel: intradayComparisonSeriesLabel(
-          operationalSettings.intradayComparison,
-        ),
-        comparisonRows: comparisonHourRows,
-        currentDefinition: hourlyDefinition,
-        currentRows: hourRows,
-        scope: selectedScope,
-        targetDailyAverage: baselineDailyAverage,
-        widgetColor: liveColorByCardId.get("live_chart_hour"),
-      }),
-    ]);
+  const minuteDayReportModel = resolveLiveWidgetModelForCard(
+    LIVE_DAY_MINUTES_ID,
+  );
+  const hourlyReportModel = resolveLiveWidgetModelForCard("live_chart_hour");
+  const trendReportModel = resolveLiveWidgetModelForCard(
+    "live_moving_average_trend",
+  );
+  const monthComparisonReportModel = resolveLiveWidgetModelForCard(
+    "live_operational_month_comparison",
+  );
+  const monthCumulativeReportModel = resolveLiveWidgetModelForCard(
+    "live_operational_month_cumulative",
+  );
+  const annualMonthlyReportModel = resolveLiveWidgetModelForCard(
+    "live_current_year_monthly",
+  );
+  const annualAccumulatedReportModel = resolveLiveWidgetModelForCard(
+    "live_current_year_accumulated",
+  );
+  if (hourlyDefinition) {
+    if (minuteDayReportModel.scope) {
+      liveChartEntries.push([
+        LIVE_DAY_MINUTES_ID,
+        buildMinuteDayReportChart({
+          clock,
+          companyTimeZone,
+          definition: minuteDayDefinition,
+          rows: minuteDayRows,
+          scope: minuteDayReportModel.scope,
+          widgetColor: liveColorByCardId.get(LIVE_DAY_MINUTES_ID),
+        }),
+      ]);
+    }
+    if (hourlyReportModel.scope) {
+      liveChartEntries.push([
+        "live_chart_hour",
+        buildOperationalHourlyReportChart({
+          averageDescription: averageBaseDescription(
+            operationalSettings.monthComparison,
+          ),
+          comparisonDefinition: operationalComparisonDefinition,
+          comparisonLabel: intradayComparisonSeriesLabel(
+            operationalSettings.intradayComparison,
+          ),
+          comparisonRows: comparisonHourRows,
+          currentDefinition: hourlyDefinition,
+          currentRows: hourRows,
+          scope: hourlyReportModel.scope,
+          targetDailyAverage: hourlyReportModel.baselineDailyAverage,
+          widgetColor: liveColorByCardId.get("live_chart_hour"),
+        }),
+      ]);
+    }
     liveChartEntries.push([
       "live_month_hour_heatmap",
       buildOperationalHeatmapReportChart({
         month: clock,
-        points: operationalHeatmapPoints,
+        points: getOperationalHeatmapPoints(),
         scopeName: scenarioSelectionSummary(
           scenarios,
           operationalSettings.heatmapSelectionMode,
@@ -3284,8 +3829,9 @@ export function RealtimeDashboard({
         accumulated: false,
         month: clock,
         mode: operationalSettings.monthComparison,
-        points: monthComparisonPoints,
-        scopeName: selectedScope.name,
+        points: monthComparisonReportModel.monthComparisonPoints,
+        scopeName:
+          monthComparisonReportModel.scope?.name ?? "Visão selecionada",
         widgetColor: liveColorByCardId.get(
           "live_operational_month_comparison",
         ),
@@ -3297,8 +3843,9 @@ export function RealtimeDashboard({
         accumulated: true,
         month: clock,
         mode: operationalSettings.monthComparison,
-        points: monthComparisonPoints,
-        scopeName: selectedScope.name,
+        points: monthCumulativeReportModel.monthComparisonPoints,
+        scopeName:
+          monthCumulativeReportModel.scope?.name ?? "Visão selecionada",
         widgetColor: liveColorByCardId.get(
           "live_operational_month_cumulative",
         ),
@@ -3307,35 +3854,41 @@ export function RealtimeDashboard({
     liveChartEntries.push([
       "live_moving_average_trend",
       buildOperationalTrendReportChart(
-        operationalTrendPoints,
-        selectedScope.name,
+        trendReportModel.operationalTrendPoints,
+        trendReportModel.scope?.name ?? "Visão selecionada",
         clock,
         liveColorByCardId.get("live_moving_average_trend"),
       ),
     ]);
-    if (liveAnnualComparisonModel) {
+    if (annualMonthlyReportModel.liveAnnualComparisonModel) {
       const annualAssets = buildCountingIntelligenceReportAssets(
-        liveAnnualComparisonModel,
+        annualMonthlyReportModel.liveAnnualComparisonModel,
         {
           [COUNTING_INTELLIGENCE_CARD_IDS.annualComparison]:
             liveColorByCardId.get("live_current_year_monthly"),
-          [COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison]:
-            liveColorByCardId.get("live_current_year_accumulated"),
         },
       );
       const monthly = annualAssets.charts.find(
         (entry) =>
           entry.cardId === COUNTING_INTELLIGENCE_CARD_IDS.annualComparison,
       );
+      if (monthly) {
+        liveChartEntries.push(["live_current_year_monthly", monthly.value]);
+      }
+    }
+    if (annualAccumulatedReportModel.liveAnnualComparisonModel) {
+      const annualAssets = buildCountingIntelligenceReportAssets(
+        annualAccumulatedReportModel.liveAnnualComparisonModel,
+        {
+          [COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison]:
+            liveColorByCardId.get("live_current_year_accumulated"),
+        },
+      );
       const accumulated = annualAssets.charts.find(
         (entry) =>
           entry.cardId ===
           COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison,
       );
-
-      if (monthly) {
-        liveChartEntries.push(["live_current_year_monthly", monthly.value]);
-      }
       if (accumulated) {
         liveChartEntries.push([
           "live_current_year_accumulated",
@@ -3347,9 +3900,9 @@ export function RealtimeDashboard({
   liveChartEntries.push([
     "live_hourly_occupancy",
     buildHourlyOccupancyReportChart({
-      entryScenarios: occupancyEntryScenarios,
-      exitScenarios: occupancyExitScenarios,
-      points: hourlyOccupancyPoints,
+      entryScenarios: getOccupancyEntryScenarios(),
+      exitScenarios: getOccupancyExitScenarios(),
+      points: getHourlyOccupancyPoints(),
       startHour: operationalSettings.occupancyStartHour,
       widgetColor: liveColorByCardId.get("live_hourly_occupancy"),
     }),
@@ -3357,21 +3910,21 @@ export function RealtimeDashboard({
   liveChartEntries.push([
     "live_scenario_cumulative",
     buildScenarioCumulativeTotalsReportChart(
-      cumulativeScenarioPoints,
+      getCumulativeScenarioPoints(),
       liveColorByCardId.get("live_scenario_cumulative"),
     ),
   ]);
   liveChartEntries.push([
     "live_month_access_ranking",
     buildMonthlyAccessRankingReportChart(
-      monthlyAccessRankingPoints,
+      getMonthlyAccessRankingPoints(),
       liveColorByCardId.get("live_month_access_ranking"),
     ),
   ]);
   liveChartEntries.push([
     "live_scenario_rose",
     buildScenarioRoseReportChart(
-      roseScenarioPoints,
+      getRoseScenarioPoints(),
       scenarioSelectionSummary(
         scenarios,
         operationalSettings.roseSelectionMode,
@@ -3387,7 +3940,7 @@ export function RealtimeDashboard({
   liveChartEntries.push([
     "live_month_peak_days",
     buildPeakDaysRankingReportChart(
-      peakDayPoints,
+      getPeakDayPoints(),
       scenarioSelectionSummary(
         scenarios,
         operationalSettings.peakDaySelectionMode,
@@ -3402,7 +3955,18 @@ export function RealtimeDashboard({
       buildTodayComparisonReportChart(
         "Hoje por cenário",
         "Acumulado de hoje por cenário.",
-        scenarioTodayComparisonPoints,
+        buildScenarioTodayComparisonPoints(
+          resolveWidgetScenarios(
+            scenarios,
+            liveScenarioSelectionByCardId.get(
+              "live_today_scenario_comparison",
+            ) ?? { mode: "inherit", scenarioIds: [] },
+            scenarios,
+          ),
+          hourRows,
+          clock,
+          chartData.live_chart_hour?.granularity ?? "hour",
+        ),
         liveColorByCardId.get("live_today_scenario_comparison"),
       ),
     ],
@@ -3411,7 +3975,18 @@ export function RealtimeDashboard({
       buildTodayComparisonReportChart(
         "Hoje por local",
         "Acumulado de hoje por local.",
-        locationTodayComparisonPoints,
+        buildScopeTodayComparisonPoints(
+          locationTodayComparisonScopes.map((scope) =>
+            resolveLiveScopeForCard(
+              "live_today_location_comparison",
+              scope,
+              true,
+            ),
+          ),
+          hourRows,
+          clock,
+          chartData.live_chart_hour?.granularity ?? "hour",
+        ),
         liveColorByCardId.get("live_today_location_comparison"),
       ),
     ],
@@ -3420,7 +3995,18 @@ export function RealtimeDashboard({
       buildTodayComparisonReportChart(
         "Hoje por sublocal",
         "Acumulado de hoje por sublocal.",
-        subLocationTodayComparisonPoints,
+        buildScopeTodayComparisonPoints(
+          subLocationTodayComparisonScopes.map((scope) =>
+            resolveLiveScopeForCard(
+              "live_today_sub_location_comparison",
+              scope,
+              true,
+            ),
+          ),
+          hourRows,
+          clock,
+          chartData.live_chart_hour?.granularity ?? "hour",
+        ),
         liveColorByCardId.get("live_today_sub_location_comparison"),
       ),
     ],
@@ -3435,19 +4021,19 @@ export function RealtimeDashboard({
         (option) => option.id === widget.scopeId,
       );
       if (!scope) return;
-      const definition = buildCustomWidgetDefinition(
-        widget,
-        chartDefinitions,
-        scope,
-      );
       const state = chartStateForGranularity(chartData, widget.granularity);
       const cardId = `live_custom_${widget.id}`;
+      const resolvedScope = resolveLiveScopeForCard(cardId, scope);
       liveChartEntries.push([
         cardId,
         buildRealtimeScopeReportChart(
-          definition,
+          buildCustomWidgetDefinition(
+            widget,
+            chartDefinitions,
+            resolvedScope,
+          ),
           state?.rows ?? [],
-          scope,
+          resolvedScope,
           liveColorByCardId.get(cardId),
         ),
       ]);
@@ -3474,36 +4060,37 @@ export function RealtimeDashboard({
         widget.selectionMode,
         widget.scenarioIds,
       );
-      const rankingPoints = buildScenarioPeriodComparisonPoints(
-        selectedScenarios,
-        currentMonthDayRows,
-        monthStart,
-        monthEnd,
-        currentMonthDayState?.granularity ?? "day",
-      );
-
-      if (widget.widgetType === "ranking") {
+      if (
+        widget.widgetType === "ranking" ||
+        widget.widgetType === "rose"
+      ) {
+        const rankingPoints = buildScenarioPeriodComparisonPoints(
+          selectedScenarios,
+          currentMonthDayRows,
+          monthStart,
+          monthEnd,
+          currentMonthDayState?.granularity ?? "day",
+        );
+        if (widget.widgetType === "rose") {
+          liveChartEntries.push([
+            cardId,
+            buildScenarioRoseReportChart(
+              rankingPoints,
+              selectionLabel,
+              widgetColor,
+              widget.title,
+              normalizeScenarioCompositionChartType(
+                liveChartTypeByCardId.get(cardId),
+              ),
+            ),
+          ]);
+          return;
+        }
         liveChartEntries.push([
           cardId,
           renameReportChart(
             buildMonthlyAccessRankingReportChart(rankingPoints, widgetColor),
             widget.title,
-          ),
-        ]);
-        return;
-      }
-
-      if (widget.widgetType === "rose") {
-        liveChartEntries.push([
-          cardId,
-          buildScenarioRoseReportChart(
-            rankingPoints,
-            selectionLabel,
-            widgetColor,
-            widget.title,
-            normalizeScenarioCompositionChartType(
-              liveChartTypeByCardId.get(cardId),
-            ),
           ),
         ]);
         return;
@@ -3612,14 +4199,28 @@ export function RealtimeDashboard({
   const liveTableByCardId = new Map<string, ReportTable>([
     [
       "live_scenario_totals_table",
-      buildScenarioTotalsReportTable(scenarioTableRows),
+      buildScenarioTotalsReportTable(getScenarioTableRows()),
     ],
     ...customScenarioTableByCardId.entries(),
   ]);
 
+  return {
+    configuredLiveChartEntries,
+    liveMetricByCardId,
+    liveTableByCardId,
+    liveWidgetScenarioContexts,
+  };
+  }
+
   function composeLiveReportPayload(
     charts: ReportPayload["charts"],
+    reportAssets: ReturnType<typeof buildLiveReportAssets>,
   ): ReportPayload {
+    const {
+      liveMetricByCardId,
+      liveTableByCardId,
+      liveWidgetScenarioContexts,
+    } = reportAssets;
     return {
       title: selectedScope
         ? `Ao Vivo - ${selectedScope.name}`
@@ -3639,6 +4240,7 @@ export function RealtimeDashboard({
         `Média-base: ${averageBaseDescription(
           operationalSettings.monthComparison,
         ).toLowerCase()}`,
+        ...liveWidgetScenarioContexts,
         "Ordem, visibilidade e cores seguem a configuração individual dos widgets.",
       ].filter(Boolean),
       metrics: visibleLiveCardIds
@@ -3661,13 +4263,14 @@ export function RealtimeDashboard({
 
   async function buildConfiguredLiveReportPayload(signal?: AbortSignal) {
     signal?.throwIfAborted();
-    const chartByCardId = new Map(configuredLiveChartEntries);
+    const reportAssets = buildLiveReportAssets();
+    const chartByCardId = new Map(reportAssets.configuredLiveChartEntries);
     if (
       visibleLiveCardIds.includes(LIVE_DAY_MINUTES_ID) &&
       minuteDayState?.error
     ) {
       throw new Error(
-        `O widget minuto a minuto não está certificado: ${minuteDayState.error}`,
+        `O widget minuto a minuto está indisponível: ${minuteDayState.error}`,
       );
     }
     const visibleComparisonWidgets = customWidgets.filter(
@@ -3676,8 +4279,16 @@ export function RealtimeDashboard({
         visibleLiveCardIds.includes(`live_custom_${widget.id}`),
     );
 
-    if (visibleComparisonWidgets.length && liveComparisonDisabledReason) {
+    if (
+      visibleComparisonWidgets.some((widget) =>
+        openScenarioComparisonWidgetIds.has(widget.id),
+      ) &&
+      liveComparisonDisabledReason
+    ) {
       throw new Error(liveComparisonDisabledReason);
+    }
+    if (visibleComparisonWidgets.length && closedComparisonDisabledReason) {
+      throw new Error(closedComparisonDisabledReason);
     }
 
     await Promise.all(
@@ -3697,7 +4308,9 @@ export function RealtimeDashboard({
             );
             const rows = await fetchScenarioComparisonRows(
               definition,
-              liveComparisonHourlySource,
+              openScenarioComparisonWidgetIds.has(widget.id)
+                ? liveComparisonHourlySource
+                : undefined,
               companyTimeZone,
               companyScopeId,
               { signal },
@@ -3719,12 +4332,12 @@ export function RealtimeDashboard({
             });
           } catch (error) {
             signal?.throwIfAborted();
-            const detail =
-              error instanceof Error
-                ? error.message
-                : "falha desconhecida na consulta";
+            const detail = dashboardErrorMessage(
+              error,
+              "falha ao consultar os dados",
+            );
             throw new Error(
-              `Não foi possível certificar o comparativo "${widget.title}": ${detail}`,
+              `Não foi possível preparar o comparativo "${widget.title}": ${detail}`,
             );
           }
         }),
@@ -3737,6 +4350,7 @@ export function RealtimeDashboard({
         .filter((chart): chart is ReportPayload["charts"][number] =>
           Boolean(chart),
         ),
+      reportAssets,
     );
   }
 
@@ -3756,7 +4370,7 @@ export function RealtimeDashboard({
     }
     if (currentMonthDayState?.granularity !== "day") {
       throw new Error(
-        "A base diária certificada do mês atual não está disponível para a IA.",
+        "A série diária completa do mês atual ainda não está disponível para a análise de IA.",
       );
     }
 
@@ -3782,7 +4396,7 @@ export function RealtimeDashboard({
     return {
       ...payload,
       context: [
-        `Período civil analisado: ${periodLabel}`,
+        `Período analisado: ${periodLabel}`,
         ...(payload.context ?? []),
       ],
       tables: [
@@ -3797,24 +4411,16 @@ export function RealtimeDashboard({
               width: 22,
             },
           ],
-          description: `Base diária canônica completa da visão ${selectedScope.name} em ${periodLabel}; dias sem registros permanecem com total zero.`,
+          description: `Detalhamento diário da visão ${selectedScope.name} em ${periodLabel}; dias sem registros permanecem com total zero. Os gráficos, indicadores e tabelas acima preservam a composição individual de cada widget.`,
           rows: dailyPoints.map((point) => ({
             date: formatRealtimeCivilDate(new Date(point.bucket)),
             total: point.total,
           })),
-          title: "Série diária canônica da Contagem",
+          title: "Detalhamento diário da Contagem",
         },
       ],
     } satisfies ReportPayload;
   }
-
-  const liveReportPayload = composeLiveReportPayload(
-    liveCardIds
-      .map((id) => new Map(configuredLiveChartEntries).get(id))
-      .filter((chart): chart is ReportPayload["charts"][number] =>
-        Boolean(chart),
-      ),
-  );
 
   return (
     <section
@@ -3829,7 +4435,7 @@ export function RealtimeDashboard({
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
       {liveDataCertificationError && !initialLoading ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
-          Consulta bloqueada: {liveDataCertificationError}
+          Não foi possível carregar os dados: {liveDataCertificationError}
         </div>
       ) : null}
       {scenarioMetadataWarning && !initialLoading ? (
@@ -3966,23 +4572,21 @@ export function RealtimeDashboard({
                       initialLoading ||
                       loadingAnnualHistory ||
                       !selectedScope ||
-                      Boolean(liveDataCertificationError) ||
+                      Boolean(liveReportCertificationError) ||
                       Boolean(liveAnnualComparisonError)
                     }
                     getPayload={buildConfiguredLiveReportPayload}
-                    payload={liveReportPayload}
                   />
                   <AiAnalysisAction
                     disabled={
                       initialLoading ||
                       loadingAnnualHistory ||
                       !selectedScope ||
-                      Boolean(liveDataCertificationError) ||
+                      Boolean(liveReportCertificationError) ||
                       Boolean(liveAnnualComparisonError)
                     }
                     getPayload={buildAiLiveReportPayload}
                     manager={manager}
-                    payload={liveReportPayload}
                     source={{ module: "counting", surface: "live" }}
                   />
                   {canEditVisual ? (
@@ -4096,7 +4700,7 @@ export function RealtimeDashboard({
           </div>
         ) : (
           <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-            Nenhuma visão disponível. Cadastre cenários, locations ou sub-locations
+            Nenhuma visão disponível. Cadastre cenários, locais ou sublocais
             com câmeras vinculadas.
           </div>
         )}
@@ -4113,6 +4717,8 @@ export function RealtimeDashboard({
           onOrganizerOpenChange={setLayoutOrganizerOpen}
           preferenceScopeId={selectedScope?.id}
           reorderMode={layoutReorderMode}
+          scenarios={scenarios}
+          showCardConfigurationActions
           showOrganizerTrigger={false}
           showReorderTrigger={false}
           viewScopeName={selectedScope?.name}
@@ -4402,7 +5008,7 @@ function MetricCard({
       label={label}
       loading={loading}
       toneColor={toneColor}
-      value={error ? "Não certificado" : formattedValue}
+      value={error ? "Indisponível" : formattedValue}
       valueClassName={error ? "text-sm text-destructive" : undefined}
       valueTitle={error ? error : String(formattedValue)}
     />
@@ -4459,7 +5065,7 @@ function MinuteDayChartCard({
   const currentSlot = slots.find((slot) => slot.status === "current");
 
   return (
-    <Card className="@container min-w-0 overflow-hidden">
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -4483,17 +5089,17 @@ function MinuteDayChartCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : state?.error ? (
           <EmptyChartState text={state.error} />
         ) : (
-          <div className="h-full min-h-0 w-full">
+          <div className="h-full min-h-0 w-full flex-1 overflow-hidden">
             <EChart
-              ariaDescription="Fluxo certificado minuto a minuto do dia atual; minutos futuros permanecem vazios."
+              ariaDescription="Fluxo minuto a minuto do dia atual; minutos futuros permanecem vazios."
               ariaLabel="Fluxo minuto a minuto de hoje"
-              className="h-full min-h-0"
+              className="h-full min-h-0 w-full flex-1"
               mergeUpdates
               option={option}
               valueLabels="none"
@@ -4534,7 +5140,7 @@ function RealtimeChartCard({
   const hasData = points.some((point) => point.total !== 0);
 
   return (
-    <Card className="@container min-w-0 overflow-hidden">
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -4554,14 +5160,14 @@ function RealtimeChartCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : state?.error ? (
           <EmptyChartState text={state.error} />
         ) : hasData ? (
-          <div className="h-full min-h-0 w-full">
-            <EChart option={option} />
+          <div className="h-full min-h-0 w-full flex-1 overflow-hidden">
+            <EChart className="h-full min-h-0 w-full flex-1" option={option} />
           </div>
         ) : (
           <EmptyChartState text="Sem eventos ao vivo nesta visão." />
@@ -4627,7 +5233,7 @@ function OperationalHourlyChartCard({
   );
 
   return (
-    <Card className="@container min-w-0 overflow-hidden">
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
           <div className="min-w-0">
@@ -4647,16 +5253,16 @@ function OperationalHourlyChartCard({
           </Badge>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : state?.error ? (
           <EmptyChartState text={state.error} />
         ) : hasData ? (
-          <EChart option={option} className="h-full min-h-0" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-full min-h-0"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Sem eventos para a comparação horária."
           />
         )}
@@ -4729,100 +5335,92 @@ function CustomScenarioWidgetCard({
     selectedIds: widget.scenarioIds,
     selectionMode: widget.selectionMode,
   };
-  const monthStart = startOfMonth(clock);
-  const monthEnd = addDays(startOfDay(clock), 1);
-  const rankingPoints = React.useMemo(
-    () =>
-      buildScenarioPeriodComparisonPoints(
+  const widgetData = React.useMemo(() => {
+    const monthStart = startOfMonth(clock);
+    const monthEnd = addDays(startOfDay(clock), 1);
+
+    if (widget.widgetType === "heatmap") {
+      return {
+        kind: "heatmap" as const,
+        points: buildScenarioCivilHourMagnitudePoints({
+          companyTimeZone,
+          from: monthStart,
+          rows: monthHourRows,
+          scenarios: selectedScenarios,
+          sourceGranularity: monthHourGranularity,
+          to: endOfAggregateBucket(startOfHour(clock), "hour"),
+        }),
+      };
+    }
+    if (widget.widgetType === "peak_days") {
+      return {
+        kind: "peak_days" as const,
+        points: buildTopScenarioPeakDays({
+          from: monthStart,
+          rows: currentMonthDayRows,
+          scenarios: selectedScenarios,
+          sourceGranularity: currentMonthDayGranularity,
+          to: monthEnd,
+        }),
+      };
+    }
+    if (widget.widgetType === "cumulative") {
+      return {
+        kind: "cumulative" as const,
+        points: buildScenarioCumulativeTotals({
+          from: startOfDay(clock),
+          rows: hourRows,
+          scenarios: selectedScenarios,
+          sourceGranularity: hourGranularity,
+          to: clock,
+        }),
+      };
+    }
+    if (widget.widgetType === "totals_table") {
+      return {
+        kind: "totals_table" as const,
+        rows: buildScenarioTotalsTableRows(
+          buildScenarioCumulativeTotals({
+            from: startOfDay(clock),
+            rows: hourRows,
+            scenarios: selectedScenarios,
+            sourceGranularity: hourGranularity,
+            to: clock,
+          }),
+          buildScenarioCumulativeTotals({
+            from: monthStart,
+            rows: currentMonthDayRows,
+            scenarios: selectedScenarios,
+            sourceGranularity: currentMonthDayGranularity,
+            to: monthEnd,
+          }),
+        ),
+      };
+    }
+    return {
+      kind: widget.widgetType,
+      points: buildScenarioPeriodComparisonPoints(
         selectedScenarios,
         currentMonthDayRows,
         monthStart,
         monthEnd,
         currentMonthDayGranularity,
       ),
-    [
-      currentMonthDayGranularity,
-      currentMonthDayRows,
-      monthEnd,
-      monthStart,
-      selectedScenarios,
-    ],
-  );
-  const peakPoints = React.useMemo(
-    () =>
-      buildTopScenarioPeakDays({
-        from: monthStart,
-        rows: currentMonthDayRows,
-        scenarios: selectedScenarios,
-        sourceGranularity: currentMonthDayGranularity,
-        to: monthEnd,
-      }),
-    [
-      currentMonthDayGranularity,
-      currentMonthDayRows,
-      monthEnd,
-      monthStart,
-      selectedScenarios,
-    ],
-  );
-  const heatmapPoints = React.useMemo(
-    () =>
-      buildScenarioCivilHourMagnitudePoints({
-        companyTimeZone,
-        from: monthStart,
-        rows: monthHourRows,
-        scenarios: selectedScenarios,
-        sourceGranularity: monthHourGranularity,
-        to: endOfAggregateBucket(startOfHour(clock), "hour"),
-      }),
-    [
-      clock,
-      companyTimeZone,
-      monthHourGranularity,
-      monthHourRows,
-      monthStart,
-      selectedScenarios,
-    ],
-  );
-  const cumulativePoints = React.useMemo(
-    () =>
-      buildScenarioCumulativeTotals({
-        from: startOfDay(clock),
-        rows: hourRows,
-        scenarios: selectedScenarios,
-        sourceGranularity: hourGranularity,
-        to: clock,
-      }),
-    [clock, hourGranularity, hourRows, selectedScenarios],
-  );
-  const tableRows = React.useMemo(() => {
-    const today = buildScenarioCumulativeTotals({
-      from: startOfDay(clock),
-      rows: hourRows,
-      scenarios: selectedScenarios,
-      sourceGranularity: hourGranularity,
-      to: clock,
-    });
-    const month = buildScenarioCumulativeTotals({
-      from: monthStart,
-      rows: currentMonthDayRows,
-      scenarios: selectedScenarios,
-      sourceGranularity: currentMonthDayGranularity,
-      to: monthEnd,
-    });
-    return buildScenarioTotalsTableRows(today, month);
+    };
   }, [
     clock,
+    companyTimeZone,
     currentMonthDayGranularity,
     currentMonthDayRows,
     hourGranularity,
     hourRows,
-    monthEnd,
-    monthStart,
+    monthHourGranularity,
+    monthHourRows,
     selectedScenarios,
+    widget.widgetType,
   ]);
 
-  if (widget.widgetType === "heatmap") {
+  if (widgetData.kind === "heatmap") {
     return (
       <OperationalHeatmapCard
         {...selectionProps}
@@ -4830,56 +5428,56 @@ function CustomScenarioWidgetCard({
         error={error}
         loading={loading}
         month={clock}
-        points={heatmapPoints}
+        points={widgetData.points}
         selectionLabel={selectionLabel}
         title={widget.title}
       />
     );
   }
 
-  if (widget.widgetType === "peak_days") {
+  if (widgetData.kind === "peak_days") {
     return (
       <PeakDaysRankingCard
         {...selectionProps}
         action={action}
         loading={loading}
-        points={peakPoints}
+        points={widgetData.points}
         title={widget.title}
       />
     );
   }
 
-  if (widget.widgetType === "cumulative") {
+  if (widgetData.kind === "cumulative") {
     return (
       <ScenarioCumulativeTotalsCard
         {...selectionProps}
         action={action}
         loading={loading}
-        points={cumulativePoints}
+        points={widgetData.points}
         title={widget.title}
       />
     );
   }
 
-  if (widget.widgetType === "totals_table") {
+  if (widgetData.kind === "totals_table") {
     return (
       <ScenarioTotalsTableCard
         {...selectionProps}
         action={action}
         loading={loading}
-        rows={tableRows}
+        rows={widgetData.rows}
         title={widget.title}
       />
     );
   }
 
-  if (widget.widgetType === "rose") {
+  if (widgetData.kind === "rose") {
     return (
       <ScenarioRoseCard
         {...selectionProps}
         action={action}
         loading={loading}
-        points={rankingPoints}
+        points={widgetData.points}
         title={widget.title}
       />
     );
@@ -4890,7 +5488,7 @@ function CustomScenarioWidgetCard({
       {...selectionProps}
       action={action}
       loading={loading}
-      points={rankingPoints}
+      points={widgetData.points}
       title={widget.title}
     />
   );
@@ -4971,10 +5569,17 @@ function OperationalHeatmapCard({
   title?: string;
 }) {
   const widgetColor = useWidgetColor();
+  const { effectiveTheme } = useTheme();
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const option = React.useMemo(
-    () => buildOperationalHeatmapOption(points, month, widgetColor),
-    [month, points, widgetColor],
+    () =>
+      buildOperationalHeatmapOption(
+        points,
+        month,
+        widgetColor,
+        effectiveTheme,
+      ),
+    [effectiveTheme, month, points, widgetColor],
   );
   const hasData = points.some((point) => point.total > 0);
   const hasSelection =
@@ -4986,7 +5591,7 @@ function OperationalHeatmapCard({
   }, [monitorMode]);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -5023,7 +5628,7 @@ function OperationalHeatmapCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 space-y-3">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden">
         {settingsOpen && !monitorMode ? (
           <ScenarioPicker
             mode={selectionMode}
@@ -5035,18 +5640,21 @@ function OperationalHeatmapCard({
         ) : null}
         {!hasSelection ? (
           <EmptyChartState
-            className="h-[260px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Selecione ao menos um cenário para montar o mapa de calor."
           />
         ) : loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : error ? (
-          <EmptyChartState className="h-[260px]" text={error} />
+          <EmptyChartState
+            className="h-full min-h-0 w-full flex-1 self-stretch"
+            text={error}
+          />
         ) : hasData ? (
-          <EChart option={option} className="h-full min-h-0" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-[260px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Sem eventos horários no mês atual para esta visão."
           />
         )}
@@ -5108,7 +5716,7 @@ function HourlyOccupancyCard({
   }, [monitorMode]);
 
   return (
-    <Card className="@container min-w-0 overflow-hidden">
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -5159,23 +5767,26 @@ function HourlyOccupancyCard({
         </div>
       </CardHeader>
       <CardContent
-        className="min-h-0 min-w-0 flex-1 overflow-hidden"
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         data-echart-layout="natural"
       >
         {!hasSelection ? (
           <EmptyChartState
-            className="h-[220px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Configure ao menos um cenário de entrada ou de saída."
           />
         ) : loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : error ? (
-          <EmptyChartState className="h-[220px]" text={error} />
+          <EmptyChartState
+            className="h-full min-h-0 w-full flex-1 self-stretch"
+            text={error}
+          />
         ) : hasData ? (
-          <EChart option={option} className="h-full min-h-0 flex-1" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-[220px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="As linhas dos cenários selecionados não possuem eventos horários no dia atual."
           />
         )}
@@ -5335,7 +5946,7 @@ function ScenarioCumulativeTotalsCard({
   }, [monitorMode]);
 
   return (
-    <Card className="@container min-w-0 overflow-hidden">
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -5372,7 +5983,7 @@ function ScenarioCumulativeTotalsCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 space-y-3">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden">
         {settingsOpen && !monitorMode ? (
           <ScenarioPicker
             mode={selectionMode}
@@ -5384,16 +5995,16 @@ function ScenarioCumulativeTotalsCard({
         ) : null}
         {!selectedScenarioCount ? (
           <EmptyChartState
-            className="h-[220px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Selecione ao menos um cenário para calcular o acumulado."
           />
         ) : loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : orderedPoints.some((point) => point.total > 0) ? (
-          <EChart option={option} className="h-full min-h-0" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-[220px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="As linhas dos cenários selecionados não possuem eventos horários no dia atual."
           />
         )}
@@ -5441,7 +6052,7 @@ function ScenarioTotalsTableCard({
   }, [monitorMode]);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -5481,7 +6092,7 @@ function ScenarioTotalsTableCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 space-y-3">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden">
         {settingsOpen && !monitorMode ? (
           <ScenarioPicker
             mode={selectionMode}
@@ -5493,13 +6104,13 @@ function ScenarioTotalsTableCard({
         ) : null}
         {!selectedScenarioCount ? (
           <EmptyChartState
-            className="h-[180px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Selecione ao menos um cenário para montar a tabela."
           />
         ) : loading ? (
-          <Skeleton className="h-[240px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : (
-          <div className="max-h-[440px] overflow-auto rounded-md border sm:max-h-[460px]">
+          <div className="min-h-0 min-w-0 flex-1 overflow-auto rounded-md border">
             <Table
               className="min-w-[640px]"
               scrollRegionLabel="Resultados por cenário; role horizontalmente para ver todas as colunas"
@@ -5590,7 +6201,7 @@ function LiveAnnualComparisonCard({
     : "Histórico anual";
 
   return (
-    <Card className="h-full min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="border-b px-4 py-3">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] items-start gap-2">
           <div className="min-w-0 flex-1">
@@ -5652,16 +6263,22 @@ function LiveAnnualComparisonCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 px-3 pb-3 pt-2">
+      <CardContent
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-3 pb-3 pt-2"
+        data-echart-layout="natural"
+      >
         {loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : error ? (
-          <EmptyChartState className="h-full min-h-0" text={error} />
+          <EmptyChartState
+            className="h-full min-h-0 w-full flex-1 self-stretch"
+            text={error}
+          />
         ) : hasData ? (
-          <EChart option={option} className="h-full min-h-0" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-full min-h-0"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Sem valores mensais no histórico desta visão."
           />
         )}
@@ -5693,7 +6310,7 @@ function OperationalMonthComparisonCard({
   );
 
   return (
-    <Card className="@container min-w-0 overflow-hidden">
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
           <div className="min-w-0">
@@ -5713,14 +6330,14 @@ function OperationalMonthComparisonCard({
           </Badge>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {loading ? (
-          <Skeleton className="h-[310px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : hasData ? (
-          <EChart option={option} className="h-[310px]" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-[200px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Sem dados diários para o comparativo mensal."
           />
         )}
@@ -5752,7 +6369,7 @@ function OperationalMonthCumulativeCard({
   );
 
   return (
-    <Card className="@container min-w-0 overflow-hidden">
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
           <div className="min-w-0">
@@ -5772,14 +6389,14 @@ function OperationalMonthCumulativeCard({
           </Badge>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {loading ? (
-          <Skeleton className="h-[310px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : hasData ? (
-          <EChart option={option} className="h-[310px]" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-[200px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Sem dados acumulados para o comparativo mensal."
           />
         )}
@@ -5816,7 +6433,7 @@ function OperationalTrendCard({
   const hasData = points.some((point) => point.average7 !== null);
 
   return (
-    <Card className="@container min-w-0 overflow-hidden">
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:items-start">
           <div className="min-w-0">
@@ -5840,19 +6457,19 @@ function OperationalTrendCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : error ? (
           <EmptyChartState
-            className="h-[200px]"
-            text="Não foi possível certificar a base horária da tendência."
+            className="h-full min-h-0 w-full flex-1 self-stretch"
+            text="A série horária necessária para calcular a tendência está indisponível."
           />
         ) : hasData ? (
-          <EChart option={option} className="h-full min-h-0" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-[200px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="São necessários ao menos 7 dias com dados para calcular a tendência."
           />
         )}
@@ -5940,7 +6557,7 @@ function ScenarioRoseCard({
   }, [monitorMode]);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -5976,7 +6593,7 @@ function ScenarioRoseCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 space-y-3">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden">
         {settingsOpen && !monitorMode ? (
           <ScenarioPicker
             mode={selectionMode}
@@ -5988,16 +6605,16 @@ function ScenarioRoseCard({
         ) : null}
         {!selectedScenarioCount ? (
           <EmptyChartState
-            className="h-[220px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Selecione ao menos um cenário para montar a composição."
           />
         ) : loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : visiblePoints.length ? (
-          <EChart option={option} className="h-full min-h-0" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-[220px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Sem fluxo mensal para os cenários selecionados."
           />
         )}
@@ -6052,7 +6669,7 @@ function MonthlyAccessRankingCard({
   }, [monitorMode]);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -6085,7 +6702,7 @@ function MonthlyAccessRankingCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 space-y-3">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden">
         {settingsOpen && !monitorMode ? (
           <ScenarioPicker
             mode={selectionMode}
@@ -6097,16 +6714,16 @@ function MonthlyAccessRankingCard({
         ) : null}
         {!selectedScenarioCount ? (
           <EmptyChartState
-            className="h-[200px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Selecione ao menos um cenário para montar o ranking."
           />
         ) : loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : rankedPoints.length ? (
-          <EChart option={option} className="h-full min-h-0" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-[200px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Sem fluxo mensal para classificar os acessos."
           />
         )}
@@ -6157,7 +6774,7 @@ function PeakDaysRankingCard({
   }, [monitorMode]);
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -6196,7 +6813,7 @@ function PeakDaysRankingCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 space-y-3">
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden">
         {settingsOpen && !monitorMode ? (
           <ScenarioPicker
             mode={selectionMode}
@@ -6208,16 +6825,16 @@ function PeakDaysRankingCard({
         ) : null}
         {!selectedScenarioCount ? (
           <EmptyChartState
-            className="h-[200px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Selecione ao menos um cenário para calcular os dias de pico."
           />
         ) : loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : points.length ? (
-          <EChart option={option} className="h-full min-h-0" />
+          <EChart option={option} className="h-full min-h-0 w-full flex-1" />
         ) : (
           <EmptyChartState
-            className="h-[200px]"
+            className="h-full min-h-0 w-full flex-1 self-stretch"
             text="Sem fluxo diário no mês atual para classificar."
           />
         )}
@@ -6236,7 +6853,7 @@ function MissingCustomWidgetCard({
   title: string;
 }) {
   return (
-    <Card className="@container min-w-0 overflow-hidden">
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -6259,7 +6876,7 @@ function MissingCustomWidgetCard({
           ) : null}
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <EmptyChartState text="Selecione outro widget ou remova este card." />
       </CardContent>
     </Card>
@@ -6286,7 +6903,7 @@ function TodayComparisonCard({
   );
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
           <BarChart3 className="h-4 w-4 shrink-0 text-primary" />
@@ -6296,12 +6913,12 @@ function TodayComparisonCard({
           {description}
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : points.length ? (
-          <div className="h-full min-h-0 w-full">
-            <EChart option={option} />
+          <div className="h-full min-h-0 w-full flex-1 overflow-hidden">
+            <EChart className="h-full min-h-0 w-full flex-1" option={option} />
           </div>
         ) : (
           <EmptyChartState text={emptyText} />
@@ -6313,7 +6930,7 @@ function TodayComparisonCard({
 
 function EmptyRealtimeCard({ title }: { title: string }) {
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader>
         <CardTitle className="[overflow-wrap:anywhere]">
           <WidgetTitleText fallback={title} />
@@ -6322,7 +6939,7 @@ function EmptyRealtimeCard({ title }: { title: string }) {
           Selecione um cenário para ver o ao vivo.
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <EmptyChartState text="Nenhum cenário selecionado." />
       </CardContent>
     </Card>
@@ -6339,7 +6956,7 @@ function EmptyChartState({
   return (
     <div
       className={cn(
-        "flex h-full min-h-0 items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground",
+        "flex h-full min-h-0 min-w-0 w-full flex-1 self-stretch items-center justify-center overflow-hidden rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground",
         className,
       )}
     >
@@ -6455,8 +7072,8 @@ function buildOperationalBaselineMonthDefinition(
         ? OPERATIONAL_LAST_YEAR_MONTH_ID
         : OPERATIONAL_PREVIOUS_MONTH_ID,
     label: monthComparisonLabel(mode),
-    description: "Base horária canônica do comparativo mensal operacional.",
-    granularity: "hour",
+    description: "Dados diários consolidados para o comparativo mensal.",
+    granularity: "day",
     from,
     to: addMonths(from, 1),
   };
@@ -6475,36 +7092,36 @@ function buildOperationalTrendDaysDefinition(now: Date): RealtimeChartDefinition
   };
 }
 
-function buildOperationalMonthHoursDefinition(
+function buildOpenCoarseDaysDefinition(
   now: Date,
+  granularities: readonly ("week" | "month")[],
 ): RealtimeChartDefinition {
-  const currentMonthStart = startOfMonth(now);
-  const historyStart = addMonths(currentMonthStart, -12);
-
+  const starts = granularities.map((granularity) =>
+    startOfAggregateBucket(now, granularity).getTime(),
+  );
+  const from = new Date(Math.min(...starts));
   return {
-    id: OPERATIONAL_MONTH_HOURS_ID,
-    label: "Histórico horário operacional",
+    id: OPEN_COARSE_DAYS_ID,
+    label: "Borda diária consolidada",
     description:
-      "Base horária canônica do mês atual e dos 12 meses anteriores.",
-    granularity: "hour",
-    from: historyStart,
-    to: endOfAggregateBucket(startOfHour(now), "hour"),
+      "Dias fechados usados somente para consolidar a semana ou o mês em andamento.",
+    granularity: "day",
+    from,
+    to: addDays(startOfDay(now), 1),
   };
 }
 
-function buildLiveAnnualRecentMonthsDefinition(
+function buildOperationalMonthHoursDefinition(
   now: Date,
 ): RealtimeChartDefinition {
-  const currentMonthStart = startOfMonth(now);
-
   return {
-    id: LIVE_ANNUAL_RECENT_MONTHS_ID,
-    label: "Meses recentes do comparativo anual",
+    id: OPERATIONAL_MONTH_HOURS_ID,
+    label: "Fonte horária ao vivo",
     description:
-      "Rollup canônico do mês atual e dos 12 meses anteriores.",
-    granularity: "month",
-    from: addMonths(currentMonthStart, -12),
-    to: addMonths(currentMonthStart, 1),
+      "Dados certificados de hoje compartilhados com os comparativos.",
+    granularity: "hour",
+    from: startOfDay(now),
+    to: endOfAggregateBucket(startOfHour(now), "hour"),
   };
 }
 
@@ -6515,7 +7132,7 @@ function buildOperationalCurrentHourMinutesDefinition(
     id: OPERATIONAL_CURRENT_HOUR_MINUTES_ID,
     label: "Minutos da hora atual",
     description:
-      "Base canônica para reconciliar a hora civil ainda aberta.",
+      "Dados por minuto para completar a hora em andamento.",
     granularity: "minute",
     from: startOfHour(now),
     to: addMinutes(startOfMinute(now), 1),
@@ -6604,15 +7221,914 @@ function granularityLabel(granularity: RealtimeCustomWidgetGranularity) {
   );
 }
 
-function aggregatePath(definition: RealtimeChartDefinition) {
-  const params = new URLSearchParams({
-    granularity: definition.granularity,
-    from: aggregateQueryIso(definition.from, definition.granularity),
-    to: aggregateQueryIso(definition.to, definition.granularity),
-    metric_type: DEFAULT_METRIC_TYPE,
+function scenarioComparisonDefinitionIncludesOpenHour(
+  definition: ReturnType<typeof buildScenarioComparisonDefinition>,
+  now: Date,
+) {
+  const openHourFrom = startOfHour(now);
+  const observedTo = addMinutes(startOfMinute(now), 1);
+  const ranges = [
+    { from: definition.currentFrom, to: definition.currentTo },
+    ...(definition.baselineFrom && definition.baselineTo
+      ? [{ from: definition.baselineFrom, to: definition.baselineTo }]
+      : []),
+  ];
+
+  return ranges.some(
+    (range) =>
+      range.from < observedTo &&
+      range.to >= observedTo &&
+      range.to > openHourFrom,
+  );
+}
+
+function buildRealtimeDataPlanKey({
+  customWidgets,
+  monthComparison,
+  openScenarioComparisonWidgetIds = [],
+  visibleCardIds,
+}: {
+  customWidgets: RealtimeCustomWidget[];
+  monthComparison: LiveOperationalSettings["monthComparison"];
+  openScenarioComparisonWidgetIds?: readonly string[];
+  visibleCardIds: readonly string[];
+}) {
+  const visibleIds = new Set(visibleCardIds);
+  const openComparisonIds = new Set(openScenarioComparisonWidgetIds);
+  const definitionIds = new Set<string>();
+  let annualComparisonSource = false;
+  let comparisonSource = false;
+  let heatmapSource = false;
+  let minuteDay = false;
+  let refreshIntervalMs = MONTH_REFRESH_MS;
+  let rollingMinute = false;
+  const baselineDefinitionId =
+    monthComparison === "last_year"
+      ? OPERATIONAL_LAST_YEAR_MONTH_ID
+      : OPERATIONAL_PREVIOUS_MONTH_ID;
+
+  const requestRefresh = (intervalMs: number) => {
+    refreshIntervalMs = Math.min(refreshIntervalMs, intervalMs);
+  };
+  const requestLive = () => {
+    rollingMinute = true;
+    requestRefresh(REFRESH_MS);
+  };
+  const requestDay = () => requestRefresh(DAY_REFRESH_MS);
+  const addCurrentMonthComparison = (live = true) => {
+    definitionIds.add(CURRENT_MONTH_DAYS_ID);
+    definitionIds.add(baselineDefinitionId);
+    if (live) requestLive();
+  };
+
+  for (const cardId of visibleIds) {
+    if (cardId === "live_intraday_comparison") {
+      definitionIds.add("live_chart_hour");
+      definitionIds.add(OPERATIONAL_COMPARISON_HOURS_ID);
+      requestLive();
+    } else if (cardId === "live_target_progress") {
+      definitionIds.add("live_chart_hour");
+      addCurrentMonthComparison();
+    } else if (cardId === "live_month_previous_comparison") {
+      definitionIds.add(CURRENT_MONTH_DAYS_ID);
+      definitionIds.add(OPERATIONAL_PREVIOUS_MONTH_ID);
+      requestLive();
+    } else if (cardId === "live_month_year_comparison") {
+      definitionIds.add(CURRENT_MONTH_DAYS_ID);
+      definitionIds.add(OPERATIONAL_LAST_YEAR_MONTH_ID);
+      requestLive();
+    } else if (cardId === LIVE_DAY_MINUTES_ID) {
+      minuteDay = true;
+      definitionIds.add("live_chart_minute");
+      requestLive();
+    } else if (cardId === "live_chart_hour") {
+      definitionIds.add("live_chart_hour");
+      definitionIds.add(OPERATIONAL_COMPARISON_HOURS_ID);
+      addCurrentMonthComparison();
+    } else if (cardId === "live_moving_average_trend") {
+      definitionIds.add(OPERATIONAL_TREND_DAYS_ID);
+      requestDay();
+    } else if (cardId === "live_hourly_occupancy") {
+      definitionIds.add(OCCUPANCY_HOURS_ID);
+      requestLive();
+    } else if (cardId === "live_scenario_cumulative") {
+      definitionIds.add("live_chart_hour");
+      requestLive();
+    } else if (cardId === "live_scenario_totals_table") {
+      definitionIds.add("live_chart_hour");
+      definitionIds.add(CURRENT_MONTH_DAYS_ID);
+      requestLive();
+    } else if (
+      cardId === "live_current_year_monthly" ||
+      cardId === "live_current_year_accumulated"
+    ) {
+      annualComparisonSource = true;
+      definitionIds.add(CURRENT_MONTH_DAYS_ID);
+      definitionIds.add(OPERATIONAL_LAST_YEAR_MONTH_ID);
+    } else if (cardId === "live_month_hour_heatmap") {
+      heatmapSource = true;
+      requestDay();
+    } else if (
+      cardId === "live_month_access_ranking" ||
+      cardId === "live_month_peak_days" ||
+      cardId === "live_scenario_rose"
+    ) {
+      definitionIds.add(CURRENT_MONTH_DAYS_ID);
+      requestDay();
+    } else if (
+      cardId === "live_operational_month_comparison" ||
+      cardId === "live_operational_month_cumulative"
+    ) {
+      addCurrentMonthComparison();
+    } else if (
+      cardId === "live_today_scenario_comparison" ||
+      cardId === "live_today_location_comparison" ||
+      cardId === "live_today_sub_location_comparison"
+    ) {
+      definitionIds.add("live_chart_hour");
+      requestLive();
+    }
+  }
+
+  for (const widget of customWidgets) {
+    if (!visibleIds.has(`live_custom_${widget.id}`)) continue;
+
+    if (widget.kind === "scenario_comparison") {
+      if (openComparisonIds.has(widget.id)) {
+        comparisonSource = true;
+        requestLive();
+      }
+      continue;
+    }
+    if (widget.kind === "scope") {
+      definitionIds.add(`live_chart_${widget.granularity}`);
+      if (widget.granularity === "minute" || widget.granularity === "hour") {
+        requestLive();
+      } else if (
+        widget.granularity === "day" ||
+        widget.granularity === "week"
+      ) {
+        requestDay();
+      }
+      continue;
+    }
+
+    if (widget.widgetType === "heatmap") {
+      heatmapSource = true;
+      requestDay();
+    } else if (
+      widget.widgetType === "ranking" ||
+      widget.widgetType === "peak_days" ||
+      widget.widgetType === "rose"
+    ) {
+      definitionIds.add(CURRENT_MONTH_DAYS_ID);
+      requestDay();
+    } else if (widget.widgetType === "cumulative") {
+      definitionIds.add("live_chart_hour");
+      requestLive();
+    } else if (widget.widgetType === "totals_table") {
+      definitionIds.add("live_chart_hour");
+      definitionIds.add(CURRENT_MONTH_DAYS_ID);
+      requestLive();
+    }
+  }
+
+  const plan: RealtimeDataPlan = {
+    annualComparisonSource,
+    comparisonSource,
+    definitionIds: Array.from(definitionIds).sort(),
+    heatmapSource,
+    minuteDay,
+    refreshIntervalMs,
+    rollingMinute,
+  };
+  return plan.definitionIds.length ||
+    plan.annualComparisonSource ||
+    plan.comparisonSource ||
+    plan.heatmapSource ||
+    plan.minuteDay
+    ? JSON.stringify(plan)
+    : "";
+}
+
+function parseRealtimeDataPlanKey(key: string): RealtimeDataPlan {
+  if (!key) {
+    return {
+      annualComparisonSource: false,
+      comparisonSource: false,
+      definitionIds: [],
+      heatmapSource: false,
+      minuteDay: false,
+      refreshIntervalMs: MONTH_REFRESH_MS,
+      rollingMinute: false,
+    };
+  }
+  const parsed = JSON.parse(key) as Partial<RealtimeDataPlan>;
+  return {
+    annualComparisonSource: parsed.annualComparisonSource === true,
+    comparisonSource: parsed.comparisonSource === true,
+    definitionIds: Array.isArray(parsed.definitionIds)
+      ? parsed.definitionIds
+      : [],
+    heatmapSource: parsed.heatmapSource === true,
+    minuteDay: parsed.minuteDay === true,
+    refreshIntervalMs:
+      typeof parsed.refreshIntervalMs === "number" &&
+      Number.isFinite(parsed.refreshIntervalMs) &&
+      parsed.refreshIntervalMs > 0
+        ? parsed.refreshIntervalMs
+        : MONTH_REFRESH_MS,
+    rollingMinute: parsed.rollingMinute === true,
+  };
+}
+
+function isRealtimeNativeCoarseGranularity(
+  granularity: AggregateGranularity,
+): granularity is "day" | "week" | "month" {
+  return (
+    granularity === "day" ||
+    granularity === "week" ||
+    granularity === "month"
+  );
+}
+
+function realtimeNativeClosedTo(
+  definition: RealtimeChartDefinition,
+  now: Date,
+) {
+  if (!isRealtimeNativeCoarseGranularity(definition.granularity)) {
+    return new Date(definition.to);
+  }
+
+  const openBucketFrom = startOfAggregateBucket(
+    now,
+    definition.granularity,
+  );
+  return new Date(
+    Math.min(
+      definition.to.getTime(),
+      Math.max(definition.from.getTime(), openBucketFrom.getTime()),
+    ),
+  );
+}
+
+function realtimeNativeOpenBoundaryRange(
+  definition: RealtimeChartDefinition,
+  now: Date,
+) {
+  if (!isRealtimeNativeCoarseGranularity(definition.granularity)) return null;
+
+  const openBucketFrom = startOfAggregateBucket(
+    now,
+    definition.granularity,
+  );
+  const openDayFrom = startOfDay(now);
+  const openHourTo = endOfAggregateBucket(startOfHour(now), "hour");
+  const from = new Date(
+    Math.max(
+      definition.from.getTime(),
+      openBucketFrom.getTime(),
+      openDayFrom.getTime(),
+    ),
+  );
+  const to = new Date(
+    Math.min(definition.to.getTime(), openHourTo.getTime()),
+  );
+  return from < to ? { from, to } : null;
+}
+
+function realtimeNativeOpenBucketRange(
+  definition: RealtimeChartDefinition,
+  now: Date,
+) {
+  if (!isRealtimeNativeCoarseGranularity(definition.granularity)) return null;
+
+  const from = new Date(
+    Math.max(
+      definition.from.getTime(),
+      startOfAggregateBucket(now, definition.granularity).getTime(),
+    ),
+  );
+  const to = new Date(
+    Math.min(
+      definition.to.getTime(),
+      endOfAggregateBucket(startOfHour(now), "hour").getTime(),
+    ),
+  );
+  return from < to ? { from, to } : null;
+}
+
+function buildRealtimeNativeClosedQueries(
+  definitions: readonly RealtimeChartDefinition[],
+  now: Date,
+): RealtimeNativeAggregateQuery[] {
+  const queries: RealtimeNativeAggregateQuery[] = [];
+
+  (["day", "week", "month"] as const).forEach((granularity) => {
+    const ranges = definitions.flatMap((definition) => {
+      if (definition.granularity !== granularity) return [];
+      const to = realtimeNativeClosedTo(definition, now);
+      return definition.from < to
+        ? [{ from: new Date(definition.from), to }]
+        : [];
+    });
+
+    mergeRealtimeQueryRanges(ranges).forEach((range) => {
+      queries.push({ ...range, granularity });
+    });
   });
 
-  return `/analytics/aggregate?${params.toString()}`;
+  return queries;
+}
+
+async function loadCachedRealtimeNativeQuery({
+  cache,
+  cacheScope,
+  companyScopeId,
+  query,
+  signal,
+}: {
+  cache: Map<string, readonly AggregateEventRow[]>;
+  cacheScope: string;
+  companyScopeId: string;
+  query: RealtimeNativeAggregateQuery;
+  signal: AbortSignal;
+}) {
+  signal.throwIfAborted();
+  const key = JSON.stringify([
+    cacheScope,
+    query.granularity,
+    aggregateQueryIso(query.from, query.granularity),
+    aggregateQueryIso(query.to, query.granularity),
+    DEFAULT_METRIC_TYPE,
+  ]);
+  const cached = cache.get(key);
+  if (cached) return [...cached];
+
+  const rows = await fetchCompleteAggregateRange({
+    companyScopeId,
+    from: query.from,
+    granularity: query.granularity,
+    metricType: DEFAULT_METRIC_TYPE,
+    signal,
+    to: query.to,
+  });
+  signal.throwIfAborted();
+  cache.set(key, [...rows]);
+  while (cache.size > 64) {
+    const oldestKey = cache.keys().next().value;
+    if (typeof oldestKey !== "string") break;
+    cache.delete(oldestKey);
+  }
+  return rows;
+}
+
+function clearRealtimeHourlyCoverageCache(
+  cache: RealtimeHourlyCoverageCache,
+) {
+  cache.cacheScope = "";
+  cache.ranges = [];
+  cache.rows = [];
+}
+
+async function fetchIncrementalRealtimeHourlyRanges({
+  cacheScope,
+  companyScopeId,
+  coverageCache,
+  includeOpenHour,
+  now,
+  queryCache,
+  ranges,
+  signal,
+}: {
+  cacheScope: string;
+  companyScopeId: string;
+  coverageCache: RealtimeHourlyCoverageCache;
+  includeOpenHour: boolean;
+  now: Date;
+  queryCache: HourlyAggregateCache;
+  ranges: readonly { from: Date; to: Date }[];
+  signal: AbortSignal;
+}) {
+  signal.throwIfAborted();
+  if (coverageCache.cacheScope !== cacheScope) {
+    clearRealtimeHourlyCoverageCache(coverageCache);
+    coverageCache.cacheScope = cacheScope;
+  }
+
+  const requestedRanges = mergeRealtimeQueryRanges(ranges);
+  const currentHourFrom = startOfHour(now);
+  const currentHourTo = endOfAggregateBucket(currentHourFrom, "hour");
+  const closedRanges = mergeRealtimeQueryRanges(
+    requestedRanges.flatMap((range) => {
+      const to = new Date(
+        Math.min(range.to.getTime(), currentHourFrom.getTime()),
+      );
+      return range.from < to ? [{ from: range.from, to }] : [];
+    }),
+  );
+  const missingClosedRanges = subtractRealtimeQueryRanges(
+    closedRanges,
+    coverageCache.ranges,
+  );
+  const openRanges = includeOpenHour
+    ? mergeRealtimeQueryRanges(
+        requestedRanges.flatMap((range) => {
+          const from = new Date(
+            Math.max(range.from.getTime(), currentHourFrom.getTime()),
+          );
+          const to = new Date(
+            Math.min(range.to.getTime(), currentHourTo.getTime()),
+          );
+          return from < to ? [{ from, to }] : [];
+        }),
+      )
+    : [];
+  const [fetchedClosedRows, fetchedOpenRows] = await Promise.all([
+    missingClosedRanges.length
+      ? fetchBoundedHourlyAggregateRanges({
+          cache: queryCache,
+          cacheScope,
+          companyScopeId,
+          now,
+          ranges: missingClosedRanges,
+          signal,
+        })
+      : Promise.resolve<AggregateEventRow[]>([]),
+    Promise.all(
+      openRanges.map((range) =>
+        fetchCompleteAggregateRange({
+          companyScopeId,
+          from: range.from,
+          granularity: "hour",
+          metricType: DEFAULT_METRIC_TYPE,
+          signal,
+          to: range.to,
+        }),
+      ),
+    ).then((rows) => rows.flat()),
+  ]);
+  signal.throwIfAborted();
+
+  if (missingClosedRanges.length) {
+    coverageCache.rows.push(
+      ...filterRealtimeRowsToRanges(
+        fetchedClosedRows,
+        "hour",
+        missingClosedRanges,
+      ),
+    );
+    coverageCache.ranges = mergeRealtimeQueryRanges([
+      ...coverageCache.ranges,
+      ...missingClosedRanges,
+    ]);
+  }
+
+  const openRows = filterRealtimeRowsToRanges(
+    fetchedOpenRows,
+    "hour",
+    openRanges,
+  );
+  return filterRealtimeRowsToRanges(
+    [...coverageCache.rows, ...openRows],
+    "hour",
+    requestedRanges,
+  );
+}
+
+function subtractRealtimeQueryRanges(
+  requested: readonly { from: Date; to: Date }[],
+  covered: readonly { from: Date; to: Date }[],
+) {
+  const coverage = mergeRealtimeQueryRanges(covered);
+  return requested.flatMap((range) => {
+    let fragments = [{ from: new Date(range.from), to: new Date(range.to) }];
+    coverage.forEach((coveredRange) => {
+      fragments = fragments.flatMap((fragment) => {
+        if (
+          coveredRange.to <= fragment.from ||
+          coveredRange.from >= fragment.to
+        ) {
+          return [fragment];
+        }
+
+        return [
+          ...(coveredRange.from > fragment.from
+            ? [{ from: fragment.from, to: new Date(coveredRange.from) }]
+            : []),
+          ...(coveredRange.to < fragment.to
+            ? [{ from: new Date(coveredRange.to), to: fragment.to }]
+            : []),
+        ];
+      });
+    });
+    return fragments;
+  });
+}
+
+function clearRealtimeRollingMinuteCache(cache: RealtimeRollingMinuteCache) {
+  cache.cacheScope = "";
+  cache.coveredFrom = null;
+  cache.coveredTo = null;
+  cache.rows = [];
+}
+
+async function fetchIncrementalRealtimeMinuteWindow({
+  cache,
+  cacheScope,
+  companyScopeId,
+  definition,
+  now,
+  signal,
+}: {
+  cache: RealtimeRollingMinuteCache;
+  cacheScope: string;
+  companyScopeId: string;
+  definition: RealtimeChartDefinition;
+  now: Date;
+  signal: AbortSignal;
+}) {
+  signal.throwIfAborted();
+  if (cache.cacheScope !== cacheScope) {
+    clearRealtimeRollingMinuteCache(cache);
+    cache.cacheScope = cacheScope;
+  }
+
+  const currentMinuteFrom = startOfMinute(now);
+  const closedTo = new Date(
+    Math.min(definition.to.getTime(), currentMinuteFrom.getTime()),
+  );
+  const cacheCannotCoverWindow = Boolean(
+    !cache.coveredFrom ||
+      !cache.coveredTo ||
+      definition.from < cache.coveredFrom ||
+      cache.coveredTo > closedTo,
+  );
+  if (cacheCannotCoverWindow) {
+    cache.coveredFrom = null;
+    cache.coveredTo = null;
+    cache.rows = [];
+  }
+
+  const catchUpFrom = new Date(
+    Math.max(
+      cache.coveredTo?.getTime() ?? definition.from.getTime(),
+      definition.from.getTime(),
+    ),
+  );
+  if (catchUpFrom < closedTo) {
+    const catchUpRows = await fetchCompleteAggregateRange({
+      companyScopeId,
+      from: catchUpFrom,
+      granularity: "minute",
+      metricType: DEFAULT_METRIC_TYPE,
+      signal,
+      to: closedTo,
+    });
+    signal.throwIfAborted();
+    cache.rows = reconcileAggregateRows(
+      cache.rows,
+      "minute",
+      catchUpRows,
+      "minute",
+      catchUpFrom,
+      closedTo,
+    );
+    cache.coveredFrom = cache.coveredFrom ?? new Date(definition.from);
+    cache.coveredTo = new Date(closedTo);
+  }
+
+  cache.rows = cache.rows.filter((row) =>
+    aggregateBucketInRange(
+      row.bucket,
+      "minute",
+      definition.from,
+      closedTo,
+    ),
+  );
+  cache.coveredFrom = new Date(definition.from);
+
+  const openFrom = new Date(
+    Math.max(definition.from.getTime(), currentMinuteFrom.getTime()),
+  );
+  const openRows = openFrom < definition.to
+    ? await fetchCompleteAggregateRange({
+        companyScopeId,
+        from: openFrom,
+        granularity: "minute",
+        metricType: DEFAULT_METRIC_TYPE,
+        signal,
+        to: definition.to,
+      })
+    : [];
+  signal.throwIfAborted();
+
+  return filterRealtimeRowsToRanges(
+    [...cache.rows, ...openRows],
+    "minute",
+    [{ from: definition.from, to: definition.to }],
+  );
+}
+
+function filterRealtimeRowsToRanges(
+  rows: readonly AggregateEventRow[],
+  granularity: AggregateGranularity,
+  ranges: readonly { from: Date; to: Date }[],
+) {
+  return rows.filter((row) =>
+    ranges.some((range) =>
+      aggregateBucketInRange(
+        row.bucket,
+        granularity,
+        range.from,
+        range.to,
+      ),
+    ),
+  );
+}
+
+function selectRealtimeNativeDefinitionRows(
+  sharedRows: readonly AggregateEventRow[],
+  definition: RealtimeChartDefinition,
+  closedTo: Date,
+) {
+  if (definition.from >= closedTo) return [];
+
+  // Adjacent definitions intentionally share one wider request. Certify that
+  // response once, then give each widget only its own half-open slice; rows
+  // belonging to a neighbouring definition are valid, not a range violation.
+  const definitionRows = filterRealtimeRowsToRanges(
+    sharedRows,
+    definition.granularity,
+    [{ from: definition.from, to: closedTo }],
+  );
+  return requireAggregateRowsInRange(
+    definitionRows,
+    definition.granularity,
+    definition.from,
+    closedTo,
+    DEFAULT_METRIC_TYPE,
+  );
+}
+
+function buildRealtimeCanonicalHourRanges({
+  annualComparisonSource,
+  comparisonSource,
+  definitions,
+  heatmapSource,
+  now,
+}: {
+  annualComparisonSource: boolean;
+  comparisonSource: boolean;
+  definitions: readonly RealtimeChartDefinition[];
+  heatmapSource: boolean;
+  now: Date;
+}) {
+  const currentHourEnd = endOfAggregateBucket(startOfHour(now), "hour");
+  const ranges = definitions
+    .filter((definition) => CANONICAL_HOUR_DERIVED_IDS.has(definition.id))
+    .map((definition) => ({
+      from: definition.from,
+      to: new Date(
+        Math.min(definition.to.getTime(), currentHourEnd.getTime()),
+      ),
+    }))
+    .filter((range) => range.from < range.to);
+
+  definitions.forEach((definition) => {
+    const boundary = realtimeNativeOpenBoundaryRange(definition, now);
+    if (boundary) ranges.push(boundary);
+  });
+
+  if (heatmapSource) {
+    ranges.push({ from: startOfMonth(now), to: currentHourEnd });
+  }
+  if (comparisonSource) {
+    const comparisonDefinition = buildOperationalMonthHoursDefinition(now);
+    ranges.push({
+      from: comparisonDefinition.from,
+      to: comparisonDefinition.to,
+    });
+  }
+  if (annualComparisonSource) {
+    const currentDayFrom = startOfDay(now);
+    const comparableTo = startOfHour(now);
+    const previousYearFrom = shiftRealtimeYearClamped(currentDayFrom, -1);
+    const previousYearTo = shiftRealtimeYearClamped(comparableTo, -1);
+    if (currentDayFrom < comparableTo) {
+      ranges.push({ from: currentDayFrom, to: comparableTo });
+    }
+    if (previousYearFrom < previousYearTo) {
+      ranges.push({ from: previousYearFrom, to: previousYearTo });
+    }
+  }
+
+  return mergeRealtimeQueryRanges(ranges);
+}
+
+function shiftRealtimeYearClamped(value: Date, amount: number) {
+  const year = value.getFullYear() + amount;
+  const month = value.getMonth();
+  const maximumDay = new Date(year, month + 1, 0).getDate();
+  return new Date(
+    year,
+    month,
+    Math.min(value.getDate(), maximumDay),
+    value.getHours(),
+    value.getMinutes(),
+    value.getSeconds(),
+    value.getMilliseconds(),
+  );
+}
+
+function mergeRealtimeQueryRanges(
+  ranges: readonly { from: Date; to: Date }[],
+) {
+  const ordered = ranges
+    .filter((range) => range.from < range.to)
+    .map((range) => ({ from: new Date(range.from), to: new Date(range.to) }))
+    .sort((left, right) => left.from.getTime() - right.from.getTime());
+  const merged: Array<{ from: Date; to: Date }> = [];
+
+  for (const range of ordered) {
+    const previous = merged.at(-1);
+    if (!previous || range.from > previous.to) {
+      merged.push(range);
+      continue;
+    }
+    if (range.to > previous.to) previous.to = range.to;
+  }
+  return merged;
+}
+
+function buildRealtimeCanonicalHourDefinition(
+  now: Date,
+  ranges: readonly { from: Date; to: Date }[],
+) {
+  if (!ranges.length) return null;
+  return {
+    ...buildOperationalMonthHoursDefinition(now),
+    from: new Date(
+      Math.min(...ranges.map((range) => range.from.getTime())),
+    ),
+    to: new Date(Math.max(...ranges.map((range) => range.to.getTime()))),
+  };
+}
+
+function dedupeRealtimeDefinitions(
+  definitions: readonly RealtimeChartDefinition[],
+) {
+  return Array.from(
+    new Map(
+      definitions.map((definition) => [definition.id, definition] as const),
+    ).values(),
+  );
+}
+
+async function fetchLiveAnnualMonthlyHistory({
+  companyScopeId,
+  from,
+  signal,
+  to,
+}: {
+  companyScopeId: string;
+  from: Date;
+  signal: AbortSignal;
+  to: Date;
+}) {
+  const partitions = buildAnnualHistoryYearPartitions(from, to);
+  const rowsByPartition = new Array<AggregateEventRow[]>(partitions.length);
+  let nextPartition = 0;
+
+  async function worker() {
+    while (nextPartition < partitions.length) {
+      signal.throwIfAborted();
+      const index = nextPartition;
+      nextPartition += 1;
+      const partition = partitions[index];
+      rowsByPartition[index] = await fetchLiveAnnualMonthlyPartition({
+        companyScopeId,
+        from: partition.from,
+        signal,
+        to: partition.to,
+      });
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      {
+        length: Math.min(
+          ANNUAL_HISTORY_QUERY_CONCURRENCY,
+          partitions.length,
+        ),
+      },
+      () => worker(),
+    ),
+  );
+
+  return requireAggregateRowsInRange(
+    rowsByPartition.flat(),
+    "month",
+    from,
+    to,
+    DEFAULT_METRIC_TYPE,
+  );
+}
+
+function buildAnnualHistoryYearPartitions(from: Date, to: Date) {
+  const partitions: Array<{ from: Date; to: Date }> = [];
+  let cursor = new Date(from);
+
+  while (cursor < to) {
+    const nextYear = new Date(cursor.getFullYear() + 1, 0, 1);
+    const partitionTo = new Date(
+      Math.min(nextYear.getTime(), to.getTime()),
+    );
+    partitions.push({ from: cursor, to: partitionTo });
+    cursor = partitionTo;
+  }
+
+  return partitions;
+}
+
+async function fetchLiveAnnualMonthlyPartition({
+  companyScopeId,
+  from,
+  signal,
+  to,
+}: {
+  companyScopeId: string;
+  from: Date;
+  signal: AbortSignal;
+  to: Date;
+}): Promise<AggregateEventRow[]> {
+  signal.throwIfAborted();
+  const params = new URLSearchParams({
+    from: aggregateQueryIso(from, "month"),
+    granularity: "month",
+    metric_type: DEFAULT_METRIC_TYPE,
+    to: aggregateQueryIso(to, "month"),
+  });
+  const response = await apiFetch<AggregateEventsResponse>(
+    `/analytics/aggregate?${params.toString()}`,
+    { companyScopeId, signal },
+  );
+  const granularity = requireAggregateGranularity(
+    response.granularity,
+    "month",
+  );
+  const rows = requireAggregateRowsInRange(
+    response.data,
+    granularity,
+    from,
+    to,
+    DEFAULT_METRIC_TYPE,
+  );
+
+  if (rows.length < AGGREGATE_RESPONSE_ROW_CEILING) return rows;
+
+  const split = splitAnnualHistoryMonthPartition(from, to);
+  if (!split) {
+    throw new Error(
+      "O histórico mensal excedeu o limite seguro em um único mês.",
+    );
+  }
+  const [left, right] = split;
+  // The outer worker pool is the concurrency boundary. Keeping recursive
+  // splits sequential prevents a truncated response from multiplying into an
+  // unbounded request burst while preserving complete coverage.
+  const leftRows = await fetchLiveAnnualMonthlyPartition({
+    companyScopeId,
+    from: left.from,
+    signal,
+    to: left.to,
+  });
+  const rightRows = await fetchLiveAnnualMonthlyPartition({
+    companyScopeId,
+    from: right.from,
+    signal,
+    to: right.to,
+  });
+  return [...leftRows, ...rightRows];
+}
+
+function splitAnnualHistoryMonthPartition(from: Date, to: Date) {
+  const monthCount =
+    (to.getFullYear() - from.getFullYear()) * 12 +
+    to.getMonth() -
+    from.getMonth();
+  if (monthCount <= 1) return null;
+
+  const split = new Date(
+    from.getFullYear(),
+    from.getMonth() + Math.floor(monthCount / 2),
+    1,
+  );
+  return [
+    { from, to: split },
+    { from: split, to },
+  ] as const;
 }
 
 function hydrateRealtimeOpenBuckets(
@@ -6636,23 +8152,29 @@ function hydrateRealtimeOpenBuckets(
   );
   const canonicalState = next[OPERATIONAL_MONTH_HOURS_ID];
 
-  if (
-    minuteState &&
-    !minuteState.error &&
-    minuteState.granularity === "minute" &&
-    visibleMinuteState &&
-    !visibleMinuteState.error &&
-    visibleMinuteState.granularity === "minute"
-  ) {
-    const currentHourStart = startOfHour(now);
-    visibleMinuteState.rows = reconcileAggregateRows(
-      visibleMinuteState.rows,
-      "minute",
-      minuteState.rows,
-      "minute",
-      currentHourStart,
-      addMinutes(startOfMinute(now), 1),
-    );
+  if (minuteState && visibleMinuteState) {
+    if (
+      visibleMinuteState.error ||
+      visibleMinuteState.granularity !== "minute"
+    ) {
+      minuteState.rows = [];
+      minuteState.error =
+        visibleMinuteState.error ??
+        "Os dados por minuto da hora atual não estão disponíveis.";
+    } else {
+      const currentHourStart = startOfHour(now);
+      const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
+      minuteState.rows = visibleMinuteState.rows.filter((row) =>
+        aggregateBucketInRange(
+          row.bucket,
+          "minute",
+          currentHourStart,
+          currentMinuteEnd,
+        ),
+      );
+      minuteState.granularity = "minute";
+      delete minuteState.error;
+    }
   }
 
   if (
@@ -6709,19 +8231,81 @@ function hydrateRealtimeOpenBuckets(
     delete target.error;
   });
 
+  definitions
+    .filter((definition) => definition.granularity === "day")
+    .forEach((definition) => {
+      const target = next[definition.id];
+      const boundary = realtimeNativeOpenBoundaryRange(definition, now);
+      if (
+        !target ||
+        target.error ||
+        target.granularity !== definition.granularity ||
+        !boundary
+      ) {
+        return;
+      }
+
+      target.rows = reconcileAggregateRows(
+        target.rows,
+        definition.granularity,
+        canonicalState.rows,
+        "hour",
+        boundary.from,
+        boundary.to,
+      );
+    });
+
+  const openCoarseDayState = next[OPEN_COARSE_DAYS_ID];
+  if (
+    openCoarseDayState &&
+    !openCoarseDayState.error &&
+    openCoarseDayState.granularity === "day"
+  ) {
+    definitions
+      .filter(
+        (definition) =>
+          definition.granularity === "week" ||
+          definition.granularity === "month",
+      )
+      .forEach((definition) => {
+        const target = next[definition.id];
+        const boundary = realtimeNativeOpenBucketRange(definition, now);
+        if (!target || target.error || !boundary) return;
+
+        target.rows = reconcileAggregateRows(
+          target.rows,
+          definition.granularity,
+          openCoarseDayState.rows,
+          "day",
+          boundary.from,
+          boundary.to,
+        );
+      });
+  }
+
   return next;
 }
 
 async function fetchSubLocations(
   locations: Location[],
   companyScopeId?: string | null,
+  requireExplicitCompanyId = false,
 ) {
   const expectedCompanyId = companyScopeId?.trim() || undefined;
   const rows = await Promise.all(
     locations.map((location) =>
       apiFetch<unknown>(`/locations/${location.id}/sub-locations`, {
         companyScopeId: expectedCompanyId,
-      }).then((value) => requireSubLocationRows(value, expectedCompanyId)),
+      }).then((value) =>
+        requireSubLocationRows(
+          requireExplicitCompanyId
+            ? selectExplicitCompanyScopedRows(value, expectedCompanyId!, {
+                label: "sublocais",
+              }).rows
+            : value,
+          expectedCompanyId,
+        ),
+      ),
     ),
   );
 
@@ -6737,22 +8321,27 @@ async function fetchRealtimeWorkers(
 ): Promise<OptionalWorkerMetadata> {
   const companyScopeId = companyId?.trim() || undefined;
   const rows = await apiFetch<unknown>("/workers", { companyScopeId }).then(
-    (value) =>
-      requireWorkerRows(
-        value,
-        requireExplicitCompanyId ? undefined : companyScopeId,
-      ),
+    (value) => {
+      const payload = requireExplicitCompanyId
+        ? selectExplicitCompanyScopedRows(value, companyScopeId!, {
+            collectionKeys: ["data", "workers", "items", "results"],
+            label: "workers",
+          })
+        : null;
+      return requireWorkerRows(
+        payload?.rows ?? value,
+        companyScopeId,
+      );
+    },
   );
-  const { foreignRows, scopedRows } = partitionWorkersByCompanyScope(
+  const { scopedRows } = partitionWorkersByCompanyScope(
     rows,
     companyId,
   );
 
   return {
     rows: sortWorkersByActivity(collapseWorkerIdentityChains(scopedRows)),
-    warning: foreignRows.length
-      ? `${formatNumber(foreignRows.length)} worker(s) fora da empresa selecionada foram ocultados. Os cenários, câmeras e locais continuam disponíveis.`
-      : "",
+    warning: "",
   };
 }
 
@@ -6762,20 +8351,20 @@ async function fetchRealtimeScenarios(
 ): Promise<OptionalScenarioMetadata> {
   const companyScopeId = companyId?.trim() || undefined;
   const rows = await apiFetch<unknown>("/scenarios", { companyScopeId }).then(
-    (value) =>
-      requireScenarioRows(
-        value,
-        requireExplicitCompanyId ? undefined : companyScopeId,
-      ),
+    (value) => {
+      const payload = requireExplicitCompanyId
+        ? selectExplicitCompanyScopedRows(value, companyScopeId!, {
+            label: "cenários de Contagem",
+          })
+        : null;
+      return requireScenarioRows(payload?.rows ?? value, companyScopeId);
+    },
   );
   const scopedRows = filterScopedApiRows(rows, companyId);
-  const foreignRowCount = rows.length - scopedRows.length;
 
   return {
     rows: scopedRows,
-    warning: foreignRowCount
-      ? `${formatNumber(foreignRowCount)} cenário(s) de Contagem fora da empresa selecionada foram ocultados. Locations e sub-locations continuam disponíveis.`
-      : "",
+    warning: "",
   };
 }
 
@@ -6785,20 +8374,20 @@ function unavailableScenarioMetadata(
   return {
     rows: [],
     warning: infrastructureCatalogsAllowed
-      ? "Cenários de Contagem indisponíveis para a empresa selecionada. Locations e sub-locations continuam disponíveis."
+      ? "Cenários de Contagem indisponíveis para a empresa selecionada. As visões por local e sublocal continuam disponíveis."
       : "Cenários de Contagem indisponíveis para a empresa selecionada.",
   };
 }
 
 function unavailableWorkerMetadata(error: unknown): OptionalWorkerMetadata {
-  const detail =
-    error instanceof Error
-      ? error.message
-      : "A API não certificou os workers desta empresa.";
+  const detail = dashboardErrorMessage(
+    error,
+    "As fontes de contagem desta empresa ainda não estão disponíveis.",
+  );
 
   return {
     rows: [],
-    warning: `Vínculos de workers indisponíveis: ${detail}`,
+    warning: `Vínculos operacionais indisponíveis: ${detail}`,
   };
 }
 
@@ -6905,7 +8494,7 @@ function buildRealtimeScopeModes({
       workers,
     }).length
   ) {
-    modes.push({ label: "Location", value: "location" });
+    modes.push({ label: "Local", value: "location" });
   }
   if (
     buildRealtimeScopeOptions({
@@ -6920,16 +8509,42 @@ function buildRealtimeScopeModes({
       workers,
     }).length
   ) {
-    modes.push({ label: "Sub-location", value: "sub_location" });
+    modes.push({ label: "Sublocal", value: "sub_location" });
   }
 
   return modes;
 }
 
 function scopeModeLabel(mode: RealtimeScopeMode) {
-  if (mode === "location") return "Location";
-  if (mode === "sub_location") return "Sub-location";
+  if (mode === "location") return "Local";
+  if (mode === "sub_location") return "Sublocal";
   return "Cenário";
+}
+
+function resolveRealtimeWidgetScope(
+  scope: RealtimeScopeOption,
+  scenarios: Scenario[],
+  selection: LayoutCardRenderContext["scenarioSelection"],
+  preserveName = false,
+): RealtimeScopeOption {
+  if (selection.mode === "inherit") return scope;
+
+  const selectedScenarios = resolveWidgetScenarios(scenarios, selection);
+  const selectionLabel = widgetScenarioSelectionLabel(
+    selectedScenarios,
+    selection,
+  );
+  return {
+    ...scope,
+    description: `${scope.description} Composição do widget: ${selectionLabel}.`,
+    name: preserveName
+      ? scope.name
+      : scope.mode === "scenario"
+        ? selectionLabel
+        : `${scope.name} · ${selectionLabel}`,
+    scenario: undefined,
+    scenarios: selectedScenarios,
+  };
 }
 
 function buildScopePoints(
@@ -7167,8 +8782,34 @@ function aggregateScopeRowsByBucket(
   scope: RealtimeScopeOption,
   granularity: AggregateGranularity,
 ) {
-  if (scope.scenario) {
-    return aggregateScenarioRowsByBucket(rows, scope.scenario, granularity);
+  const selectedScenarios =
+    scope.scenarios ?? (scope.scenario ? [scope.scenario] : null);
+  if (selectedScenarios) {
+    const multipliers = buildCombinedScenarioMultiplierMap(selectedScenarios);
+    const cameraIds = new Set(scope.cameraIds);
+    const filterByCamera = scope.mode !== "scenario";
+    const totals = new Map<number, number>();
+
+    rows.forEach((row) => {
+      if (
+        filterByCamera &&
+        (!row.camera_id || !cameraIds.has(row.camera_id))
+      ) {
+        return;
+      }
+      const multiplier = row.line_count_id
+        ? multipliers.get(row.line_count_id)
+        : undefined;
+      if (multiplier === undefined) return;
+
+      const date = parseAggregateBucket(row.bucket, granularity);
+      if (!date) return;
+
+      const key = bucketKeyForGranularity(date, granularity);
+      totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0) * multiplier);
+    });
+
+    return totals;
   }
 
   const cameraIds = new Set(scope.cameraIds);
@@ -7182,30 +8823,6 @@ function aggregateScopeRowsByBucket(
 
     const key = bucketKeyForGranularity(date, granularity);
     totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0));
-  });
-
-  return totals;
-}
-
-function aggregateScenarioRowsByBucket(
-  rows: AggregateEventRow[],
-  scenario: Scenario,
-  granularity: AggregateGranularity,
-) {
-  const multipliers = scenarioMultiplierMap(scenario);
-  const totals = new Map<number, number>();
-
-  rows.forEach((row) => {
-    const multiplier = row.line_count_id
-      ? multipliers.get(row.line_count_id)
-      : undefined;
-    if (multiplier === undefined) return;
-
-    const date = parseAggregateBucket(row.bucket, granularity);
-    if (!date) return;
-
-    const key = bucketKeyForGranularity(date, granularity);
-    totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0) * multiplier);
   });
 
   return totals;
@@ -7256,7 +8873,9 @@ function sumScopeRowsInRange(
   to: Date,
   sourceGranularity: AggregateGranularity,
 ) {
-  if (!scope.scenario) {
+  const selectedScenarios =
+    scope.scenarios ?? (scope.scenario ? [scope.scenario] : null);
+  if (!selectedScenarios) {
     const cameraIds = new Set(scope.cameraIds);
 
     return rows.reduce((sum, row) => {
@@ -7270,10 +8889,17 @@ function sumScopeRowsInRange(
     }, 0);
   }
 
-  const scenario = scope.scenario;
-  const multipliers = scenarioMultiplierMap(scenario);
+  const multipliers = buildCombinedScenarioMultiplierMap(selectedScenarios);
+  const cameraIds = new Set(scope.cameraIds);
+  const filterByCamera = scope.mode !== "scenario";
 
   return rows.reduce((sum, row) => {
+    if (
+      filterByCamera &&
+      (!row.camera_id || !cameraIds.has(row.camera_id))
+    ) {
+      return sum;
+    }
     const multiplier = row.line_count_id
       ? multipliers.get(row.line_count_id)
       : undefined;
@@ -7420,8 +9046,17 @@ function buildOperationalHeatmapOption(
   points: OperationalHeatmapPoint[],
   month: Date,
   widgetColor = "#1267C4",
+  theme: "light" | "dark" = "light",
 ): EnterpriseChartOption {
   const maximum = Math.max(1, ...points.map((point) => point.total));
+  const cellBorderColor =
+    theme === "dark"
+      ? "rgba(226, 232, 240, 0.12)"
+      : "rgba(15, 23, 42, 0.09)";
+  const activeCellBorderColor =
+    theme === "dark"
+      ? "rgba(248, 250, 252, 0.24)"
+      : "rgba(15, 23, 42, 0.20)";
   const heatmapData = points
     .filter((point) => point.total > 0)
     .map((point) => [point.day - 1, point.hour, point.total]);
@@ -7466,7 +9101,7 @@ function buildOperationalHeatmapOption(
     visualMap: {
       calculable: true,
       inRange: {
-        color: monochromeHeatmapPalette(widgetColor),
+        color: monochromeHeatmapPalette(widgetColor, theme),
       },
       itemHeight: 210,
       itemWidth: 10,
@@ -7509,14 +9144,18 @@ function buildOperationalHeatmapOption(
         data: heatmapData,
         emphasis: {
           itemStyle: {
-            borderColor: "#13233A",
+            borderColor: activeCellBorderColor,
             borderWidth: 1,
-            shadowBlur: 8,
-            shadowColor: "rgba(18, 35, 58, 0.24)",
+            shadowBlur: 4,
+            shadowColor:
+              theme === "dark"
+                ? "rgba(248, 250, 252, 0.12)"
+                : "rgba(15, 23, 42, 0.14)",
           },
         },
         itemStyle: {
-          borderWidth: 0,
+          borderColor: cellBorderColor,
+          borderWidth: 1,
         },
         markArea: buildCalendarMarkAreaForMonth(month),
         name: "Intensidade horária",
@@ -9145,4 +10784,21 @@ function addYears(date: Date, years: number) {
 
 function isAbortError(error: unknown) {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function createRenderLazyValue<T>(build: () => T) {
+  let initialized = false;
+  let value!: T;
+
+  return () => {
+    if (!initialized) {
+      value = build();
+      initialized = true;
+    }
+    return value;
+  };
+}
+
+function dashboardErrorMessage(error: unknown, fallback: string) {
+  return userFacingErrorMessage(error, fallback);
 }

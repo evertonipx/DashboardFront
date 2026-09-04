@@ -14,31 +14,41 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import type { Scenario } from "@/lib/types";
 import { cn, formatNumber } from "@/lib/utils";
 
 type ScenarioSelectionMode = "all" | "custom";
 
-type ScenarioPickerProps = {
+export type ScenarioPickerOption = {
+  description?: string;
+  id: string;
+  lines?: readonly unknown[];
+  name: string;
+};
+
+export type ScenarioPickerProps = {
   allowAll?: boolean;
   className?: string;
+  initiallyOpen?: boolean;
   label?: string;
   loading?: boolean;
+  maxSelected?: number;
   mode: ScenarioSelectionMode;
   nounPlural?: string;
   nounSingular?: string;
   onModeChange: (mode: ScenarioSelectionMode) => void;
   onSelectedIdsChange: (ids: string[]) => void;
-  scenarios: Scenario[];
+  scenarios: ScenarioPickerOption[];
   selectedIds: string[];
-  summaryForItem?: (scenario: Scenario) => string;
+  summaryForItem?: (scenario: ScenarioPickerOption) => string;
 };
 
 export function ScenarioPicker({
   allowAll = true,
   className,
+  initiallyOpen = false,
   label = "Cenários",
   loading = false,
+  maxSelected,
   mode,
   nounPlural = "cenários",
   nounSingular = "cenário",
@@ -48,9 +58,20 @@ export function ScenarioPicker({
   selectedIds,
   summaryForItem,
 }: ScenarioPickerProps) {
-  const [open, setOpen] = React.useState(false);
+  const selectionLimit = normalizeSelectionLimit(maxSelected);
+  const effectiveSelectedIds = React.useMemo(
+    () =>
+      selectionLimit ? selectedIds.slice(0, selectionLimit) : selectedIds,
+    [selectedIds, selectionLimit],
+  );
+  const [open, setOpen] = React.useState(
+    () => initiallyOpen && mode === "custom",
+  );
   const [search, setSearch] = React.useState("");
-  const selectedIdSet = React.useMemo(() => new Set(selectedIds), [selectedIds]);
+  const selectedIdSet = React.useMemo(
+    () => new Set(effectiveSelectedIds),
+    [effectiveSelectedIds],
+  );
   const selectedScenarios = React.useMemo(
     () => scenarios.filter((scenario) => selectedIdSet.has(scenario.id)),
     [scenarios, selectedIdSet],
@@ -95,28 +116,43 @@ export function ScenarioPicker({
 
   function toggleScenario(scenarioId: string) {
     if (selectedIdSet.has(scenarioId)) {
-      onSelectedIdsChange(selectedIds.filter((id) => id !== scenarioId));
+      onSelectedIdsChange(
+        effectiveSelectedIds.filter((id) => id !== scenarioId),
+      );
       return;
     }
 
-    onSelectedIdsChange([...selectedIds, scenarioId]);
+    onSelectedIdsChange(
+      selectionLimit === 1
+        ? [scenarioId]
+        : [...effectiveSelectedIds, scenarioId],
+    );
   }
 
   function selectFiltered() {
-    const nextIds = new Set(selectedIds);
+    const nextIds = new Set(effectiveSelectedIds);
     filteredScenarios.forEach((scenario) => nextIds.add(scenario.id));
-    onSelectedIdsChange(Array.from(nextIds));
+    onSelectedIdsChange(
+      selectionLimit
+        ? Array.from(nextIds).slice(0, selectionLimit)
+        : Array.from(nextIds),
+    );
   }
 
   function removeFiltered() {
     const filteredIds = new Set(filteredScenarios.map((scenario) => scenario.id));
-    onSelectedIdsChange(selectedIds.filter((id) => !filteredIds.has(id)));
+    onSelectedIdsChange(
+      effectiveSelectedIds.filter((id) => !filteredIds.has(id)),
+    );
   }
 
   return (
     <div
       data-scenario-picker
-      className={cn("rounded-md border bg-background p-2", className)}
+      className={cn(
+        "@container min-w-0 overflow-hidden rounded-md border bg-background p-2",
+        className,
+      )}
     >
       <div
         data-scenario-picker-heading
@@ -126,26 +162,35 @@ export function ScenarioPicker({
           <div className="text-xs font-medium uppercase text-muted-foreground">
             {label}
           </div>
-          <div className="truncate text-sm font-semibold">{selectedSummary}</div>
+          <div
+            className="truncate text-sm font-semibold"
+            title={selectedSummary}
+          >
+            {selectedSummary}
+          </div>
         </div>
         {allowAll ? (
           <div
             data-scenario-picker-mode
-            className="grid w-full grid-cols-2 gap-2"
+            className="grid w-full grid-cols-2 gap-1.5"
           >
             <Button
               type="button"
               size="sm"
+              className="h-8 min-w-0 px-2 text-xs"
               variant={mode === "all" ? "default" : "outline"}
               onClick={selectAll}
+              aria-pressed={mode === "all"}
             >
               Todos
             </Button>
             <Button
               type="button"
               size="sm"
+              className="h-8 min-w-0 px-2 text-xs"
               variant={mode === "custom" ? "default" : "outline"}
               onClick={chooseCustom}
+              aria-pressed={mode === "custom"}
             >
               Escolher
             </Button>
@@ -154,29 +199,29 @@ export function ScenarioPicker({
       </div>
 
       {mode === "custom" ? (
-        <div className="mt-2 rounded-md bg-muted/20 p-2">
+        <div className="mt-1.5 min-w-0 rounded-md bg-muted/20 p-1.5">
           <div
             data-scenario-picker-selection
-            className="flex flex-col gap-2"
+            className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5"
           >
-            <div className="flex min-w-0 flex-wrap gap-1.5">
-              {selectedScenarios.slice(0, 4).map((scenario) => (
+            <div className="flex min-w-0 flex-nowrap items-center gap-1 overflow-hidden">
+              {selectedScenarios.slice(0, 2).map((scenario) => (
                 <Badge
                   key={scenario.id}
                   variant="outline"
-                  className="max-w-[180px] truncate bg-card"
+                  className="min-w-0 max-w-28 truncate bg-card px-1.5 @sm:max-w-36"
                   title={scenario.name}
                 >
                   {scenario.name}
                 </Badge>
               ))}
-              {selectedScenarios.length > 4 ? (
-                <Badge variant="secondary">
-                  +{formatNumber(selectedScenarios.length - 4)}
+              {selectedScenarios.length > 2 ? (
+                <Badge variant="secondary" className="shrink-0 px-1.5">
+                  +{formatNumber(selectedScenarios.length - 2)}
                 </Badge>
               ) : null}
               {!selectedScenarios.length ? (
-                <span className="text-xs text-muted-foreground">
+                <span className="truncate text-xs text-muted-foreground">
                   Abra a lista para escolher {nounPlural}.
                 </span>
               ) : null}
@@ -185,10 +230,11 @@ export function ScenarioPicker({
               type="button"
               size="sm"
               variant="ghost"
-              className="w-full shrink-0"
+              className="h-8 shrink-0 px-2 text-xs"
               data-scenario-picker-edit
               onClick={() => setOpen((value) => !value)}
               aria-expanded={open}
+              aria-label={`${open ? "Recolher" : "Editar"} seleção de ${label}`}
             >
               <ChevronDown
                 className={cn("h-3.5 w-3.5 transition", open && "rotate-180")}
@@ -225,28 +271,30 @@ export function ScenarioPicker({
                 className="pl-9"
               />
             </div>
-            <div className="grid min-w-0 gap-2 sm:grid-cols-2 lg:flex lg:shrink-0">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={selectFiltered}
-                disabled={!filteredScenarios.length}
-              >
-                Selecionar filtrados
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={removeFiltered}
-                disabled={
-                  !filteredScenarios.some((scenario) =>
-                    selectedIdSet.has(scenario.id),
-                  )
-                }
-              >
-                Remover filtrados
-              </Button>
-            </div>
+            {selectionLimit === 1 ? null : (
+              <div className="grid min-w-0 gap-2 sm:grid-cols-2 lg:flex lg:shrink-0">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={selectFiltered}
+                  disabled={!filteredScenarios.length}
+                >
+                  Selecionar filtrados
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={removeFiltered}
+                  disabled={
+                    !filteredScenarios.some((scenario) =>
+                      selectedIdSet.has(scenario.id),
+                    )
+                  }
+                >
+                  Remover filtrados
+                </Button>
+              </div>
+            )}
           </div>
 
           <div className="min-h-0 overflow-y-auto rounded-md border bg-background p-1">
@@ -300,7 +348,7 @@ export function ScenarioPicker({
               type="button"
               variant="ghost"
               onClick={() => onSelectedIdsChange([])}
-              disabled={!selectedIds.length}
+              disabled={!effectiveSelectedIds.length}
             >
               <X className="h-3.5 w-3.5" />
               Limpar seleção
@@ -321,4 +369,10 @@ function normalizeSearch(value: string) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+}
+
+function normalizeSelectionLimit(value: number | undefined) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
 }

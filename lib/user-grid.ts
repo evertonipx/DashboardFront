@@ -63,12 +63,7 @@ type AppliedStorageChange = {
 };
 
 export type UserGridSyncStatus =
-  | "idle"
-  | "loading"
-  | "ready"
-  | "saving"
-  | "saved"
-  | "error";
+  "idle" | "loading" | "ready" | "saving" | "saved" | "error";
 
 export type UserGridSyncStatusDetail = {
   status: UserGridSyncStatus;
@@ -80,8 +75,11 @@ export const USER_GRID_SYNC_STATUS_EVENT = "ipxdata:user-grid-sync-status";
 
 const GRID_FORMAT = "ipxdata-user-grid";
 const GRID_VERSION = 2;
-const LOCAL_SCAN_INTERVAL_MS = 5_000;
-const REMOTE_RECONCILE_INTERVAL_MS = 30_000;
+// Managed writers dispatch USER_GRID_LOCAL_CHANGE_EVENT immediately. This
+// slow scan is only a compatibility net for legacy direct localStorage writes;
+// remote reconciliation is event-driven (focus, visibility and online) so an
+// idle dashboard does not poll the preferences endpoint forever.
+const LOCAL_SCAN_INTERVAL_MS = 60_000;
 const SAVE_DEBOUNCE_MS = 600;
 const INITIAL_RETRY_DELAY_MS = 1_000;
 const MAX_RETRY_DELAY_MS = 30_000;
@@ -97,6 +95,7 @@ const MANAGED_GRID_BASE_KEYS = new Set([
   "ipxdata.counting-report-view-settings.v1",
   "ipxdata.dashboard-focus.v1",
   "ipxdata.dashboard-module.v1",
+  "ipxdata.demographics-range.v1",
   "ipxdata.legacy-dashboard-default-migration.v1.live",
   "ipxdata.legacy-dashboard-default-migration.v2",
   "ipxdata.live-dashboard-settings.v1",
@@ -113,12 +112,13 @@ const MANAGED_GRID_BASE_KEYS = new Set([
   "ipxdata.saved-live-views.v1",
   "ipxdata.sidebar-collapsed.v1",
   "ipxdata-theme",
+  "ipxdata.view-link-references.v1",
   "ipxdata.video-walls.v1",
 ]);
 
 const MANAGED_GRID_BASE_PATTERNS = [
-  /^ipxdata\.widget-view-presets\.v1\.(?:analysis|live|occupancy(?:-(?:analysis|live|reports))?|reports)$/,
-  /^ipxdata\.widget-view-preset-applied\.v1\.(?:analysis|live|occupancy(?:-(?:analysis|live|reports))?|reports)$/,
+  /^ipxdata\.widget-view-presets\.v1\.(?:analysis|demographics|live|occupancy(?:-(?:analysis|live|reports))?|reports)$/,
+  /^ipxdata\.widget-view-preset-applied\.v1\.(?:analysis|demographics|live|occupancy(?:-(?:analysis|live|reports))?|reports)$/,
   /^ipxdata\.live-custom-.+\.scenario-comparison\.v1$/,
   /^ipxdata\.reports(?:-custom-.+)?\.scenario-comparison\.v1$/,
 ];
@@ -169,9 +169,7 @@ export async function hydrateUserGridFromServer(
     needsRemoteRepair = false;
     pendingChanges.clear();
     lastEntryTimestamp = 0;
-    localSnapshot = new Map(
-      Object.entries(collectManagedEntries(cleanUserId)),
-    );
+    localSnapshot = new Map(Object.entries(collectManagedEntries(cleanUserId)));
     retryAttempt = 0;
   }
   activeUserId = cleanUserId;
@@ -180,7 +178,11 @@ export async function hydrateUserGridFromServer(
   emitStatus("loading");
 
   try {
-    const response = await readRemoteGrid(currentGeneration, cleanUserId, options);
+    const response = await readRemoteGrid(
+      currentGeneration,
+      cleanUserId,
+      options,
+    );
     if (!response) return false;
     const parsed = normalizeGridDocument(response.grid);
     if (!parsed.supported) {
@@ -211,9 +213,7 @@ export async function hydrateUserGridFromServer(
       cleanUserId,
       pendingChanges,
     );
-    localSnapshot = new Map(
-      Object.entries(collectManagedEntries(cleanUserId)),
-    );
+    localSnapshot = new Map(Object.entries(collectManagedEntries(cleanUserId)));
     emitSyntheticStorageEvents(appliedChanges);
     hydrated = true;
     emitHydrated();
@@ -244,12 +244,9 @@ export function startUserGridSync(userId: string) {
   activeListenerCleanup?.();
   if (!activeUserId) {
     activeUserId = cleanUserId;
-    localSnapshot = new Map(
-      Object.entries(collectManagedEntries(cleanUserId)),
-    );
+    localSnapshot = new Map(Object.entries(collectManagedEntries(cleanUserId)));
   }
 
-  let lastRemoteReconciliation = Date.now();
   const scan = () => captureLocalChanges(cleanUserId);
   const handleStorage = (event: StorageEvent) => {
     if (!event.key || isManagedGridKey(event.key, cleanUserId)) scan();
@@ -278,14 +275,13 @@ export function startUserGridSync(userId: string) {
   };
 
   const interval = window.setInterval(() => {
-    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState !== "visible"
+    ) {
       return;
     }
     scan();
-    if (Date.now() - lastRemoteReconciliation >= REMOTE_RECONCILE_INTERVAL_MS) {
-      lastRemoteReconciliation = Date.now();
-      void retryHydrationOrReconcile();
-    }
   }, LOCAL_SCAN_INTERVAL_MS);
   window.addEventListener("storage", handleStorage);
   window.addEventListener(USER_GRID_LOCAL_CHANGE_EVENT, handleLocalChange);
@@ -389,7 +385,8 @@ function captureSnapshotDelta(
   keys.forEach((key) => {
     const previousValue = localSnapshot.get(key);
     const currentValue = current.get(key);
-    if (previousValue === currentValue || !isManagedGridKey(key, userId)) return;
+    if (previousValue === currentValue || !isManagedGridKey(key, userId))
+      return;
     pendingChanges.set(key, {
       entry: createEntry(currentValue ?? null),
       revision: ++localRevision,
@@ -547,11 +544,8 @@ async function persistWithFreshBase(
     userId,
   );
   const savedDocument = mergeDocuments(preparedConfirmation.document, merged);
-  const capturedChangesConfirmed = Array.from(changes).every(
-    ([key, change]) => entriesEquivalent(
-      preparedConfirmation.document.entries[key],
-      change.entry,
-    ),
+  const capturedChangesConfirmed = Array.from(changes).every(([key, change]) =>
+    entriesEquivalent(preparedConfirmation.document.entries[key], change.entry),
   );
   needsRemoteRepair = Boolean(
     confirmation.needsUpgrade ||
@@ -564,9 +558,7 @@ async function persistWithFreshBase(
     userId,
     pendingChanges,
   );
-  localSnapshot = new Map(
-    Object.entries(collectManagedEntries(userId)),
-  );
+  localSnapshot = new Map(Object.entries(collectManagedEntries(userId)));
   emitSyntheticStorageEvents(appliedChanges);
   return capturedChangesConfirmed;
 }
@@ -635,9 +627,7 @@ async function reconcileRemote() {
         userId,
         pendingChanges,
       );
-      localSnapshot = new Map(
-        Object.entries(collectManagedEntries(userId)),
-      );
+      localSnapshot = new Map(Object.entries(collectManagedEntries(userId)));
       emitSyntheticStorageEvents(appliedChanges);
       emitHydrated();
       emitStatus("ready");
@@ -666,10 +656,9 @@ function scheduleHydrationRetry(delay?: number) {
     return;
   }
   clearRetryTimer();
-  const retryDelay = delay ?? Math.min(
-    INITIAL_RETRY_DELAY_MS * 2 ** retryAttempt,
-    MAX_RETRY_DELAY_MS,
-  );
+  const retryDelay =
+    delay ??
+    Math.min(INITIAL_RETRY_DELAY_MS * 2 ** retryAttempt, MAX_RETRY_DELAY_MS);
   retryAttempt += 1;
   retryTimer = window.setTimeout(() => {
     retryTimer = null;
@@ -685,9 +674,7 @@ async function readRemoteGrid(
   const response = await apiFetch<UserGridResponse>("/users/me/grid", {
     expectedAccessToken: options.expectedAccessToken,
   });
-  return isCurrentContext(currentGeneration, userId, options)
-    ? response
-    : null;
+  return isCurrentContext(currentGeneration, userId, options) ? response : null;
 }
 
 function prepareHydratedDocument(
@@ -796,8 +783,8 @@ function rebasePendingChanges(
 
 function withEntryTimestamp(entry: UserGridEntry, updatedAt: string) {
   return isTombstone(entry)
-    ? { deleted: true, updatedAt } satisfies UserGridTombstone
-    : { updatedAt, value: entry.value } satisfies UserGridValueEntry;
+    ? ({ deleted: true, updatedAt } satisfies UserGridTombstone)
+    : ({ updatedAt, value: entry.value } satisfies UserGridValueEntry);
 }
 
 function mergeDocuments(
@@ -812,7 +799,10 @@ function mergeDocuments(
   ]);
   keys.forEach((key) => {
     const hasRemote = Object.prototype.hasOwnProperty.call(remote.entries, key);
-    const hasPrevious = Object.prototype.hasOwnProperty.call(previous.entries, key);
+    const hasPrevious = Object.prototype.hasOwnProperty.call(
+      previous.entries,
+      key,
+    );
     if (!hasRemote) {
       entries[key] = cloneUnknown(previous.entries[key]);
       return;
@@ -839,7 +829,10 @@ function chooseNewerEntry(remote: unknown, previous: unknown) {
   const remoteEntry = asUserGridEntry(remote);
   const previousEntry = asUserGridEntry(previous);
   if (!remoteEntry || !previousEntry) return remote;
-  const comparison = compareTimestamp(remoteEntry.updatedAt, previousEntry.updatedAt);
+  const comparison = compareTimestamp(
+    remoteEntry.updatedAt,
+    previousEntry.updatedAt,
+  );
   if (comparison > 0) return remote;
   if (comparison < 0) return previous;
   // A tombstone wins a timestamp tie, preventing an equally old value from
@@ -854,15 +847,14 @@ function chooseNewerEntry(remote: unknown, previous: unknown) {
     : previous;
 }
 
-function documentEntriesEqual(
-  left: UserGridDocument,
-  right: UserGridDocument,
-) {
+function documentEntriesEqual(left: UserGridDocument, right: UserGridDocument) {
   const leftKeys = Object.keys(left.entries);
   const rightKeys = Object.keys(right.entries);
   return Boolean(
     leftKeys.length === rightKeys.length &&
-    leftKeys.every((key) => entriesEquivalent(left.entries[key], right.entries[key])),
+    leftKeys.every((key) =>
+      entriesEquivalent(left.entries[key], right.entries[key]),
+    ),
   );
 }
 
@@ -950,7 +942,9 @@ function collectManagedEntries(userId: string) {
     // The server document remains usable even when browser storage is blocked.
   }
   return Object.fromEntries(
-    Object.entries(entries).sort(([left], [right]) => left.localeCompare(right)),
+    Object.entries(entries).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
   );
 }
 
@@ -972,7 +966,9 @@ function managedGridBaseKey(key: string, userId: string) {
   const companyMarker = ".company.";
   const companyIndex = leadingScope.lastIndexOf(companyMarker);
   if (companyIndex < 0) return leadingScope;
-  const encodedCompanyId = leadingScope.slice(companyIndex + companyMarker.length);
+  const encodedCompanyId = leadingScope.slice(
+    companyIndex + companyMarker.length,
+  );
   return encodedCompanyId && !encodedCompanyId.includes(".")
     ? leadingScope.slice(0, companyIndex)
     : null;
@@ -984,7 +980,9 @@ function legacyManagedGridScope(key: string) {
   const companyMarkerIndex = key.lastIndexOf(companyMarker);
   if (companyMarkerIndex > 0) {
     const baseKey = key.slice(0, companyMarkerIndex);
-    const encodedCompanyId = key.slice(companyMarkerIndex + companyMarker.length);
+    const encodedCompanyId = key.slice(
+      companyMarkerIndex + companyMarker.length,
+    );
     if (
       isManagedGridBaseKey(baseKey) &&
       encodedCompanyId &&
@@ -997,7 +995,8 @@ function legacyManagedGridScope(key: string) {
   for (let separatorIndex = key.lastIndexOf("."); separatorIndex > 0;) {
     const baseKey = key.slice(0, separatorIndex);
     const companyId = key.slice(separatorIndex + 1);
-    if (companyId && isManagedGridBaseKey(baseKey)) return { baseKey, companyId };
+    if (companyId && isManagedGridBaseKey(baseKey))
+      return { baseKey, companyId };
     separatorIndex = key.lastIndexOf(".", separatorIndex - 1);
   }
   return null;
@@ -1027,7 +1026,10 @@ function normalizeGridDocument(value: unknown): NormalizedGrid {
 
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
-    if (record.format === GRID_FORMAT && numericVersion(record.version) > GRID_VERSION) {
+    if (
+      record.format === GRID_FORMAT &&
+      numericVersion(record.version) > GRID_VERSION
+    ) {
       return {
         document: createEmptyDocument(),
         needsUpgrade: false,
@@ -1094,7 +1096,8 @@ function decodePotentialByteArray(value: unknown) {
     !Array.isArray(value) ||
     !value.length ||
     !value.every(
-      (item) => Number.isInteger(item) && Number(item) >= 0 && Number(item) <= 255,
+      (item) =>
+        Number.isInteger(item) && Number(item) >= 0 && Number(item) <= 255,
     )
   ) {
     return value;
@@ -1127,7 +1130,9 @@ function asUserGridEntry(value: unknown): UserGridEntry | null {
   const updatedAt = validTimestamp(value.updatedAt);
   if (!updatedAt) return null;
   if (value.deleted === true) return { deleted: true, updatedAt };
-  return typeof value.value === "string" ? { updatedAt, value: value.value } : null;
+  return typeof value.value === "string"
+    ? { updatedAt, value: value.value }
+    : null;
 }
 
 function isTombstone(entry: UserGridEntry): entry is UserGridTombstone {
@@ -1159,7 +1164,8 @@ function numericVersion(value: unknown) {
 }
 
 function validTimestamp(value: unknown) {
-  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return null;
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value)))
+    return null;
   return value;
 }
 
@@ -1178,7 +1184,11 @@ function nextTimestamp() {
 }
 
 function nextTimestampAfter(timestamp: string) {
-  const next = Math.max(Date.now(), lastEntryTimestamp + 1, Date.parse(timestamp) + 1);
+  const next = Math.max(
+    Date.now(),
+    lastEntryTimestamp + 1,
+    Date.parse(timestamp) + 1,
+  );
   lastEntryTimestamp = next;
   return new Date(next).toISOString();
 }
@@ -1195,7 +1205,8 @@ function isCurrentContext(
   return Boolean(
     currentGeneration === generation &&
     activeUserId === userId &&
-    activeHydrationOptions.expectedAccessToken === options.expectedAccessToken &&
+    activeHydrationOptions.expectedAccessToken ===
+      options.expectedAccessToken &&
     canApply(options) &&
     canApply(activeHydrationOptions),
   );

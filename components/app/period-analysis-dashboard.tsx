@@ -20,7 +20,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { AiAnalysisAction } from "@/components/app/ai-analysis-action";
+import { AiAnalysisAction } from "@/components/app/deferred-ai-analysis-action";
 import { AnalysisDateRangePicker } from "@/components/app/occupancy-date-range-picker";
 import {
   CardLayout,
@@ -30,14 +30,16 @@ import {
   COMPACT_METRIC_LAYOUT_DEFAULTS,
   CompactMetricCard,
 } from "@/components/app/compact-metric-card";
-import { EChart, applyChartTypePreference } from "@/components/app/echart";
+import { EChart } from "@/components/app/deferred-echart";
 import {
   MonitorModeButton,
   MonitorModeExitHint,
   useMonitorMode,
 } from "@/components/app/monitor-mode";
 import { ReportExportActions } from "@/components/app/report-export-actions";
+import { applyChartTypePreference } from "@/lib/chart-type-preference";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
+import { useTheme } from "@/components/app/theme-provider";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
 import { WidgetCardActions } from "@/components/app/widget-card-actions";
 import { WidgetTitleText } from "@/components/app/widget-appearance";
@@ -73,10 +75,8 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { hasVisualAdminAccess } from "@/lib/access";
 import {
-  aggregateQueryIso,
+  aggregateBucketInRange,
   endOfAggregateBucket,
-  requireAggregateGranularity,
-  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
@@ -84,6 +84,7 @@ import {
   fetchBoundedHourlyAggregateRanges,
   type HourlyAggregateCache,
 } from "@/lib/aggregate-hour-query";
+import { fetchCompleteAggregateRange } from "@/lib/aggregate-range-query";
 import {
   reconcileAggregateRows,
   rollupAggregateRows,
@@ -91,9 +92,13 @@ import {
 import { apiFetch } from "@/lib/api";
 import { readCameraGroups } from "@/lib/camera-groups";
 import { companyDateKey } from "@/lib/company-time-zone";
-import { normalizeOccupancyAnalysisDateRangeInput } from "@/lib/occupancy-analysis-window";
+import {
+  normalizeOccupancyAnalysisDateRangeInput,
+  shiftOccupancyAnalysisDateInput,
+} from "@/lib/occupancy-analysis-window";
 import {
   filterScopedApiRows,
+  usesMasterCrossCompanyScope,
   useEffectiveCompanyScopeId,
   useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
@@ -102,7 +107,6 @@ import { canReadInfrastructureCatalogs } from "@/lib/permissions";
 import {
   buildCountingAnalysisRangePlan,
   countingAnalysisHourlyDetailRange,
-  resolveCountingAnalysisVisualGranularity,
 } from "@/lib/counting-analysis-range-plan";
 import {
   requireCameraRows,
@@ -111,6 +115,7 @@ import {
   requireSubLocationRows,
 } from "@/lib/metadata-validation";
 import { buildLiveAnalysisImport } from "@/lib/live-analysis-import";
+import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import {
   buildPeriodAnalysisWidgetModel,
   formatPeriodAnalysisRange,
@@ -141,7 +146,6 @@ import {
   PERIOD_ANALYSIS_WIDGETS_UPDATED_EVENT,
   createDefaultPeriodAnalysisSettings,
   deletePeriodAnalysisWidget,
-  loadPeriodAnalysisSettings,
   loadPeriodAnalysisWidgets,
   savePeriodAnalysisSettings,
   savePeriodAnalysisWidgets,
@@ -162,12 +166,8 @@ import {
 } from "@/lib/scenario-analytics";
 import { inferOccupancyScenarios } from "@/lib/scenario-direction";
 import { requireScenarioRows } from "@/lib/scenario-validation";
-import type {
-  AggregateEventsResponse,
-  AggregateGranularity,
-  Location,
-  Scenario,
-} from "@/lib/types";
+import type { AggregateGranularity, Location, Scenario } from "@/lib/types";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import { cn, formatNumber, formatTime } from "@/lib/utils";
 import {
   orderByCardPreferences,
@@ -196,6 +196,20 @@ type AnalysisDayCacheEntry = Readonly<{
 }>;
 
 type AnalysisDayCache = Map<string, AnalysisDayCacheEntry>;
+type PendingAnalysisDayRequest = Readonly<{
+  promise: Promise<PeriodAnalysisDataset>;
+  revision: string;
+  signal?: AbortSignal;
+}>;
+
+const pendingAnalysisDayRequests = new WeakMap<
+  AnalysisDayCache,
+  Map<string, PendingAnalysisDayRequest>
+>();
+const pendingAnalysisDatasetsBySignal = new WeakMap<
+  AbortSignal,
+  Map<string, Promise<PeriodAnalysisDataset>>
+>();
 
 const widgetKindOptions: Array<{
   description: string;
@@ -447,8 +461,28 @@ export function PeriodAnalysisDashboard({
 }: PeriodAnalysisDashboardProps) {
   const { user } = useAuth();
   const companyScopeId = useEffectiveCompanyScopeId(user);
-  const companyTimeZoneResolution =
+  const masterCrossCompanyScope = usesMasterCrossCompanyScope(
+    user,
+    companyScopeId,
+  );
+  const rawCompanyTimeZoneResolution =
     useEffectiveCompanyTimeZoneResolution(user);
+  // Storage/user-grid hydration can publish an equivalent resolution object
+  // more than once. Keep its identity stable so those visual synchronizations
+  // never restart an already completed analysis request.
+  const companyTimeZoneResolution = React.useMemo(
+    () => ({
+      fallback: rawCompanyTimeZoneResolution.fallback,
+      source: rawCompanyTimeZoneResolution.fallback
+        ? ("fallback" as const)
+        : ("deployment-default" as const),
+      timeZone: rawCompanyTimeZoneResolution.timeZone,
+    }),
+    [
+      rawCompanyTimeZoneResolution.fallback,
+      rawCompanyTimeZoneResolution.timeZone,
+    ],
+  );
   const companyTimeZone = companyTimeZoneResolution.timeZone;
   const canEditVisual = hasVisualAdminAccess(user);
   const infrastructureCatalogsAllowed = canReadInfrastructureCatalogs(user);
@@ -468,14 +502,22 @@ export function PeriodAnalysisDashboard({
   const [metadataError, setMetadataError] = React.useState("");
   const [dataLoadError, setDataLoadError] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
+  const [analysisRequested, setAnalysisRequested] = React.useState(false);
   const [queryVersion, setQueryVersion] = React.useState(0);
+  const [configurationReadyKey, setConfigurationReadyKey] = React.useState("");
   const [layoutOrganizerOpen, setLayoutOrganizerOpen] = React.useState(false);
   const [layoutReorderMode, setLayoutReorderMode] = React.useState(false);
   const [widgetDialogOpen, setWidgetDialogOpen] = React.useState(false);
   const [widgetForm, setWidgetForm] =
     React.useState<PeriodAnalysisWidgetInput>(() => emptyWidgetForm());
   const requestRef = React.useRef<AbortController | null>(null);
-  const timeZoneBlockedRef = React.useRef(false);
+  const requestKeyRef = React.useRef("");
+  const completedRequestKeyRef = React.useRef("");
+  const requestAbortTimerRef = React.useRef<number | null>(null);
+  const metadataRequestRef = React.useRef<AbortController | null>(null);
+  const metadataRequestKeyRef = React.useRef("");
+  const metadataLoadedKeyRef = React.useRef("");
+  const metadataAbortTimerRef = React.useRef<number | null>(null);
   const hasLoadedDataRef = React.useRef(false);
   const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(new Map());
   const dailyAggregateCacheRef = React.useRef<AnalysisDayCache>(new Map());
@@ -488,6 +530,12 @@ export function PeriodAnalysisDashboard({
       )!,
     [appliedSettings],
   );
+  const configurationScopeKey = [
+    companyScopeId ?? "",
+    user?.id ?? "",
+    companyTimeZoneResolution.timeZone,
+    companyTimeZoneResolution.fallback ? "fallback" : "certified",
+  ].join("|");
   const singleDayAnalysis = appliedSettings.mode === "day";
   const operationalPeriod = React.useMemo(
     () => periodAnalysisOperationalRange(period),
@@ -501,8 +549,6 @@ export function PeriodAnalysisDashboard({
     () => countingAnalysisHourlyDetailRange(operationalPeriod),
     [operationalPeriod],
   );
-  const autoRefreshEnabled =
-    new Date() >= period.from && new Date() < period.to;
   const widgetIds = React.useMemo(
     () => widgets.map((widget) => widget.id),
     [widgets],
@@ -548,26 +594,73 @@ export function PeriodAnalysisDashboard({
     () => orderByCardPreferences(widgets, preferences),
     [preferences, widgets],
   );
+  const hasQueryWidgets = queryWidgets.length > 0;
+  const scenarioCatalogSize = scenarios.length;
+  const hasScenarios = scenarioCatalogSize > 0;
   const dataRequirementsKey = React.useMemo(
     () => {
-      const effectiveWidgetGranularity = (widget: PeriodAnalysisWidget) =>
-        widget.kind === "comparison"
-          ? resolveCountingAnalysisVisualGranularity(
-              widget.granularity,
-              period,
-              periodAnalysisComparisonSeriesCount(widget, scenarios),
-            )
-          : periodAnalysisEffectiveGranularity(widget, period);
-      const needsExactHour =
-        singleDayAnalysis ||
-        queryWidgets.some(
-          (widget) =>
-              widget.kind === "hour_profile" ||
-              widget.kind === "heatmap" ||
-              widget.kind === "hourly_occupancy" ||
-              ((widget.kind === "timeline" || widget.kind === "comparison") &&
-                effectiveWidgetGranularity(widget) === "hour"),
+      const effectiveWidgetGranularities = (
+        widget: PeriodAnalysisWidget,
+      ) => {
+        // The response contains every source series before the widget applies
+        // its composition. Request only the one resolution that is safe for
+        // the actual payload and that the current widget will render.
+        return [
+          periodAnalysisEffectiveGranularity(
+            widget,
+            period,
+            Math.max(1, scenarioCatalogSize),
+          ),
+        ];
+      };
+      const usesSelectedPeriodDataset = new Set<PeriodAnalysisWidgetKind>([
+        "day_total",
+        "scenario_cumulative",
+        "scope_totals",
+        "summary",
+      ]);
+      const needsDay = queryWidgets.some((widget) => {
+        if (widget.kind === "heatmap" || widget.kind === "hour_profile") {
+          return false;
+        }
+        if (widget.kind === "hourly_occupancy") return false;
+        if (widget.kind === "timeline" || widget.kind === "comparison") {
+          return effectiveWidgetGranularities(widget).some(
+            (granularity) =>
+              granularity !== "hour" && granularity !== "minute",
+          );
+        }
+        if (
+          widget.kind === "year_monthly" ||
+          widget.kind === "year_accumulated"
+        ) {
+          return false;
+        }
+        if (usesSelectedPeriodDataset.has(widget.kind)) {
+          return !singleDayAnalysis;
+        }
+        if (widget.kind === "target_progress") return !singleDayAnalysis;
+        // Accumulated, calendar and ranking widgets consume the consolidated
+        // daily source even for a single selected date. Annual widgets use
+        // the dedicated January-to-cutoff monthly source instead.
+        return true;
+      });
+      const needsHour = queryWidgets.some((widget) => {
+        if (widget.kind === "hour_profile") return true;
+        if (widget.kind === "timeline" || widget.kind === "comparison") {
+          return effectiveWidgetGranularities(widget).includes("hour");
+        }
+        return (
+          singleDayAnalysis &&
+          (usesSelectedPeriodDataset.has(widget.kind) ||
+            widget.kind === "target_progress" ||
+            widget.kind === "totals_table")
         );
+      });
+      const needsContextHour = queryWidgets.some(
+        (widget) =>
+          widget.kind === "heatmap" || widget.kind === "hourly_occupancy",
+      );
       const baselineKinds = new Set<PeriodAnalysisWidgetKind>([
         "cumulative",
         "cumulative_metric",
@@ -583,21 +676,23 @@ export function PeriodAnalysisDashboard({
               .map((widget) => widget.baseline),
           ),
         ).sort(),
-        contextHour: needsExactHour,
-        hour: needsExactHour,
+        contextHour: needsContextHour,
+        day: needsDay,
+        hour: needsHour,
         minute: queryWidgets.some(
           (widget) =>
             (widget.kind === "timeline" || widget.kind === "comparison") &&
-            effectiveWidgetGranularity(widget) === "minute",
+            effectiveWidgetGranularities(widget).includes("minute"),
         ),
         month: queryWidgets.some(
           (widget) =>
             widget.kind === "year_monthly" ||
             widget.kind === "year_accumulated",
         ),
+        trendHistory: queryWidgets.some((widget) => widget.kind === "trend"),
       });
     },
-    [period, queryWidgets, scenarios, singleDayAnalysis],
+    [period, queryWidgets, scenarioCatalogSize, singleDayAnalysis],
   );
   const hourlyDetailRequested = React.useMemo(() => {
     const requirements = JSON.parse(dataRequirementsKey) as {
@@ -606,17 +701,53 @@ export function PeriodAnalysisDashboard({
     };
     return requirements.contextHour || requirements.hour;
   }, [dataRequirementsKey]);
+  const dayDatasetRequested = React.useMemo(
+    () =>
+      (JSON.parse(dataRequirementsKey) as { day: boolean }).day,
+    [dataRequirementsKey],
+  );
   const hourlyDetailDayCount = React.useMemo(
     () => buildCountingAnalysisRangePlan(hourlyDetailRange).spanDays,
     [hourlyDetailRange],
   );
 
   React.useEffect(() => {
-    const loadedSettings = loadPeriodAnalysisSettings(companyScopeId, user?.id);
+    if (metadataAbortTimerRef.current !== null) {
+      window.clearTimeout(metadataAbortTimerRef.current);
+      metadataAbortTimerRef.current = null;
+    }
+    if (requestAbortTimerRef.current !== null) {
+      window.clearTimeout(requestAbortTimerRef.current);
+      requestAbortTimerRef.current = null;
+    }
+    if (metadataRequestRef.current) {
+      abortRequest(
+        metadataRequestRef.current,
+        "A empresa da análise foi alterada.",
+      );
+      metadataRequestRef.current = null;
+      metadataRequestKeyRef.current = "";
+    }
+    if (requestRef.current) {
+      abortRequest(requestRef.current, "A empresa da análise foi alterada.");
+      requestRef.current = null;
+      requestKeyRef.current = "";
+    }
+    completedRequestKeyRef.current = "";
+    const companyTodayInput = companyDateKey(new Date(), companyTimeZone);
+    const previousDayInput = shiftOccupancyAnalysisDateInput(
+      companyTodayInput,
+      -1,
+    );
+    const defaultSettings: PeriodAnalysisSettings = {
+      from: previousDayInput,
+      mode: "day",
+      to: previousDayInput,
+    };
     const normalizedRange = normalizeOccupancyAnalysisDateRangeInput(
-      loadedSettings.from,
-      loadedSettings.to,
-      companyDateKey(new Date(), companyTimeZone),
+      defaultSettings.from,
+      defaultSettings.to,
+      companyTodayInput,
     );
     const settings: PeriodAnalysisSettings = {
       from: normalizedRange.startInput,
@@ -626,16 +757,24 @@ export function PeriodAnalysisDashboard({
     };
     hasLoadedDataRef.current = false;
     clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
-    dailyAggregateCacheRef.current.clear();
+    clearAnalysisDayCache(dailyAggregateCacheRef.current);
+    metadataLoadedKeyRef.current = "";
     setMetadataError("");
     setDataLoadError("");
     setScenarios([]);
     setScopeOptions([]);
     setData(emptyData());
     setLastUpdated(null);
+    setAnalysisRequested(true);
     setAppliedSettings(settings);
     setWidgets(loadPeriodAnalysisWidgets(companyScopeId, user?.id));
-  }, [companyScopeId, companyTimeZone, user?.id]);
+    setConfigurationReadyKey(configurationScopeKey);
+  }, [
+    companyScopeId,
+    companyTimeZone,
+    configurationScopeKey,
+    user?.id,
+  ]);
 
   React.useEffect(() => {
     function syncWidgets() {
@@ -654,8 +793,54 @@ export function PeriodAnalysisDashboard({
   }, [companyScopeId, user?.id]);
 
   React.useEffect(() => {
-    let cancelled = false;
+    if (metadataAbortTimerRef.current !== null) {
+      window.clearTimeout(metadataAbortTimerRef.current);
+      metadataAbortTimerRef.current = null;
+    }
+    if (configurationReadyKey !== configurationScopeKey) return;
+
+    const metadataRequestKey = JSON.stringify([
+      companyScopeId ?? "",
+      infrastructureCatalogsAllowed,
+      manager,
+      masterCrossCompanyScope,
+    ]);
+    const scheduleAbort = (activeController: AbortController) => {
+      metadataAbortTimerRef.current = window.setTimeout(() => {
+        metadataAbortTimerRef.current = null;
+        if (
+          metadataRequestRef.current !== activeController ||
+          metadataRequestKeyRef.current !== metadataRequestKey
+        ) {
+          return;
+        }
+        abortRequest(
+          activeController,
+          "O carregamento dos filtros foi encerrado.",
+        );
+        metadataRequestRef.current = null;
+        metadataRequestKeyRef.current = "";
+      }, 0);
+    };
+    if (metadataLoadedKeyRef.current === metadataRequestKey) return;
+    const existingController = metadataRequestRef.current;
+    if (
+      existingController &&
+      !existingController.signal.aborted &&
+      metadataRequestKeyRef.current === metadataRequestKey
+    ) {
+      return () => scheduleAbort(existingController);
+    }
+
     const controller = new AbortController();
+    if (metadataRequestRef.current) {
+      abortRequest(
+        metadataRequestRef.current,
+        "Os filtros da análise foram alterados.",
+      );
+    }
+    metadataRequestRef.current = controller;
+    metadataRequestKeyRef.current = metadataRequestKey;
     const requestCompanyScopeId = companyScopeId?.trim() || undefined;
     setLoadingScenarios(true);
     setMetadataError("");
@@ -680,30 +865,62 @@ export function PeriodAnalysisDashboard({
         : Promise.resolve([]),
     ])
       .then(async ([scenarioRows, cameraRows, locationRows]) => {
-        if (cancelled) return;
+        if (
+          controller.signal.aborted ||
+          metadataRequestRef.current !== controller
+        ) {
+          return;
+        }
+        const scenarioPayload = masterCrossCompanyScope
+          ? selectExplicitCompanyScopedRows(
+              scenarioRows,
+              requestCompanyScopeId!,
+              { label: "cenários de Contagem" },
+            ).rows
+          : scenarioRows;
+        const cameraPayload = masterCrossCompanyScope
+          ? selectExplicitCompanyScopedRows(
+              cameraRows,
+              requestCompanyScopeId!,
+              { label: "câmeras" },
+            ).rows
+          : cameraRows;
+        const locationPayload = masterCrossCompanyScope
+          ? selectExplicitCompanyScopedRows(
+              locationRows,
+              requestCompanyScopeId!,
+              { label: "locais" },
+            ).rows
+          : locationRows;
         const scopedScenarios = filterScopedApiRows(
-          requireScenarioRows(scenarioRows, requestCompanyScopeId),
+          requireScenarioRows(scenarioPayload, requestCompanyScopeId),
           companyScopeId,
         );
         const scopedCameras = filterScopedApiRows(
-          requireCameraRows(cameraRows, requestCompanyScopeId),
+          requireCameraRows(cameraPayload, requestCompanyScopeId),
           companyScopeId,
         );
         const scopedLocations = filterScopedApiRows(
-          requireLocationRows(locationRows, requestCompanyScopeId),
+          requireLocationRows(locationPayload, requestCompanyScopeId),
           companyScopeId,
         );
         const subLocations = await fetchAnalysisSubLocations(
           scopedLocations,
           requestCompanyScopeId,
           controller.signal,
+          masterCrossCompanyScope,
         );
         requireInfrastructureRelations({
           cameras: scopedCameras,
           locations: scopedLocations,
           subLocations,
         });
-        if (cancelled) return;
+        if (
+          controller.signal.aborted ||
+          metadataRequestRef.current !== controller
+        ) {
+          return;
+        }
         const visibleScenarios = manager
           ? scopedScenarios
           : scopedScenarios.filter((scenario) => scenario.active);
@@ -719,64 +936,148 @@ export function PeriodAnalysisDashboard({
             subLocations,
           }),
         );
+        metadataLoadedKeyRef.current = metadataRequestKey;
       })
       .catch((error) => {
         if (isAbortError(error, controller.signal)) return;
-        if (cancelled) return;
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Não foi possível carregar os cenários.";
+        if (
+          controller.signal.aborted ||
+          metadataRequestRef.current !== controller
+        ) {
+          return;
+        }
+        const message = analysisErrorMessage(
+          error,
+          "Não foi possível carregar os cenários.",
+        );
         setMetadataError(message);
         setScenarios([]);
         setScopeOptions([]);
         toast.error(message);
       })
       .finally(() => {
-        if (!cancelled) setLoadingScenarios(false);
+        if (metadataRequestRef.current === controller) {
+          metadataRequestRef.current = null;
+          metadataRequestKeyRef.current = "";
+          setLoadingScenarios(false);
+        }
       });
 
-    return () => {
-      cancelled = true;
-      abortRequest(controller, "O carregamento dos filtros foi substituído.");
-    };
-  }, [companyScopeId, infrastructureCatalogsAllowed, manager]);
+    return () => scheduleAbort(controller);
+  }, [
+    companyScopeId,
+    configurationReadyKey,
+    configurationScopeKey,
+    infrastructureCatalogsAllowed,
+    manager,
+    masterCrossCompanyScope,
+  ]);
 
   React.useEffect(() => {
+    if (requestAbortTimerRef.current !== null) {
+      window.clearTimeout(requestAbortTimerRef.current);
+      requestAbortTimerRef.current = null;
+    }
+    // Each visit starts from the latest fully closed day. Subsequent picker
+    // edits still start only when the user applies them.
+    if (!analysisRequested) {
+      setLoadingData(false);
+      return;
+    }
+    // The initial render still contains fallback settings and no catalog. A
+    // request here would be immediately aborted and repeated after hydration.
+    // Wait for the persisted configuration and the selected company's
+    // scenarios, then execute one semantic analysis request.
+    if (
+      configurationReadyKey !== configurationScopeKey ||
+      loadingScenarios
+    ) {
+      return;
+    }
+    if (metadataError || !hasScenarios || !hasQueryWidgets) {
+      if (requestRef.current) abortRequest(requestRef.current);
+      requestRef.current = null;
+      requestKeyRef.current = "";
+      completedRequestKeyRef.current = "";
+      hasLoadedDataRef.current = false;
+      setData(emptyData());
+      setLastUpdated(null);
+      setLoadingData(false);
+      return;
+    }
+
     const requirements = JSON.parse(dataRequirementsKey) as {
       baseline: PeriodAnalysisBaseline[];
       contextHour: boolean;
+      day: boolean;
       hour: boolean;
       minute: boolean;
       month: boolean;
+      trendHistory: boolean;
     };
     try {
       requireCertifiedCountingRuntimeTimeZone(companyTimeZoneResolution);
-      timeZoneBlockedRef.current = false;
     } catch (error) {
       if (requestRef.current) abortRequest(requestRef.current);
       requestRef.current = null;
-      timeZoneBlockedRef.current = true;
+      requestKeyRef.current = "";
+      completedRequestKeyRef.current = "";
       hasLoadedDataRef.current = false;
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Fuso da empresa não disponível.";
+      const message = analysisErrorMessage(
+        error,
+        "Fuso da empresa não disponível.",
+      );
       setData(emptyData());
       setDataLoadError(message);
       setLastUpdated(null);
       setLoadingData(false);
       return;
     }
+    const requestKey = JSON.stringify([
+      companyScopeId ?? "",
+      companyTimeZone,
+      period.from.toISOString(),
+      period.to.toISOString(),
+      dataRequirementsKey,
+      queryVersion,
+    ]);
+    // Storage/user-grid and timezone hydration may publish the same semantic
+    // state more than once. A completed analysis stays valid until its data
+    // key changes or the user explicitly increments queryVersion.
+    if (completedRequestKeyRef.current === requestKey) return;
+    const scheduleAbort = (activeController: AbortController) => {
+      requestAbortTimerRef.current = window.setTimeout(() => {
+        requestAbortTimerRef.current = null;
+        if (
+          requestRef.current !== activeController ||
+          requestKeyRef.current !== requestKey
+        ) {
+          return;
+        }
+        abortRequest(activeController, "A consulta da análise foi encerrada.");
+        requestRef.current = null;
+        requestKeyRef.current = "";
+      }, 0);
+    };
+    const existingController = requestRef.current;
+    if (
+      existingController &&
+      !existingController.signal.aborted &&
+      requestKeyRef.current === requestKey
+    ) {
+      return () => scheduleAbort(existingController);
+    }
+    completedRequestKeyRef.current = "";
     const controller = new AbortController();
     if (requestRef.current) abortRequest(requestRef.current);
     requestRef.current = controller;
+    requestKeyRef.current = requestKey;
     const announceErrors = !hasLoadedDataRef.current;
     if (announceErrors) setLoadingData(true);
     const now = new Date();
     const dayCacheOptions = {
       cache: dailyAggregateCacheRef.current,
-      cacheScope: `analysis:${companyScopeId ?? "jwt-company"}`,
+      cacheScope: `analysis:${companyScopeId ?? "jwt-company"}:${companyTimeZone}`,
       revision: companyDateKey(now, companyTimeZone),
     };
 
@@ -786,7 +1087,9 @@ export function PeriodAnalysisDashboard({
         ? addMinutes(startOfMinute(now), 1)
         : period.to;
     const dayRange = {
-      from: addDays(operationalPeriod.from, -29),
+      from: requirements.trendHistory
+        ? addDays(operationalPeriod.from, -29)
+        : operationalPeriod.from,
       to: periodCoverageTo,
     };
     const monthRange = {
@@ -824,7 +1127,7 @@ export function PeriodAnalysisDashboard({
       ? fetchAnalysisHourlyDatasets(
           requiredHourRanges,
           hourlyAggregateCacheRef.current,
-          `analysis:${companyScopeId ?? "jwt-company"}`,
+          `analysis:${companyScopeId ?? "jwt-company"}:${companyTimeZone}`,
           now,
           companyScopeId,
           controller.signal,
@@ -853,160 +1156,156 @@ export function PeriodAnalysisDashboard({
             controller.signal,
           )
       : Promise.resolve(emptyDataset("minute"));
-    const dayPromise = fetchAnalysisConsolidatedDayDataset(
-      dayRange,
-      companyScopeId,
-      controller.signal,
-      dayCacheOptions,
-    );
-    const monthDayPromise = requirements.month
-      ? fetchAnalysisConsolidatedDayDataset(
-          monthRange,
-          companyScopeId,
-          controller.signal,
-          dayCacheOptions,
-        )
-      : Promise.resolve(emptyDataset("day"));
+    const requestedConsolidatedDayRanges = [
+      ...(requirements.day ? [dayRange] : []),
+      ...(requirements.month ? [monthRange] : []),
+      ...baselineRanges.flatMap(([baseline, baselineRange]) => {
+        const comparableRange =
+          baselineComparableRanges.get(baseline) ?? baselineRange;
+        return sameAnalysisRange(baselineRange, comparableRange)
+          ? [baselineRange]
+          : [baselineRange, comparableRange];
+      }),
+    ];
+    const consolidatedDayDatasetsPromise =
+      fetchAnalysisConsolidatedDayDatasets(
+        requestedConsolidatedDayRanges,
+        companyScopeId,
+        controller.signal,
+        dayCacheOptions,
+      );
     const currentMinuteRange = analysisCurrentMinuteRange(
       requiredHourRanges,
       now,
     );
     const reconciliationMinutePromise = currentMinuteRange
-      ? fetchAnalysisDataset(
-          "minute",
-          currentMinuteRange,
-          companyScopeId,
-          controller.signal,
-        )
+      ? requirements.minute
+        ? minutePromise
+        : fetchAnalysisDataset(
+            "minute",
+            currentMinuteRange,
+            companyScopeId,
+            controller.signal,
+          )
       : Promise.resolve(emptyDataset("minute"));
 
     Promise.all([
-      dayPromise,
       hourPromise,
       contextHourPromise,
       minutePromise,
-      monthDayPromise,
       reconciliationMinutePromise,
-      Promise.all(
-        baselineRanges.map(async ([baseline, baselineRange]) => {
-          const comparableRange =
-            baselineComparableRanges.get(baseline) ?? baselineRange;
-          const datasetPromise = fetchAnalysisConsolidatedDayDataset(
-            baselineRange,
-            companyScopeId,
-            controller.signal,
-            dayCacheOptions,
-          );
-          const comparableDatasetPromise = sameAnalysisRange(
-            baselineRange,
-            comparableRange,
-          )
-            ? datasetPromise
-            : fetchAnalysisConsolidatedDayDataset(
-                comparableRange,
-                companyScopeId,
-                controller.signal,
-                dayCacheOptions,
-              );
-          const [dataset, comparableDataset] = await Promise.all([
-            datasetPromise,
-            comparableDatasetPromise,
-          ]);
-          return [
-            baseline,
-            baselineRange,
-            dataset,
-            comparableRange,
-            comparableDataset,
-          ] as const;
-        }),
-      ),
+      consolidatedDayDatasetsPromise,
     ])
       .then(
         ([
-          rawDay,
           hour,
           rawContextHour,
           minute,
-          rawMonthDays,
           reconciliationMinute,
-          rawBaselineEntries,
+          consolidatedDayDatasets,
         ]) => {
-        if (controller.signal.aborted) return;
-        const contextHour = reconcileAnalysisHourlyDataset(
-          rawContextHour,
-          reconciliationMinute,
-          boundedHourlyRange,
-          currentMinuteRange,
-        );
-        const reconciledHour = requirements.hour
-          ? contextHour
-          : hour;
-        const reconciledMinute = requirements.minute
-          ? reconcileAnalysisMinuteDataset(
-              minute,
-              reconciliationMinute,
-              currentMinuteRange,
-            )
-          : minute;
-        const day = requiredHourRanges.length
-          ? mergeExactHoursIntoDays(
-              rawDay,
-              contextHour,
-              boundedHourlyRange,
-            )
-          : rawDay;
-        const monthDays = requiredHourRanges.length
-          ? mergeExactHoursIntoDays(
-              rawMonthDays,
-              contextHour,
-              boundedHourlyRange,
-            )
-          : rawMonthDays;
-        const month = requirements.month
-          ? rollupAnalysisDataset(monthDays, "month", monthRange)
-          : emptyDataset("month");
-        const baselineEntries = rawBaselineEntries.map(
-          ([baseline, , dataset]) => [baseline, dataset] as const,
-        );
-        const baselineComparableEntries = rawBaselineEntries.map(
-          ([baseline, , , , dataset]) => [baseline, dataset] as const,
-        );
-        setData({
-          baseline: Object.fromEntries(baselineEntries),
-          baselineComparable: Object.fromEntries(
-            baselineComparableEntries,
-          ),
-          contextHour,
-          day,
-          hour: reconciledHour,
-          minute: reconciledMinute,
-          month,
-        });
-        setDataLoadError("");
-        hasLoadedDataRef.current = true;
-        setLastUpdated(new Date());
-        if (
-          announceErrors &&
-          (day.error ||
-            hour.error ||
-            contextHour.error ||
-            reconciledMinute.error ||
-            month.error ||
-            baselineEntries.some(([, dataset]) => dataset.error) ||
-            baselineComparableEntries.some(([, dataset]) => dataset.error))
-        ) {
-          toast.error("Alguns dados da análise não puderam ser carregados.");
-        }
+          if (controller.signal.aborted) return;
+          const rawDay = requirements.day
+            ? consolidatedDayDatasets.get(analysisRangeKey(dayRange)) ??
+              emptyDataset("day")
+            : emptyDataset("day");
+          const rawMonthDays = requirements.month
+            ? consolidatedDayDatasets.get(analysisRangeKey(monthRange)) ??
+              emptyDataset("day")
+            : emptyDataset("day");
+          const rawBaselineEntries = baselineRanges.map(
+            ([baseline, baselineRange]) => {
+              const comparableRange =
+                baselineComparableRanges.get(baseline) ?? baselineRange;
+              return [
+                baseline,
+                baselineRange,
+                consolidatedDayDatasets.get(
+                  analysisRangeKey(baselineRange),
+                ) ?? emptyDataset("day"),
+                comparableRange,
+                consolidatedDayDatasets.get(
+                  analysisRangeKey(comparableRange),
+                ) ?? emptyDataset("day"),
+              ] as const;
+            },
+          );
+          const exactHour = reconcileAnalysisHourlyDataset(
+            requirements.contextHour ? rawContextHour : hour,
+            reconciliationMinute,
+            boundedHourlyRange,
+            currentMinuteRange,
+          );
+          const contextHour = requirements.contextHour
+            ? exactHour
+            : emptyDataset("hour");
+          const reconciledHour = requirements.hour ? exactHour : hour;
+          const reconciledMinute = requirements.minute
+            ? reconcileAnalysisMinuteDataset(
+                minute,
+                reconciliationMinute,
+                currentMinuteRange,
+              )
+            : minute;
+          const day = requiredHourRanges.length
+            ? mergeExactHoursIntoDays(
+                rawDay,
+                exactHour,
+                boundedHourlyRange,
+              )
+            : rawDay;
+          const monthDays = requiredHourRanges.length
+            ? mergeExactHoursIntoDays(
+                rawMonthDays,
+                exactHour,
+                boundedHourlyRange,
+              )
+            : rawMonthDays;
+          const month = requirements.month
+            ? rollupAnalysisDataset(monthDays, "month", monthRange)
+            : emptyDataset("month");
+          const baselineEntries = rawBaselineEntries.map(
+            ([baseline, , dataset]) => [baseline, dataset] as const,
+          );
+          const baselineComparableEntries = rawBaselineEntries.map(
+            ([baseline, , , , dataset]) => [baseline, dataset] as const,
+          );
+          setData({
+            baseline: Object.fromEntries(baselineEntries),
+            baselineComparable: Object.fromEntries(
+              baselineComparableEntries,
+            ),
+            contextHour,
+            day,
+            hour: reconciledHour,
+            minute: reconciledMinute,
+            month,
+          });
+          setDataLoadError("");
+          hasLoadedDataRef.current = true;
+          completedRequestKeyRef.current = requestKey;
+          setLastUpdated(new Date());
+          if (
+            announceErrors &&
+            (day.error ||
+              hour.error ||
+              contextHour.error ||
+              reconciledMinute.error ||
+              month.error ||
+              baselineEntries.some(([, dataset]) => dataset.error) ||
+              baselineComparableEntries.some(([, dataset]) => dataset.error))
+          ) {
+            toast.error("Alguns dados da análise não puderam ser carregados.");
+          }
         },
       )
       .catch((error) => {
         if (isAbortError(error, controller.signal)) return;
         if (requestRef.current !== controller) return;
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Não foi possível carregar a análise.";
+        const message = analysisErrorMessage(
+          error,
+          "Não foi possível carregar a análise.",
+        );
         setData(emptyData());
         setDataLoadError(message);
         hasLoadedDataRef.current = false;
@@ -1015,49 +1314,30 @@ export function PeriodAnalysisDashboard({
       .finally(() => {
         if (requestRef.current === controller) {
           requestRef.current = null;
+          requestKeyRef.current = "";
           setLoadingData(false);
         }
       });
 
-    return () => {
-      abortRequest(controller);
-    };
+    return () => scheduleAbort(controller);
   }, [
+    analysisRequested,
     companyScopeId,
     companyTimeZone,
     companyTimeZoneResolution,
+    configurationReadyKey,
+    configurationScopeKey,
     dataRequirementsKey,
+    hasQueryWidgets,
+    hasScenarios,
     hourlyDetailRange,
+    loadingScenarios,
+    metadataError,
     operationalPeriod,
     period,
     queryVersion,
     singleDayAnalysis,
   ]);
-
-  React.useEffect(() => {
-    if (!autoRefreshEnabled) return;
-
-    const refreshWhenIdle = () => {
-      if (
-        document.visibilityState !== "visible" ||
-        timeZoneBlockedRef.current ||
-        requestRef.current !== null
-      ) {
-        return;
-      }
-      setQueryVersion((value) => value + 1);
-    };
-    const interval = window.setInterval(
-      refreshWhenIdle,
-      analysisRangePlan.refreshIntervalMs,
-    );
-    document.addEventListener("visibilitychange", refreshWhenIdle);
-
-    return () => {
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", refreshWhenIdle);
-    };
-  }, [analysisRangePlan.refreshIntervalMs, autoRefreshEnabled, period]);
 
   const analysisCertificationError =
     metadataError ||
@@ -1071,34 +1351,6 @@ export function PeriodAnalysisDashboard({
       ...Object.values(data.baseline),
       ...Object.values(data.baselineComparable ?? {}),
     ].find((dataset) => dataset?.error)?.error;
-  const modelByWidgetId = React.useMemo(
-    () =>
-      new Map(
-        queryWidgets.map((widget) => [
-          widget.id,
-          buildPeriodAnalysisWidgetModel({
-            chartType: widgetChartTypeById.get(widget.id),
-            color: widgetColorById.get(widget.id),
-            companyTimeZone,
-            data,
-            period,
-            scenarios,
-            scopeOptions,
-            widget,
-          }),
-        ]),
-      ),
-    [
-      data,
-      companyTimeZone,
-      period,
-      scenarios,
-      scopeOptions,
-      widgetChartTypeById,
-      widgetColorById,
-      queryWidgets,
-    ],
-  );
   const layoutCards = widgets.map((widget) => {
     const compact = isCompactAnalysisWidget(widget.kind);
     const fullWidth = isFullWidthAnalysisWidget(widget.kind);
@@ -1143,25 +1395,26 @@ export function PeriodAnalysisDashboard({
       label: widget.title,
       previewKind: resolveWidgetBentoPreviewKindFromDataKind(widget.kind),
       titleEditable: true,
-      node: (
-        <PeriodAnalysisCard
+      // CardLayout only invokes function nodes near the viewport. Keeping the
+      // model inside a child component also lets React memoize it across
+      // unrelated dashboard renders instead of materializing every widget at
+      // once when a large response is published.
+      node: () => (
+        <PeriodAnalysisCardRuntime
+          analysisRequested={analysisRequested}
           canConfigure={canEditVisual}
-          effectiveGranularity={
-            modelByWidgetId.get(widget.id)?.appliedGranularity ??
-            periodAnalysisEffectiveGranularity(widget, period)
-          }
+          chartType={widgetChartTypeById.get(widget.id)}
+          color={widgetColorById.get(widget.id)}
+          companyTimeZone={companyTimeZone}
+          data={data}
           loading={loadingData || loadingScenarios}
-          model={
-            modelByWidgetId.get(widget.id) ?? deferredAnalysisWidgetModel(widget)
-          }
           monitorMode={monitorMode}
           onEdit={() => openEditWidget(widget)}
           onRemove={() => removeWidget(widget.id)}
-          scenarioSummary={periodAnalysisScenarioSummary(
-            widget,
-            scenarios,
-            scopeOptions,
-          )}
+          period={period}
+          scenarios={scenarios}
+          scopeOptions={scopeOptions}
+          sourceSeriesCount={Math.max(1, scenarioCatalogSize)}
           widget={widget}
         />
       ),
@@ -1171,34 +1424,79 @@ export function PeriodAnalysisDashboard({
         !compact,
     };
   });
-  const reportPayload = composePeriodAnalysisReport({
-    models: queryWidgets.flatMap((widget) => {
-      const model = modelByWidgetId.get(widget.id);
-      return model
-        ? [
-            {
-              chartType: widgetChartTypeById.get(widget.id),
-              defaultTitle: widget.title,
-              model,
-              title: widgetTitleById.get(widget.id) ?? widget.title,
-            },
-          ]
-        : [];
-    }),
-    period,
-    timeZone: companyTimeZone,
-  });
+  function buildPeriodAnalysisReportPayload(): ReportPayload {
+    return composePeriodAnalysisReport({
+      models: queryWidgets.flatMap((widget) => {
+        const model = buildPeriodAnalysisWidgetModel({
+          chartType: widgetChartTypeById.get(widget.id),
+          color: widgetColorById.get(widget.id),
+          companyTimeZone,
+          data,
+          period,
+          scenarios,
+          scopeOptions,
+          sourceSeriesCount: Math.max(1, scenarioCatalogSize),
+          widget,
+        });
+        return [
+          {
+            chartType: widgetChartTypeById.get(widget.id),
+            defaultTitle: widget.title,
+            model,
+            scenarioSummary: periodAnalysisScenarioSummary(
+              widget,
+              scenarios,
+              scopeOptions,
+            ),
+            title: widgetTitleById.get(widget.id) ?? widget.title,
+          },
+        ];
+      }),
+      period,
+      timeZone: companyTimeZone,
+    });
+  }
 
-  function buildAiPeriodAnalysisPayload(): ReportPayload {
-    if (data.day.error) {
+  async function buildAiPeriodAnalysisPayload(
+    signal?: AbortSignal,
+  ): Promise<ReportPayload> {
+    signal?.throwIfAborted();
+    const now = new Date();
+    const sourceTo =
+      now >= period.from && now < period.to
+        ? new Date(
+            Math.min(
+              period.to.getTime(),
+              addMinutes(startOfMinute(now), 1).getTime(),
+            ),
+          )
+        : period.to;
+    const dailySourceRange = { from: period.from, to: sourceTo };
+    let aiDayDataset = data.day;
+    if (!dayDatasetRequested || aiDayDataset.error) {
+      const datasets = await fetchAnalysisConsolidatedDayDatasets(
+        [dailySourceRange],
+        companyScopeId,
+        signal,
+        {
+          cache: dailyAggregateCacheRef.current,
+          cacheScope: `analysis:${companyScopeId ?? "jwt-company"}:${companyTimeZone}`,
+          revision: companyDateKey(now, companyTimeZone),
+        },
+      );
+      signal?.throwIfAborted();
+      aiDayDataset =
+        datasets.get(analysisRangeKey(dailySourceRange)) ?? emptyDataset("day");
+    }
+    if (aiDayDataset.error) {
       throw new Error(
-        `A série diária completa não está disponível: ${data.day.error}`,
+        `A série diária completa não está disponível: ${aiDayDataset.error}`,
       );
     }
 
     const dataCompleteUntil = periodAnalysisDataCompleteUntil(
       period,
-      new Date(),
+      now,
     );
     const dailyTo = new Date(
       Math.min(
@@ -1211,10 +1509,10 @@ export function PeriodAnalysisDashboard({
       from: period.from,
       granularity: "day",
       includeOverlappingSourceBuckets:
-        data.day.partialBoundariesReconciled === true,
-      rows: data.day.rows,
+        aiDayDataset.partialBoundariesReconciled === true,
+      rows: aiDayDataset.rows,
       scenarios,
-      sourceGranularity: data.day.granularity,
+      sourceGranularity: aiDayDataset.granularity,
       to: dailyTo,
     });
 
@@ -1224,6 +1522,7 @@ export function PeriodAnalysisDashboard({
       );
     }
 
+    const reportPayload = buildPeriodAnalysisReportPayload();
     const dailyPeriod = formatPeriodAnalysisRange({
       from: period.from,
       to: dailyTo,
@@ -1231,7 +1530,7 @@ export function PeriodAnalysisDashboard({
     return {
       ...reportPayload,
       context: [
-        `Período civil analisado: ${dailyPeriod}`,
+        `Período analisado: ${dailyPeriod}`,
         ...(reportPayload.context ?? []),
       ],
       tables: [
@@ -1246,12 +1545,12 @@ export function PeriodAnalysisDashboard({
               width: 22,
             },
           ],
-          description: `Base diária canônica completa de todos os cenários em ${dailyPeriod}; dias sem registros permanecem com total zero.`,
+          description: `Detalhamento diário de todos os cenários em ${dailyPeriod}; dias sem registros permanecem com total zero. Os gráficos, indicadores e tabelas acima preservam a composição individual de cada widget.`,
           rows: dailyPoints.map((point, index) => ({
             date: formatFileDate(addDays(startOfDay(period.from), index)),
             total: point.total,
           })),
-          title: "Série diária canônica da Contagem",
+          title: "Detalhamento diário da Contagem",
         },
       ],
     };
@@ -1288,7 +1587,7 @@ export function PeriodAnalysisDashboard({
       savePeriodAnalysisSettings(normalizedSettings, companyScopeId, user?.id);
     } catch {
       toast.error(
-        "O período será aplicado, mas não pôde ser salvo neste navegador.",
+        "O período será aplicado, mas não pôde ser salvo agora.",
       );
     }
     if (requestRef.current) abortRequest(requestRef.current);
@@ -1297,6 +1596,7 @@ export function PeriodAnalysisDashboard({
     setDataLoadError("");
     setData(emptyData());
     setLoadingData(true);
+    setAnalysisRequested(true);
     setAppliedSettings(normalizedSettings);
     setQueryVersion((value) => value + 1);
   }
@@ -1433,7 +1733,7 @@ export function PeriodAnalysisDashboard({
       imported.sourceResolution === "scope_name"
         ? "a visão foi reconciliada pelo nome"
         : imported.sourceResolution === "all_scenarios"
-          ? "o escopo original não era um cenário disponível; os widgets de escopo usam todos os cenários desta empresa"
+          ? "a seleção original não era um cenário disponível; esses widgets usam todos os cenários desta empresa"
           : "",
       imported.unsupportedCount
         ? `${imported.unsupportedCount} item(ns) sem equivalente foram ignorados`
@@ -1458,7 +1758,7 @@ export function PeriodAnalysisDashboard({
       {monitorMode ? <MonitorModeExitHint onExit={exitMonitorMode} /> : null}
       {analysisCertificationError ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive [overflow-wrap:anywhere]">
-          Consulta bloqueada: {analysisCertificationError}
+          Não foi possível carregar a análise: {analysisCertificationError}
         </div>
       ) : null}
 
@@ -1473,14 +1773,6 @@ export function PeriodAnalysisDashboard({
             </div>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            {autoRefreshEnabled ? (
-              <Badge
-                variant="outline"
-                className={cn(ANALYSIS_READABLE_BADGE_CLASS_NAME, "bg-card")}
-              >
-                Atualização {analysisRangePlan.refreshIntervalMs / 1_000} s
-              </Badge>
-            ) : null}
             {analysisRangePlan.mode === "consolidated" ? (
               <Badge
                 variant="secondary"
@@ -1525,7 +1817,6 @@ export function PeriodAnalysisDashboard({
                 contextLabel="análise de Contagem"
                 maximumInput={companyDateKey(new Date(), companyTimeZone)}
                 onApply={applyAnalysisRange}
-                timeZoneLabel={companyTimeZone}
                 value={{
                   endInput: appliedSettings.to,
                   startInput: appliedSettings.from,
@@ -1535,7 +1826,7 @@ export function PeriodAnalysisDashboard({
 
             <div
               className="col-start-2 row-start-1 flex min-w-0 flex-nowrap items-center justify-end gap-1 overflow-hidden"
-              aria-label="Metadados da análise de Contagem"
+              aria-label="Informações da análise de Contagem"
             >
               {analysisRangePlan.mode === "consolidated" ? (
                 <Badge
@@ -1603,15 +1894,17 @@ export function PeriodAnalysisDashboard({
               <ReportExportActions
                 compact
                 disabled={
+                  !analysisRequested ||
                   loadingData ||
                   loadingScenarios ||
                   !widgets.length ||
                   Boolean(analysisCertificationError)
                 }
-                payload={reportPayload}
+                getPayload={buildPeriodAnalysisReportPayload}
               />
               <AiAnalysisAction
                 disabled={
+                  !analysisRequested ||
                   loadingData ||
                   loadingScenarios ||
                   !widgets.length ||
@@ -1619,7 +1912,6 @@ export function PeriodAnalysisDashboard({
                 }
                 manager={manager}
                 getPayload={buildAiPeriodAnalysisPayload}
-                payload={reportPayload}
                 source={{ module: "counting", surface: "analysis" }}
               />
               <MonitorModeButton
@@ -1633,9 +1925,9 @@ export function PeriodAnalysisDashboard({
       )}
 
       {loadingScenarios && !scopeOptions.length ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Skeleton className="h-[320px] w-full" />
-          <Skeleton className="h-[320px] w-full" />
+        <div className="grid auto-rows-fr gap-4 sm:grid-cols-2">
+          <Skeleton className="aspect-[4/3] h-full min-h-0 w-full flex-1 self-stretch sm:aspect-video" />
+          <Skeleton className="aspect-[4/3] h-full min-h-0 w-full flex-1 self-stretch sm:aspect-video" />
         </div>
       ) : scopeOptions.length ? (
         <CardLayout
@@ -1674,6 +1966,98 @@ export function PeriodAnalysisDashboard({
         scopeOptions={scopeOptions}
       />
     </section>
+  );
+}
+
+function PeriodAnalysisCardRuntime({
+  analysisRequested,
+  canConfigure,
+  chartType,
+  color,
+  companyTimeZone,
+  data,
+  loading,
+  monitorMode,
+  onEdit,
+  onRemove,
+  period,
+  scenarios,
+  scopeOptions,
+  sourceSeriesCount,
+  widget,
+}: {
+  analysisRequested: boolean;
+  canConfigure: boolean;
+  chartType?: CardChartType;
+  color?: string;
+  companyTimeZone: string;
+  data: PeriodAnalysisData;
+  loading: boolean;
+  monitorMode: boolean;
+  onEdit: () => void;
+  onRemove: () => void;
+  period: PeriodAnalysisRange;
+  scenarios: Scenario[];
+  scopeOptions: PeriodAnalysisScopeOption[];
+  sourceSeriesCount: number;
+  widget: PeriodAnalysisWidget;
+}) {
+  const { effectiveTheme } = useTheme();
+  const model = React.useMemo(
+    () =>
+      !analysisRequested || loading
+        ? deferredAnalysisWidgetModel(widget)
+        : buildPeriodAnalysisWidgetModel({
+            chartType,
+            color,
+            companyTimeZone,
+            data,
+            period,
+            scenarios,
+            scopeOptions,
+            sourceSeriesCount,
+            theme: effectiveTheme,
+            widget,
+          }),
+    [
+      analysisRequested,
+      chartType,
+      color,
+      companyTimeZone,
+      data,
+      effectiveTheme,
+      loading,
+      period,
+      scenarios,
+      scopeOptions,
+      sourceSeriesCount,
+      widget,
+    ],
+  );
+  const scenarioSummary = React.useMemo(
+    () => periodAnalysisScenarioSummary(widget, scenarios, scopeOptions),
+    [scenarios, scopeOptions, widget],
+  );
+
+  return (
+    <PeriodAnalysisCard
+      canConfigure={canConfigure}
+      effectiveGranularity={
+        model.appliedGranularity ??
+        periodAnalysisEffectiveGranularity(
+          widget,
+          period,
+          sourceSeriesCount,
+        )
+      }
+      loading={loading}
+      model={model}
+      monitorMode={monitorMode}
+      onEdit={onEdit}
+      onRemove={onRemove}
+      scenarioSummary={scenarioSummary}
+      widget={widget}
+    />
   );
 }
 
@@ -1760,7 +2144,7 @@ function PeriodAnalysisCard({
         label={compactLabel}
         loading={loading}
         toneColor={toneColor}
-        value={model.error ? "Não certificado" : metricValue}
+        value={model.error ? "Indisponível" : metricValue}
         valueClassName={model.error ? "text-sm text-destructive" : undefined}
         valueTitle={model.error ?? String(metricValue)}
       />
@@ -1769,7 +2153,7 @@ function PeriodAnalysisCard({
 
   return (
     <Card
-      className="h-full min-w-0 overflow-hidden"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
       data-period-analysis-card={widget.kind}
     >
       <CardHeader className={cn("pb-2", compactContent && "p-3 pb-1.5")}>
@@ -1873,12 +2257,12 @@ function PeriodAnalysisCard({
       </CardHeader>
       <CardContent
         className={cn(
-          "min-h-0 min-w-0 flex-1 !overflow-hidden",
+          "flex min-h-0 min-w-0 flex-col flex-1 !overflow-hidden",
           compactContent && "px-3 pb-3",
         )}
       >
         {loading ? (
-          <Skeleton className="h-full min-h-[160px] w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : model.error ? (
           <EmptyState text={model.error} />
         ) : model.displayTable && (model.displayTableData || model.table) ? (
@@ -1886,8 +2270,8 @@ function PeriodAnalysisCard({
         ) : model.metrics ? (
           <MetricGrid compact={compactContent} metrics={model.metrics} />
         ) : model.hasData && model.option ? (
-          <div className="h-full min-h-0 w-full">
-            <EChart option={model.option} />
+          <div className="h-full min-h-0 w-full flex-1 overflow-hidden">
+            <EChart className="h-full min-h-0 w-full flex-1" option={model.option} />
           </div>
         ) : (
           <EmptyState text={model.emptyText} />
@@ -2180,7 +2564,7 @@ function WidgetDialog({
           ) : null}
 
           {configurableGranularity ? (
-            <Field htmlFor={widgetGranularityInputId} label="Granularidade">
+            <Field htmlFor={widgetGranularityInputId} label="Agrupamento">
               <Select
                 value={form.granularity}
                 onValueChange={(value) =>
@@ -2413,7 +2797,7 @@ function Field({
 
 function EmptyState({ text }: { text: string }) {
   return (
-    <div className="flex h-full min-h-[160px] min-w-0 items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground [overflow-wrap:anywhere]">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 self-stretch items-center justify-center overflow-hidden rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground [overflow-wrap:anywhere]">
       {text}
     </div>
   );
@@ -2487,6 +2871,7 @@ function composePeriodAnalysisReport({
     chartType?: CardChartType;
     defaultTitle: string;
     model: PeriodAnalysisWidgetModel;
+    scenarioSummary: string;
     title: string;
   }>;
   period: PeriodAnalysisRange;
@@ -2520,6 +2905,14 @@ function composePeriodAnalysisReport({
     context: [
       singleDay ? "Análise histórica diária" : "Período consolidado",
       formatPeriodAnalysisRange(period),
+      ...Array.from(
+        new Set(
+          models.map(
+            ({ scenarioSummary, title }) =>
+              `Composição de “${title}”: ${scenarioSummary}`,
+          ),
+        ),
+      ),
     ],
     dataCompleteUntil,
     filename: `ipxdata-analises-${formatFileDate(period.from)}-${formatFileDate(
@@ -2565,6 +2958,7 @@ async function fetchAnalysisSubLocations(
   locations: Location[],
   companyScopeId?: string | null,
   signal?: AbortSignal,
+  requireExplicitCompanyId = false,
 ) {
   const expectedCompanyId = companyScopeId?.trim() || undefined;
   const rows = await Promise.all(
@@ -2575,7 +2969,16 @@ async function fetchAnalysisSubLocations(
           companyScopeId: expectedCompanyId,
           signal,
         },
-      ).then((value) => requireSubLocationRows(value, expectedCompanyId)),
+      ).then((value) =>
+        requireSubLocationRows(
+          requireExplicitCompanyId
+            ? selectExplicitCompanyScopedRows(value, expectedCompanyId!, {
+                label: "sublocais",
+              }).rows
+            : value,
+          expectedCompanyId,
+        ),
+      ),
     ),
   );
 
@@ -2585,49 +2988,64 @@ async function fetchAnalysisSubLocations(
   );
 }
 
-async function fetchAnalysisDataset(
+function fetchAnalysisDataset(
   granularity: AggregateGranularity,
   range: PeriodAnalysisRange,
   companyScopeId?: string | null,
   signal?: AbortSignal,
 ): Promise<PeriodAnalysisDataset> {
-  try {
-    const response = await fetchAnalysisAggregate(
-      granularity,
-      range,
-      companyScopeId,
-      signal,
-    );
-    const responseGranularity = requireAggregateGranularity(
-      response.granularity,
-      granularity,
-    );
+  const execute = async (): Promise<PeriodAnalysisDataset> => {
+    try {
+      return {
+        granularity,
+        rows: await fetchCompleteAggregateRange({
+          companyScopeId: companyScopeId?.trim() || undefined,
+          from: range.from,
+          granularity,
+          metricType: DEFAULT_METRIC_TYPE,
+          signal,
+          to: range.to,
+        }),
+      };
+    } catch (error) {
+      if (isAbortError(error, signal)) throw error;
+      return {
+        error: analysisErrorMessage(
+          error,
+          "Não foi possível carregar os dados.",
+        ),
+        granularity,
+        rows: [],
+      };
+    }
+  };
 
-    return {
-      granularity: responseGranularity,
-      rows: requireAggregateRowsInRange(
-        response.data,
-        responseGranularity,
-        range.from,
-        range.to,
-        DEFAULT_METRIC_TYPE,
-      ),
-    };
-  } catch (error) {
-    if (isAbortError(error, signal)) throw error;
-    return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar os dados.",
-      granularity,
-      rows: [],
-    };
+  if (!signal) return execute();
+  const key = JSON.stringify([
+    companyScopeId?.trim() ?? "",
+    granularity,
+    range.from.toISOString(),
+    range.to.toISOString(),
+  ]);
+  let pending = pendingAnalysisDatasetsBySignal.get(signal);
+  if (!pending) {
+    pending = new Map();
+    pendingAnalysisDatasetsBySignal.set(signal, pending);
   }
+  const existing = pending.get(key);
+  if (existing) return existing;
+
+  const promise = execute();
+  pending.set(key, promise);
+  const release = () => {
+    if (pending?.get(key) === promise) pending.delete(key);
+  };
+  void promise.then(release, release);
+  return promise;
 }
 
-async function fetchAnalysisConsolidatedDayDataset(
-  range: PeriodAnalysisRange,
+async function fetchAnalysisConsolidatedDayDatasets(
+  ranges: PeriodAnalysisRange[],
   companyScopeId?: string | null,
   signal?: AbortSignal,
   cacheOptions?: {
@@ -2635,39 +3053,128 @@ async function fetchAnalysisConsolidatedDayDataset(
     cacheScope: string;
     revision: string;
   },
-): Promise<PeriodAnalysisDataset> {
-  const { fullDays, partialDays } = splitAnalysisRangeAtDayBoundaries(range);
-  const fullDaysPromise = fullDays
-    ? fetchCachedAnalysisDayDataset(
-        fullDays,
-        companyScopeId,
-        signal,
-        cacheOptions,
-      )
-    : Promise.resolve(emptyDataset("day"));
-  const partialDayPromises = partialDays.map(async (partialRange) => {
-    const hourly = await fetchAnalysisExactHourlyDataset(
-      partialRange,
-      companyScopeId,
-      signal,
-    );
-    return rollupAnalysisDataset(hourly, "day", partialRange);
-  });
-  const [closedDays, edgeDays] = await Promise.all([
-    fullDaysPromise,
-    Promise.all(partialDayPromises),
+): Promise<Map<string, PeriodAnalysisDataset>> {
+  const uniqueRanges = new Map(
+    ranges
+      .filter((range) => range.from < range.to)
+      .map((range) => [analysisRangeKey(range), range] as const),
+  );
+  const rangeParts = new Map(
+    Array.from(uniqueRanges, ([key, range]) => [
+      key,
+      splitAnalysisRangeAtDayBoundaries(range),
+    ]),
+  );
+  const mergedFullDayRanges = mergeAnalysisRanges(
+    Array.from(rangeParts.values()).flatMap(({ fullDays }) =>
+      fullDays ? [fullDays] : [],
+    ),
+  );
+  const uniquePartialDayRanges = new Map(
+    Array.from(rangeParts.values())
+      .flatMap(({ partialDays }) => partialDays)
+      .map((range) => [analysisRangeKey(range), range] as const),
+  );
+  const [fullDayDatasets, partialDayDatasets] = await Promise.all([
+    Promise.all(
+      mergedFullDayRanges.map(async (range) => ({
+        dataset: await fetchCachedAnalysisDayDataset(
+          range,
+          companyScopeId,
+          signal,
+          cacheOptions,
+        ),
+        range,
+      })),
+    ),
+    Promise.all(
+      Array.from(uniquePartialDayRanges, async ([key, range]) => ({
+        dataset: rollupAnalysisDataset(
+          await fetchAnalysisExactHourlyDataset(
+            range,
+            companyScopeId,
+            signal,
+          ),
+          "day",
+          range,
+        ),
+        key,
+      })),
+    ),
   ]);
-  const error =
-    closedDays.error || edgeDays.find((dataset) => dataset.error)?.error;
+  const partialByKey = new Map(
+    partialDayDatasets.map(({ dataset, key }) => [key, dataset]),
+  );
 
-  return {
-    ...(error ? { error } : {}),
-    granularity: "day",
-    partialBoundariesReconciled: partialDays.length > 0,
-    rows: error
-      ? []
-      : [closedDays, ...edgeDays].flatMap((dataset) => dataset.rows),
-  };
+  return new Map(
+    Array.from(uniqueRanges, ([key]) => {
+      const { fullDays, partialDays } = rangeParts.get(key)!;
+      const relevantFullDatasets = fullDays
+        ? fullDayDatasets.filter(
+            ({ range: sourceRange }) =>
+              sourceRange.from < fullDays.to && sourceRange.to > fullDays.from,
+          )
+        : [];
+      const relevantPartialDatasets = partialDays.map(
+        (partialRange) =>
+          partialByKey.get(analysisRangeKey(partialRange)) ??
+          emptyDataset("day"),
+      );
+      const error =
+        relevantFullDatasets.find(({ dataset }) => dataset.error)?.dataset
+          .error ??
+        relevantPartialDatasets.find((dataset) => dataset.error)?.error;
+      const fullRows = fullDays
+        ? relevantFullDatasets.flatMap(({ dataset }) =>
+            dataset.rows.filter((row) =>
+              aggregateBucketInRange(
+                row.bucket,
+                "day",
+                fullDays.from,
+                fullDays.to,
+              ),
+            ),
+          )
+        : [];
+
+      return [
+        key,
+        {
+          ...(error ? { error } : {}),
+          granularity: "day" as const,
+          partialBoundariesReconciled: partialDays.length > 0,
+          rows: error
+            ? []
+            : [
+                ...fullRows,
+                ...relevantPartialDatasets.flatMap((dataset) => dataset.rows),
+              ],
+        },
+      ] as const;
+    }),
+  );
+}
+
+function mergeAnalysisRanges(ranges: PeriodAnalysisRange[]) {
+  const ordered = ranges
+    .map((range) => ({ from: new Date(range.from), to: new Date(range.to) }))
+    .sort((left, right) => left.from.getTime() - right.from.getTime());
+  const merged: PeriodAnalysisRange[] = [];
+
+  ordered.forEach((range) => {
+    const current = merged.at(-1);
+    if (!current || range.from > current.to) {
+      merged.push(range);
+      return;
+    }
+    if (range.to > current.to) current.to = new Date(range.to);
+  });
+
+  return merged;
+}
+
+function analysisRangeKey(range: PeriodAnalysisRange) {
+  return `${range.from.toISOString()}|${range.to.toISOString()}`;
 }
 
 async function fetchCachedAnalysisDayDataset(
@@ -2695,20 +3202,62 @@ async function fetchCachedAnalysisDayDataset(
     return cached.dataset;
   }
 
-  const dataset = await fetchAnalysisDataset(
+  const pendingRequests = cacheOptions
+    ? pendingAnalysisDayRequestsForCache(cacheOptions.cache)
+    : undefined;
+  const pending = key ? pendingRequests?.get(key) : undefined;
+  if (
+    pending &&
+    cacheOptions &&
+    pending.revision === cacheOptions.revision &&
+    pending.signal === signal
+  ) {
+    return pending.promise;
+  }
+
+  const promise = fetchAnalysisDataset(
     "day",
     range,
     companyScopeId,
     signal,
   );
-  signal?.throwIfAborted();
-  if (key && cacheOptions && !dataset.error) {
-    setAnalysisDayCacheEntry(cacheOptions.cache, key, {
-      dataset,
+  if (key && cacheOptions) {
+    pendingRequests?.set(key, {
+      promise,
       revision: cacheOptions.revision,
+      signal,
     });
   }
-  return dataset;
+
+  try {
+    const dataset = await promise;
+    signal?.throwIfAborted();
+    if (key && cacheOptions && !dataset.error) {
+      setAnalysisDayCacheEntry(cacheOptions.cache, key, {
+        dataset,
+        revision: cacheOptions.revision,
+      });
+    }
+    return dataset;
+  } finally {
+    if (key && pendingRequests?.get(key)?.promise === promise) {
+      pendingRequests.delete(key);
+    }
+  }
+}
+
+function pendingAnalysisDayRequestsForCache(cache: AnalysisDayCache) {
+  const existing = pendingAnalysisDayRequests.get(cache);
+  if (existing) return existing;
+
+  const requests = new Map<string, PendingAnalysisDayRequest>();
+  pendingAnalysisDayRequests.set(cache, requests);
+  return requests;
+}
+
+function clearAnalysisDayCache(cache: AnalysisDayCache) {
+  cache.clear();
+  pendingAnalysisDayRequests.get(cache)?.clear();
 }
 
 function setAnalysisDayCacheEntry(
@@ -2806,28 +3355,6 @@ function sameAnalysisRange(
   );
 }
 
-function fetchAnalysisAggregate(
-  granularity: AggregateGranularity,
-  range: PeriodAnalysisRange,
-  companyScopeId?: string | null,
-  signal?: AbortSignal,
-) {
-  const params = new URLSearchParams({
-    from: aggregateQueryIso(range.from, granularity),
-    granularity,
-    metric_type: DEFAULT_METRIC_TYPE,
-    to: aggregateQueryIso(range.to, granularity),
-  });
-
-  return apiFetch<AggregateEventsResponse>(
-    `/analytics/aggregate?${params.toString()}`,
-    {
-      companyScopeId: companyScopeId?.trim() || undefined,
-      signal,
-    },
-  );
-}
-
 async function fetchAnalysisHourlyDatasets(
   ranges: PeriodAnalysisRange[],
   cache: HourlyAggregateCache,
@@ -2851,10 +3378,10 @@ async function fetchAnalysisHourlyDatasets(
   } catch (error) {
     if (isAbortError(error, signal)) throw error;
     return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar a base horária da análise.",
+      error: analysisErrorMessage(
+        error,
+        "Não foi possível carregar a base horária da análise.",
+      ),
       granularity: "hour",
       rows: [],
     };
@@ -2936,7 +3463,7 @@ function reconcileAnalysisHourlyDataset(
   }
   if (hourly.granularity !== "hour" || minute.granularity !== "minute") {
     return {
-      error: "As granularidades usadas na reconciliação da hora são inválidas.",
+      error: "Não foi possível combinar os dados horários recebidos.",
       granularity: "hour",
       rows: [],
     };
@@ -2956,10 +3483,10 @@ function reconcileAnalysisHourlyDataset(
     };
   } catch (error) {
     return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "Não foi possível reconciliar a hora ainda aberta.",
+      error: analysisErrorMessage(
+        error,
+        "Não foi possível consolidar a hora em andamento.",
+      ),
       granularity: "hour",
       rows: [],
     };
@@ -2985,7 +3512,7 @@ function reconcileAnalysisMinuteDataset(
   ) {
     return {
       error:
-        "As granularidades usadas na reconciliação dos minutos são inválidas.",
+        "Não foi possível combinar os dados por minuto recebidos.",
       granularity: "minute",
       rows: [],
     };
@@ -3005,10 +3532,10 @@ function reconcileAnalysisMinuteDataset(
     };
   } catch (error) {
     return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "Não foi possível reconciliar os minutos ainda abertos.",
+      error: analysisErrorMessage(
+        error,
+        "Não foi possível consolidar os minutos em andamento.",
+      ),
       granularity: "minute",
       rows: [],
     };
@@ -3061,7 +3588,7 @@ function reconcileAnalysisHourlyBoundaries(
   if (hourly.granularity !== "hour") {
     return {
       error:
-        "A granularidade usada na reconciliação da base horária é inválida.",
+        "Não foi possível preparar a referência horária.",
       granularity: "hour",
       rows: [],
     };
@@ -3079,7 +3606,7 @@ function reconcileAnalysisHourlyBoundaries(
       }
       if (dataset.granularity !== "minute") {
         return {
-          error: "A granularidade usada na borda comparável é inválida.",
+          error: "Não foi possível preparar o limite do período comparável.",
           granularity: "hour",
           rows: [],
         };
@@ -3100,10 +3627,10 @@ function reconcileAnalysisHourlyBoundaries(
     };
   } catch (error) {
     return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "Não foi possível reconciliar a borda horária da base.",
+      error: analysisErrorMessage(
+        error,
+        "Não foi possível consolidar o limite horário da referência.",
+      ),
       granularity: "hour",
       rows: [],
     };
@@ -3147,8 +3674,8 @@ function deferredAnalysisWidgetModel(
   widget: PeriodAnalysisWidget,
 ): PeriodAnalysisWidgetModel {
   return {
-    description: "Widget oculto; o processamento será retomado ao exibi-lo.",
-    emptyText: "Widget oculto.",
+    description: "Aplique o período quando quiser consultar esta análise.",
+    emptyText: "Aguardando a consulta do período.",
     hasData: false,
     height: widget.kind === "heatmap" ? 500 : 320,
   };
@@ -3214,24 +3741,14 @@ function requireAiDailyRangeWithinLimit(from: Date, to: Date) {
   return dayCount;
 }
 
-function periodAnalysisComparisonSeriesCount(
-  widget: PeriodAnalysisWidget,
-  scenarios: Scenario[],
-) {
-  if (widget.scopeMode !== "scenario") return 1;
-  if (widget.selectionMode === "all") return Math.max(1, scenarios.length);
-
-  const availableIds = new Set(scenarios.map((scenario) => scenario.id));
-  return Math.max(
-    1,
-    new Set(widget.scenarioIds.filter((id) => availableIds.has(id))).size,
-  );
-}
-
 function formatFileDate(date: Date) {
   return [
     date.getFullYear(),
     String(date.getMonth() + 1).padStart(2, "0"),
     String(date.getDate()).padStart(2, "0"),
   ].join("-");
+}
+
+function analysisErrorMessage(error: unknown, fallback: string) {
+  return userFacingErrorMessage(error, fallback);
 }

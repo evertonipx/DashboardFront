@@ -4,7 +4,7 @@ import * as React from "react";
 import { BarChart3, Clock3, Settings2 } from "lucide-react";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import {
   useWidgetColor,
@@ -37,20 +37,20 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
+import { abortRequest } from "@/lib/request-cancellation";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import {
   aggregateBucketInRange,
-  aggregateQueryIso,
   endOfAggregateBucket,
-  requireAggregateGranularity,
-  requireAggregateRowsInRange,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
-  clearHourlyAggregateCache,
-  fetchHourlyAggregateRanges,
-  type HourlyAggregateCache,
-} from "@/lib/aggregate-hour-query";
-import { reconcileAggregateRows } from "@/lib/aggregate-reconciliation";
+  fetchCompleteAggregateRange,
+  type CompleteAggregateRequest,
+} from "@/lib/aggregate-range-query";
+import {
+  reconcileAggregateRows,
+} from "@/lib/aggregate-reconciliation";
 import {
   DAY_OF_MONTH_AXIS_LABELS,
   buildCalendarAxisLabel,
@@ -88,15 +88,25 @@ import { cn, formatNumber, formatTime, toDateTimeLocalValue } from "@/lib/utils"
 
 type ScenarioComparisonCardProps = {
   action?: React.ReactNode;
-  autoRefresh?: boolean;
+  aggregateSource?: ScenarioComparisonAggregateSource;
+  aggregateSourcePending?: boolean;
+  aggregateRevision?: number | string;
   companyId?: string | null;
   companyTimeZone: string;
+  deferSettingsApply?: boolean;
   description?: string;
   disabledReason?: string;
   hourlySource?: ScenarioComparisonHourlySource;
+  hourlySourcePending?: boolean;
+  hourlySourceRevision?: number | string | null;
   monitorMode?: boolean;
+  onReportChartChange?: (
+    key: string,
+    chart: ReportPayload["charts"][number] | null,
+  ) => void;
   periodOverride?: ScenarioComparisonPeriodOverride;
   preferenceScopeId?: string | null;
+  reportChartKey?: string;
   scenarios: Scenario[];
   storageKey: string;
   title?: string;
@@ -108,11 +118,39 @@ export type ScenarioComparisonHourlySource = ScenarioComparisonSourceScope & {
   to: Date;
 };
 
+export type ScenarioComparisonAggregateSource =
+  ScenarioComparisonHourlySource & {
+    granularity: AggregateGranularity;
+  };
+
 export type ScenarioComparisonPeriodOverride = {
   from: Date;
   label: string;
   to: Date;
 };
+
+function scenarioComparisonHourlySourceRevision(
+  source:
+    | ScenarioComparisonHourlySource
+    | ScenarioComparisonAggregateSource
+    | undefined,
+) {
+  if (!source) return "none";
+  const tail = source.rows.slice(-256).map((row) => [
+    row.bucket,
+    row.camera_id,
+    row.line_count_id ?? "",
+    row.metric_type,
+    row.object_class ?? "",
+    row.total,
+  ]);
+  return JSON.stringify([
+    source.from.toISOString(),
+    source.to.toISOString(),
+    source.rows.length,
+    tail,
+  ]);
+}
 
 export type ScenarioCompareGranularity = "hour" | "day" | "week" | "month";
 export type ScenarioComparePeriod =
@@ -135,6 +173,34 @@ export type ScenarioComparisonSettings = {
   selectionMode: ScenarioSelectionMode;
   view: ScenarioComparisonView;
 };
+
+export function scenarioComparisonSettingsDataKey(
+  settings: ScenarioComparisonSettings,
+  hasPeriodOverride = false,
+) {
+  const period = hasPeriodOverride ? "fixed" : settings.period;
+  const customPeriod = !hasPeriodOverride && settings.period === "custom";
+
+  return JSON.stringify([
+    settings.view,
+    settings.view === "period" ? settings.granularity : "day",
+    period,
+    customPeriod ? settings.customFrom : "",
+    customPeriod ? settings.customTo : "",
+  ]);
+}
+
+export function scenarioComparisonSettingsPresentationKey(
+  settings: ScenarioComparisonSettings,
+) {
+  return JSON.stringify([
+    settings.accumulated,
+    settings.selectionMode,
+    settings.selectionMode === "custom"
+      ? [...new Set(settings.selectedScenarioIds)].sort()
+      : [],
+  ]);
+}
 
 export type ScenarioComparisonDefinition = {
   granularity: AggregateGranularity;
@@ -167,9 +233,19 @@ export type ScenarioComparisonSeries = {
 };
 
 const DEFAULT_METRIC_TYPE = "count";
-const REFRESH_MS = 5_000;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
+const MAX_SHARED_AGGREGATE_RESPONSES = 256;
+
+type SharedAggregateRequestEntry = {
+  abortTimer: ReturnType<typeof setTimeout> | null;
+  controller: AbortController;
+  promise: Promise<AggregateEventsResponse>;
+  subscribers: Set<symbol>;
+};
+
+const sharedAggregateResponses = new Map<string, AggregateEventsResponse>();
+const sharedAggregateRequests = new Map<string, SharedAggregateRequestEntry>();
 
 const granularityOptions: Array<{
   label: string;
@@ -198,15 +274,22 @@ const viewOptions: Array<{ label: string; value: ScenarioComparisonView }> = [
 
 export function ScenarioComparisonCard({
   action,
-  autoRefresh = false,
+  aggregateSource,
+  aggregateSourcePending = false,
+  aggregateRevision,
   companyId,
   companyTimeZone,
+  deferSettingsApply = false,
   description = "Compare os cenários escolhidos no mesmo gráfico.",
   disabledReason,
   hourlySource,
+  hourlySourcePending = false,
+  hourlySourceRevision,
   monitorMode = false,
+  onReportChartChange,
   periodOverride,
   preferenceScopeId,
+  reportChartKey,
   scenarios,
   storageKey,
   title = "Cenários por período",
@@ -217,40 +300,52 @@ export function ScenarioComparisonCard({
   const [settings, setSettings] = React.useState<ScenarioComparisonSettings>(
     () => createDefaultScenarioComparisonSettings(),
   );
+  const [draftSettings, setDraftSettings] =
+    React.useState<ScenarioComparisonSettings>(() =>
+      createDefaultScenarioComparisonSettings(),
+    );
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [rows, setRows] = React.useState<AggregateEventRow[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
   const [settingsReady, setSettingsReady] = React.useState(false);
+  const [loadedDataRequestKey, setLoadedDataRequestKey] =
+    React.useState("");
   const requestSequenceRef = React.useRef(0);
-  const requestRunningRef = React.useRef(false);
   const requestRef = React.useRef<AbortController | null>(null);
-  const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(
-    new Map(),
-  );
+  const activeRequestKeyRef = React.useRef("");
+  const completedRequestKeyRef = React.useRef("");
+  const requestConsumerAttachedRef = React.useRef(false);
+  const requestAbortTimerRef = React.useRef<number | null>(null);
   const scopeCertificationError = React.useMemo(() => {
     try {
       requireScenarioComparisonScope({
         companyScopeId: companyId,
         companyTimeZone,
-        hourlySource,
+        hourlySource: aggregateSource ?? hourlySource,
         scenarios,
       });
       return "";
     } catch (scopeError) {
-      return scopeError instanceof Error
-        ? scopeError.message
-        : "Escopo da comparação não certificado.";
+      return userFacingErrorMessage(
+        scopeError,
+        "Não foi possível preparar esta comparação.",
+      );
     }
-  }, [companyId, companyTimeZone, hourlySource, scenarios]);
+  }, [aggregateSource, companyId, companyTimeZone, hourlySource, scenarios]);
   const effectiveDisabledReason = disabledReason || scopeCertificationError;
-  const [definition, setDefinition] = React.useState<ScenarioComparisonDefinition>(() =>
-    buildScenarioComparisonDefinition(
-      createDefaultScenarioComparisonSettings(),
-      new Date(),
-      periodOverride,
-    ),
+  const [loadedDefinition, setLoadedDefinition] =
+    React.useState<ScenarioComparisonDefinition>(() =>
+      buildScenarioComparisonDefinition(
+        createDefaultScenarioComparisonSettings(),
+        new Date(),
+        periodOverride,
+      ),
+    );
+  const definition = React.useMemo(
+    () => ({ ...loadedDefinition, accumulated: settings.accumulated }),
+    [loadedDefinition, settings.accumulated],
   );
   const selectedScenarios = React.useMemo(
     () => selectScenarioComparisonScenarios(scenarios, settings),
@@ -287,168 +382,316 @@ export function ScenarioComparisonCard({
     settings,
     selectedScenarios,
   )}`;
+  const periodOverrideFromKey = periodOverride?.from.toISOString() ?? "";
+  const periodOverrideToKey = periodOverride?.to.toISOString() ?? "";
+  const dataView = settings.view;
+  const dataGranularity =
+    dataView === "period" ? settings.granularity : "day";
+  const dataPeriod = periodOverride ? "today" : settings.period;
+  const dataCustomFrom =
+    !periodOverride && settings.period === "custom" ? settings.customFrom : "";
+  const dataCustomTo =
+    !periodOverride && settings.period === "custom" ? settings.customTo : "";
+  const settingsDataKey = scenarioComparisonSettingsDataKey(
+    settings,
+    Boolean(periodOverride),
+  );
+  const hourlySourceRevisionKey = React.useMemo(
+    () =>
+      hourlySourceRevision ??
+      scenarioComparisonHourlySourceRevision(hourlySource),
+    [hourlySource, hourlySourceRevision],
+  );
+  const aggregateSourceRevisionKey = React.useMemo(
+    () => scenarioComparisonHourlySourceRevision(aggregateSource),
+    [aggregateSource],
+  );
+  const hourlySourceRef = React.useRef(hourlySource);
+  const aggregateSourceRef = React.useRef(aggregateSource);
+  React.useEffect(() => {
+    hourlySourceRef.current = hourlySource;
+    aggregateSourceRef.current = aggregateSource;
+  }, [aggregateSource, hourlySource]);
+  const dataRequestKey = React.useMemo(
+    () =>
+      JSON.stringify([
+        companyId ?? "",
+        companyTimeZone,
+        aggregateRevision ?? "",
+        aggregateSourceRevisionKey,
+        periodOverrideFromKey,
+        periodOverrideToKey,
+        hourlySourceRevisionKey,
+        settingsDataKey,
+      ]),
+    [
+      companyId,
+      companyTimeZone,
+      aggregateRevision,
+      aggregateSourceRevisionKey,
+      hourlySourceRevisionKey,
+      periodOverrideFromKey,
+      periodOverrideToKey,
+      settingsDataKey,
+    ],
+  );
+  const hasScenarioSelection = selectedScenarios.length > 0;
+  const buildDataDefinition = React.useCallback(
+    (now: Date) =>
+      buildScenarioComparisonDefinition(
+        {
+          accumulated: false,
+          customFrom: dataCustomFrom,
+          customTo: dataCustomTo,
+          granularity: dataGranularity,
+          period: dataPeriod,
+          selectedScenarioIds: [],
+          selectionMode: "all",
+          view: dataView,
+        },
+        now,
+        periodOverrideFromKey && periodOverrideToKey
+          ? {
+              from: new Date(periodOverrideFromKey),
+              label: "",
+              to: new Date(periodOverrideToKey),
+            }
+          : undefined,
+      ),
+    [
+      dataCustomFrom,
+      dataCustomTo,
+      dataGranularity,
+      dataPeriod,
+      dataView,
+      periodOverrideFromKey,
+      periodOverrideToKey,
+    ],
+  );
+  const loadedReportChart = React.useMemo(
+    () =>
+      loadedDataRequestKey === dataRequestKey &&
+      lastUpdated &&
+      !error &&
+      !effectiveDisabledReason &&
+      hasScenarioSelection
+        ? buildScenarioComparisonReportChart({
+            definition,
+            periodLabelOverride: periodOverride?.label,
+            rows,
+            scenarios,
+            settings,
+            title: resolvedTitle,
+            widgetColor,
+          })
+        : null,
+    [
+      definition,
+      dataRequestKey,
+      error,
+      effectiveDisabledReason,
+      hasScenarioSelection,
+      lastUpdated,
+      loadedDataRequestKey,
+      periodOverride?.label,
+      resolvedTitle,
+      rows,
+      scenarios,
+      settings,
+      widgetColor,
+    ],
+  );
 
   const load = React.useCallback(
-    async (silent = false) => {
-      const requestSequence = ++requestSequenceRef.current;
-      requestRef.current?.abort();
-      requestRef.current = null;
-      requestRunningRef.current = true;
+    async (silent = false, force = false) => {
+      if (hourlySourcePending || aggregateSourcePending) return;
+
       if (effectiveDisabledReason) {
+        requestSequenceRef.current += 1;
+        if (requestRef.current) {
+          abortRequest(requestRef.current, "A comparação ficou indisponível.");
+        }
+        requestRef.current = null;
+        activeRequestKeyRef.current = "";
+        completedRequestKeyRef.current = "";
+        setLoadedDataRequestKey("");
         setRows([]);
         setError(effectiveDisabledReason);
         setLastUpdated(null);
         setLoading(false);
-        setDefinition(
-          buildScenarioComparisonDefinition(settings, new Date(), periodOverride),
-        );
-        requestRunningRef.current = false;
+        setLoadedDefinition(buildDataDefinition(new Date()));
         return;
       }
 
       if (!companyId) {
+        completedRequestKeyRef.current = "";
+        setLoadedDataRequestKey("");
         setRows([]);
         setError("Empresa não definida para esta comparação.");
         setLastUpdated(null);
         setLoading(false);
-        requestRunningRef.current = false;
         return;
       }
 
       try {
         requireCountingRuntimeTimeZone(companyTimeZone);
       } catch (loadError) {
+        completedRequestKeyRef.current = "";
+        setLoadedDataRequestKey("");
         setRows([]);
-        setError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Fuso da empresa não disponível.",
-        );
+        setError(userFacingErrorMessage(loadError, "Fuso da empresa não disponível."));
         setLastUpdated(null);
         setLoading(false);
-        requestRunningRef.current = false;
         return;
       }
 
-      if (!scenarios.length) {
-        setRows([]);
-        setError("");
-        setLastUpdated(null);
-        setLoading(false);
-        setDefinition(
-          buildScenarioComparisonDefinition(settings, new Date(), periodOverride),
-        );
-        requestRunningRef.current = false;
+      if (
+        !force &&
+        (activeRequestKeyRef.current === dataRequestKey ||
+          completedRequestKeyRef.current === dataRequestKey)
+      ) {
         return;
       }
 
-      if (settings.selectionMode === "custom" && !settings.selectedScenarioIds.length) {
-        setRows([]);
-        setError("");
-        setLastUpdated(null);
-        setLoading(false);
-        setDefinition(
-          buildScenarioComparisonDefinition(settings, new Date(), periodOverride),
-        );
-        requestRunningRef.current = false;
-        return;
+      const requestSequence = ++requestSequenceRef.current;
+      if (requestRef.current) {
+        abortRequest(requestRef.current, "A comparação anterior foi substituída.");
       }
+      requestRef.current = null;
+      if (force) completedRequestKeyRef.current = "";
+      setLoadedDataRequestKey("");
 
       if (!silent) setLoading(true);
       setError("");
       const controller = new AbortController();
       requestRef.current = controller;
+      activeRequestKeyRef.current = dataRequestKey;
 
       try {
         const now = new Date();
-        const nextDefinition = buildScenarioComparisonDefinition(
-          settings,
-          now,
-          periodOverride,
-        );
+        const nextDefinition = buildDataDefinition(now);
         if (nextDefinition.to <= nextDefinition.from) {
-          setDefinition(nextDefinition);
+          setLoadedDefinition(nextDefinition);
           setRows([]);
           setLastUpdated(null);
           return;
         }
         const nextRows = await fetchScenarioComparisonRows(
           nextDefinition,
-          hourlySource,
+          hourlySourceRef.current,
           companyTimeZone,
           companyId,
           {
-            cache: hourlyAggregateCacheRef.current,
-            cacheScope: `scenario-comparison:${companyId}`,
+            aggregateSource: aggregateSourceRef.current,
             now,
+            requestRevision: force
+              ? `manual:${Date.now()}`
+              : aggregateRevision === undefined
+                ? undefined
+                : `parent:${aggregateRevision}`,
             signal: controller.signal,
           },
         );
-        if (requestSequence !== requestSequenceRef.current) return;
+        if (
+          requestSequence !== requestSequenceRef.current ||
+          !requestConsumerAttachedRef.current
+        ) {
+          return;
+        }
 
-        setDefinition(nextDefinition);
+        setLoadedDefinition(nextDefinition);
         setRows(nextRows);
         setLastUpdated(now);
+        setLoadedDataRequestKey(dataRequestKey);
+        completedRequestKeyRef.current = dataRequestKey;
       } catch (loadError) {
         if (requestSequence !== requestSequenceRef.current) return;
+        if (!requestConsumerAttachedRef.current) return;
         if (loadError instanceof Error && loadError.name === "AbortError") {
           return;
         }
         setRows([]);
         setLastUpdated(null);
         setError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Não foi possível carregar a comparação de cenários.",
+          userFacingErrorMessage(
+            loadError,
+            "Não foi possível carregar a comparação de cenários.",
+          ),
         );
       } finally {
         if (requestSequence === requestSequenceRef.current) {
           setLoading(false);
-          requestRunningRef.current = false;
           if (requestRef.current === controller) requestRef.current = null;
+        }
+        if (activeRequestKeyRef.current === dataRequestKey) {
+          activeRequestKeyRef.current = "";
         }
       }
     },
     [
       companyId,
       companyTimeZone,
+      aggregateRevision,
+      aggregateSourcePending,
+      buildDataDefinition,
+      dataRequestKey,
       effectiveDisabledReason,
-      hourlySource,
-      periodOverride,
-      scenarios,
-      settings,
+      hourlySourcePending,
     ],
   );
 
   React.useEffect(() => {
     requestSequenceRef.current += 1;
-    requestRef.current?.abort();
+    if (requestRef.current) {
+      abortRequest(requestRef.current, "O escopo da comparação mudou.");
+    }
     requestRef.current = null;
-    requestRunningRef.current = false;
-    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+    activeRequestKeyRef.current = "";
+    completedRequestKeyRef.current = "";
     setRows([]);
     setError("");
     setLastUpdated(null);
+    setLoadedDataRequestKey("");
     setSettingsReady(false);
-    setSettings(
-      loadSettings(storageKey, companyId, {
-        userId: user?.id,
-        viewId: preferenceScopeId,
-      }),
-    );
+    const loadedSettings = loadSettings(storageKey, companyId, {
+      userId: user?.id,
+      viewId: preferenceScopeId,
+    });
+    setSettings(loadedSettings);
+    setDraftSettings(loadedSettings);
     setSettingsReady(true);
   }, [companyId, companyTimeZone, preferenceScopeId, storageKey, user?.id]);
 
-  React.useEffect(
-    () => () => {
-      requestSequenceRef.current += 1;
-      requestRef.current?.abort();
-    },
-    [],
-  );
+  React.useEffect(() => {
+    requestConsumerAttachedRef.current = true;
+    if (requestAbortTimerRef.current !== null) {
+      window.clearTimeout(requestAbortTimerRef.current);
+      requestAbortTimerRef.current = null;
+    }
+
+    return () => {
+      requestConsumerAttachedRef.current = false;
+      requestAbortTimerRef.current = window.setTimeout(() => {
+        requestAbortTimerRef.current = null;
+        if (requestConsumerAttachedRef.current) return;
+        requestSequenceRef.current += 1;
+        if (requestRef.current) {
+          abortRequest(requestRef.current, "A comparação saiu da tela.");
+        }
+        requestRef.current = null;
+        activeRequestKeyRef.current = "";
+      }, 0);
+    };
+  }, []);
 
   React.useEffect(() => {
     setSettings((current) => ({
+      ...current,
+      selectedScenarioIds: current.selectedScenarioIds.filter((id) =>
+        scenarios.some((scenario) => scenario.id === id),
+      ),
+    }));
+    setDraftSettings((current) => ({
       ...current,
       selectedScenarioIds: current.selectedScenarioIds.filter((id) =>
         scenarios.some((scenario) => scenario.id === id),
@@ -466,37 +709,54 @@ export function ScenarioComparisonCard({
 
   React.useEffect(() => {
     if (!settingsReady) return;
-    load();
-  }, [load, settingsReady]);
+    if (!hasScenarioSelection) {
+      requestSequenceRef.current += 1;
+      if (requestRef.current) {
+        abortRequest(
+          requestRef.current,
+          "A comparação ficou sem cenários selecionados.",
+        );
+      }
+      requestRef.current = null;
+      activeRequestKeyRef.current = "";
+      setLoading(false);
+      return;
+    }
+    void load();
+  }, [hasScenarioSelection, load, settingsReady]);
 
   React.useEffect(() => {
-    if (!autoRefresh) return;
-
-    const interval = window.setInterval(() => {
-      if (
-        document.visibilityState === "visible" &&
-        !requestRunningRef.current
-      ) {
-        void load(true);
-      }
-    }, REFRESH_MS);
-
-    return () => window.clearInterval(interval);
-  }, [autoRefresh, load]);
+    if (!onReportChartChange || !reportChartKey) return;
+    onReportChartChange(reportChartKey, loadedReportChart);
+  }, [loadedReportChart, onReportChartChange, reportChartKey]);
 
   React.useEffect(() => {
     if (monitorMode) setSettingsOpen(false);
   }, [monitorMode]);
 
+  function openSettings() {
+    if (deferSettingsApply) setDraftSettings(settings);
+    setSettingsOpen(true);
+  }
+
   function updateSettings(next: Partial<ScenarioComparisonSettings>) {
+    if (deferSettingsApply) {
+      setDraftSettings((current) => ({ ...current, ...next }));
+      return;
+    }
     setSettings((current) => ({ ...current, ...next }));
+  }
+
+  function completeSettings() {
+    if (deferSettingsApply) setSettings(draftSettings);
+    setSettingsOpen(false);
   }
 
   return (
     <Card
       className={cn(
-        "@container min-w-0 overflow-hidden",
-        monitorMode && "h-full shadow-none",
+        "@container min-w-0 overflow-hidden flex h-full min-h-0 flex-col",
+        monitorMode && "shadow-none",
       )}
     >
       <CardHeader className={cn("pb-3", monitorMode && "pb-2")}>
@@ -523,7 +783,7 @@ export function ScenarioComparisonCard({
                 type="button"
                 variant={settingsOpen ? "default" : "outline"}
                 size="sm"
-                onClick={() => setSettingsOpen(true)}
+                onClick={openSettings}
               >
                 <Settings2 className="h-3.5 w-3.5" />
                 Configurar
@@ -533,21 +793,19 @@ export function ScenarioComparisonCard({
         </div>
       </CardHeader>
       <CardContent
-        className={cn("min-h-0 flex-1 overflow-hidden", monitorMode && "pt-2")}
+        className={cn(
+          "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+          monitorMode && "pt-2",
+        )}
         data-echart-layout="natural"
       >
         <div
           aria-label="Gráfico comparativo responsivo"
-          className={cn(
-            "h-[360px] min-h-0 w-full flex-1 overflow-hidden",
-            monitorMode
-              ? "h-[clamp(320px,42vh,620px)]"
-              : "h-[360px]",
-          )}
+          className="h-full min-h-0 w-full flex-1 overflow-hidden"
           role="region"
         >
           {loading && !rows.length ? (
-            <Skeleton className="h-full w-full" />
+            <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
           ) : effectiveDisabledReason || error ? (
             <ChartState text={effectiveDisabledReason || error} />
           ) : settings.selectionMode === "custom" &&
@@ -556,13 +814,19 @@ export function ScenarioComparisonCard({
           ) : !selectedScenarios.length ? (
             <ChartState text="Nenhum cenário disponível para comparar." />
           ) : hasData ? (
-            <EChart option={option} />
+            <EChart className="h-full min-h-0 w-full flex-1" option={option} />
           ) : (
             <ChartState text="Sem eventos nos cenários selecionados para este período." />
           )}
         </div>
       </CardContent>
-      <Dialog open={settingsOpen && !monitorMode} onOpenChange={setSettingsOpen}>
+      <Dialog
+        open={settingsOpen && !monitorMode}
+        onOpenChange={(open) => {
+          if (open) openSettings();
+          else setSettingsOpen(false);
+        }}
+      >
         <DialogContent className="grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>Configurar comparação por cenário</DialogTitle>
@@ -573,12 +837,12 @@ export function ScenarioComparisonCard({
               fixedPeriodLabel={periodOverride?.label}
               onChange={updateSettings}
               scenarios={scenarios}
-              settings={settings}
+              settings={deferSettingsApply ? draftSettings : settings}
             />
           </div>
           <DialogFooter>
-            <Button type="button" onClick={() => setSettingsOpen(false)}>
-              Concluir
+            <Button type="button" onClick={completeSettings}>
+              {deferSettingsApply ? "Aplicar" : "Concluir"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -633,7 +897,7 @@ export function ScenarioComparisonConfigurator({
         </Select>
       </Field>
 
-      <Field label="Granularidade">
+      <Field label="Agrupamento">
         {settings.view === "period" ? (
         <Select
           value={settings.granularity}
@@ -641,7 +905,7 @@ export function ScenarioComparisonConfigurator({
             onChange({ granularity: value as ScenarioCompareGranularity })
           }
         >
-          <SelectTrigger aria-label="Granularidade"><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Agrupamento"><SelectValue /></SelectTrigger>
           <SelectContent>
             {granularityOptions.map((optionItem) => (
               <SelectItem key={optionItem.value} value={optionItem.value}>
@@ -739,7 +1003,7 @@ function Field({
 
 function ChartState({ text }: { text: string }) {
   return (
-    <div className="flex h-full w-full items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+    <div className="flex h-full min-h-0 min-w-0 w-full flex-1 self-stretch items-center justify-center overflow-hidden rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
       {text}
     </div>
   );
@@ -784,7 +1048,10 @@ export async function fetchScenarioComparisonRows(
         range,
         certifiedScope.companyScopeId,
         hourlySource,
-        options,
+        {
+          ...options,
+          companyTimeZone: certifiedScope.companyTimeZone,
+        },
       ),
     ),
   );
@@ -799,9 +1066,10 @@ type AggregateRangeDefinition = {
 };
 
 type ScenarioComparisonFetchOptions = {
-  cache?: HourlyAggregateCache;
-  cacheScope?: string;
+  aggregateSource?: ScenarioComparisonAggregateSource;
+  companyTimeZone?: string;
   now?: Date;
+  requestRevision?: string;
   signal?: AbortSignal;
 };
 
@@ -811,6 +1079,15 @@ async function fetchScenarioComparisonRangeRows(
   hourlySource?: ScenarioComparisonHourlySource,
   options: ScenarioComparisonFetchOptions = {},
 ) {
+  if (definition.granularity !== "hour") {
+    return fetchConsolidatedScenarioComparisonRangeRows(
+      definition,
+      companyScopeId,
+      hourlySource,
+      options,
+    );
+  }
+
   const now = options.now ?? new Date();
   const hourlyDefinition = {
     granularity: "hour" as const,
@@ -843,16 +1120,37 @@ async function fetchScenarioComparisonRangeRows(
       hourlySource.from <= hourlyDefinition.from &&
       hourlySource.to >= hourlyDefinition.to,
   );
-  let hourlyRows = hasProvidedSource && hourlySource
-    ? hourlySource.rows.filter((row) =>
-        aggregateBucketInRange(
-          row.bucket,
-          "hour",
-          hourlyDefinition.from,
-          hourlyDefinition.to,
-        ),
-      )
-    : await fetchAggregateRows(hourlyDefinition, companyScopeId, options);
+  const missingHourlyRanges = hasProvidedSource
+    ? []
+    : hasSourceIntersection && sourceIntersectionFrom && sourceIntersectionTo
+      ? [
+          {
+            ...hourlyDefinition,
+            to: sourceIntersectionFrom,
+          },
+          {
+            ...hourlyDefinition,
+            from: sourceIntersectionTo,
+          },
+        ].filter((range) => range.from < range.to)
+      : [hourlyDefinition];
+  let hourlyRows = (
+    await Promise.all(
+      missingHourlyRanges.map((range) =>
+        fetchAggregateRows(range, companyScopeId, options),
+      ),
+    )
+  ).flat();
+  if (hasProvidedSource && hourlySource) {
+    hourlyRows = hourlySource.rows.filter((row) =>
+      aggregateBucketInRange(
+        row.bucket,
+        "hour",
+        hourlyDefinition.from,
+        hourlyDefinition.to,
+      ),
+    );
+  }
   const currentHour = currentOpenBucket("hour", now);
   const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
   const requiredCurrentFrom = new Date(
@@ -992,50 +1290,318 @@ async function fetchScenarioComparisonRangeRows(
   return hourlyRows;
 }
 
+async function fetchConsolidatedScenarioComparisonRangeRows(
+  definition: AggregateRangeDefinition,
+  companyScopeId: string,
+  hourlySource: ScenarioComparisonHourlySource | undefined,
+  options: ScenarioComparisonFetchOptions,
+) {
+  const granularity = definition.granularity;
+  const lastInstant = new Date(definition.to.getTime() - 1);
+  const firstBoundaryStart = startOfAggregateBucket(
+    definition.from,
+    granularity,
+  );
+  const lastBoundaryStart = startOfAggregateBucket(lastInstant, granularity);
+  const firstBoundaryPartial = definition.from > firstBoundaryStart;
+  const lastBoundaryPartial = definition.to < endOfAggregateBucket(
+    lastInstant,
+    granularity,
+  );
+  const fullFrom = firstBoundaryPartial
+    ? endOfAggregateBucket(definition.from, granularity)
+    : definition.from;
+  const fullTo = lastBoundaryPartial ? lastBoundaryStart : definition.to;
+  const aggregateSource = options.aggregateSource?.granularity === granularity
+    ? options.aggregateSource
+    : undefined;
+  const sourceFrom = aggregateSource
+    ? new Date(Math.max(fullFrom.getTime(), aggregateSource.from.getTime()))
+    : null;
+  const sourceTo = aggregateSource
+    ? new Date(Math.min(fullTo.getTime(), aggregateSource.to.getTime()))
+    : null;
+  const hasSourceIntersection = Boolean(
+    sourceFrom && sourceTo && sourceFrom < sourceTo,
+  );
+  const completeSourceCoverage = Boolean(
+    aggregateSource &&
+      aggregateSource.from <= fullFrom &&
+      aggregateSource.to >= fullTo,
+  );
+  const missingFullRanges =
+    fullFrom >= fullTo || completeSourceCoverage
+      ? []
+      : hasSourceIntersection && sourceFrom && sourceTo
+        ? [
+            { from: fullFrom, granularity, to: sourceFrom },
+            { from: sourceTo, granularity, to: fullTo },
+          ].filter((range) => range.from < range.to)
+        : [{ from: fullFrom, granularity, to: fullTo }];
+  let rows = (
+    await Promise.all(
+      missingFullRanges.map((range) =>
+        fetchAggregateRows(range, companyScopeId, options),
+      ),
+    )
+  ).flat();
+  if (
+    hasSourceIntersection &&
+    aggregateSource &&
+    sourceFrom &&
+    sourceTo
+  ) {
+    rows = reconcileAggregateRows(
+      rows,
+      granularity,
+      aggregateSource.rows,
+      granularity,
+      sourceFrom,
+      sourceTo,
+    );
+  }
+  const boundaryRanges: Array<{ from: Date; to: Date }> = [];
+
+  if (
+    firstBoundaryStart.getTime() === lastBoundaryStart.getTime() &&
+    (firstBoundaryPartial || lastBoundaryPartial)
+  ) {
+    boundaryRanges.push({ from: definition.from, to: definition.to });
+  } else {
+    if (firstBoundaryPartial) {
+      boundaryRanges.push({
+        from: definition.from,
+        to: endOfAggregateBucket(definition.from, granularity),
+      });
+    }
+    if (lastBoundaryPartial) {
+      boundaryRanges.push({
+        from: lastBoundaryStart,
+        to: definition.to,
+      });
+    }
+  }
+
+  for (const boundary of boundaryRanges) {
+    const hourlyRows = await fetchScenarioComparisonRangeRows(
+      { ...boundary, granularity: "hour" },
+      companyScopeId,
+      hourlySource,
+      options,
+    );
+    rows = reconcileAggregateRows(
+      rows,
+      granularity,
+      hourlyRows,
+      "hour",
+      boundary.from,
+      boundary.to,
+    );
+  }
+
+  return rows;
+}
+
 async function fetchAggregateRows(
   definition: AggregateRangeDefinition,
   companyScopeId: string,
   options: ScenarioComparisonFetchOptions = {},
 ) {
-  if (definition.granularity === "hour") {
-    return fetchHourlyAggregateRanges({
-      cache: options.cache,
-      cacheScope:
-        options.cacheScope ?? "scenario-comparison:uncached-request",
+  const now = options.now ?? new Date();
+  const request: CompleteAggregateRequest = (path) =>
+    requestSharedScenarioComparisonAggregate({
       companyScopeId,
-      now: options.now,
-      ranges: [definition],
+      companyTimeZone: options.companyTimeZone ?? "UTC",
+      now,
+      path,
+      requestRevision: options.requestRevision,
       signal: options.signal,
     });
+
+  return fetchCompleteAggregateRange({
+    companyScopeId,
+    from: definition.from,
+    granularity: definition.granularity,
+    metricType: DEFAULT_METRIC_TYPE,
+    request,
+    signal: options.signal,
+    to: definition.to,
+  });
+}
+
+function requestSharedScenarioComparisonAggregate({
+  companyScopeId,
+  companyTimeZone,
+  now,
+  path,
+  requestRevision,
+  signal,
+}: {
+  companyScopeId: string;
+  companyTimeZone: string;
+  now: Date;
+  path: string;
+  requestRevision?: string;
+  signal?: AbortSignal;
+}) {
+  const key = sharedAggregateRequestKey({
+    companyScopeId,
+    companyTimeZone,
+    now,
+    path,
+    requestRevision,
+  });
+  const cached = sharedAggregateResponses.get(key);
+  if (cached) {
+    signal?.throwIfAborted();
+    sharedAggregateResponses.delete(key);
+    sharedAggregateResponses.set(key, cached);
+    return Promise.resolve(cached);
   }
 
-  const params = new URLSearchParams({
-    granularity: definition.granularity,
-    from: aggregateQueryIso(definition.from, definition.granularity),
-    metric_type: DEFAULT_METRIC_TYPE,
-    to: aggregateQueryIso(definition.to, definition.granularity),
-  });
-  const response = await apiFetch<AggregateEventsResponse>(
-    `/analytics/aggregate?${params.toString()}`,
-    options.signal
-      ? { companyScopeId, signal: options.signal }
-      : { companyScopeId },
-  );
-  requireAggregateGranularity(response.granularity, definition.granularity);
+  let entry = sharedAggregateRequests.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    const promise = apiFetch<AggregateEventsResponse>(path, {
+      companyScopeId,
+      signal: controller.signal,
+    });
+    entry = {
+      abortTimer: null,
+      controller,
+      promise,
+      subscribers: new Set(),
+    };
+    sharedAggregateRequests.set(key, entry);
+    promise.then(
+      (response) => {
+        if (!controller.signal.aborted) {
+          rememberSharedAggregateResponse(key, response);
+        }
+        if (sharedAggregateRequests.get(key) === entry) {
+          sharedAggregateRequests.delete(key);
+        }
+      },
+      () => {
+        if (sharedAggregateRequests.get(key) === entry) {
+          sharedAggregateRequests.delete(key);
+        }
+      },
+    );
+  }
 
-  return requireAggregateRowsInRange(
-    response.data,
-    definition.granularity,
-    definition.from,
-    definition.to,
-    DEFAULT_METRIC_TYPE,
-  );
+  return subscribeToSharedAggregateRequest(entry, signal);
+}
+
+function subscribeToSharedAggregateRequest(
+  entry: SharedAggregateRequestEntry,
+  signal?: AbortSignal,
+) {
+  signal?.throwIfAborted();
+  const subscriber = Symbol("scenario-comparison-request");
+  entry.subscribers.add(subscriber);
+  if (entry.abortTimer) {
+    clearTimeout(entry.abortTimer);
+    entry.abortTimer = null;
+  }
+
+  return new Promise<AggregateEventsResponse>((resolve, reject) => {
+    let settled = false;
+    const release = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      entry.subscribers.delete(subscriber);
+      if (!entry.subscribers.size && !entry.controller.signal.aborted) {
+        entry.abortTimer = setTimeout(() => {
+          entry.abortTimer = null;
+          if (!entry.subscribers.size) {
+            abortRequest(
+              entry.controller,
+              "A consulta compartilhada ficou sem consumidores.",
+            );
+          }
+        }, 0);
+      }
+    };
+    const onAbort = () => {
+      release();
+      reject(abortReason(signal));
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    entry.promise.then(
+      (response) => {
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        release();
+        resolve(response);
+      },
+      (error) => {
+        release();
+        reject(error);
+      },
+    );
+  });
+}
+
+function sharedAggregateRequestKey({
+  companyScopeId,
+  companyTimeZone,
+  now,
+  path,
+  requestRevision,
+}: {
+  companyScopeId: string;
+  companyTimeZone: string;
+  now: Date;
+  path: string;
+  requestRevision?: string;
+}) {
+  const url = new URL(path, "http://ipxdata.local");
+  const from = new Date(url.searchParams.get("from") ?? "");
+  const to = new Date(url.searchParams.get("to") ?? "");
+  const intersectsOpenBucket =
+    !Number.isNaN(from.getTime()) &&
+    !Number.isNaN(to.getTime()) &&
+    from <= now &&
+    now < to;
+  const revision = requestRevision ?? (intersectsOpenBucket
+    ? `open:${startOfMinute(now).toISOString()}`
+    : "closed");
+
+  return JSON.stringify([
+    companyScopeId,
+    companyTimeZone,
+    path,
+    revision,
+  ]);
+}
+
+function rememberSharedAggregateResponse(
+  key: string,
+  response: AggregateEventsResponse,
+) {
+  sharedAggregateResponses.set(key, response);
+  while (sharedAggregateResponses.size > MAX_SHARED_AGGREGATE_RESPONSES) {
+    const oldestKey = sharedAggregateResponses.keys().next().value;
+    if (typeof oldestKey !== "string") break;
+    sharedAggregateResponses.delete(oldestKey);
+  }
+}
+
+function abortReason(signal?: AbortSignal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new DOMException("A consulta foi cancelada.", "AbortError");
 }
 
 function usesHourlyScenarioComparisonSource(
-  definition: Pick<AggregateRangeDefinition, "from" | "to">,
+  definition: Pick<AggregateRangeDefinition, "from" | "granularity" | "to">,
 ) {
-  return definition.to > definition.from;
+  return definition.granularity === "hour" && definition.to > definition.from;
 }
 
 function scenarioComparisonSourceGranularity(

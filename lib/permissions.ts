@@ -13,7 +13,7 @@ export type OperationalPermissionDefinition = {
 export const OPERATIONAL_PERMISSIONS = [
   {
     slug: "dashboard_widgets_manage",
-    label: "Widgets do dashboard",
+    label: "Widgets do painel",
     description: "Configurar, mover, ocultar e criar widgets personalizados.",
     aliases: [
       "widget_manage",
@@ -40,7 +40,7 @@ export const OPERATIONAL_PERMISSIONS = [
   {
     slug: "views_manage",
     label: "Visões",
-    description: "Acessar e configurar URLs de visões para exibição externa.",
+    description: "Criar e configurar visões para exibição em outros monitores.",
     aliases: [
       "view_manage",
       "views_create",
@@ -72,7 +72,7 @@ export const OPERATIONAL_PERMISSIONS = [
   {
     slug: "occupancy_manage",
     label: "Ocupação",
-    description: "Acessar e configurar áreas de ocupação por fotografia.",
+    description: "Acessar e configurar áreas e cenários de ocupação.",
     aliases: [
       "occupancy_create",
       "occupancy_edit",
@@ -104,7 +104,7 @@ export const OPERATIONAL_PERMISSIONS = [
   {
     slug: "locations_manage",
     label: "Locais",
-    description: "Criar e editar locais e sub-locais operacionais.",
+    description: "Criar e editar locais e sublocais operacionais.",
     aliases: [
       "location_manage",
       "locations_create",
@@ -192,7 +192,7 @@ export const OPERATIONAL_PERMISSIONS = [
   {
     slug: "workers_manage",
     label: "Workers",
-    description: "Criar workers, rotacionar chaves e acompanhar heartbeats.",
+    description: "Cadastrar Workers, renovar credenciais e acompanhar a comunicação.",
     aliases: [
       "worker_manage",
       "workers_create",
@@ -248,12 +248,13 @@ export function canManageWidgets(user: CurrentUser | null) {
 
   // Widget layout is part of administering the operational dashboard itself.
   // Some API/JWT versions publish a dedicated widget grant, while others only
-  // expose the write-capable grant for Counting or Occupancy. Accept either
-  // representation without widening access to infrastructure resources.
+  // expose a write-capable grant for one of the operational modules. Accept
+  // either representation without widening access to infrastructure resources.
   return (
     permissionsAllowWidgetManagement(user?.permissions, user) ||
     userHasModuleManagementPermission(user, "counting") ||
-    userHasModuleManagementPermission(user, "occupancy")
+    userHasModuleManagementPermission(user, "occupancy") ||
+    userHasModuleManagementPermission(user, "demographics")
   );
 }
 
@@ -290,6 +291,15 @@ export function canManageViews(user: CurrentUser | null) {
   return canManage(user, "views_manage");
 }
 
+/**
+ * The audit endpoints are protected by the tenant role itself in the API,
+ * not by a module permission. Keep this capability separate from operational
+ * grants so an operator never gains access through a read-only module claim.
+ */
+export function canViewAudit(user: CurrentUser | null) {
+  return isMasterUser(user) || isOperationalAdmin(user);
+}
+
 export function hasAnyOperationalPermission(user: CurrentUser | null) {
   if (isMasterUser(user)) return true;
   if (!isOperationalAdmin(user)) return false;
@@ -298,7 +308,8 @@ export function hasAnyOperationalPermission(user: CurrentUser | null) {
     userHasPermission(user, permission),
   ) ||
     userHasModuleManagementPermission(user, "counting") ||
-    userHasModuleManagementPermission(user, "occupancy");
+    userHasModuleManagementPermission(user, "occupancy") ||
+    userHasModuleManagementPermission(user, "demographics");
 }
 
 /**
@@ -475,11 +486,21 @@ function isOperationalAdmin(user: CurrentUser | null) {
   return normalizeRole(user?.role) === "admin";
 }
 
-export type OperationalModuleFamily = "counting" | "occupancy";
+export type OperationalModuleFamily =
+  | "counting"
+  | "occupancy"
+  | "demographics";
 
 const MODULE_FAMILY_TERMS = {
   counting: ["counting", "contagem", "people counting", "people count"],
   occupancy: ["occupancy", "ocupacao", "people occupancy"],
+  demographics: [
+    "demographics",
+    "demographic",
+    "demografia",
+    "demografico",
+    "people demographics",
+  ],
 } as const satisfies Record<OperationalModuleFamily, readonly string[]>;
 
 const MODULE_READ_ACTIONS = ["view", "read", "list", "export"] as const;
@@ -508,8 +529,9 @@ const MODULE_WIDE_MUTATING_ACTIONS = [
  * The permission catalogue is the source of truth, so this deliberately does
  * not enumerate permission slugs. The embedded module is authoritative when
  * present; JWTs that contain only permission slugs remain compatible through
- * the module prefix (`counting_*` / `occupancy_*`). Contradictory declarations
- * fail closed instead of leaking one module through a grant for another.
+ * the module prefix (`counting_*`, `occupancy_*` or `demographics_*`).
+ * Contradictory declarations fail closed instead of leaking one module through
+ * a grant for another.
  */
 export function permissionModuleFamily(
   permission: Pick<UserPermission, "slug" | "module">,
@@ -536,9 +558,17 @@ export function canViewOccupancy(user: CurrentUser | null) {
   return userCanViewModule(user, "occupancy");
 }
 
+export function canViewDemographics(user: CurrentUser | null) {
+  return userCanViewModule(user, "demographics");
+}
+
 /** Ao Vivo, Análises e Relatórios formam o pacote de leitura dos módulos. */
 export function canAccessOperationalDashboards(user: CurrentUser | null) {
-  return canViewCounting(user) || canViewOccupancy(user);
+  return (
+    canViewCounting(user) ||
+    canViewOccupancy(user) ||
+    canViewDemographics(user)
+  );
 }
 
 /**
@@ -624,9 +654,10 @@ function companyEnablesExplicitPermissionModule(
 
   const assignments = user.company_modules;
   // The JWT permission remains authoritative when an older backend does not
-  // publish module assignments. A matching assignment, when available, can
-  // explicitly disable the resource.
-  if (!assignments?.length) return true;
+  // publish module assignments. Once the JWT explicitly publishes the list,
+  // absence of a corresponding enabled assignment is authoritative too.
+  if (assignments === undefined) return true;
+  if (!assignments.length) return false;
 
   const rawModuleId =
     permission.module_id?.trim() || permission.module?.id?.trim() || "";
@@ -646,7 +677,7 @@ function companyEnablesExplicitPermissionModule(
     );
   });
 
-  if (!matchingAssignments.length) return true;
+  if (!matchingAssignments.length) return false;
   return matchingAssignments.some(
     (assignment) => assignment.enabled && assignment.module?.active !== false,
   );

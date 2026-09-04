@@ -1,17 +1,5 @@
-import { AppShell } from "@/components/app/app-shell";
-import { AuthGuard } from "@/components/app/auth-guard";
-import { ViewsManager } from "@/components/app/views-manager";
+import { DeferredViewsManager as ViewsManager } from "@/components/app/deferred-route-panels";
 
 export default function ManagerViewsPage() {
-  return (
-    <AuthGuard requireManager requireResource="views">
-      <AppShell
-        mode="manager"
-        title="Visões"
-        description="Configure visões autenticadas e distribua o Ao Vivo em um ou mais monitores."
-      >
-        <ViewsManager />
-      </AppShell>
-    </AuthGuard>
-  );
+  return <ViewsManager />;
 }

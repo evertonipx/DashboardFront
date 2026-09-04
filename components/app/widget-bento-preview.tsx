@@ -8,6 +8,7 @@ import {
   CARD_LAYOUT_ROW_GAP,
   CARD_LAYOUT_ROW_HEIGHT,
 } from "@/lib/card-layout-sizing";
+import { packCardLayout } from "@/lib/card-layout-packing";
 import { cn } from "@/lib/utils";
 import {
   resolveWidgetBentoPreviewGeometry,
@@ -97,6 +98,23 @@ export function WidgetBentoPreview({
     sourceRowHeight,
     sourceWidth,
   });
+  const packedItems = React.useMemo(() => {
+    const itemsById = new Map(items.map((item) => [item.id, item]));
+    return packCardLayout(
+      items.map((item) => ({
+        columnSpan: Math.min(
+          normalizePositiveInteger(item.columnSpan),
+          resolvedColumnCount,
+        ),
+        id: item.id,
+        rowSpan: normalizePositiveInteger(item.rowSpan),
+      })),
+      resolvedColumnCount,
+    ).map((placement) => ({
+      item: itemsById.get(placement.id)!,
+      placement,
+    }));
+  }, [items, resolvedColumnCount]);
   const interactive = Boolean(
     onSelect ||
       onDragStart ||
@@ -132,7 +150,7 @@ export function WidgetBentoPreview({
   }, [items.length]);
 
   React.useEffect(() => {
-    const nextOrder = items.map((item) => item.id);
+    const nextOrder = packedItems.map(({ item }) => item.id);
     const previousOrder = previousOrderRef.current;
     const sameMembers =
       previousOrder.length === nextOrder.length &&
@@ -146,8 +164,10 @@ export function WidgetBentoPreview({
         nextOrder.filter((itemId, index) => itemId !== previousOrder[index]),
       );
       const movedItem =
-        items.find((item) => item.selected && changedIds.has(item.id)) ??
-        items.find((item) => changedIds.has(item.id));
+        packedItems.find(
+          ({ item }) => item.selected && changedIds.has(item.id),
+        )?.item ??
+        packedItems.find(({ item }) => changedIds.has(item.id))?.item;
       const position = movedItem ? nextOrder.indexOf(movedItem.id) + 1 : 0;
       setReorderAnnouncement(
         movedItem && position > 0
@@ -157,7 +177,7 @@ export function WidgetBentoPreview({
     }
 
     previousOrderRef.current = nextOrder;
-  }, [items]);
+  }, [packedItems]);
 
   return (
     <section
@@ -182,8 +202,8 @@ export function WidgetBentoPreview({
             id={descriptionId}
             className="mt-1 text-xs text-muted-foreground"
           >
-            {layoutLabel ?? layoutModeLabel(resolvedColumnCount)} · ordem e proporções da tela
-            atual
+            {layoutLabel ?? layoutModeLabel(resolvedColumnCount)} · encaixe
+            automático, ordem visual e proporções da tela atual
           </p>
         </div>
 
@@ -231,13 +251,10 @@ export function WidgetBentoPreview({
               data-widget-bento-grid
               data-widget-bento-scale={geometry.scale.toFixed(4)}
             >
-              {items.map((item, index) => {
-                const columnSpan = Math.min(
-                  normalizePositiveInteger(item.columnSpan),
-                  resolvedColumnCount,
-                );
-                const rowSpan = normalizePositiveInteger(item.rowSpan);
-                const label = item.label.trim() || item.id;
+              {packedItems.map(({ item, placement }, index) => {
+                const columnSpan = placement.columnSpan;
+                const rowSpan = placement.rowSpan;
+                const label = item.label.trim() || "Widget";
                 const dimensionLabel =
                   item.dimensionLabel?.trim() || `${columnSpan}×${rowSpan}`;
                 const columnTrackWidth =
@@ -293,14 +310,16 @@ export function WidgetBentoPreview({
                     key={item.id}
                     className="min-h-0 min-w-0 list-none"
                     style={{
-                      gridColumn: `span ${columnSpan} / span ${columnSpan}`,
-                      gridRow: `span ${rowSpan} / span ${rowSpan}`,
+                      gridColumn: `${placement.columnStart} / span ${columnSpan}`,
+                      gridRow: `${placement.rowStart} / span ${rowSpan}`,
                     }}
                     data-widget-bento-item={item.id}
                     data-widget-bento-column-span={columnSpan}
+                    data-widget-bento-column-start={placement.columnStart}
                     data-widget-bento-compact={compactTile ? "true" : "false"}
                     data-widget-bento-kind={item.previewKind ?? "chart"}
                     data-widget-bento-row-span={rowSpan}
+                    data-widget-bento-row-start={placement.rowStart}
                   >
                     {interactive ? (
                       <button

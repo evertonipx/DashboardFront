@@ -244,7 +244,9 @@ export function createDefaultPeriodAnalysisWidgets() {
 export function createDefaultPeriodAnalysisSettings(
   now = new Date(),
 ): PeriodAnalysisSettings {
-  const date = formatDateInput(now);
+  const previousDay = new Date(now);
+  previousDay.setDate(previousDay.getDate() - 1);
+  const date = formatDateInput(previousDay);
 
   return { from: date, mode: "day", to: date };
 }
@@ -353,8 +355,9 @@ export function deletePeriodAnalysisWidget(
 export function loadPeriodAnalysisSettings(
   companyId?: string | null,
   userId?: string | null,
+  fallback = createDefaultPeriodAnalysisSettings(),
 ) {
-  const defaults = createDefaultPeriodAnalysisSettings();
+  const defaults = fallback;
   if (typeof window === "undefined") return defaults;
 
   try {

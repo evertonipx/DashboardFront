@@ -8,7 +8,6 @@ export type CountingAnalysisRange = Readonly<{
 export type CountingAnalysisRangePlan = Readonly<{
   hourlyDetail: boolean;
   mode: "detailed" | "consolidated";
-  refreshIntervalMs: number;
   spanDays: number;
 }>;
 
@@ -17,9 +16,6 @@ export type CountingAnalysisRangePlan = Readonly<{
  * complete daily history and expose a clearly labelled hourly detail window.
  */
 export const MAX_COUNTING_ANALYSIS_HOURLY_DETAIL_DAYS = 31;
-
-export const COUNTING_ANALYSIS_DETAILED_REFRESH_MS = 5_000;
-export const COUNTING_ANALYSIS_CONSOLIDATED_REFRESH_MS = 60_000;
 
 const VISUAL_POINT_LIMITS: Readonly<
   Record<ScenarioAnalyticsGranularity, number>
@@ -52,9 +48,6 @@ export function buildCountingAnalysisRangePlan(
   return {
     hourlyDetail,
     mode: hourlyDetail ? "detailed" : "consolidated",
-    refreshIntervalMs: hourlyDetail
-      ? COUNTING_ANALYSIS_DETAILED_REFRESH_MS
-      : COUNTING_ANALYSIS_CONSOLIDATED_REFRESH_MS,
     spanDays,
   };
 }

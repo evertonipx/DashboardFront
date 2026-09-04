@@ -4,9 +4,9 @@ export type OccupancySnapshotsProxyResult = {
 };
 
 const BACKEND_UNAVAILABLE_MESSAGE =
-  "Backend de ocupação indisponível para consultar snapshots.";
+  "Os dados de ocupação estão temporariamente indisponíveis.";
 const INVALID_BACKEND_RESPONSE_MESSAGE =
-  "O backend de ocupação não retornou uma resposta JSON certificável.";
+  "Não foi possível interpretar os dados de ocupação recebidos.";
 
 export async function resolveOccupancySnapshotsProxyResult(
   response: Response | null,

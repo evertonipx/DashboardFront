@@ -1,4 +1,8 @@
-import type { CurrentUser, UserPermission } from "@/lib/types";
+import type {
+  CurrentUser,
+  CurrentUserCompanyModule,
+  UserPermission,
+} from "@/lib/types";
 import { isMasterUser, normalizeRole } from "@/lib/user-role";
 import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
 import { resolveCurrentUserCompanyTimeZone } from "@/lib/company-time-zone-record";
@@ -9,6 +13,8 @@ type AccessTokenClaims = Record<string, unknown> & {
   access?: unknown;
   authorization?: unknown;
   company?: unknown;
+  companyModules?: unknown;
+  company_modules?: unknown;
   companyId?: unknown;
   company_id?: unknown;
   exp?: unknown;
@@ -215,6 +221,54 @@ export function accessTokenExplicitlyMismatchesUserIdentity(
   );
 }
 
+/**
+ * Guards reuse of an authenticated-user snapshot after a network/5xx error.
+ * A token for the same identity but another tenant must not inherit grants
+ * cached for the previous company. Explicit Master tokens remain global.
+ */
+export function accessTokenExplicitlyMismatchesUserContext(
+  accessToken: string,
+  user: CurrentUser,
+  nowMilliseconds = Date.now(),
+) {
+  const claims = decodeAccessTokenClaims(accessToken);
+  if (!claims) return false;
+  if (!claimsAreActive(claims, nowMilliseconds)) return true;
+
+  const identity = resolveUserIdentityClaims(claims);
+  if (
+    identity.conflict ||
+    (identity.value && !tokenIdentityMatchesCurrentUser(identity, user))
+  ) {
+    return true;
+  }
+
+  const roleClaim = resolveStringAliases(claims, ["role"]);
+  const masterClaim = resolveBooleanAliases(claims, ["is_master", "isMaster"]);
+  if (resolveMasterClaimState(roleClaim, masterClaim) === "master") {
+    return false;
+  }
+
+  const strictDirectCompany = resolveStringAliases(claims, [
+    "company_id",
+    "companyId",
+    "tenant_id",
+    "tenantId",
+  ]);
+  if (strictDirectCompany.conflict) return true;
+  const company = resolveCompanyIdentityClaims(claims);
+  if (company.conflict) return true;
+  const userCompanyId = resolveUserCompanyId(user);
+  if (
+    company.value &&
+    userCompanyId &&
+    !sameIdentifier(company.value, userCompanyId)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function accessTokensShareUserIdentity(
   previousAccessToken: string,
   nextAccessToken: string,
@@ -286,6 +340,20 @@ export function enrichCurrentUserFromAccessToken(
       ? []
       : permissionClaims.permissions
     : null;
+  const companyModuleClaims = resolveCompanyModuleClaims(
+    claims,
+    companyId || context.companyId,
+    userId || context.userId,
+  );
+  // Like permission claims, an explicit company-module declaration belongs to
+  // this accepted JWT snapshot. Invalid aliases, tenant conflicts or malformed
+  // assignments therefore become an explicit empty list instead of falling
+  // through to data left by `/auth/me` or a previous session.
+  const claimedCompanyModules = companyModuleClaims.declared
+    ? companyModuleClaims.invalid
+      ? []
+      : companyModuleClaims.modules
+    : null;
   // Authorization metadata may be split during a backend rollout: older
   // /auth/me payloads can still report `is_master: false` while the signed JWT
   // already carries `role: super-admin` (and the API authorizes it as such).
@@ -299,7 +367,8 @@ export function enrichCurrentUserFromAccessToken(
     role === cleanString(user.role) &&
     companyTimeZone === declaredUserTimeZone &&
     isMaster === user.is_master &&
-    claimedPermissions === null
+    claimedPermissions === null &&
+    claimedCompanyModules === null
   ) {
     return user;
   }
@@ -316,6 +385,9 @@ export function enrichCurrentUserFromAccessToken(
     is_master: isMaster,
     ...(claimedPermissions !== null
       ? { permissions: claimedPermissions }
+      : undefined),
+    ...(claimedCompanyModules !== null
+      ? { company_modules: claimedCompanyModules }
       : undefined),
     role: role || user.role,
   };
@@ -376,23 +448,35 @@ export function reconcileCurrentUserWithAccessToken(
     user,
     claims,
   );
+  const identity = resolveUserIdentityClaims(claims);
+  if (identity.conflict) {
+    return removeUncertifiedAuthorization(operationallyEnrichedUser);
+  }
   const context = resolveAccessTokenContext(accessToken, nowMilliseconds);
   if (!context) return operationallyEnrichedUser;
-  const identity = resolveUserIdentityClaims(claims);
-  if (
-    identity.conflict ||
-    !contextMatchesCurrentUser(context, identity, user)
-  ) {
+  if (!contextMatchesCurrentUser(context, identity, user)) {
     // `/auth/me` authenticated this exact Bearer. A JWT schema migration must
-    // not manufacture a logout; incompatible local claims simply cannot add
-    // role, tenant or master metadata to the response.
-    return operationallyEnrichedUser;
+    // not manufacture a logout. Explicitly incompatible identity/company
+    // claims also cannot retain authorization attached to another principal.
+    return identity.value || context.companyId
+      ? removeUncertifiedAuthorization(operationallyEnrichedUser)
+      : operationallyEnrichedUser;
   }
   return enrichCurrentUserFromAccessToken(
     operationallyEnrichedUser,
     accessToken,
     nowMilliseconds,
   );
+}
+
+function removeUncertifiedAuthorization(user: CurrentUser): CurrentUser {
+  return {
+    ...user,
+    company_modules: [],
+    is_master: false,
+    permissions: [],
+    role: undefined,
+  };
 }
 
 export function decodeAccessTokenClaims(
@@ -528,7 +612,7 @@ function resolveUserIdentityClaims(
 ): UserIdentityResolution {
   // `user_id` is the application identity. `sub` is the generic JWT subject
   // and may legitimately be an e-mail, username or identity-provider key.
-  const applicationId = resolvePreferredStringClaim(claims, [
+  const applicationId = resolveStringAliases(claims, [
     "user_id",
     "userId",
   ]);
@@ -582,6 +666,293 @@ function isUuid(value: string) {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return isRecord(value) ? value : null;
+}
+
+function resolveCompanyModuleClaims(
+  claims: AccessTokenClaims,
+  expectedCompanyId: string,
+  expectedUserId: string,
+): {
+  declared: boolean;
+  invalid: boolean;
+  modules: CurrentUserCompanyModule[];
+} {
+  const ordinarySources = [
+    { includeObjectId: false, source: claims },
+    { includeObjectId: false, source: asRecord(claims.authorization) },
+    { includeObjectId: false, source: asRecord(claims.access) },
+    { includeObjectId: true, source: asRecord(claims.user) },
+  ].filter(
+    (entry): entry is { includeObjectId: boolean; source: Record<string, unknown> } =>
+      Boolean(entry.source),
+  );
+  const companySources = [
+    asRecord(claims.company),
+    asRecord(claims.tenant),
+  ].filter((source): source is Record<string, unknown> => Boolean(source));
+  const declarations: CurrentUserCompanyModule[][] = [];
+  let declared = false;
+
+  for (const { includeObjectId, source } of ordinarySources) {
+    const keys = ["company_modules", "companyModules"].filter((key) =>
+      Object.prototype.hasOwnProperty.call(source, key),
+    );
+    if (!keys.length) continue;
+    declared = true;
+    if (
+      !expectedCompanyId ||
+      !expectedUserId ||
+      !companyModuleClaimsMatchAuthenticatedContext(
+        claims,
+        expectedCompanyId,
+        expectedUserId,
+      ) ||
+      !companyModuleSourceMatchesCompany(source, expectedCompanyId) ||
+      !companyModuleSourceMatchesUser(source, expectedUserId, includeObjectId)
+    ) {
+      return { declared: true, invalid: true, modules: [] };
+    }
+    for (const key of keys) {
+      const parsed = parseCompanyModuleClaimList(source[key], expectedCompanyId);
+      if (!parsed) return { declared: true, invalid: true, modules: [] };
+      declarations.push(parsed);
+    }
+  }
+
+  // A company/tenant object may expose the same assignment list as `modules`.
+  // Restrict that compact alias to those objects so a generic top-level
+  // `modules` claim can never be mistaken for a tenant assignment.
+  for (const source of companySources) {
+    const keys = ["company_modules", "companyModules", "modules"].filter(
+      (key) => Object.prototype.hasOwnProperty.call(source, key),
+    );
+    if (!keys.length) continue;
+    declared = true;
+    if (
+      !expectedCompanyId ||
+      !expectedUserId ||
+      !companyModuleClaimsMatchAuthenticatedContext(
+        claims,
+        expectedCompanyId,
+        expectedUserId,
+      ) ||
+      !companyModuleSourceMatchesCompany(source, expectedCompanyId, true) ||
+      !companyModuleSourceMatchesUser(source, expectedUserId)
+    ) {
+      return { declared: true, invalid: true, modules: [] };
+    }
+    for (const key of keys) {
+      const parsed = parseCompanyModuleClaimList(source[key], expectedCompanyId);
+      if (!parsed) return { declared: true, invalid: true, modules: [] };
+      declarations.push(parsed);
+    }
+  }
+
+  if (!declared || !declarations.length) {
+    return { declared: false, invalid: false, modules: [] };
+  }
+  const expectedSignature = companyModuleClaimSignature(declarations[0]);
+  if (
+    declarations.some(
+      (modules) => companyModuleClaimSignature(modules) !== expectedSignature,
+    )
+  ) {
+    return { declared: true, invalid: true, modules: [] };
+  }
+
+  return {
+    declared: true,
+    invalid: false,
+    modules: declarations[0],
+  };
+}
+
+function companyModuleClaimsMatchAuthenticatedContext(
+  claims: AccessTokenClaims,
+  expectedCompanyId: string,
+  expectedUserId: string,
+) {
+  const companySources = [
+    { includeObjectId: false, source: claims },
+    { includeObjectId: false, source: asRecord(claims.authorization) },
+    { includeObjectId: false, source: asRecord(claims.access) },
+    { includeObjectId: false, source: asRecord(claims.user) },
+    { includeObjectId: true, source: asRecord(claims.company) },
+    { includeObjectId: true, source: asRecord(claims.tenant) },
+  ].filter(
+    (entry): entry is { includeObjectId: boolean; source: Record<string, unknown> } =>
+      Boolean(entry.source),
+  );
+  for (const { includeObjectId, source } of companySources) {
+    if (!companyModuleSourceMatchesCompany(source, expectedCompanyId, includeObjectId)) {
+      return false;
+    }
+  }
+
+  const userSources = [
+    { includeObjectId: false, source: claims },
+    { includeObjectId: false, source: asRecord(claims.authorization) },
+    { includeObjectId: false, source: asRecord(claims.access) },
+    { includeObjectId: true, source: asRecord(claims.user) },
+  ].filter(
+    (entry): entry is { includeObjectId: boolean; source: Record<string, unknown> } =>
+      Boolean(entry.source),
+  );
+  return userSources.every(({ includeObjectId, source }) =>
+    companyModuleSourceMatchesUser(source, expectedUserId, includeObjectId),
+  );
+}
+
+function companyModuleSourceMatchesUser(
+  source: Record<string, unknown>,
+  expectedUserId: string,
+  includeObjectId = false,
+) {
+  const sourceUser = resolveStringAliases(
+    source,
+    includeObjectId ? ["id", "user_id", "userId"] : ["user_id", "userId"],
+  );
+  return Boolean(
+    !sourceUser.conflict &&
+      (!sourceUser.value || sameIdentifier(sourceUser.value, expectedUserId)),
+  );
+}
+
+function companyModuleSourceMatchesCompany(
+  source: Record<string, unknown>,
+  expectedCompanyId: string,
+  includeObjectId = false,
+) {
+  const sourceCompany = resolveStringAliases(
+    source,
+    includeObjectId
+      ? ["id", "company_id", "companyId", "tenant_id", "tenantId"]
+      : ["company_id", "companyId", "tenant_id", "tenantId"],
+  );
+  return Boolean(
+    !sourceCompany.conflict &&
+      (!sourceCompany.value ||
+        !expectedCompanyId ||
+        sameIdentifier(sourceCompany.value, expectedCompanyId)),
+  );
+}
+
+function parseCompanyModuleClaimList(
+  value: unknown,
+  expectedCompanyId: string,
+): CurrentUserCompanyModule[] | null {
+  if (!Array.isArray(value)) return null;
+
+  const assignments = new Map<string, CurrentUserCompanyModule>();
+  for (const item of value) {
+    const parsed = parseCompanyModuleClaim(item, expectedCompanyId);
+    if (!parsed) return null;
+    const identity = companyModuleIdentity(parsed);
+    if (!identity) return null;
+    const previous = assignments.get(identity);
+    if (
+      previous &&
+      companyModuleAssignmentSignature(previous) !==
+        companyModuleAssignmentSignature(parsed)
+    ) {
+      return null;
+    }
+    assignments.set(identity, previous ?? parsed);
+  }
+  return [...assignments.values()];
+}
+
+function parseCompanyModuleClaim(
+  value: unknown,
+  expectedCompanyId: string,
+): CurrentUserCompanyModule | null {
+  if (typeof value === "string") {
+    const identifier = cleanString(value);
+    if (!identifier) return null;
+    if (isUuid(identifier)) {
+      return {
+        ...(expectedCompanyId ? { company_id: expectedCompanyId } : undefined),
+        enabled: true,
+        module_id: identifier,
+      };
+    }
+    const slug = normalizeModuleSlug(identifier);
+    if (!slug) return null;
+    const moduleId = `jwt-module:${slug}`;
+    return {
+      ...(expectedCompanyId ? { company_id: expectedCompanyId } : undefined),
+      enabled: true,
+      module_id: moduleId,
+      module: { id: moduleId, name: identifier, slug },
+    };
+  }
+
+  const record = asRecord(value);
+  if (!record || typeof record.enabled !== "boolean") return null;
+  const assignmentCompany = resolveStringAliases(record, [
+    "company_id",
+    "companyId",
+    "tenant_id",
+    "tenantId",
+  ]);
+  if (
+    assignmentCompany.conflict ||
+    (assignmentCompany.value &&
+      expectedCompanyId &&
+      !sameIdentifier(assignmentCompany.value, expectedCompanyId))
+  ) {
+    return null;
+  }
+
+  const permissionModule = resolvePermissionModuleClaim(record);
+  if (permissionModule.invalid) return null;
+  const moduleId =
+    permissionModule.moduleId || cleanString(permissionModule.module?.id);
+  if (!moduleId) return null;
+
+  return {
+    ...(cleanString(record.id) ? { id: cleanString(record.id) } : undefined),
+    ...(assignmentCompany.value || expectedCompanyId
+      ? { company_id: assignmentCompany.value || expectedCompanyId }
+      : undefined),
+    enabled: record.enabled,
+    module_id: moduleId,
+    ...(permissionModule.module ? { module: permissionModule.module } : undefined),
+  };
+}
+
+function normalizeModuleSlug(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function companyModuleIdentity(module: CurrentUserCompanyModule) {
+  const moduleId = cleanString(module.module_id);
+  if (moduleId && !moduleId.startsWith("jwt-module:")) return `id:${moduleId}`;
+  const slug = normalizeModuleSlug(cleanString(module.module?.slug));
+  return slug ? `slug:${slug}` : moduleId ? `id:${moduleId}` : "";
+}
+
+function companyModuleClaimSignature(modules: CurrentUserCompanyModule[]) {
+  return modules
+    .map(companyModuleAssignmentSignature)
+    .sort((left, right) => left.localeCompare(right))
+    .join("\u0000");
+}
+
+function companyModuleAssignmentSignature(module: CurrentUserCompanyModule) {
+  return JSON.stringify([
+    companyModuleIdentity(module),
+    cleanString(module.company_id),
+    module.enabled,
+    cleanString(module.module?.slug),
+    cleanString(module.module?.name),
+    module.module?.active ?? null,
+  ]);
 }
 
 function resolvePermissionClaims(

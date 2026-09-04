@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Download, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { BrainCog, Download, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -26,17 +26,20 @@ import {
 import {
   AiInsightsCompatibleApiResponseSchema,
   AiInsightsReportSchema,
-  AiInsightsScopedStatusResponseSchema,
-  AiInsightsStatusResponseSchema,
   type AiInsightModule,
   type AiInsightSurface,
   type AiInsightsReport,
   type AiInsightsStatusResponse,
 } from "@/lib/ai-insights-contract";
 import { exportAiInsightsToPdf } from "@/lib/ai-insights-pdf";
-import { ApiError, apiFetch } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import { hasMasterAccess } from "@/lib/access";
-import { purgeLegacyAiInsightsLocalSettings } from "@/lib/ai-insights-local-settings";
+import {
+  createAiInsightsAvailabilityScopeKey,
+  storeAiInsightsAvailabilityReport,
+  type AiInsightsAvailabilitySnapshot,
+} from "@/lib/ai-insights-availability";
 import {
   getStoredCurrentCompanyScope,
   getStoredMasterCompanyScope,
@@ -46,15 +49,20 @@ import {
 import type { ReportPayload } from "@/lib/report-export";
 import type { CurrentUser } from "@/lib/types";
 
-type AiAnalysisActionProps = {
+export type AiAnalysisActionProps = {
   disabled?: boolean;
   getPayload?: (signal?: AbortSignal) => Promise<ReportPayload> | ReportPayload;
   manager?: boolean;
-  payload: ReportPayload;
+  payload?: ReportPayload;
   source: {
     module: AiInsightModule;
     surface: AiInsightSurface;
   };
+};
+
+export type AiAnalysisActionRuntimeProps = AiAnalysisActionProps & {
+  availability: AiInsightsAvailabilitySnapshot;
+  initialDialogOpen?: boolean;
 };
 
 type ScopedReportState = {
@@ -64,60 +72,71 @@ type ScopedReportState = {
 
 const LEGACY_AI_MAX_ROWS_PER_DATASET = 120;
 const LEGACY_AI_MAX_TOTAL_CELLS = 6_000;
-
 export function AiAnalysisAction({
+  availability,
   disabled = false,
   getPayload,
+  initialDialogOpen = false,
   payload,
   source,
-}: AiAnalysisActionProps) {
+}: AiAnalysisActionRuntimeProps) {
   const { loading: authLoading, user } = useAuth();
   const companyScopeId = useEffectiveCompanyScopeId(user);
   const companyTimeZoneResolution =
     useEffectiveCompanyTimeZoneResolution(user);
-  const [available, setAvailable] = React.useState(false);
-  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const userId = user?.id ?? "";
+  const activeScopeKey = createAiInsightsAvailabilityScopeKey({
+    companyScopeId,
+    module: source.module,
+    surface: source.surface,
+    userId,
+  });
+  const available =
+    availability.scopeKey === activeScopeKey && availability.status.available;
+  const serviceLimits = available ? availability.status.limits : null;
+  const initialReport = React.useMemo(() => {
+    if (availability.scopeKey !== activeScopeKey) return null;
+    const parsed = AiInsightsReportSchema.safeParse(availability.latestReport);
+    return parsed.success ? parsed.data : null;
+  }, [activeScopeKey, availability]);
+  const [dialogOpen, setDialogOpen] = React.useState(initialDialogOpen);
   const [exporting, setExporting] = React.useState(false);
   const [generating, setGenerating] = React.useState(false);
-  const [serviceLimits, setServiceLimits] = React.useState<
-    AiInsightsStatusResponse["limits"] | null
-  >(null);
   const [reportState, setReportState] = React.useState<ScopedReportState | null>(
-    null,
+    () =>
+      initialReport
+        ? { scopeKey: activeScopeKey, value: initialReport }
+        : null,
   );
   const [analysisError, setAnalysisError] = React.useState<string | null>(null);
   const [announcement, setAnnouncement] = React.useState("");
-  const availabilityRequestSequence = React.useRef(0);
   const analysisRequestSequence = React.useRef(0);
   const analysisControllerRef = React.useRef<AbortController | null>(null);
   const resultHeadingRef = React.useRef<HTMLHeadingElement>(null);
   const exportInFlightRef = React.useRef(false);
   const inFlightRef = React.useRef(false);
-  const activeScopeKey = `${user?.id ?? ""}|${companyScopeId}|${source.module}|${source.surface}`;
   const report =
     reportState?.scopeKey === activeScopeKey ? reportState.value : null;
   const companyLabel = resolveCompanyLabel(user, companyScopeId);
+  const analysisContextKey = JSON.stringify([
+    userId,
+    companyScopeId,
+    companyTimeZoneResolution.timeZone,
+  ]);
+  const previousAnalysisContextKeyRef = React.useRef(analysisContextKey);
   const currentContextRef = React.useRef({
     companyScopeId,
     timeZone: companyTimeZoneResolution.timeZone,
-    userId: user?.id ?? "",
+    userId,
   });
 
   React.useEffect(() => {
     currentContextRef.current = {
       companyScopeId,
       timeZone: companyTimeZoneResolution.timeZone,
-      userId: user?.id ?? "",
+      userId,
     };
-  }, [companyScopeId, companyTimeZoneResolution.timeZone, user?.id]);
-
-  React.useEffect(() => {
-    if (!user?.id || !companyScopeId || hasMasterAccess(user)) return;
-    purgeLegacyAiInsightsLocalSettings({
-      companyId: companyScopeId,
-      userId: user.id,
-    });
-  }, [companyScopeId, user]);
+  }, [companyScopeId, companyTimeZoneResolution.timeZone, userId]);
 
   const storeNewestScopedReport = React.useCallback(
     (candidate: AiInsightsReport) => {
@@ -134,72 +153,13 @@ export function AiAnalysisAction({
     [activeScopeKey],
   );
 
-  const refreshAvailability = React.useCallback(async () => {
-    const requestId = ++availabilityRequestSequence.current;
-    if (authLoading || !user || !companyScopeId) {
-      setAvailable(false);
-      setServiceLimits(null);
-      return null;
-    }
-
-    try {
-      const statusPayload = await apiFetch<unknown>(
-        `/ai/insights?module=${source.module}&surface=${source.surface}`,
-        {
-          companyScopeId,
-        },
-      );
-      if (availabilityRequestSequence.current !== requestId) return;
-      const scoped = AiInsightsScopedStatusResponseSchema.safeParse(statusPayload);
-      const legacy = scoped.success
-        ? null
-        : AiInsightsStatusResponseSchema.safeParse(statusPayload);
-      const status = scoped.success
-        ? scoped.data.status
-        : legacy?.success
-          ? legacy.data
-          : null;
-      setAvailable(Boolean(status?.available));
-      setServiceLimits(status?.limits ?? null);
-      if (scoped.success && scoped.data.latestReport) {
-        storeNewestScopedReport(scoped.data.latestReport);
-      }
-      if (status) setAnalysisError(null);
-      return scoped.success ? scoped.data.latestReport : null;
-    } catch (error) {
-      if (availabilityRequestSequence.current === requestId) {
-        if (
-          error instanceof ApiError &&
-          [401, 403, 404].includes(error.status)
-        ) {
-          setAvailable(false);
-          setServiceLimits(null);
-          setReportState(null);
-        }
-      }
-      return null;
-    }
-  }, [
-    authLoading,
-    companyScopeId,
-    source.module,
-    source.surface,
-    storeNewestScopedReport,
-    user,
-  ]);
+  React.useEffect(() => {
+    if (initialReport) storeNewestScopedReport(initialReport);
+  }, [initialReport, storeNewestScopedReport]);
 
   React.useEffect(() => {
-    setAvailable(false);
-    void refreshAvailability();
-    const handleFocus = () => void refreshAvailability();
-    window.addEventListener("focus", handleFocus);
-    return () => {
-      availabilityRequestSequence.current += 1;
-      window.removeEventListener("focus", handleFocus);
-    };
-  }, [refreshAvailability]);
-
-  React.useEffect(() => {
+    if (previousAnalysisContextKeyRef.current === analysisContextKey) return;
+    previousAnalysisContextKeyRef.current = analysisContextKey;
     analysisRequestSequence.current += 1;
     abortAnalysis(
       analysisControllerRef.current,
@@ -213,7 +173,7 @@ export function AiAnalysisAction({
     setDialogOpen(false);
     setReportState(null);
     setAnalysisError(null);
-  }, [companyScopeId, companyTimeZoneResolution.timeZone, user?.id]);
+  }, [analysisContextKey]);
 
   React.useEffect(
     () => () => {
@@ -228,15 +188,17 @@ export function AiAnalysisAction({
     [],
   );
 
-  const hasData = reportPayloadHasAnalyzableData(payload);
+  const hasData = payload
+    ? reportPayloadHasAnalyzableData(payload)
+    : Boolean(getPayload);
   const generationUnavailableReason = disabled
-    ? "Aguarde a conclusão e certificação dos dados desta visão."
+    ? "Aguarde a conclusão do carregamento desta visão."
     : authLoading || !user
-      ? "A sessão autenticada ainda está sendo validada."
+      ? "Validando seu acesso."
       : !companyScopeId
         ? "Selecione uma empresa antes de analisar esta visão."
         : companyTimeZoneResolution.fallback
-          ? "O fuso IANA da empresa precisa estar certificado."
+          ? "O fuso horário da empresa precisa estar configurado."
           : !hasData
             ? "A visão configurada ainda não possui dados para análise."
             : "";
@@ -255,7 +217,6 @@ export function AiAnalysisAction({
     setGenerating(true);
     setAnalysisError(null);
     setAnnouncement("Análise iniciada.");
-    availabilityRequestSequence.current += 1;
     const requestId = ++analysisRequestSequence.current;
 
     try {
@@ -263,6 +224,11 @@ export function AiAnalysisAction({
         ? await getPayload(controller.signal)
         : payload;
       controller.signal.throwIfAborted();
+      if (!configuredPayload) {
+        throw new Error(
+          "A visão configurada ainda não possui dados disponíveis para análise.",
+        );
+      }
       const activeContext = currentContextRef.current;
       if (
         requestedContext.userId !== activeContext.userId ||
@@ -275,7 +241,7 @@ export function AiAnalysisAction({
       }
       if (!reportPayloadHasAnalyzableData(configuredPayload)) {
         throw new Error(
-          "A visão configurada ainda não possui dados certificados para análise.",
+          "A visão configurada ainda não possui dados disponíveis para análise.",
         );
       }
 
@@ -314,10 +280,10 @@ export function AiAnalysisAction({
         throw new Error("A IA retornou uma análise em formato inválido.");
       }
       storeNewestScopedReport(generatedReport);
+      storeAiInsightsAvailabilityReport(activeScopeKey, generatedReport);
       setAnnouncement("Análise concluída.");
       toast.success("Insights gerados para esta visão.");
       window.requestAnimationFrame(() => resultHeadingRef.current?.focus());
-      void refreshAvailability();
     } catch (error) {
       if (
         analysisRequestSequence.current !== requestId ||
@@ -343,7 +309,6 @@ export function AiAnalysisAction({
     setAnnouncement("Exportação do relatório iniciada.");
     try {
       const exported = await exportAiInsightsToPdf(report, {
-        companyId: companyScopeId,
         companyLabel,
       });
       setAnnouncement("Relatório exportado em PDF.");
@@ -374,7 +339,6 @@ export function AiAnalysisAction({
   function openAdvisor() {
     setDialogOpen(true);
     setAnalysisError(null);
-    void refreshAvailability();
   }
 
   if (!available) return null;
@@ -395,7 +359,7 @@ export function AiAnalysisAction({
         title="Abrir IA Advisor"
         onClick={openAdvisor}
       >
-        <Sparkles className="h-4 w-4" strokeWidth={1.8} aria-hidden="true" />
+        <BrainCog className="h-4 w-4" strokeWidth={1.8} aria-hidden="true" />
       </Button>
 
       <Dialog open={dialogOpen} onOpenChange={changeDialogOpen}>
@@ -403,7 +367,7 @@ export function AiAnalysisAction({
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/10 text-primary ring-1 ring-primary/15">
-                <Sparkles className="h-4 w-4" strokeWidth={1.8} aria-hidden="true" />
+                <BrainCog className="h-4 w-4" strokeWidth={1.8} aria-hidden="true" />
               </span>
               IA Advisor
             </DialogTitle>
@@ -496,7 +460,7 @@ export function AiAnalysisAction({
             ) : (
               <div className="flex min-h-52 flex-col items-center justify-center rounded-md border border-dashed border-border p-6 text-center">
                 <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15">
-                  <Sparkles className="h-5 w-5" strokeWidth={1.8} aria-hidden="true" />
+                  <BrainCog className="h-5 w-5" strokeWidth={1.8} aria-hidden="true" />
                 </span>
                 <h3 className="mt-3 text-sm font-semibold text-foreground">
                   Nenhum relatório disponível
@@ -529,10 +493,7 @@ export function AiAnalysisAction({
 }
 
 function toUiError(error: unknown, fallback: string) {
-  if (error instanceof ApiError || error instanceof Error) {
-    return error.message || fallback;
-  }
-  return fallback;
+  return userFacingErrorMessage(error, fallback);
 }
 
 function abortAnalysis(controller: AbortController | null, message: string) {
@@ -584,9 +545,9 @@ function resolveCompanyLabel(
     return user.company.trade_name || user.company.name;
   }
   if (user?.company_id === companyScopeId) {
-    return user.company_trade_name || user.company_name || companyScopeId;
+    return user.company_trade_name || user.company_name || "Empresa selecionada";
   }
-  return companyScopeId;
+  return "Empresa selecionada";
 }
 
 function assertServiceAcceptsSnapshot(
@@ -596,7 +557,7 @@ function assertServiceAcceptsSnapshot(
 ) {
   if (!limits) {
     throw new Error(
-      "Os limites do serviço de IA ainda não foram certificados. Feche e abra o IA Advisor para tentar novamente.",
+      "A análise ainda está sendo preparada. Feche e abra o IA Advisor para tentar novamente.",
     );
   }
   const largestDataset = snapshot.report.datasets.reduce(
@@ -605,12 +566,12 @@ function assertServiceAcceptsSnapshot(
   );
   if (snapshot.report.datasets.length > limits.maxDatasets) {
     throw new Error(
-      "A instância disponível do serviço de IA ainda não suporta todos os conjuntos desta análise. Aguarde a conclusão da atualização e tente novamente.",
+      "Esta visão reúne mais informações do que a análise comporta no momento. Reduza o período ou a quantidade de cenários e tente novamente.",
     );
   }
   if (largestDataset > limits.maxRowsPerDataset) {
     throw new Error(
-      `O serviço de IA disponível ainda aceita somente ${limits.maxRowsPerDataset} dias por série. Aguarde a conclusão da atualização do serviço para analisar os ${largestDataset} dias sem amostragem.`,
+      `Esta análise comporta até ${limits.maxRowsPerDataset} dias por série. Reduza o período de ${largestDataset} dias e tente novamente.`,
     );
   }
   const totalCells = snapshot.report.datasets.reduce(
@@ -623,13 +584,13 @@ function assertServiceAcceptsSnapshot(
     totalCells > LEGACY_AI_MAX_TOTAL_CELLS
   ) {
     throw new Error(
-      "A instância disponível do serviço de IA ainda não suporta o volume combinado dos conjuntos desta análise. Aguarde a conclusão da atualização e tente novamente.",
+      "Esta visão reúne informações demais para uma única análise. Reduza o período ou a quantidade de cenários e tente novamente.",
     );
   }
   const bodyBytes = new TextEncoder().encode(JSON.stringify(requestPayload)).byteLength;
   if (bodyBytes > limits.maxBodyBytes) {
     throw new Error(
-      "A instância disponível do serviço de IA ainda não suporta o volume diário desta análise. Aguarde a conclusão da atualização e tente novamente.",
+      "O período selecionado reúne informações demais para uma única análise. Reduza o intervalo e tente novamente.",
     );
   }
 }

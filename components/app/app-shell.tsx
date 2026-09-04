@@ -1,17 +1,17 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import Link, { useLinkStatus } from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
-  BrainCircuit,
   Building2,
   Camera,
   ChartNoAxesCombined,
   ChevronRight,
   FileText,
   Filter,
+  History,
   Eye,
   LogOut,
   MapPinned,
@@ -27,8 +27,13 @@ import { useAuth } from "@/components/app/auth-provider";
 import { ThemeToggle } from "@/components/app/theme-provider";
 import { usePremiumShellMotion } from "@/components/app/use-premium-motion";
 import { hasMasterAccess } from "@/lib/access";
+import {
+  cancelScheduledAppRoutePreload,
+  preloadAppRoute,
+  scheduleAppRoutePreload,
+  type AppDashboardModule,
+} from "@/lib/app-route-preload";
 import { requestLiveRefresh } from "@/lib/live-refresh";
-import { migrateLegacyDashboardDefaults } from "@/lib/legacy-dashboard-view-migration";
 import {
   getEffectiveCompanyScopeId,
   getUserViewScopedStorageKey,
@@ -43,6 +48,10 @@ import {
   canManageScenarioCatalogs,
   canManageViews,
   canManageWorkers,
+  canViewAudit,
+  canViewCounting,
+  canViewDemographics,
+  canViewOccupancy,
 } from "@/lib/permissions";
 import { cn, initials } from "@/lib/utils";
 import type { CurrentUser } from "@/lib/types";
@@ -108,10 +117,10 @@ const managerNavItems: NavItem[] = [
     canShow: canAccessOperationalDashboards,
   },
   {
-    href: "/manager/insights",
-    label: "Configuração IA",
-    icon: BrainCircuit,
-    canShow: hasMasterAccess,
+    href: "/manager/audit",
+    label: "Auditoria",
+    icon: History,
+    canShow: canViewAudit,
   },
   {
     href: "/manager/views",
@@ -133,7 +142,7 @@ const managerNavItems: NavItem[] = [
   },
   {
     href: "/manager/locations",
-    label: "Locations",
+    label: "Locais",
     icon: MapPinned,
     canShow: canManageLocations,
   },
@@ -145,8 +154,85 @@ const managerNavItems: NavItem[] = [
   },
 ];
 
-const masterNavItem = { href: "/manager/master", label: "Master", icon: ShieldCheck };
+const masterNavItem = { href: "/manager/master", label: "Superadmin", icon: ShieldCheck };
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "ipxdata.sidebar-collapsed.v1";
+const PAGE_PRESENTATIONS: Record<
+  "client" | "manager",
+  Record<string, { title: string; description: string }>
+> = {
+  client: {
+    "/dashboard/analytics": {
+      title: "Análises",
+      description: "Análise de contagem, ocupação e perfil demográfico por período.",
+    },
+    "/dashboard/live": {
+      title: "Ao Vivo",
+      description: "Contagem, ocupação e perfil demográfico em tempo real.",
+    },
+    "/dashboard/occupancy": {
+      title: "Ocupação Ao Vivo",
+      description:
+        "Ocupação em tempo real, agregados e alertas sempre pela configuração do cenário.",
+    },
+    "/dashboard/reports": {
+      title: "Relatórios",
+      description: "Relatórios de contagem, ocupação e perfil demográfico por período.",
+    },
+  },
+  manager: {
+    "/manager/analytics": {
+      title: "Análises",
+      description:
+        "Análises configuráveis de contagem, ocupação e perfil demográfico.",
+    },
+    "/manager/audit": {
+      title: "Auditoria",
+      description:
+        "Consulte alterações operacionais registradas para a empresa selecionada.",
+    },
+    "/manager/cameras": {
+      title: "Câmeras",
+      description: "Organize as câmeras e as linhas usadas nas contagens.",
+    },
+    "/manager/live": {
+      title: "Ao Vivo",
+      description: "Contagem, ocupação e perfil demográfico em tempo real.",
+    },
+    "/manager/locations": {
+      title: "Locais",
+      description: "Organize unidades, setores e suas câmeras.",
+    },
+    "/manager/master": {
+      title: "Central do Superadmin",
+      description:
+        "Gerencie empresas, usuários, acessos, módulos e inteligência artificial em um único lugar.",
+    },
+    "/manager/occupancy": {
+      title: "Ocupação Ao Vivo",
+      description:
+        "Gestão da ocupação em tempo real, agregados e alertas por cenário de áreas.",
+    },
+    "/manager/reports": {
+      title: "Relatórios",
+      description:
+        "Contagem, ocupação e perfil demográfico consolidados por período.",
+    },
+    "/manager/scenarios": {
+      title: "Cenários",
+      description: "Crie e ajuste as regras que alimentam os relatórios.",
+    },
+    "/manager/views": {
+      title: "Visões",
+      description:
+        "Configure visões autenticadas e distribua o Ao Vivo em um ou mais monitores.",
+    },
+    "/manager/workers": {
+      title: "Workers",
+      description:
+        "Gerencie os Workers responsáveis pelo processamento dos dados da empresa.",
+    },
+  },
+};
 
 export function AppShell({
   mode,
@@ -155,6 +241,7 @@ export function AppShell({
   description,
 }: AppShellProps) {
   const pathname = usePathname();
+  const router = useRouter();
   const { user, logout } = useAuth();
   const shellRef = React.useRef<HTMLDivElement>(null);
   const isMaster = hasMasterAccess(user);
@@ -171,9 +258,19 @@ export function AppShell({
   const effectiveCompanyScopeId = isMaster
     ? masterCompanyScope?.id ?? ""
     : getEffectiveCompanyScopeId(user);
+  const isMasterWorkspace =
+    isMaster && mode === "manager" && pathname === "/manager/master";
   const visibleClientNavItems = clientNavItems.filter(
     (item) => !item.canShow || item.canShow(user),
   );
+  const fallbackDashboardModule: AppDashboardModule | undefined =
+    canViewCounting(user)
+      ? "counting"
+      : canViewOccupancy(user)
+        ? "occupancy"
+        : canViewDemographics(user)
+          ? "demographics"
+          : undefined;
   const navItems =
     mode === "manager"
       ? [
@@ -183,9 +280,11 @@ export function AppShell({
       : isMaster
         ? [masterNavItem, ...visibleClientNavItems]
         : visibleClientNavItems;
-  const pageTitle = title ?? (mode === "manager" ? "Manager" : "Dashboard do cliente");
+  const pagePresentation = PAGE_PRESENTATIONS[mode][pathname];
+  const pageTitle =
+    title ?? pagePresentation?.title ?? (mode === "manager" ? "Gestão" : "Painel");
   const pageDescription =
-    description ??
+    description ?? pagePresentation?.description ??
     (mode === "manager"
       ? "Monitoramento ao vivo, relatórios e cadastros operacionais."
       : "Acesso somente leitura aos dados ao vivo e aos resultados por cenário.");
@@ -216,21 +315,26 @@ export function AppShell({
   }, [isMaster, user]);
 
   React.useEffect(() => {
+    if (isMasterWorkspace) return;
+
     const userId = user?.id?.trim() ?? "";
     const companyId = effectiveCompanyScopeId.trim();
     if (!userId || !companyId) return;
 
     let active = true;
-    void migrateLegacyDashboardDefaults({
-      companyId,
-      shouldApply: () =>
-        active && getEffectiveCompanyScopeId(user) === companyId,
-      userId,
-    });
+    void import("@/lib/legacy-dashboard-view-migration").then(
+      ({ migrateLegacyDashboardDefaults }) =>
+        migrateLegacyDashboardDefaults({
+          companyId,
+          shouldApply: () =>
+            active && getEffectiveCompanyScopeId(user) === companyId,
+          userId,
+        }),
+    ).catch(() => undefined);
     return () => {
       active = false;
     };
-  }, [effectiveCompanyScopeId, user]);
+  }, [effectiveCompanyScopeId, isMasterWorkspace, user]);
 
   React.useEffect(() => {
     const synchronizeSidebar = () => {
@@ -292,9 +396,12 @@ export function AppShell({
     ) : (
       children
     );
-  const contentKey = isMaster
-    ? masterCompanyScope?.id ?? "master-no-company-scope"
-    : "tenant-user";
+  const contentKey =
+    isMasterWorkspace
+      ? `master-workspace-${user?.id ?? "anonymous"}`
+      : isMaster
+        ? masterCompanyScope?.id ?? "master-no-company-scope"
+        : "tenant-user";
 
   return (
     <div ref={shellRef} className="min-h-screen bg-background">
@@ -327,7 +434,7 @@ export function AppShell({
             )}
           >
             <div className="text-base font-semibold tracking-normal">IPXData</div>
-            <div className="text-xs text-muted-foreground">Analytics Platform</div>
+            <div className="text-xs text-muted-foreground">Inteligência de dados</div>
           </div>
         </div>
 
@@ -356,7 +463,7 @@ export function AppShell({
           )}
         >
           <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            {isMaster ? "Escopo" : "Empresa"}
+            Empresa
           </div>
           <div className="mt-1 truncate text-sm font-medium text-foreground">
             {companyName}
@@ -378,13 +485,36 @@ export function AppShell({
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={false}
                 aria-current={active ? "page" : undefined}
                 aria-label={item.label}
                 onClick={() => {
                   if (liveItem) requestLiveRefresh();
                 }}
+                onBlur={() => cancelScheduledAppRoutePreload(item.href)}
+                onFocus={() =>
+                  scheduleAppRoutePreload(
+                    item.href,
+                    fallbackDashboardModule,
+                    140,
+                    () => router.prefetch(item.href),
+                  )
+                }
+                onPointerDown={() => {
+                  router.prefetch(item.href);
+                  preloadAppRoute(item.href, fallbackDashboardModule);
+                }}
+                onPointerEnter={() =>
+                  scheduleAppRoutePreload(
+                    item.href,
+                    fallbackDashboardModule,
+                    140,
+                    () => router.prefetch(item.href),
+                  )
+                }
+                onPointerLeave={() => cancelScheduledAppRoutePreload(item.href)}
                 className={cn(
-                  "flex items-center justify-center rounded-md px-2 py-2.5 text-sm text-muted-foreground transition hover:bg-secondary hover:text-foreground lg:justify-between lg:px-3",
+                  "relative flex items-center justify-center overflow-hidden rounded-md px-2 py-2.5 text-sm text-muted-foreground transition hover:bg-secondary hover:text-foreground lg:justify-between lg:px-3",
                   sidebarCollapsed &&
                     "lg:justify-center lg:px-2",
                   active && "bg-primary/10 font-medium text-primary",
@@ -415,6 +545,7 @@ export function AppShell({
                     !sidebarCollapsed && "lg:block",
                   )}
                 />
+                <NavigationPendingIndicator />
               </Link>
             );
           })}
@@ -514,13 +645,36 @@ export function AppShell({
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={false}
                 aria-current={active ? "page" : undefined}
                 aria-label={item.label}
                 onClick={() => {
                   if (liveItem) requestLiveRefresh();
                 }}
+                onBlur={() => cancelScheduledAppRoutePreload(item.href)}
+                onFocus={() =>
+                  scheduleAppRoutePreload(
+                    item.href,
+                    fallbackDashboardModule,
+                    140,
+                    () => router.prefetch(item.href),
+                  )
+                }
+                onPointerDown={() => {
+                  router.prefetch(item.href);
+                  preloadAppRoute(item.href, fallbackDashboardModule);
+                }}
+                onPointerEnter={() =>
+                  scheduleAppRoutePreload(
+                    item.href,
+                    fallbackDashboardModule,
+                    140,
+                    () => router.prefetch(item.href),
+                  )
+                }
+                onPointerLeave={() => cancelScheduledAppRoutePreload(item.href)}
                 className={cn(
-                  "inline-flex items-center gap-2 whitespace-nowrap rounded-md border bg-card px-3 py-2 text-xs font-medium",
+                  "relative inline-flex items-center gap-2 overflow-hidden whitespace-nowrap rounded-md border bg-card px-3 py-2 text-xs font-medium",
                   active && "border-primary/30 bg-primary/10 text-primary",
                 )}
                 data-premium-hover
@@ -528,6 +682,7 @@ export function AppShell({
               >
                 <Icon className="h-3.5 w-3.5" />
                 {item.label}
+                <NavigationPendingIndicator />
               </Link>
             );
           })}
@@ -570,6 +725,20 @@ export function AppShell({
   );
 }
 
+function NavigationPendingIndicator() {
+  const { pending } = useLinkStatus();
+
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "pointer-events-none absolute inset-x-2 bottom-0 h-0.5 origin-left rounded-full bg-primary opacity-0",
+        pending && "animate-pulse opacity-100",
+      )}
+    />
+  );
+}
+
 function MasterScopeLoading() {
   return (
     <div className="rounded-md border border-border bg-card p-6 shadow-soft">
@@ -592,14 +761,13 @@ function MasterScopeRequired() {
             Selecione uma empresa
           </h2>
           <p className="mt-1 text-sm leading-6 text-muted-foreground">
-            Cenários, locations, câmeras, workers, ocupação e relatórios são
-            dados de uma empresa. Escolha a empresa no Master antes de acessar
-            essas telas.
+            Os painéis e cadastros operacionais pertencem a uma empresa.
+            Escolha a empresa no Superadmin antes de acessar essas telas.
           </p>
           <Button asChild className="mt-4">
             <Link href="/manager/master">
               <ShieldCheck className="h-4 w-4" />
-              Ir para Master
+              Ir para Superadmin
             </Link>
           </Button>
         </div>
@@ -617,7 +785,7 @@ function getCompanyDisplayName(
     return (
       masterCompanyScope?.trade_name ||
       masterCompanyScope?.name ||
-      "Selecione no Master"
+      "Selecione uma empresa"
     );
   }
 
@@ -625,7 +793,7 @@ function getCompanyDisplayName(
     return (
       masterCompanyScope?.trade_name ||
       masterCompanyScope?.name ||
-      "Gestão Master"
+      "Gestão de empresas"
     );
   }
 

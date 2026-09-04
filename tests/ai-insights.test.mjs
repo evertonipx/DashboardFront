@@ -14,6 +14,9 @@ const bodyReader = loadTypeScriptModule("lib/ai-insights-body.ts");
 const companySettings = loadTypeScriptModule(
   "lib/ai-insights-company-settings.ts",
 );
+const availabilityRuntime = loadTypeScriptModule(
+  "lib/ai-insights-availability.ts",
+);
 const contract = loadTypeScriptModule("lib/ai-insights-contract.ts");
 const localSettings = loadTypeScriptModule("lib/ai-insights-local-settings.ts");
 const rateLimit = loadTypeScriptModule("lib/ai-insights-rate-limit.ts");
@@ -794,21 +797,85 @@ test("rota IA usa configuração por empresa e separa status, escrita e geraçã
   assert.doesNotMatch(envExample, /NEXT_PUBLIC_OPENAI/);
 });
 
+test("parser leve da disponibilidade mantém o contrato fail-closed", () => {
+  const scopeKey = '["user-a","company-a","counting","live"]';
+  const report = validReport();
+  const status = validStatus();
+
+  assert.deepEqual(
+    availabilityRuntime.parseAiInsightsAvailabilityPayload(
+      { latestReport: report, status },
+      scopeKey,
+    ),
+    { latestReport: report, scopeKey, status },
+  );
+  assert.deepEqual(
+    availabilityRuntime.parseAiInsightsAvailabilityPayload(status, scopeKey),
+    { latestReport: null, scopeKey, status },
+    "o deploy legado deve continuar aceito sem segunda consulta",
+  );
+
+  for (const invalid of [
+    { ...status, available: true, configured: false },
+    { ...status, role: "guest" },
+    { ...status, allowedModels: [status.model, status.model] },
+    { ...status, limits: { ...status.limits, maxDatasets: 0 } },
+    { ...status, unexpected: true },
+    {
+      latestReport: report,
+      status: { ...status, available: false },
+    },
+  ]) {
+    assert.equal(
+      availabilityRuntime.parseAiInsightsAvailabilityPayload(invalid, scopeKey),
+      null,
+    );
+  }
+
+  assert.equal(
+    availabilityRuntime.isAiInsightsFailClosedError(
+      new availabilityRuntime.AiInsightsAvailabilityPayloadError(),
+    ),
+    true,
+  );
+  assert.equal(
+    availabilityRuntime.isAiInsightsFailClosedError({ status: 403 }),
+    true,
+  );
+  assert.equal(
+    availabilityRuntime.isAiInsightsFailClosedError(new Error("offline")),
+    false,
+    "uma falha transitória de rede não deve revogar visualmente um acesso já validado",
+  );
+});
+
 test("ação abre a última análise, gera sob demanda e exporta o IA Advisor", () => {
   const action = readFileSync(
     resolve(projectRoot, "components/app/ai-analysis-action.tsx"),
     "utf8",
   );
+  const deferredAction = readFileSync(
+    resolve(projectRoot, "components/app/deferred-ai-analysis-action.tsx"),
+    "utf8",
+  );
+  const availability = readFileSync(
+    resolve(projectRoot, "lib/ai-insights-availability.ts"),
+    "utf8",
+  );
+  const exportActions = readFileSync(
+    resolve(projectRoot, "components/app/report-export-actions.tsx"),
+    "utf8",
+  );
   const layout = readFileSync(resolve(projectRoot, "app/layout.tsx"), "utf8");
 
   assert.match(
-    action,
-    /`\/ai\/insights\?module=\$\{source\.module\}&surface=\$\{source\.surface\}`/,
+    availability,
+    /`\/ai\/insights\?module=\$\{module\}&surface=\$\{surface\}`/,
     "o ícone deve consultar o último relatório no escopo selecionado",
   );
-  assert.match(action, /AiInsightsScopedStatusResponseSchema\.safeParse\(statusPayload\)/);
-  assert.match(action, /AiInsightsStatusResponseSchema\.safeParse\(statusPayload\)/);
-  assert.match(action, /storeNewestScopedReport\(scoped\.data\.latestReport\)/);
+  assert.match(availability, /parseAiInsightsAvailabilityPayload\(payload, scopeKey\)/);
+  assert.match(availability, /value\.available && !value\.configured/);
+  assert.match(action, /storeNewestScopedReport\(initialReport\)/);
   assert.match(action, /if \(!available\) return null/);
   assert.match(action, /createAiAnalysisSnapshot/);
   assert.match(action, /createLegacyCompatibleAiInsightsRequest\(snapshot\)/);
@@ -820,11 +887,15 @@ test("ação abre a última análise, gera sob demanda e exporta o IA Advisor", 
   assert.match(action, /AiInsightsCompatibleApiResponseSchema\.safeParse\(responsePayload\)/);
   assert.match(action, /<Dialog open=\{dialogOpen\}/);
   assert.match(action, /onClick=\{openAdvisor\}/);
-  assert.match(action, /<Sparkles[\s\S]*?strokeWidth=\{1\.8\}/);
+  assert.match(action, /<BrainCog[\s\S]*?strokeWidth=\{1\.8\}/);
   assert.match(action, /aria-haspopup="dialog"/);
   assert.match(action, /aria-expanded=\{dialogOpen\}/);
-  assert.doesNotMatch(action, /BrainCircuit/);
-  assert.match(action, /function openAdvisor\(\)[\s\S]*?refreshAvailability\(\)/);
+  assert.doesNotMatch(action, /Sparkles|BrainCircuit/);
+  assert.doesNotMatch(
+    action,
+    /function openAdvisor\(\)[\s\S]*?refreshAvailability\(\)/,
+    "abrir o diálogo deve reutilizar o status e o relatório já carregados",
+  );
   assert.match(action, /Gerar novo relatório/);
   assert.match(action, /Exportar PDF/);
   assert.match(action, /exportAiInsightsToPdf\(report, \{/);
@@ -846,7 +917,20 @@ test("ação abre a última análise, gera sob demanda e exporta o IA Advisor", 
     "o POST do navegador não pode transportar configuração nem segredo",
   );
   assert.doesNotMatch(action, /localStorage|sessionStorage/);
+  assert.doesNotMatch(deferredAction, /localStorage|sessionStorage/);
   assert.doesNotMatch(layout, /AiAnalysisProvider|ai-analysis-provider/);
+  assert.match(action, /payload\?: ReportPayload/);
+  assert.match(exportActions, /payload\?: ReportPayload/);
+  assert.match(
+    action,
+    /const hasData = payload[\s\S]*?Boolean\(getPayload\)/,
+    "o Advisor deve permitir captura sob demanda sem montar relatório no render",
+  );
+  assert.match(
+    exportActions,
+    /if \(!exportPayload\)[\s\S]*?dados do relatório ainda não estão disponíveis/,
+    "a exportação deve validar com segurança a ausência de payload somente no clique",
+  );
 
   const integrations = [
     ["components/app/realtime-dashboard.tsx", /module: "counting", surface: "live"/],
@@ -900,6 +984,12 @@ test("ação abre a última análise, gera sob demanda e exporta o IA Advisor", 
     realtimeDashboard,
     /buildAiLiveReportPayload\(signal\?: AbortSignal\)[\s\S]*?buildConfiguredLiveReportPayload\(signal\)/,
   );
+  assert.match(realtimeDashboard, /function buildLiveReportAssets\(\)/);
+  assert.doesNotMatch(realtimeDashboard, /const liveReportPayload\s*=/);
+  assert.doesNotMatch(
+    realtimeDashboard,
+    /<ReportExportActions[\s\S]{0,500}?payload=/,
+  );
   const scenarioReports = readFileSync(
     resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
     "utf8",
@@ -917,14 +1007,129 @@ test("ação abre a última análise, gera sob demanda e exporta o IA Advisor", 
     scenarioReports,
     /buildAiScenarioReportPayload\(signal\?: AbortSignal\)[\s\S]{0,400}buildConfiguredScenarioReportPayload\(\)/,
   );
+  assert.match(scenarioReports, /function buildScenarioReportAssets\(\)/);
+  assert.doesNotMatch(scenarioReports, /const scenarioReportPayload\s*=/);
   assert.match(periodAnalysis, /getPayload=\{buildAiPeriodAnalysisPayload\}/);
+  assert.match(
+    periodAnalysis,
+    /getPayload=\{buildPeriodAnalysisReportPayload\}/,
+  );
+  assert.doesNotMatch(periodAnalysis, /const reportPayload = composePeriodAnalysisReport/);
+  assert.match(
+    occupancyReports,
+    /getPayload=\{buildOccupancyReportPayload\}/,
+  );
+  assert.doesNotMatch(
+    occupancyReports,
+    /<ReportExportActions[\s\S]{0,500}?payload=/,
+  );
   for (const source of [
     periodAnalysis,
     realtimeDashboard,
     scenarioReports,
   ]) {
-    assert.match(source, /Série diária canônica da Contagem/);
+    assert.match(source, /Detalhamento diário da Contagem/);
   }
+});
+
+test("disponibilidade do IA Advisor compartilha consultas por escopo e absorve rajadas de foco", () => {
+  const action = readFileSync(
+    resolve(projectRoot, "components/app/ai-analysis-action.tsx"),
+    "utf8",
+  );
+  const deferredAction = readFileSync(
+    resolve(projectRoot, "components/app/deferred-ai-analysis-action.tsx"),
+    "utf8",
+  );
+  const availability = readFileSync(
+    resolve(projectRoot, "lib/ai-insights-availability.ts"),
+    "utf8",
+  );
+
+  assert.match(
+    availability,
+    /const aiInsightsAvailabilityCache = new Map<[\s\S]*?AiInsightsAvailabilityCacheEntry[\s\S]*?>\(\)/,
+  );
+  assert.match(
+    availability,
+    /JSON\.stringify\(\[userId, companyScopeId, module, surface\]\)/,
+    "cache deve isolar usuário, empresa, módulo e visão",
+  );
+  assert.match(availability, /AI_INSIGHTS_AVAILABILITY_CACHE_TTL_MS = 30_000/);
+  assert.match(availability, /AI_INSIGHTS_AVAILABILITY_ERROR_TTL_MS = 5_000/);
+  assert.match(
+    availability,
+    /let request = entry\.request;[\s\S]*?if \(!request\)[\s\S]*?entry\.request = sharedRequest/,
+    "montagens concorrentes devem compartilhar a mesma promessa",
+  );
+  assert.match(
+    availability,
+    /request\.subscribers \+= 1;[\s\S]*?request\.subscribers = Math\.max[\s\S]*?request\.controller\.abort/,
+    "a requisição só pode ser cancelada quando perder todos os consumidores",
+  );
+  assert.match(availability, /\{ companyScopeId, signal \}/);
+  assert.match(deferredAction, /window\.addEventListener\("focus", handleFocus\)/);
+  assert.match(deferredAction, /for \(const release of releases\) release\(\)/);
+  assert.match(
+    action,
+    /storeNewestScopedReport\(generatedReport\);[\s\S]*?storeAiInsightsAvailabilityReport\(activeScopeKey, generatedReport\)/,
+    "o POST deve atualizar o cache local sem disparar um GET de confirmação",
+  );
+
+  const generateBlock = action.slice(
+    action.indexOf("async function generateInsights()"),
+    action.indexOf("async function exportReport()"),
+  );
+  const openBlock = action.slice(
+    action.indexOf("function openAdvisor()"),
+    action.indexOf("if (!available) return null;"),
+  );
+  assert.doesNotMatch(generateBlock, /refreshAvailability\(\)/);
+  assert.doesNotMatch(openBlock, /refreshAvailability\(\)/);
+  assert.equal(
+    availability.match(/`\/ai\/insights\?module=/g)?.length,
+    1,
+    "deve existir um único caminho de GET para disponibilidade e último relatório",
+  );
+  assert.doesNotMatch(
+    deferredAction,
+    /requestIdleCallback|setTimeout\([^)]*setReady/,
+    "o runtime completo da IA não pode baixar automaticamente em idle",
+  );
+  assert.match(
+    deferredAction,
+    /onFocus=\{preloadRuntime\}[\s\S]*?onMouseEnter=\{preloadRuntime\}[\s\S]*?onPointerDown=\{preloadRuntime\}/,
+    "a intenção deve antecipar o chunk sem trocar o botão focado",
+  );
+  assert.match(
+    deferredAction,
+    /function preloadRuntime\(\)[\s\S]*?runtimePromise === request[\s\S]*?runtimePromise = null/,
+    "uma falha de prefetch não pode envenenar a primeira abertura",
+  );
+  assert.match(
+    deferredAction,
+    /Component = await request;[\s\S]*?catch[\s\S]*?loadAiAnalysisActionRuntime\(\)[\s\S]*?Component = await request/,
+    "o clique deve repetir uma importação que falhou durante a intenção",
+  );
+  assert.match(
+    deferredAction,
+    /<Runtime[\s\S]*?availability=\{availability\}[\s\S]*?initialDialogOpen/,
+    "o primeiro clique deve entregar o GET já resolvido e abrir o diálogo",
+  );
+  const refreshAvailabilityBlock = deferredAction.slice(
+    deferredAction.indexOf("const refreshAvailability = React.useCallback"),
+    deferredAction.indexOf("React.useEffect(() =>"),
+  );
+  assert.doesNotMatch(
+    refreshAvailabilityBlock,
+    /availabilityState\?\.scopeKey/,
+    "o callback de disponibilidade não pode depender do estado que ele próprio atualiza",
+  );
+  assert.doesNotMatch(
+    `${deferredAction}\n${availability}`,
+    /from ["']zod["']|AiInsights(?:ScopedStatusResponse|StatusResponse)Schema/,
+    "o controle leve não deve carregar nem executar Zod antes da interação",
+  );
 });
 
 test("dashboard master persiste no servidor e usa localStorage somente na migração", () => {
@@ -956,24 +1161,77 @@ test("dashboard master persiste no servidor e usa localStorage somente na migra�
   assert.match(dashboard, /loadAiInsightsLocalApiKey/);
   assert.match(dashboard, /loadAiInsightsLocalPrompt/);
   assert.match(dashboard, /if \(!configuration\.updatedAt\)/);
-  assert.match(dashboard, /findLegacyPrompt\(companyScopeId, userId\)/);
+  assert.match(
+    dashboard,
+    /findLegacyPrompt\(\s*requestedCompanyScopeId,\s*requestedUserId,?\s*\)/,
+  );
   assert.match(
     dashboard,
     /configuration\.configured[\s\S]*?loadAiInsightsLocalApiKey/,
   );
-  assert.match(dashboard, /clearLegacyConfiguration\(companyScopeId, userId\)/);
+  assert.match(
+    dashboard,
+    /clearLegacyConfiguration\(requestedCompanyScopeId, requestedUserId\)/,
+  );
   assert.doesNotMatch(dashboard, /saveAiInsightsLocalApiKey/);
   assert.doesNotMatch(dashboard, /saveAiInsightsLocalPrompt/);
   assert.doesNotMatch(
     dashboard,
     /window\.localStorage|sessionStorage|document\.cookie|URLSearchParams/,
   );
-  assert.match(dashboard, /write-only/);
-  assert.match(dashboard, /servidor do frontend/);
-  assert.match(dashboard, /cifrada em repouso/);
+  assert.match(dashboard, /permanece protegida e não pode ser consultada novamente/);
+  assert.match(dashboard, /protegida por empresa/);
+  assert.match(
+    dashboard,
+    /nunca é disponibilizada aos administradores ou operadores/,
+  );
   assert.match(dashboard, /Contexto estratégico da empresa/);
   assert.match(dashboard, /accept="\.txt,text\/plain"/);
   assert.match(dashboard, /file\.text\(\)/);
+  assert.match(
+    dashboard,
+    /export type AiInsightsDashboardProps = \{[\s\S]*?companyName\?: string \| null;[\s\S]*?companyScopeId\?: string \| null;[\s\S]*?embedded\?: boolean;/,
+    "o painel deve aceitar o escopo controlado sem quebrar a rota autônoma",
+  );
+  assert.match(
+    dashboard,
+    /controlledCompanyScopeId === undefined[\s\S]*?effectiveCompanyScopeId[\s\S]*?: controlledCompanyScopeId \?\? ""/,
+    "a ausência da prop mantém o escopo efetivo, enquanto vazio controlado não reutiliza outra empresa",
+  );
+  assert.match(
+    dashboard,
+    /const aiInsightsConfigurationCache = new Map<[\s\S]*?const aiInsightsConfigurationRequests = new Map</,
+  );
+  assert.match(
+    dashboard,
+    /const pendingRequest = aiInsightsConfigurationRequests\.get\(cacheKey\);[\s\S]*?if \(pendingRequest\) return pendingRequest;[\s\S]*?if \(!force && cached\) return cached;/,
+    "requisições simultâneas e revisitas devem compartilhar a mesma leitura por escopo",
+  );
+  assert.match(
+    dashboard,
+    /writeAiInsightsConfigurationCache\(\s*\{ companyScopeId, userId \},\s*parsed\.data,?\s*\);[\s\S]*?setStatus\(parsed\.data\)/,
+    "a resposta do PUT deve atualizar o cache e o formulário sem GET adicional",
+  );
+  assert.match(
+    dashboard,
+    /setStatus\(null\);[\s\S]*?setForm\(null\);[\s\S]*?setApiKey\(""\);[\s\S]*?setLoadedScopeKey\(""\)/,
+    "a troca de empresa deve retirar imediatamente dados e credenciais do escopo anterior",
+  );
+  assert.match(dashboard, /function RoleAccessCheckbox/);
+  assert.match(dashboard, /<Checkbox[\s\S]*?checked=\{checked\}/);
+  assert.match(dashboard, /onCheckedChange=\{\(nextChecked\)/);
+  assert.match(dashboard, /aria-describedby=\{descriptionId\}/);
+  assert.doesNotMatch(dashboard, /role="switch"/);
+  assert.match(
+    dashboard,
+    /embedded[\s\S]*?2xl:grid-cols-\[minmax\(0,1\.2fr\)_minmax\(300px,0\.8fr\)\][\s\S]*?: "xl:grid-cols-/,
+    "o painel incorporado só deve dividir colunas quando a área útil comportar o formulário",
+  );
+  assert.match(
+    dashboard,
+    /embedded \? "min-h-\[140px\]" : "min-h-\[180px\]"/,
+    "campos extensos devem permanecer utilizáveis sem alongar excessivamente o Master",
+  );
   assert.equal(contract.AI_INSIGHTS_CONFIGURATION_LIMITS.constraints, 24_000);
   assert.equal(companySettings.AI_INSIGHTS_COMPANY_CONSTRAINTS_MAX_LENGTH, 24_000);
 });
@@ -1356,9 +1614,17 @@ test("migração local rejeita fallback, corrupção e indisponibilidade do nave
   }
 });
 
-test("menu e páginas mantêm configuração IA exclusiva do superadmin", () => {
+test("configuração IA fica exclusiva e carrega apenas dentro da seção do Superadmin", () => {
   const appShell = readFileSync(
     resolve(projectRoot, "components/app/app-shell.tsx"),
+    "utf8",
+  );
+  const routeShell = readFileSync(
+    resolve(projectRoot, "components/app/authenticated-route-shell.tsx"),
+    "utf8",
+  );
+  const managerLayout = readFileSync(
+    resolve(projectRoot, "app/manager/layout.tsx"),
     "utf8",
   );
   const managerPage = readFileSync(
@@ -1369,21 +1635,52 @@ test("menu e páginas mantêm configuração IA exclusiva do superadmin", () => 
     resolve(projectRoot, "app/dashboard/insights/page.tsx"),
     "utf8",
   );
+  const masterDashboard = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const routePreload = readFileSync(
+    resolve(projectRoot, "lib/app-route-preload.ts"),
+    "utf8",
+  );
   const clientNavigation = appShell.slice(
     appShell.indexOf("const clientNavItems"),
     appShell.indexOf("const managerNavItems"),
   );
 
   assert.doesNotMatch(clientNavigation, /insights|Configuração IA/);
+  assert.doesNotMatch(appShell, /href: "\/manager\/insights"|BrainCog/);
+  assert.doesNotMatch(routePreload, /"\/manager\/insights"/);
+  assert.match(managerLayout, /<ManagerRouteShell>\{children\}<\/ManagerRouteShell>/);
   assert.match(
-    appShell,
-    /href: "\/manager\/insights",[\s\S]*?label: "Configuração IA",[\s\S]*?canShow: hasMasterAccess/,
+    routeShell,
+    /const requireMaster = pathname === "\/manager\/master"/,
   );
-  assert.match(managerPage, /<AuthGuard requireManager requireMaster>/);
-  assert.match(managerPage, /<AiInsightsDashboard \/>/);
-  assert.match(clientPage, /hasMasterAccess\(user\)[\s\S]*?"\/manager\/insights"/);
-  assert.match(clientPage, /isManager[\s\S]*?"\/manager\/live"[\s\S]*?"\/dashboard\/live"/);
-  assert.doesNotMatch(clientPage, /AiInsightsDashboard/);
+  assert.match(routeShell, /<AuthGuard[\s\S]*?requireManager[\s\S]*?requireMaster=\{requireMaster\}/);
+  for (const page of [managerPage, clientPage]) {
+    assert.match(page, /import \{ redirect \} from "next\/navigation"/);
+    assert.match(page, /redirect\("\/manager\/master\?section=insights"\)/);
+    assert.doesNotMatch(
+      page,
+      /"use client"|AiInsightsDashboard|useAuth|useRouter/,
+    );
+  }
+
+  assert.match(
+    masterDashboard,
+    /DeferredAiInsightsDashboard as AiInsightsDashboard/,
+  );
+  assert.match(masterDashboard, /<TabsTrigger value="insights"[\s\S]*?IA Advisor/);
+  assert.match(
+    masterDashboard,
+    /<TabsContent value="insights"[^>]*>[\s\S]*?activeCompanyTab === "insights" \? \([\s\S]*?<AiInsightsDashboard[\s\S]*?companyScopeId=\{selectedCompanyId\}[\s\S]*?companyName=\{selectedCompany\?\.name\}[\s\S]*?embedded/,
+    "o painel pesado e seu GET devem existir somente enquanto a seção de IA estiver ativa",
+  );
+  assert.match(
+    masterDashboard,
+    /new URLSearchParams\(window\.location\.search\)\.get\("section"\)[\s\S]*?masterSections\.has/,
+    "o alias deve conseguir abrir diretamente a seção embutida",
+  );
 });
 
 function validRequest() {

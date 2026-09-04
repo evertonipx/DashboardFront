@@ -1,7 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  CalendarDays,
+  CalendarRange,
+  ChevronLeft,
+  ChevronRight,
+  SlidersHorizontal,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +22,21 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  closedMonthRange,
+  inferAnalysisPeriodSelectionMode,
+  isClosedMonthAvailable,
+  lastClosedMonthRange,
+  previousClosedCivilDayInput,
+  type AnalysisPeriodSelectionMode,
+} from "@/lib/analysis-period-selection";
+import {
   MAX_OCCUPANCY_ANALYSIS_RANGE_DAYS,
   countOccupancyAnalysisDateRangeDays,
   formatOccupancyAnalysisDateInput,
@@ -29,7 +50,6 @@ type OccupancyDateRangePickerProps = {
   disabled?: boolean;
   maximumInput: string;
   onApply: (range: OccupancyAnalysisDateRangeInput) => void;
-  timeZoneLabel: string;
   value: OccupancyAnalysisDateRangeInput;
 };
 
@@ -40,6 +60,45 @@ export type AnalysisDateRangePickerProps =
   };
 
 const WEEKDAY_LABELS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"];
+const MONTH_LABELS = [
+  "Jan",
+  "Fev",
+  "Mar",
+  "Abr",
+  "Mai",
+  "Jun",
+  "Jul",
+  "Ago",
+  "Set",
+  "Out",
+  "Nov",
+  "Dez",
+] as const;
+const ANALYSIS_PERIOD_MODES: Array<{
+  description: string;
+  icon: typeof CalendarDays;
+  label: string;
+  value: AnalysisPeriodSelectionMode;
+}> = [
+  {
+    description: "Um dia já encerrado",
+    icon: CalendarDays,
+    label: "Diário",
+    value: "day",
+  },
+  {
+    description: "Janeiro a dezembro",
+    icon: CalendarRange,
+    label: "Mês fechado",
+    value: "closed_month",
+  },
+  {
+    description: "Intervalo livre",
+    icon: SlidersHorizontal,
+    label: "Personalizado",
+    value: "custom",
+  },
+];
 
 export function OccupancyDateRangePicker({
   ...props
@@ -59,14 +118,35 @@ export function AnalysisDateRangePicker({
   maximumDays,
   maximumInput,
   onApply,
-  timeZoneLabel,
   value,
 }: AnalysisDateRangePickerProps) {
   const startInputId = React.useId();
   const endInputId = React.useId();
+  const dayInputId = React.useId();
   const calendarRootRef = React.useRef<HTMLDivElement | null>(null);
+  const safeMaximumInput = parseOccupancyAnalysisDateInput(maximumInput)
+    ? maximumInput
+    : formatOccupancyAnalysisDateInput(new Date());
+  const closedMaximumInput = React.useMemo(
+    () => previousClosedCivilDayInput(safeMaximumInput),
+    [safeMaximumInput],
+  );
+  const defaultClosedMonth = React.useMemo(
+    () => lastClosedMonthRange(safeMaximumInput),
+    [safeMaximumInput],
+  );
+  const lastClosedMonthDate =
+    parseOccupancyAnalysisDateInput(defaultClosedMonth.startInput) ??
+    new Date();
   const [open, setOpen] = React.useState(false);
   const [draft, setDraft] = React.useState(value);
+  const [customDraft, setCustomDraft] = React.useState(value);
+  const [mode, setMode] = React.useState<AnalysisPeriodSelectionMode>(() =>
+    inferAnalysisPeriodSelectionMode(value, safeMaximumInput),
+  );
+  const [selectedYear, setSelectedYear] = React.useState(
+    lastClosedMonthDate.getFullYear(),
+  );
   const [error, setError] = React.useState("");
   const [selectingEnd, setSelectingEnd] = React.useState(false);
   const [hoveredInput, setHoveredInput] = React.useState<string | null>(null);
@@ -75,40 +155,71 @@ export function AnalysisDateRangePicker({
   );
   const [focusedInput, setFocusedInput] = React.useState(value.endInput);
   const maximumDate = React.useMemo(
-    () => parseOccupancyAnalysisDateInput(maximumInput) ?? new Date(),
-    [maximumInput],
+    () => parseOccupancyAnalysisDateInput(safeMaximumInput) ?? new Date(),
+    [safeMaximumInput],
   );
+  const activeMaximumInput =
+    mode === "custom" ? safeMaximumInput : closedMaximumInput;
+  const activeMaximumDate =
+    parseOccupancyAnalysisDateInput(activeMaximumInput) ?? maximumDate;
   const previousVisibleMonth = addMonths(visibleMonth, -1);
   const canShowNextMonth =
     formatOccupancyAnalysisDateInput(addMonths(visibleMonth, 1)) <=
-    maximumInput;
-
-  const handleOpenChange = React.useCallback(
-    (nextOpen: boolean) => {
-      setOpen(nextOpen);
-      if (!nextOpen) return;
-      setDraft(value);
-      setError("");
-      setSelectingEnd(false);
-      setHoveredInput(null);
-      setFocusedInput(value.endInput);
-      setVisibleMonth(
-        startOfMonth(
-          parseOccupancyAnalysisDateInput(value.endInput) ?? maximumDate,
-        ),
-      );
-    }, [maximumDate, value],
+    activeMaximumInput;
+  const minimumYear = Math.min(2000, selectedYear);
+  const yearOptions = Array.from(
+    { length: lastClosedMonthDate.getFullYear() - minimumYear + 1 },
+    (_, index) => lastClosedMonthDate.getFullYear() - index,
   );
+  const selectedClosedMonth = closedMonthSelection(draft, safeMaximumInput);
 
-  const validation = validateDraftRange(draft, maximumInput, maximumDays);
+  function handleOpenChange(nextOpen: boolean) {
+    setOpen(nextOpen);
+    if (!nextOpen) return;
+    const nextMode = inferAnalysisPeriodSelectionMode(value, safeMaximumInput);
+    setDraft(value);
+    setCustomDraft(value);
+    setMode(nextMode);
+    setError("");
+    setSelectingEnd(false);
+    setHoveredInput(null);
+    setFocusedInput(value.endInput);
+    setSelectedYear(
+      nextMode === "closed_month"
+        ? (parseOccupancyAnalysisDateInput(value.startInput)?.getFullYear() ??
+            lastClosedMonthDate.getFullYear())
+        : lastClosedMonthDate.getFullYear(),
+    );
+    setVisibleMonth(
+      startOfMonth(
+        parseOccupancyAnalysisDateInput(value.endInput) ?? maximumDate,
+      ),
+    );
+  }
+
+  const rangeValidation = validateDraftRange(
+    draft,
+    activeMaximumInput,
+    maximumDays,
+  );
+  const modeValidation =
+    mode === "day" && draft.startInput !== draft.endInput
+      ? "Selecione apenas um dia encerrado."
+      : mode === "closed_month" && !selectedClosedMonth
+        ? "Selecione um mês completamente encerrado."
+        : "";
+  const validation = rangeValidation || modeValidation;
 
   function updateDraftField(
     field: keyof OccupancyAnalysisDateRangeInput,
     rawValue: string,
   ) {
-    const nextValue = rawValue > maximumInput ? maximumInput : rawValue;
+    const nextValue =
+      rawValue > safeMaximumInput ? safeMaximumInput : rawValue;
     setError("");
-    setDraft((current) => ({ ...current, [field]: nextValue }));
+    const next = { ...draft, [field]: nextValue };
+    setDraft(next);
+    setCustomDraft(next);
     const parsed = parseOccupancyAnalysisDateInput(nextValue);
     if (parsed) {
       setVisibleMonth(startOfMonth(parsed));
@@ -116,27 +227,48 @@ export function AnalysisDateRangePicker({
     }
   }
 
+  function updateDailyInput(rawValue: string) {
+    if (!rawValue) return;
+    const nextValue =
+      rawValue > closedMaximumInput ? closedMaximumInput : rawValue;
+    const next = { endInput: nextValue, startInput: nextValue };
+    setError("");
+    setDraft(next);
+    setFocusedInput(nextValue);
+    const parsed = parseOccupancyAnalysisDateInput(nextValue);
+    if (parsed) setVisibleMonth(startOfMonth(parsed));
+  }
+
   function selectDate(dateInput: string) {
-    if (dateInput > maximumInput) return;
+    if (dateInput > activeMaximumInput) return;
     setError("");
     setFocusedInput(dateInput);
     setHoveredInput(null);
-    if (!selectingEnd) {
+    if (mode === "day") {
       setDraft({ endInput: dateInput, startInput: dateInput });
+      setSelectingEnd(false);
+      return;
+    }
+    if (!selectingEnd) {
+      const next = { endInput: dateInput, startInput: dateInput };
+      setDraft(next);
+      setCustomDraft(next);
       setSelectingEnd(true);
       return;
     }
 
-    setDraft((current) =>
-      dateInput < current.startInput
-        ? { endInput: current.startInput, startInput: dateInput }
-        : { ...current, endInput: dateInput },
-    );
+    const next =
+      dateInput < draft.startInput
+        ? { endInput: draft.startInput, startInput: dateInput }
+        : { ...draft, endInput: dateInput };
+    setDraft(next);
+    setCustomDraft(next);
     setSelectingEnd(false);
   }
 
   function applyPreset(range: OccupancyAnalysisDateRangeInput) {
     setDraft(range);
+    setCustomDraft(range);
     setError("");
     setSelectingEnd(false);
     setHoveredInput(null);
@@ -145,12 +277,75 @@ export function AnalysisDateRangePicker({
     if (end) setVisibleMonth(startOfMonth(end));
   }
 
-  function applyDraft() {
-    const nextValidation = validateDraftRange(
-      draft,
-      maximumInput,
-      maximumDays,
+  function updateMode(nextMode: AnalysisPeriodSelectionMode) {
+    if (nextMode === mode) return;
+    if (mode === "custom") setCustomDraft(draft);
+    setMode(nextMode);
+    setError("");
+    setSelectingEnd(false);
+    setHoveredInput(null);
+
+    if (nextMode === "day") {
+      const next = {
+        endInput: closedMaximumInput,
+        startInput: closedMaximumInput,
+      };
+      setDraft(next);
+      setFocusedInput(next.endInput);
+      setVisibleMonth(
+        startOfMonth(
+          parseOccupancyAnalysisDateInput(next.endInput) ?? activeMaximumDate,
+        ),
+      );
+      return;
+    }
+    if (nextMode === "closed_month") {
+      setDraft(defaultClosedMonth);
+      setSelectedYear(lastClosedMonthDate.getFullYear());
+      setFocusedInput(defaultClosedMonth.endInput);
+      setVisibleMonth(lastClosedMonthDate);
+      return;
+    }
+
+    setDraft(customDraft);
+    setFocusedInput(customDraft.endInput);
+    setVisibleMonth(
+      startOfMonth(
+        parseOccupancyAnalysisDateInput(customDraft.endInput) ?? maximumDate,
+      ),
     );
+  }
+
+  function selectYear(year: number) {
+    const normalizedYear = Math.min(
+      lastClosedMonthDate.getFullYear(),
+      Math.max(minimumYear, year),
+    );
+    const monthIndex =
+      normalizedYear === lastClosedMonthDate.getFullYear()
+        ? lastClosedMonthDate.getMonth()
+        : 11;
+    const next = closedMonthRange(normalizedYear, monthIndex);
+    setSelectedYear(normalizedYear);
+    setDraft(next);
+    setFocusedInput(next.endInput);
+  }
+
+  function selectMonth(monthIndex: number) {
+    if (
+      !isClosedMonthAvailable(selectedYear, monthIndex, safeMaximumInput)
+    ) {
+      return;
+    }
+    const next = closedMonthRange(selectedYear, monthIndex);
+    setDraft(next);
+    setFocusedInput(next.endInput);
+  }
+
+  function applyDraft() {
+    const nextValidation =
+      validateDraftRange(draft, activeMaximumInput, maximumDays) ||
+      modeValidation;
     if (nextValidation) {
       setError(nextValidation);
       return;
@@ -161,12 +356,15 @@ export function AnalysisDateRangePicker({
 
   function moveVisibleMonth(amount: number) {
     const next = addMonths(visibleMonth, amount);
-    if (amount > 0 && formatOccupancyAnalysisDateInput(next) > maximumInput) {
+    if (
+      amount > 0 &&
+      formatOccupancyAnalysisDateInput(next) > activeMaximumInput
+    ) {
       return;
     }
     const focusDate =
-      amount > 0 && sameMonth(next, maximumDate)
-        ? maximumDate
+      amount > 0 && sameMonth(next, activeMaximumDate)
+        ? activeMaximumDate
         : startOfMonth(next);
     const focusInput = formatOccupancyAnalysisDateInput(focusDate);
     setVisibleMonth(next);
@@ -202,7 +400,7 @@ export function AnalysisDateRangePicker({
         event.key === "PageUp" ? -1 : 1,
       );
     }
-    if (!nextInput || nextInput > maximumInput) return;
+    if (!nextInput || nextInput > activeMaximumInput) return;
 
     event.preventDefault();
     const nextDate = parseOccupancyAnalysisDateInput(nextInput);
@@ -222,6 +420,11 @@ export function AnalysisDateRangePicker({
   }
 
   const presets = buildRangePresets(maximumDate);
+  const valueMode = inferAnalysisPeriodSelectionMode(
+    value,
+    safeMaximumInput,
+  );
+  const triggerModeLabel = analysisPeriodModeLabel(valueMode);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -232,15 +435,15 @@ export function AnalysisDateRangePicker({
           className="h-8 w-8 min-w-0 max-w-full shrink-0 justify-center bg-card px-0 py-0 text-left text-xs @sm:w-[300px] @sm:justify-start @sm:px-2.5"
           disabled={disabled}
           aria-haspopup="dialog"
-          aria-label={`Alterar período da ${contextLabel}. Atual: ${formatAnalysisDateRangeLabel(value)} no fuso ${timeZoneLabel}`}
-          title={`${formatAnalysisDateRangeLabel(value)} · ${formatRangeDayCount(value)} · ${timeZoneLabel}`}
+          aria-label={`Alterar período da ${contextLabel}. Atual: ${formatAnalysisDateRangeLabel(value)}, ${triggerModeLabel.toLowerCase()}, no horário da empresa`}
+          title={`${formatAnalysisDateRangeLabel(value)} · ${triggerModeLabel} · ${formatRangeDayCount(value)} · horário da empresa`}
         >
           <CalendarDays className="h-4 w-4 shrink-0 text-primary" />
           <span className="sr-only font-medium @sm:not-sr-only @sm:min-w-0 @sm:flex-1 @sm:truncate">
             {formatAnalysisDateRangeLabel(value)}
           </span>
           <span className="hidden shrink-0 text-[10px] font-normal text-muted-foreground @2xl:inline">
-            {formatRangeDayCount(value)}
+            {triggerModeLabel}
           </span>
         </Button>
       </DialogTrigger>
@@ -248,117 +451,270 @@ export function AnalysisDateRangePicker({
         <DialogHeader className="border-b px-5 py-4">
           <DialogTitle>Período da {contextLabel}</DialogTitle>
           <DialogDescription>
-            Escolha datas civis inclusivas. A consulta só será atualizada ao
-            aplicar, usa o fuso {timeZoneLabel} e nunca incluirá datas futuras.
+            Analise um dia encerrado, um mês completo ou monte um intervalo.
+            A consulta só será atualizada ao aplicar.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid min-h-0 min-w-0 overflow-y-auto md:grid-cols-[170px_minmax(0,1fr)]">
-          <div className="border-b bg-muted/20 p-3 md:border-b-0 md:border-r">
-            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Atalhos
-            </div>
-            <div className="grid grid-cols-2 gap-1.5 md:grid-cols-1">
-              {presets.map((preset) => (
-                <Button
-                  key={preset.label}
+        <div className="min-h-0 min-w-0 overflow-y-auto">
+          <div
+            className="grid grid-cols-3 gap-1.5 border-b bg-muted/15 p-3"
+            role="group"
+            aria-label="Tipo de período da análise"
+          >
+            {ANALYSIS_PERIOD_MODES.map((option) => {
+              const Icon = option.icon;
+              const selected = mode === option.value;
+              return (
+                <button
+                  key={option.value}
                   type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="justify-start"
-                  onClick={() => applyPreset(preset.range)}
+                  aria-pressed={selected}
+                  className={cn(
+                    "flex min-w-0 items-center justify-center gap-2 rounded-md border px-2 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                    selected
+                      ? "border-primary/35 bg-primary/10 text-primary"
+                      : "border-transparent bg-background/70 hover:border-border hover:bg-background",
+                  )}
+                  onClick={() => updateMode(option.value)}
                 >
-                  {preset.label}
-                </Button>
-              ))}
-            </div>
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0">
+                    <span className="block truncate text-xs font-semibold">
+                      {option.label}
+                    </span>
+                    <span className="hidden truncate text-[10px] font-normal text-muted-foreground sm:block">
+                      {option.description}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
           <div ref={calendarRootRef} className="min-w-0 p-4 md:p-5">
-            <div className="mb-4 grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor={startInputId}>Início</Label>
-                <Input
-                  id={startInputId}
-                  type="date"
-                  max={maximumInput}
-                  value={draft.startInput}
-                  onChange={(event) =>
-                    updateDraftField("startInput", event.target.value)
-                  }
+            {mode === "day" ? (
+              <div className="mx-auto max-w-sm">
+                <div className="mb-4 space-y-1.5">
+                  <Label htmlFor={dayInputId}>Dia encerrado</Label>
+                  <Input
+                    id={dayInputId}
+                    type="date"
+                    max={closedMaximumInput}
+                    value={draft.startInput}
+                    onChange={(event) => updateDailyInput(event.target.value)}
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    O dia atual fica disponível somente no modo Personalizado.
+                  </p>
+                </div>
+                <CalendarNavigation
+                  canShowNextMonth={canShowNextMonth}
+                  hint="Escolha qualquer dia já encerrado."
+                  onMove={moveVisibleMonth}
                 />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={endInputId}>Fim</Label>
-                <Input
-                  id={endInputId}
-                  type="date"
-                  max={maximumInput}
-                  value={draft.endInput}
-                  onChange={(event) =>
-                    updateDraftField("endInput", event.target.value)
-                  }
-                />
-              </div>
-            </div>
-
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label="Mostrar mês anterior"
-                onClick={() => moveVisibleMonth(-1)}
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              <p className="text-xs text-muted-foreground" aria-live="polite">
-                {selectingEnd
-                  ? "Agora selecione a data final."
-                  : "Selecione a data inicial para começar um novo intervalo."}
-              </p>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label="Mostrar próximo mês"
-                disabled={!canShowNextMonth}
-                onClick={() => moveVisibleMonth(1)}
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </div>
-
-            <div className="grid gap-5 md:grid-cols-2">
-              <div className="hidden md:block">
                 <CalendarMonth
                   draft={draft}
                   focusedInput={focusedInput}
-                  previewEndInput={selectingEnd ? hoveredInput : null}
-                  maximumInput={maximumInput}
-                  month={previousVisibleMonth}
+                  previewEndInput={null}
+                  maximumInput={closedMaximumInput}
+                  month={visibleMonth}
                   onDayKeyDown={handleDayKeyDown}
                   onDayPreview={setHoveredInput}
                   onSelect={selectDate}
                 />
               </div>
-              <CalendarMonth
-                draft={draft}
-                focusedInput={focusedInput}
-                previewEndInput={selectingEnd ? hoveredInput : null}
-                maximumInput={maximumInput}
-                month={visibleMonth}
-                onDayKeyDown={handleDayKeyDown}
-                onDayPreview={setHoveredInput}
-                onSelect={selectDate}
-              />
-            </div>
+            ) : mode === "closed_month" ? (
+              <div className="mx-auto max-w-xl">
+                <div className="mb-4 flex items-center justify-between gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Ano anterior"
+                    onClick={() => selectYear(selectedYear - 1)}
+                    disabled={selectedYear <= minimumYear}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
+                  <div className="w-40">
+                    <Label
+                      className="sr-only"
+                      htmlFor={`${startInputId}-year`}
+                    >
+                      Ano do mês fechado
+                    </Label>
+                    <Select
+                      value={String(selectedYear)}
+                      onValueChange={(next) => selectYear(Number(next))}
+                    >
+                      <SelectTrigger
+                        id={`${startInputId}-year`}
+                        aria-label="Ano do mês fechado"
+                        className="h-9 bg-card"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {yearOptions.map((year) => (
+                          <SelectItem key={year} value={String(year)}>
+                            {year}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Próximo ano"
+                    onClick={() => selectYear(selectedYear + 1)}
+                    disabled={
+                      selectedYear >= lastClosedMonthDate.getFullYear()
+                    }
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
+                <div
+                  className="grid grid-cols-3 gap-2 sm:grid-cols-4"
+                  role="group"
+                  aria-label={`Meses encerrados de ${selectedYear}`}
+                >
+                  {MONTH_LABELS.map((label, monthIndex) => {
+                    const available = isClosedMonthAvailable(
+                      selectedYear,
+                      monthIndex,
+                      safeMaximumInput,
+                    );
+                    const selected =
+                      selectedClosedMonth?.year === selectedYear &&
+                      selectedClosedMonth.monthIndex === monthIndex;
+                    return (
+                      <button
+                        key={label}
+                        type="button"
+                        aria-label={formatAccessibleMonth(
+                          selectedYear,
+                          monthIndex,
+                        )}
+                        aria-pressed={selected}
+                        disabled={!available}
+                        title={
+                          available
+                            ? formatAccessibleMonth(selectedYear, monthIndex)
+                            : "Este mês ainda não foi encerrado."
+                        }
+                        onClick={() => selectMonth(monthIndex)}
+                        className={cn(
+                          "flex min-h-14 items-center gap-2 rounded-lg border px-3 py-2 text-left outline-none transition focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                          selected
+                            ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                            : "bg-card hover:border-primary/35 hover:bg-primary/5",
+                          !available &&
+                            "cursor-not-allowed border-dashed bg-muted/25 text-muted-foreground/45 shadow-none",
+                        )}
+                      >
+                        <span className="text-[10px] font-semibold tabular-nums opacity-70">
+                          {String(monthIndex + 1).padStart(2, "0")}
+                        </span>
+                        <span className="text-sm font-semibold">{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-3 text-center text-xs text-muted-foreground">
+                  Somente meses completamente encerrados podem ser analisados.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="mb-4 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                  {presets.map((preset) => (
+                    <Button
+                      key={preset.label}
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="min-w-0 justify-start"
+                      onClick={() => applyPreset(preset.range)}
+                    >
+                      <span className="truncate">{preset.label}</span>
+                    </Button>
+                  ))}
+                </div>
+                <div className="mb-4 grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor={startInputId}>Início</Label>
+                    <Input
+                      id={startInputId}
+                      type="date"
+                      max={safeMaximumInput}
+                      value={draft.startInput}
+                      onChange={(event) =>
+                        updateDraftField("startInput", event.target.value)
+                      }
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor={endInputId}>Fim</Label>
+                    <Input
+                      id={endInputId}
+                      type="date"
+                      max={safeMaximumInput}
+                      value={draft.endInput}
+                      onChange={(event) =>
+                        updateDraftField("endInput", event.target.value)
+                      }
+                    />
+                  </div>
+                </div>
+                <CalendarNavigation
+                  canShowNextMonth={canShowNextMonth}
+                  hint={
+                    selectingEnd
+                      ? "Agora selecione a data final."
+                      : "Selecione a data inicial para começar um novo intervalo."
+                  }
+                  onMove={moveVisibleMonth}
+                />
+                <div className="grid gap-5 md:grid-cols-2">
+                  <div className="hidden md:block">
+                    <CalendarMonth
+                      draft={draft}
+                      focusedInput={focusedInput}
+                      previewEndInput={selectingEnd ? hoveredInput : null}
+                      maximumInput={safeMaximumInput}
+                      month={previousVisibleMonth}
+                      onDayKeyDown={handleDayKeyDown}
+                      onDayPreview={setHoveredInput}
+                      onSelect={selectDate}
+                    />
+                  </div>
+                  <CalendarMonth
+                    currentDateInput={safeMaximumInput}
+                    draft={draft}
+                    focusedInput={focusedInput}
+                    previewEndInput={selectingEnd ? hoveredInput : null}
+                    maximumInput={safeMaximumInput}
+                    month={visibleMonth}
+                    onDayKeyDown={handleDayKeyDown}
+                    onDayPreview={setHoveredInput}
+                    onSelect={selectDate}
+                  />
+                </div>
+              </>
+            )}
 
             <div className="mt-4 rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
               <span className="font-medium text-foreground">
                 {formatAnalysisDateRangeLabel(draft)}
               </span>
               {validation ? null : ` · ${formatRangeDayCount(draft)}`}
+              <span className="block">
+                {analysisPeriodModeDescription(mode)}
+              </span>
               {maximumDays ? (
                 <span className="block">
                   Máximo de {maximumDays} dias por consulta.
@@ -378,7 +734,11 @@ export function AnalysisDateRangePicker({
             Cancelar
           </Button>
           <Button type="button" disabled={Boolean(validation)} onClick={applyDraft}>
-            Aplicar período
+            {mode === "day"
+              ? "Analisar dia"
+              : mode === "closed_month"
+                ? "Analisar mês"
+                : "Aplicar período"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -386,7 +746,45 @@ export function AnalysisDateRangePicker({
   );
 }
 
+function CalendarNavigation({
+  canShowNextMonth,
+  hint,
+  onMove,
+}: {
+  canShowNextMonth: boolean;
+  hint: string;
+  onMove: (amount: number) => void;
+}) {
+  return (
+    <div className="mb-2 flex items-center justify-between gap-2">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label="Mostrar mês anterior"
+        onClick={() => onMove(-1)}
+      >
+        <ChevronLeft className="h-4 w-4" />
+      </Button>
+      <p className="text-xs text-muted-foreground" aria-live="polite">
+        {hint}
+      </p>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label="Mostrar próximo mês"
+        disabled={!canShowNextMonth}
+        onClick={() => onMove(1)}
+      >
+        <ChevronRight className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
+
 function CalendarMonth({
+  currentDateInput,
   draft,
   focusedInput,
   previewEndInput,
@@ -396,6 +794,7 @@ function CalendarMonth({
   onDayPreview,
   onSelect,
 }: {
+  currentDateInput?: string;
   draft: OccupancyAnalysisDateRangeInput;
   focusedInput: string;
   previewEndInput: string | null;
@@ -483,7 +882,7 @@ function CalendarMonth({
                       dateInput >= previewStart &&
                       dateInput <= previewEnd,
                   );
-                  const today = dateInput === maximumInput;
+                  const today = dateInput === currentDateInput;
 
                   return (
                     <div
@@ -535,6 +934,42 @@ function CalendarMonth({
       </div>
     </div>
   );
+}
+
+function analysisPeriodModeLabel(mode: AnalysisPeriodSelectionMode) {
+  if (mode === "day") return "Diário";
+  if (mode === "closed_month") return "Mês fechado";
+  return "Personalizado";
+}
+
+function analysisPeriodModeDescription(mode: AnalysisPeriodSelectionMode) {
+  if (mode === "day") return "Leitura completa de um único dia encerrado.";
+  if (mode === "closed_month") {
+    return "Leitura consolidada de um mês civil completamente encerrado.";
+  }
+  return "Intervalo personalizado com datas inclusivas.";
+}
+
+function closedMonthSelection(
+  range: OccupancyAnalysisDateRangeInput,
+  maximumInput: string,
+) {
+  if (
+    inferAnalysisPeriodSelectionMode(range, maximumInput) !== "closed_month"
+  ) {
+    return null;
+  }
+  const start = parseOccupancyAnalysisDateInput(range.startInput);
+  return start
+    ? { monthIndex: start.getMonth(), year: start.getFullYear() }
+    : null;
+}
+
+function formatAccessibleMonth(year: number, monthIndex: number) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    month: "long",
+    year: "numeric",
+  }).format(new Date(year, monthIndex, 1, 12));
 }
 
 export function formatAnalysisDateRangeLabel(

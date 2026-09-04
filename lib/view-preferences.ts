@@ -11,7 +11,12 @@ import {
   writeUserGridPreference,
 } from "@/lib/user-grid-local";
 
-export type CardMenuKey = "live" | "reports" | "analysis" | "occupancy";
+export type CardMenuKey =
+  | "live"
+  | "reports"
+  | "analysis"
+  | "occupancy"
+  | "demographics";
 
 export type CardSize = "compact" | "wide" | "large" | "full";
 
@@ -74,6 +79,12 @@ export type CardChartType = "bar" | "line" | "rose" | "treemap";
 
 export const CARD_ZOOM_LEVELS = [80, 90, 100, 110, 120] as const;
 export type CardZoom = (typeof CARD_ZOOM_LEVELS)[number];
+export type CardScenarioSelectionMode = "inherit" | "all" | "custom";
+
+export type CardScenarioSelection = {
+  mode: CardScenarioSelectionMode;
+  scenarioIds: string[];
+};
 
 export type CardPreference = {
   chartType?: CardChartType;
@@ -81,6 +92,8 @@ export type CardPreference = {
   height?: CardHeight;
   heightLevel?: CardLayoutLevel;
   id: string;
+  scenarioIds?: string[];
+  scenarioSelectionMode?: CardScenarioSelectionMode;
   title?: string;
   visible: boolean;
   size?: CardSize;
@@ -151,6 +164,8 @@ export const cardViewMenus: CardMenuDefinition[] = [
       card("report_counting_access_leader", "Acesso líder", "Cenário com maior participação no fluxo."),
       card("report_counting_annual_comparison", "Comparativo mensal por ano", "Sazonalidade mensal entre anos."),
       card("report_counting_annual_accumulated_comparison", "Comparativo acumulado por ano", "Evolução acumulada mês a mês entre anos."),
+      card("report_counting_day_month_heatmap", "Mapa de calor · dias x meses", "Intensidade dos dias fechados ao longo dos meses do ano final do período."),
+      card("report_counting_month_year_heatmap", "Mapa de calor · meses x anos", "Intensidade mensal comparada entre os anos do período."),
       card("report_counting_year_over_year_month", "Tabela mensal comparativa", "Matriz de anos, meses, acumulados e variações."),
       card("report_counting_directional_flow", "Fluxo direcional por hora", "Entradas e saídas por faixa horária."),
       card("report_counting_access_ranking", "Ranking dos acessos", "Participação, volume e picos dos cenários."),
@@ -186,16 +201,33 @@ export const cardViewMenus: CardMenuDefinition[] = [
     ],
   },
   {
+    key: "demographics",
+    label: "Demographics",
+    description:
+      "Distribuição percentual das detecções classificadas por gênero, faixa etária e emoção.",
+    cards: [
+      card("demographics_total", "Detecções classificadas", "Volume retornado no período selecionado."),
+      card("demographics_gender_leader", "Gênero predominante", "Maior participação entre as classificações de gênero."),
+      card("demographics_age_leader", "Faixa etária predominante", "Faixa etária com maior participação nas classificações."),
+      card("demographics_emotion_leader", "Emoção predominante", "Emoção com maior participação nas classificações."),
+      card("demographics_gender_mix", "Distribuição por gênero", "Composição percentual das classificações de gênero."),
+      card("demographics_age_distribution", "Distribuição por faixa etária", "Participação percentual em cada faixa etária."),
+      card("demographics_emotion_distribution", "Distribuição por emoção", "Ranking percentual das emoções classificadas."),
+      card("demographics_age_gender_pyramid", "Faixa etária por gênero", "Pirâmide comparativa das faixas etárias por gênero."),
+      card("demographics_age_emotion_heatmap", "Faixa etária x emoção", "Mapa de calor da relação entre idade e emoção."),
+    ],
+  },
+  {
     key: "occupancy",
     label: "Ocupação",
     description: "Widgets de ocupação por cenário e período.",
     cards: [
-      card("occupancy_current_total", "Último snapshot", "Estado instantâneo certificado do cenário."),
+      card("occupancy_current_total", "Ocupação atual", "Estado atual do cenário."),
       card("occupancy_average", "Média hoje", "Média temporal do total do cenário hoje."),
-      card("occupancy_minimum", "Mínimo hoje", "Menor total certificado hoje."),
-      card("occupancy_peak", "Máximo hoje", "Maior total certificado hoje."),
+      card("occupancy_minimum", "Mínimo hoje", "Menor ocupação registrada hoje."),
+      card("occupancy_peak", "Máximo hoje", "Maior ocupação registrada hoje."),
       card("occupancy_alerts", "Alertas recentes", "Quantidade da janela de até 12 alertas recentes."),
-      card("occupancy_active_areas", "Áreas ocupadas", "Áreas com valor certificado maior que zero."),
+      card("occupancy_active_areas", "Áreas ocupadas", "Áreas com ocupação acima de zero."),
       card("occupancy_chart_minute", "Minuto a minuto", "Ocupação nos últimos 60 minutos."),
       card("occupancy_chart_hour", "Hora a hora", "Ocupação nas horas do dia."),
       card("occupancy_chart_day", "Dia a dia", "Ocupação nos últimos 7 dias."),
@@ -204,10 +236,16 @@ export const cardViewMenus: CardMenuDefinition[] = [
       card("occupancy_scenario_detail", "Cenário de ocupação", "Áreas, valores e limites do cenário."),
       card("occupancy_alert_list", "Histórico de alertas", "Janela dos alertas recentes do cenário."),
       card("occupancy_scenario_half_donut", "Comparação atual por cenário", "Estado ou valor real atual, mantendo a ordem configurada."),
-      card("occupancy_scenario_bar_race", "Bar race ao vivo por cenário", "Ranking dinâmico dos snapshots atuais."),
+      card("occupancy_scenario_bar_race", "Ranking ao vivo por cenário", "Comparação dinâmica dos valores atuais."),
       card("occupancy_scenario_max_hour", "Máximo por hora por cenário", "Pico de cada cenário nas horas de hoje."),
       card("occupancy_scenario_max_month", "Máximo por mês por cenário", "Pico mensal dos últimos 12 meses."),
       card("occupancy_scenario_max_year", "Máximo por ano por cenário", "Pico observado em cada um dos últimos 5 anos."),
+      card("occupancy_duration_confirmed", "Tempo ocupado confirmado", "Soma dos minutos integralmente ocupados hoje nos cenários escolhidos."),
+      card("occupancy_duration_longest", "Maior período ocupado", "Maior sequência contínua confirmada no dia atual."),
+      card("occupancy_duration_load", "Carga de ocupação", "Integral da ocupação média de hoje em unidades-hora, sem inferir permanência individual."),
+      card("occupancy_duration_coverage", "Cobertura da duração", "Percentual dos minutos fechados de hoje com dados disponíveis."),
+      card("occupancy_duration_timeline", "Linha do tempo de ocupação", "Intervalos ocupados, livres, mistos e sem dados ao longo de hoje."),
+      card("occupancy_duration_by_scenario", "Tempo por cenário", "Comparação do tempo confirmado e da cobertura de hoje entre cenários."),
       card("occupancy_hex_layout", "Simulador operacional hexagonal", "Layout configurável para posições operacionais."),
       card("occupancy_day_hour_heatmap", "Ocupação por dias x horários", "Mapa horário do cenário ao longo dos dias."),
       card("occupancy_scenario_hour_heatmap", "Ocupação por cenários x horários", "Mapa comparativo dos cenários nas horas da data."),
@@ -242,47 +280,64 @@ export function normalizeCardPreferences(
       ? cardIds
       : getCardMenuDefinition(menuKey).cards.map((card) => card.id),
   );
-  const byId = new Map(
-    (preferences ?? [])
-      .filter((preference) => definitionIds.has(preference.id))
-      .map((preference) => [preference.id, preference]),
-  );
-  const normalized = (preferences ?? [])
-    .filter((preference) => definitionIds.has(preference.id))
-    .map((preference) => {
-      const storedPreference = byId.get(preference.id);
-      const legacyHeight = isCardHeight(storedPreference?.height)
-        ? storedPreference.height
-        : undefined;
-      const legacySize = isCardSize(storedPreference?.size)
-        ? storedPreference.size
-        : undefined;
-      const heightLevel =
-        normalizeCardLayoutLevel(storedPreference?.heightLevel) ??
-        (legacyHeight ? cardHeightToLayoutLevel(legacyHeight) : undefined);
-      const widthLevel =
-        normalizeCardLayoutLevel(storedPreference?.widthLevel) ??
-        (legacySize ? cardSizeToLayoutLevel(legacySize) : undefined);
-
-      return {
-        chartType: isCardChartType(storedPreference?.chartType)
-          ? storedPreference.chartType
-          : undefined,
-        color: isCardColor(storedPreference?.color)
-          ? storedPreference.color
-          : undefined,
-        height: heightLevel
-          ? cardLayoutLevelToCardHeight(heightLevel)
-          : undefined,
-        heightLevel,
-        id: preference.id,
-        title: normalizeCardTitle(storedPreference?.title),
-        visible: storedPreference?.visible ?? true,
-        size: widthLevel ? cardLayoutLevelToCardSize(widthLevel) : undefined,
-        widthLevel,
-        zoom: normalizeCardZoom(storedPreference?.zoom),
-      };
+  const byId = new Map<string, StoredCardPreference>();
+  const storedOrder: string[] = [];
+  if (Array.isArray(preferences)) {
+    preferences.forEach((candidate) => {
+      if (
+        !isStoredCardPreference(candidate) ||
+        !definitionIds.has(candidate.id)
+      ) {
+        return;
+      }
+      if (!byId.has(candidate.id)) storedOrder.push(candidate.id);
+      // Preserve the historical last-write-wins behavior while emitting each
+      // card only once at the position of its first valid occurrence.
+      byId.set(candidate.id, candidate);
     });
+  }
+  const normalized = storedOrder.map((id) => {
+    const storedPreference = byId.get(id)!;
+    const legacyHeight = isCardHeight(storedPreference.height)
+      ? storedPreference.height
+      : undefined;
+    const legacySize = isCardSize(storedPreference.size)
+      ? storedPreference.size
+      : undefined;
+    const heightLevel =
+      normalizeCardLayoutLevel(storedPreference.heightLevel) ??
+      (legacyHeight ? cardHeightToLayoutLevel(legacyHeight) : undefined);
+    const widthLevel =
+      normalizeCardLayoutLevel(storedPreference.widthLevel) ??
+      (legacySize ? cardSizeToLayoutLevel(legacySize) : undefined);
+    const scenarioSelectionMode = normalizeCardScenarioSelectionMode(
+      storedPreference.scenarioSelectionMode,
+    );
+    const scenarioIds = normalizeCardScenarioIds(storedPreference.scenarioIds);
+
+    return {
+      chartType: isCardChartType(storedPreference.chartType)
+        ? storedPreference.chartType
+        : undefined,
+      color: isCardColor(storedPreference.color)
+        ? storedPreference.color
+        : undefined,
+      height: heightLevel
+        ? cardLayoutLevelToCardHeight(heightLevel)
+        : undefined,
+      heightLevel,
+      id,
+      ...(scenarioSelectionMode === "custom" && scenarioIds.length
+        ? { scenarioIds }
+        : {}),
+      ...(scenarioSelectionMode ? { scenarioSelectionMode } : {}),
+      title: normalizeCardTitle(storedPreference.title),
+      visible: storedPreference.visible ?? true,
+      size: widthLevel ? cardLayoutLevelToCardSize(widthLevel) : undefined,
+      widthLevel,
+      zoom: normalizeCardZoom(storedPreference.zoom),
+    };
+  });
   const normalizedIds = new Set(normalized.map((preference) => preference.id));
   const defaultOrder = Array.from(definitionIds);
   const merged = [...normalized];
@@ -544,6 +599,20 @@ function isCardSize(value: unknown): value is CardSize {
   );
 }
 
+type StoredCardPreference = Partial<CardPreference> &
+  Pick<CardPreference, "id">;
+
+function isStoredCardPreference(
+  value: unknown,
+): value is StoredCardPreference {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    typeof (value as { id?: unknown }).id === "string"
+  );
+}
+
 function isCardHeight(value: unknown): value is CardHeight {
   return value === "short" || value === "standard" || value === "tall";
 }
@@ -565,6 +634,25 @@ function normalizeCardTitle(value: unknown) {
   if (typeof value !== "string") return undefined;
   const title = value.trim();
   return title ? title.slice(0, 120) : undefined;
+}
+
+function normalizeCardScenarioSelectionMode(
+  value: unknown,
+): CardScenarioSelectionMode | undefined {
+  return value === "all" || value === "custom" ? value : undefined;
+}
+
+function normalizeCardScenarioIds(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value.flatMap((scenarioId) =>
+        typeof scenarioId === "string" && scenarioId.trim()
+          ? [scenarioId.trim()]
+          : [],
+      ),
+    ),
+  );
 }
 
 function normalizeCardZoom(value: unknown): CardZoom | undefined {

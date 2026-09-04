@@ -20,17 +20,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  exportReportToExcel,
-  exportReportToPdf,
-  type ReportExportMode,
-  type ReportPayload,
+import type {
+  ReportExportMode,
+  ReportPayload,
 } from "@/lib/report-export";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
 
 type ReportExportActionsProps = {
-  payload: ReportPayload;
+  payload?: ReportPayload;
   disabled?: boolean;
-  getPayload?: () => Promise<ReportPayload> | ReportPayload;
+  getPayload?: (signal?: AbortSignal) => Promise<ReportPayload> | ReportPayload;
   compact?: boolean;
 };
 
@@ -43,28 +42,60 @@ export function ReportExportActions({
   const [exporting, setExporting] = React.useState<"excel" | "pdf" | null>(null);
   const [mode, setMode] = React.useState<ReportExportMode>("complete");
   const exportInFlightRef = React.useRef(false);
+  const exportControllerRef = React.useRef<AbortController | null>(null);
+
+  React.useEffect(
+    () => () => {
+      const controller = exportControllerRef.current;
+      if (controller && !controller.signal.aborted) {
+        controller.abort(
+          new DOMException("A exportação foi fechada.", "AbortError"),
+        );
+      }
+    },
+    [],
+  );
 
   async function exportFile(format: "excel" | "pdf") {
     if (exportInFlightRef.current) return;
     exportInFlightRef.current = true;
     setExporting(format);
+    const controller = new AbortController();
+    exportControllerRef.current = controller;
     try {
-      const exportPayload = getPayload ? await getPayload() : payload;
+      const exportPayload = getPayload
+        ? await getPayload(controller.signal)
+        : payload;
+      controller.signal.throwIfAborted();
+      if (!exportPayload) {
+        throw new Error("Os dados do relatório ainda não estão disponíveis.");
+      }
+      const { exportReportToExcel, exportReportToPdf } = await import(
+        "@/lib/report-export"
+      );
 
       if (format === "excel") {
-        await exportReportToExcel(exportPayload, { mode });
+        await exportReportToExcel(exportPayload, {
+          mode,
+          signal: controller.signal,
+        });
+        controller.signal.throwIfAborted();
         toast.success("Excel gerado.");
       } else {
-        await exportReportToPdf(exportPayload, { mode });
+        await exportReportToPdf(exportPayload, {
+          mode,
+          signal: controller.signal,
+        });
+        controller.signal.throwIfAborted();
         toast.success("PDF gerado.");
       }
     } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Não foi possível gerar o relatório.",
-      );
+      if (isExportAbort(error, controller.signal)) return;
+      toast.error(userFacingErrorMessage(error, "Não foi possível gerar o relatório."));
     } finally {
+      if (exportControllerRef.current === controller) {
+        exportControllerRef.current = null;
+      }
       exportInFlightRef.current = false;
       setExporting(null);
     }
@@ -201,5 +232,13 @@ export function ReportExportActions({
           : ""}
       </span>
     </div>
+  );
+}
+
+function isExportAbort(error: unknown, signal: AbortSignal) {
+  return (
+    signal.aborted ||
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
   );
 }

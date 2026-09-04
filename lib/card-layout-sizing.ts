@@ -73,7 +73,7 @@ export function clampCardLayoutLevel(level: CardLayoutLevel): CardLayoutLevel {
 export function resolveCardLayoutTier(containerWidth: number): CardLayoutTier {
   if (!Number.isFinite(containerWidth) || containerWidth < 640) return "single";
   if (containerWidth < 960) return "two-column";
-  if (containerWidth < 1_200) return "three-column";
+  if (containerWidth < 1_040) return "three-column";
   return "desktop";
 }
 

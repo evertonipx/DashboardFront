@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const personalStores = [
+  "lib/demographics-date-range.ts",
   "lib/counting-report-period.ts",
   "lib/counting-report-view-settings.ts",
   "lib/dashboard-focus.ts",
@@ -20,6 +21,7 @@ const personalStores = [
   "lib/realtime-custom-widgets.ts",
   "lib/report-custom-widgets.ts",
   "lib/video-wall.ts",
+  "lib/view-link-reference.ts",
   "lib/view-preferences.ts",
   "lib/widget-view-presets.ts",
   "components/app/scenario-comparison-card.tsx",
@@ -48,9 +50,15 @@ test("preferências globais são pessoais e configurações de Ocupação carreg
     "components/app/occupancy-reports-dashboard.tsx",
   );
 
-  assert.match(sidebar, /getUserViewScopedStorageKey\([\s\S]*?SIDEBAR_COLLAPSED_STORAGE_KEY/);
+  assert.match(
+    sidebar,
+    /getUserViewScopedStorageKey\([\s\S]*?SIDEBAR_COLLAPSED_STORAGE_KEY/,
+  );
   assert.match(sidebar, /writeUserGridPreference\(sidebarStorageKey/);
-  assert.match(moduleTabs, /dashboardModuleStorageKey\(companyScopeId, user\?\.id\)/);
+  assert.match(
+    moduleTabs,
+    /dashboardModuleStorageKey\(companyScopeId, user\?\.id\)/,
+  );
   assert.match(moduleTabs, /writeUserGridPreference\(storageKey, module\)/);
   assert.match(
     occupancyReports,

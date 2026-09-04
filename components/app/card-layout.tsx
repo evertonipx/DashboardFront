@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import {
   ArrowDown,
   ArrowUp,
@@ -32,9 +33,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/components/app/auth-provider";
+import type {
+  ScenarioPickerOption,
+  ScenarioPickerProps,
+} from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
-import { WidgetBentoPreview } from "@/components/app/widget-bento-preview";
-import { WidgetViewPresetsDialog } from "@/components/app/widget-view-presets";
+import type { WidgetBentoPreviewProps } from "@/components/app/widget-bento-preview";
+import type { WidgetViewPresetsDialogProps } from "@/components/app/widget-view-presets";
 import { WidgetAppearanceProvider } from "@/components/app/widget-appearance";
 import { hasVisualAdminAccess } from "@/lib/access";
 import {
@@ -43,7 +48,7 @@ import {
 } from "@/lib/chart-palette";
 import { useEffectiveCompanyScopeId } from "@/lib/master-company-scope";
 import { flushUserGridSync } from "@/lib/user-grid";
-import { cn } from "@/lib/utils";
+import { cn, formatNumber } from "@/lib/utils";
 import {
   CARD_LAYOUT_ROW_GAP,
   CARD_LAYOUT_ROW_HEIGHT,
@@ -51,8 +56,14 @@ import {
   clampCardLayoutLevel,
   resolveCardLayoutDimensions,
   resolveCardLayoutHeightPixels,
+  resolveCardLayoutTier,
   type CardLayoutLevel,
+  type CardLayoutTier,
 } from "@/lib/card-layout-sizing";
+import {
+  packCardLayout,
+  type CardLayoutPlacement,
+} from "@/lib/card-layout-packing";
 import {
   resolveWidgetBentoPreviewKind,
   type WidgetBentoPreviewKind,
@@ -75,17 +86,58 @@ import {
   type CardChartType,
   type CardHeight,
   type CardMenuKey,
+  type CardScenarioSelection,
   type CardSize,
   type CardZoom,
 } from "@/lib/view-preferences";
 
-type LayoutCard = {
+const WidgetViewPresetsDialog = dynamic<WidgetViewPresetsDialogProps>(
+  () =>
+    import("@/components/app/widget-view-presets").then(
+      (module) => module.WidgetViewPresetsDialog,
+    ),
+  { ssr: false },
+);
+
+const ScenarioPicker = dynamic<ScenarioPickerProps>(
+  () =>
+    import("@/components/app/scenario-picker").then(
+      (module) => module.ScenarioPicker,
+    ),
+  {
+    loading: () => (
+      <div className="h-9 w-full animate-pulse rounded-md bg-muted/30" />
+    ),
+    ssr: false,
+  },
+);
+
+const WidgetBentoPreview = dynamic<WidgetBentoPreviewProps>(
+  () =>
+    import("@/components/app/widget-bento-preview").then(
+      (module) => module.WidgetBentoPreview,
+    ),
+  {
+    loading: () => (
+      <div className="h-64 w-full animate-pulse rounded-md border bg-muted/20" />
+    ),
+    ssr: false,
+  },
+);
+
+export type LayoutCardRenderContext = {
+  scenarioSelection: CardScenarioSelection;
+};
+
+export type LayoutCard = {
   chartTypeEnabled?: boolean;
   chartTypes?: readonly CardChartType[];
   colorEditable?: boolean;
   colorPreview?: "gradient" | "solid";
   condensed?: boolean;
   id: string;
+  inheritedScenarioIds?: string[];
+  inheritedScenarioLabel?: string;
   label?: string;
   defaultHeight?: CardHeight;
   defaultHeightLevel?: CardLayoutLevel;
@@ -98,10 +150,49 @@ type LayoutCard = {
   previewKind?: WidgetBentoPreviewKind;
   previewOrientation?: "horizontal" | "vertical";
   previewOrder?: "asc" | "desc";
+  scenarioConfigurable?: boolean;
+  scenarioSelectionPolicy?: "aggregate" | "compare" | "single";
   titleEditable?: boolean;
   zoomEnabled?: boolean;
-  node: React.ReactNode;
+  node:
+    | React.ReactNode
+    | ((context: LayoutCardRenderContext) => React.ReactNode);
 };
+
+type CardMaterializationTask = {
+  cancelled: boolean;
+  run: () => void;
+};
+
+const cardMaterializationQueue: CardMaterializationTask[] = [];
+let cardMaterializationFrame: number | null = null;
+
+function scheduleCardMaterialization(run: () => void) {
+  const task: CardMaterializationTask = { cancelled: false, run };
+  cardMaterializationQueue.push(task);
+  scheduleNextCardMaterialization();
+  return () => {
+    task.cancelled = true;
+  };
+}
+
+function scheduleNextCardMaterialization() {
+  if (cardMaterializationFrame !== null) return;
+  cardMaterializationFrame = window.requestAnimationFrame(
+    flushNextCardMaterialization,
+  );
+}
+
+function flushNextCardMaterialization() {
+  cardMaterializationFrame = null;
+  while (cardMaterializationQueue.length) {
+    const task = cardMaterializationQueue.shift();
+    if (!task || task.cancelled) continue;
+    task.run();
+    break;
+  }
+  if (cardMaterializationQueue.length) scheduleNextCardMaterialization();
+}
 
 type CardLayoutProps = {
   cards: LayoutCard[];
@@ -119,6 +210,8 @@ type CardLayoutProps = {
   showOrganizerTrigger?: boolean;
   showReorderTrigger?: boolean;
   savedViewSourceMenus?: CardMenuKey[];
+  showCardConfigurationActions?: boolean;
+  scenarios?: ScenarioPickerOption[];
   viewScopeName?: string | null;
   viewScopes?: WidgetViewScope[];
 };
@@ -139,6 +232,8 @@ export function CardLayout({
   showOrganizerTrigger = true,
   showReorderTrigger = true,
   savedViewSourceMenus = [],
+  showCardConfigurationActions = false,
+  scenarios = [],
   viewScopeName,
   viewScopes = [],
 }: CardLayoutProps) {
@@ -155,6 +250,8 @@ export function CardLayout({
   const [saved, setSaved] = React.useState(false);
   const [savedViewsOpen, setSavedViewsOpen] = React.useState(false);
   const [internalOrganizerOpen, setInternalOrganizerOpen] = React.useState(false);
+  const [organizerSelectedCardId, setOrganizerSelectedCardId] =
+    React.useState<string | null>(null);
   const [layoutWidth, setLayoutWidth] = React.useState(0);
   const defaultApplicationRef = React.useRef("");
   const layoutRootRef = React.useRef<HTMLDivElement>(null);
@@ -187,7 +284,22 @@ export function CardLayout({
     viewId: preferenceScopeId,
   });
   const canEditLayout = hasVisualAdminAccess(user) && !monitorMode;
-  const orderedCards = orderByCardPreferences(cards, preferences);
+  const orderedCards = React.useMemo(
+    () => orderByCardPreferences(cards, preferences),
+    [cards, preferences],
+  );
+  const packedLayouts = React.useMemo(
+    () => packCardsForEveryTier(orderedCards, preferences),
+    [orderedCards, preferences],
+  );
+  const activeLayoutTier = resolveCardLayoutTier(layoutWidth);
+  const packedCards = React.useMemo(() => {
+    const cardsById = new Map(orderedCards.map((card) => [card.id, card]));
+    return packedLayouts[activeLayoutTier].map((placement) => ({
+      card: cardsById.get(placement.id)!,
+      placements: placementSetForCard(packedLayouts, placement.id),
+    }));
+  }, [activeLayoutTier, orderedCards, packedLayouts]);
   const organizerCards = orderByAllCardPreferences(cards, preferences);
   const currentViewScope = preferenceScopeId
     ? {
@@ -469,6 +581,30 @@ export function CardLayout({
     flashSaved();
   }
 
+  function setCardScenarioSelection(
+    cardId: string,
+    selection: CardScenarioSelection,
+  ) {
+    persistPreferences(
+      preferences.map((preference) => {
+        if (preference.id !== cardId) return preference;
+        if (selection.mode === "inherit") {
+          const inherited = { ...preference };
+          delete inherited.scenarioIds;
+          delete inherited.scenarioSelectionMode;
+          return inherited;
+        }
+        return {
+          ...preference,
+          scenarioIds:
+            selection.mode === "custom" ? selection.scenarioIds : undefined,
+          scenarioSelectionMode: selection.mode,
+        };
+      }),
+    );
+    flashSaved();
+  }
+
   return (
     <div
       ref={layoutRootRef}
@@ -503,7 +639,7 @@ export function CardLayout({
         </div>
       ) : null}
 
-      {monitorMode || !canEditLayout ? null : (
+      {monitorMode || !canEditLayout || !organizerOpen ? null : (
         <WidgetOrganizerDialog
           cards={organizerCards}
           layoutWidth={layoutWidth}
@@ -537,10 +673,12 @@ export function CardLayout({
             setSavedViewsOpen(true);
           }}
           onOpenChange={setOrganizerOpen}
+          onSelectedCardIdChange={setOrganizerSelectedCardId}
           onColorChange={setCardColor}
           onChartTypeChange={setCardChartType}
           onHeightChange={resizeCardHeight}
           onResize={resizeCard}
+          onScenarioSelectionChange={setCardScenarioSelection}
           onRestoreDefault={restoreDefaultOrder}
           onTitleChange={setCardTitle}
           onToggleVisibility={toggleCardVisibility}
@@ -548,12 +686,14 @@ export function CardLayout({
           open={organizerOpen}
           overId={organizerOverId}
           preferences={preferences}
+          scenarios={scenarios}
+          selectedCardId={organizerSelectedCardId}
           saved={saved}
           editActions={editActions}
         />
       )}
 
-      {canEditLayout ? (
+      {canEditLayout && savedViewsOpen ? (
         <WidgetViewPresetsDialog
           cardIds={cardIds}
           companyId={companyId}
@@ -578,7 +718,7 @@ export function CardLayout({
         )}
         style={{ gridAutoRows: `${CARD_LAYOUT_ROW_HEIGHT}px` }}
       >
-        {orderedCards.map((card) => (
+        {packedCards.map(({ card, placements }) => (
           <CardLayoutItem
             key={card.id}
             card={card}
@@ -610,6 +750,12 @@ export function CardLayout({
             }}
             overId={screenOverId}
             preference={preferences.find((preference) => preference.id === card.id)}
+            configureEnabled={showCardConfigurationActions && canEditLayout}
+            placements={placements}
+            onConfigure={() => {
+              setOrganizerSelectedCardId(card.id);
+              setOrganizerOpen(true);
+            }}
             reorderEnabled={screenReorderEnabled}
             layoutWidth={layoutWidth}
           />
@@ -654,27 +800,35 @@ export function ReorderModeButton({
 
 function CardLayoutItem({
   card,
+  configureEnabled,
   draggingId,
   layoutWidth,
   onDragEnd,
   onDragOver,
   onDragStart,
   onDrop,
+  onConfigure,
   overId,
+  placements,
   preference,
   reorderEnabled,
 }: {
   card: LayoutCard;
+  configureEnabled: boolean;
   draggingId: string | null;
   layoutWidth: number;
   onDragEnd: () => void;
   onDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
   onDragStart: (event: React.DragEvent<HTMLButtonElement>) => void;
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
+  onConfigure: () => void;
   overId: string | null;
+  placements: CardLayoutPlacementSet;
   preference?: CardPreference;
   reorderEnabled: boolean;
 }) {
+  const cardRootRef = React.useRef<HTMLDivElement | null>(null);
+  const [contentReady, setContentReady] = React.useState(false);
   const requestedWidthLevel = resolveRequestedCardWidthLevel(card, preference);
   const requestedHeightLevel = resolveRequestedCardHeightLevel(
     card,
@@ -687,10 +841,49 @@ function CardLayoutItem({
     requestedHeightLevel,
     layoutWidth,
   );
+  const activePlacement = placements[dimensions.tier];
   const chartTypes = supportedChartTypes(card);
+  const scenarioSelection: CardScenarioSelection = {
+    mode: preference?.scenarioSelectionMode ?? "inherit",
+    scenarioIds: preference?.scenarioIds ?? [],
+  };
+
+  React.useEffect(() => {
+    const cardRoot = cardRootRef.current;
+    if (!cardRoot) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setContentReady(true);
+      return;
+    }
+
+    let cancelMaterialization: (() => void) | undefined;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        observer.disconnect();
+        cancelMaterialization = scheduleCardMaterialization(() => {
+          React.startTransition(() => setContentReady(true));
+        });
+      },
+      { rootMargin: "600px 0px", threshold: 0.01 },
+    );
+    observer.observe(cardRoot);
+    return () => {
+      observer.disconnect();
+      cancelMaterialization?.();
+    };
+  }, []);
+
+  const cardNode = contentReady
+    ? typeof card.node === "function"
+      ? card.node({ scenarioSelection })
+      : card.node
+    : null;
 
   return (
     <div
+      ref={cardRootRef}
+      aria-busy={!contentReady}
       data-layout-card-id={card.id}
       data-layout-reorder-enabled={reorderEnabled ? "true" : undefined}
       data-layout-card-height={cardLayoutLevelToCardHeight(
@@ -699,17 +892,18 @@ function CardLayoutItem({
       data-layout-card-height-level={dimensions.heightLevel}
       data-layout-card-density={card.condensed ? "condensed" : "standard"}
       data-layout-card-dimension-range="1-6"
+      data-layout-card-column-start={activePlacement.columnStart}
+      data-layout-card-row-start={activePlacement.rowStart}
       data-layout-card-size={cardLayoutLevelToCardSize(dimensions.widthLevel)}
       data-layout-card-width-level={dimensions.widthLevel}
       onDragOver={onDragOver}
       onDrop={onDrop}
-      style={cardLayoutItemStyle(
-        card,
-        dimensions.widthLevel,
-        requestedHeightLevel,
-      )}
+      style={cardLayoutItemStyle(placements)}
       className={cn(
-        "group relative h-full min-h-0 min-w-0 overflow-hidden transition",
+        "group relative h-full min-h-0 min-w-0 overflow-hidden transition [contain-intrinsic-size:auto_320px] [content-visibility:auto]",
+        configureEnabled &&
+          !reorderEnabled &&
+          "[&_[data-card-header]]:pr-14 [&_[data-compact-metric-header]]:pr-12",
         card.className,
         reorderEnabled &&
           "rounded-md ring-1 ring-primary/25 ring-offset-2 ring-offset-background",
@@ -728,11 +922,29 @@ function CardLayoutItem({
           onDragEnd={onDragEnd}
           className="absolute left-1/2 top-0 z-30 flex h-6 w-8 -translate-x-1/2 -translate-y-1/2 cursor-grab items-center justify-center rounded-md border bg-card/95 text-muted-foreground shadow-sm transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 active:cursor-grabbing"
           aria-grabbed={draggingId === card.id}
-          aria-label={`Mover ${card.label ?? card.id}`}
+          aria-label={`Mover ${card.label ?? "Widget"}`}
           title="Arrastar para mover"
         >
           <GripVertical className="h-4 w-4" />
         </button>
+      ) : null}
+      {configureEnabled && !reorderEnabled ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="absolute right-2 top-2 z-30 h-8 w-8 shrink-0 bg-card/95 text-muted-foreground shadow-sm backdrop-blur-sm hover:text-foreground"
+          onClick={(event) => {
+            event.stopPropagation();
+            onConfigure();
+          }}
+          aria-haspopup="dialog"
+          aria-label={`Configurar ${preference?.title ?? card.label ?? "widget"}`}
+          data-layout-card-configure
+          title="Configurar widget"
+        >
+          <Settings2 className="h-4 w-4" />
+        </Button>
       ) : null}
       <WidgetAppearanceProvider
         chartType={resolveCardChartType(preference?.chartType, chartTypes)}
@@ -740,7 +952,15 @@ function CardLayoutItem({
         title={preference?.title}
         zoom={preference?.zoom}
       >
-        {card.node}
+        {contentReady ? (
+          cardNode
+        ) : (
+          <div
+            aria-hidden="true"
+            className="h-full min-h-0 w-full animate-pulse rounded-md border bg-muted/20"
+            data-layout-card-runtime-loading
+          />
+        )}
       </WidgetAppearanceProvider>
     </div>
   );
@@ -760,17 +980,21 @@ function WidgetOrganizerDialog({
   onMoveUp,
   onManageSavedViews,
   onOpenChange,
+  onSelectedCardIdChange,
   onColorChange,
   onChartTypeChange,
   onHeightChange,
   onResize,
   onRestoreDefault,
+  onScenarioSelectionChange,
   onTitleChange,
   onToggleVisibility,
   onZoomChange,
   open,
   overId,
   preferences,
+  scenarios,
+  selectedCardId,
   saved,
 }: {
   cards: LayoutCard[];
@@ -786,17 +1010,24 @@ function WidgetOrganizerDialog({
   onMoveUp: (cardId: string, index: number) => void;
   onManageSavedViews: () => void;
   onOpenChange: (open: boolean) => void;
+  onSelectedCardIdChange: (cardId: string | null) => void;
   onColorChange: (cardId: string, color?: string) => void;
   onChartTypeChange: (cardId: string, chartType: CardChartType) => void;
   onHeightChange: (cardId: string, height: CardLayoutLevel) => void;
   onResize: (cardId: string, size: CardLayoutLevel) => void;
   onRestoreDefault: () => void;
+  onScenarioSelectionChange: (
+    cardId: string,
+    selection: CardScenarioSelection,
+  ) => void;
   onTitleChange: (cardId: string, title?: string) => void;
   onToggleVisibility: (cardId: string) => void;
   onZoomChange: (cardId: string, zoom: CardZoom) => void;
   open: boolean;
   overId: string | null;
   preferences: CardPreference[];
+  scenarios: ScenarioPickerOption[];
+  selectedCardId: string | null;
   saved: boolean;
 }) {
   const activeCards = cards.filter(
@@ -805,17 +1036,21 @@ function WidgetOrganizerDialog({
   const hiddenCards = cards.filter(
     (card) => getPreference(preferences, card.id)?.visible === false,
   );
-  const [selectedCardId, setSelectedCardId] = React.useState<string | null>(
-    null,
-  );
   const inspectorId = React.useId();
 
   React.useEffect(() => {
     if (!open) return;
     const selectedExists = cards.some((card) => card.id === selectedCardId);
     if (selectedExists) return;
-    setSelectedCardId(activeCards[0]?.id ?? hiddenCards[0]?.id ?? null);
-  }, [activeCards, cards, hiddenCards, open, selectedCardId]);
+    onSelectedCardIdChange(activeCards[0]?.id ?? hiddenCards[0]?.id ?? null);
+  }, [
+    activeCards,
+    cards,
+    hiddenCards,
+    onSelectedCardIdChange,
+    open,
+    selectedCardId,
+  ]);
 
   const selectedCard =
     cards.find((card) => card.id === selectedCardId) ??
@@ -878,7 +1113,7 @@ function WidgetOrganizerDialog({
       dragging: draggingId === card.id,
       gradient: card.colorPreview === "gradient",
       id: card.id,
-      label: preference?.title ?? card.label ?? card.id,
+      label: preference?.title ?? card.label ?? "Widget",
       over: overId === card.id && draggingId !== card.id,
       previewKind: resolveWidgetBentoPreviewKind({
         chartType,
@@ -940,9 +1175,9 @@ function WidgetOrganizerDialog({
               inspectorId={inspectorId}
               items={previewItems}
               layoutLabel={layoutPreviewLabel(layoutWidth)}
-              onSelect={setSelectedCardId}
+              onSelect={onSelectedCardIdChange}
               onDragStart={(event, cardId) => {
-                setSelectedCardId(cardId);
+                onSelectedCardIdChange(cardId);
                 onDragStart(event, cardId);
               }}
               onDragOver={(event, cardId) => onDragOver(event, cardId)}
@@ -997,11 +1232,11 @@ function WidgetOrganizerDialog({
                         <button
                           type="button"
                           className="min-w-0 rounded-sm px-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          onClick={() => setSelectedCardId(card.id)}
+                          onClick={() => onSelectedCardIdChange(card.id)}
                           aria-pressed={selectedCard?.id === card.id}
                         >
                           <span className="block truncate text-sm font-medium">
-                            {preference?.title ?? card.label ?? card.id}
+                            {preference?.title ?? card.label ?? "Widget"}
                           </span>
                           <span className="block text-[11px] text-muted-foreground">
                             {widthLevelLabel(widthLevel)} ·{" "}
@@ -1017,10 +1252,10 @@ function WidgetOrganizerDialog({
                           size="sm"
                           className="h-8 shrink-0"
                           onClick={() => {
-                            setSelectedCardId(card.id);
+                            onSelectedCardIdChange(card.id);
                             onToggleVisibility(card.id);
                           }}
-                          aria-label={`Exibir ${preference?.title ?? card.label ?? card.id}`}
+                          aria-label={`Exibir ${preference?.title ?? card.label ?? "Widget"}`}
                         >
                           <Eye className="h-3.5 w-3.5" />
                           Exibir
@@ -1050,7 +1285,7 @@ function WidgetOrganizerDialog({
                       <div className="break-words text-sm font-semibold [overflow-wrap:anywhere]">
                         {selectedPreference?.title ??
                           selectedCard.label ??
-                          selectedCard.id}
+                          "Widget sem título"}
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1.5">
                         <Badge variant={selectedVisible ? "outline" : "secondary"}>
@@ -1071,7 +1306,7 @@ function WidgetOrganizerDialog({
                       size="icon"
                       className="h-8 w-8 shrink-0"
                       onClick={() => onToggleVisibility(selectedCard.id)}
-                      aria-label={`${selectedVisible ? "Ocultar" : "Exibir"} ${selectedPreference?.title ?? selectedCard.label ?? selectedCard.id}`}
+                      aria-label={`${selectedVisible ? "Ocultar" : "Exibir"} ${selectedPreference?.title ?? selectedCard.label ?? "Widget"}`}
                       title={selectedVisible ? "Ocultar widget" : "Exibir widget"}
                     >
                       {selectedVisible ? (
@@ -1096,7 +1331,7 @@ function WidgetOrganizerDialog({
                         onClick={() =>
                           onMoveUp(selectedCard.id, selectedActiveIndex)
                         }
-                        aria-label={`Mover ${selectedPreference?.title ?? selectedCard.label ?? selectedCard.id} para cima`}
+                        aria-label={`Mover ${selectedPreference?.title ?? selectedCard.label ?? "Widget"} para cima`}
                       >
                         <ArrowUp className="h-3.5 w-3.5" />
                       </Button>
@@ -1112,7 +1347,7 @@ function WidgetOrganizerDialog({
                         onClick={() =>
                           onMoveDown(selectedCard.id, selectedActiveIndex)
                         }
-                        aria-label={`Mover ${selectedPreference?.title ?? selectedCard.label ?? selectedCard.id} para baixo`}
+                        aria-label={`Mover ${selectedPreference?.title ?? selectedCard.label ?? "Widget"} para baixo`}
                       >
                         <ArrowDown className="h-3.5 w-3.5" />
                       </Button>
@@ -1123,9 +1358,28 @@ function WidgetOrganizerDialog({
                 {selectedCard.titleEditable ? (
                   <WidgetTitleEditor
                     cardId={selectedCard.id}
-                    defaultTitle={selectedCard.label ?? selectedCard.id}
+                    defaultTitle={selectedCard.label ?? "Widget"}
                     onChange={onTitleChange}
                     title={selectedPreference?.title}
+                  />
+                ) : null}
+
+                {selectedCard.scenarioConfigurable &&
+                typeof selectedCard.node === "function" ? (
+                  <WidgetScenarioCompositionEditor
+                    key={selectedCard.id}
+                    inheritedScenarioIds={selectedCard.inheritedScenarioIds}
+                    inheritedScenarioLabel={selectedCard.inheritedScenarioLabel}
+                    onChange={(selection) =>
+                      onScenarioSelectionChange(selectedCard.id, selection)
+                    }
+                    scenarios={scenarios}
+                    selection={{
+                      mode:
+                        selectedPreference?.scenarioSelectionMode ?? "inherit",
+                      scenarioIds: selectedPreference?.scenarioIds ?? [],
+                    }}
+                    selectionPolicy={selectedCard.scenarioSelectionPolicy}
                   />
                 ) : null}
 
@@ -1229,6 +1483,149 @@ const CARD_HEIGHT_LEVEL_OPTIONS: ReadonlyArray<{
   level,
   pixels: resolveCardLayoutHeightPixels(level),
 }));
+
+function WidgetScenarioCompositionEditor({
+  inheritedScenarioIds = [],
+  inheritedScenarioLabel,
+  onChange,
+  scenarios,
+  selection,
+  selectionPolicy = "aggregate",
+}: {
+  inheritedScenarioIds?: string[];
+  inheritedScenarioLabel?: string;
+  onChange: (selection: CardScenarioSelection) => void;
+  scenarios: ScenarioPickerOption[];
+  selection: CardScenarioSelection;
+  selectionPolicy?: "aggregate" | "compare" | "single";
+}) {
+  const [openCustomPickerOnMount, setOpenCustomPickerOnMount] =
+    React.useState(false);
+  const availableIds = React.useMemo(
+    () => new Set(scenarios.map((scenario) => scenario.id)),
+    [scenarios],
+  );
+  const selectedIds = selection.scenarioIds.filter((scenarioId) =>
+    availableIds.has(scenarioId),
+  );
+  const inheritedIds = inheritedScenarioIds.filter((scenarioId) =>
+    availableIds.has(scenarioId),
+  );
+
+  function chooseCustom() {
+    const candidateIds = selectedIds.length
+      ? selectedIds
+      : inheritedIds.length
+        ? inheritedIds
+        : scenarios[0]
+          ? [scenarios[0].id]
+          : [];
+    const initialIds =
+      selectionPolicy === "single" ? candidateIds.slice(0, 1) : candidateIds;
+    setOpenCustomPickerOnMount(true);
+    onChange({ mode: "custom", scenarioIds: initialIds });
+  }
+
+  return (
+    <section
+      className="@container min-w-0 space-y-2 border-t pt-3"
+      data-widget-scenario-composition
+    >
+      <div className="min-w-0">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Composição de cenários
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Defina a fonte deste widget sem alterar os demais cards da tela.
+        </p>
+      </div>
+
+      <div
+        className="grid min-w-0 grid-cols-[minmax(0,0.8fr)_minmax(0,0.75fr)_minmax(0,1.45fr)] gap-1 @xs:grid-cols-3"
+        role="group"
+        aria-label="Fonte de cenários do widget"
+      >
+        <Button
+          type="button"
+          size="sm"
+          className="h-8 min-w-0 overflow-hidden px-1 text-[10px] @xs:px-1.5 @xs:text-[11px] @sm:px-2 @sm:text-xs"
+          variant={selection.mode === "inherit" ? "default" : "outline"}
+          onClick={() => {
+            setOpenCustomPickerOnMount(false);
+            onChange({ mode: "inherit", scenarioIds: [] });
+          }}
+          aria-pressed={selection.mode === "inherit"}
+          title="Herdar a configuração da tela ou do widget"
+        >
+          Herdar
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          className="h-8 min-w-0 overflow-hidden px-1 text-[10px] @xs:px-1.5 @xs:text-[11px] @sm:px-2 @sm:text-xs"
+          variant={selection.mode === "all" ? "default" : "outline"}
+          disabled={!scenarios.length || selectionPolicy === "single"}
+          onClick={() => {
+            setOpenCustomPickerOnMount(false);
+            onChange({ mode: "all", scenarioIds: [] });
+          }}
+          aria-pressed={selection.mode === "all"}
+          title="Usar todos os cenários disponíveis"
+        >
+          Todos
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          className="h-8 min-w-0 overflow-hidden px-1 text-[10px] @xs:px-1.5 @xs:text-[11px] @sm:px-2 @sm:text-xs"
+          variant={selection.mode === "custom" ? "default" : "outline"}
+          disabled={!scenarios.length}
+          onClick={chooseCustom}
+          aria-pressed={selection.mode === "custom"}
+          title="Escolher uma composição personalizada"
+        >
+          Personalizado
+        </Button>
+      </div>
+
+      {selection.mode === "inherit" ? (
+        <p className="rounded-md bg-muted/25 px-2.5 py-2 text-xs text-muted-foreground">
+          {inheritedScenarioLabel
+            ? `Herda: ${inheritedScenarioLabel}.`
+            : "Usa o filtro ou a configuração operacional atual da tela."}
+        </p>
+      ) : selection.mode === "all" ? (
+        <p className="rounded-md bg-muted/25 px-2.5 py-2 text-xs text-muted-foreground">
+          {selectionPolicy === "compare"
+            ? `Compara todos os ${formatNumber(scenarios.length)} cenários disponíveis.`
+            : selectionPolicy === "single"
+              ? "Selecione um único cenário em Personalizado."
+              : `Consolida todos os ${formatNumber(scenarios.length)} cenários disponíveis.`}
+        </p>
+      ) : (
+        <ScenarioPicker
+          allowAll={false}
+          className="min-w-0"
+          initiallyOpen={openCustomPickerOnMount}
+          label="Cenários deste widget"
+          maxSelected={selectionPolicy === "single" ? 1 : undefined}
+          mode="custom"
+          onModeChange={() => undefined}
+          onSelectedIdsChange={(scenarioIds) =>
+            onChange({
+              mode: "custom",
+              scenarioIds:
+                selectionPolicy === "single" ? scenarioIds.slice(-1) : scenarioIds,
+            })
+          }
+          scenarios={scenarios}
+          selectedIds={selectedIds}
+          summaryForItem={(scenario) => scenario.description ?? "Disponível"}
+        />
+      )}
+    </section>
+  );
+}
 
 function WidgetDimensionControls({
   card,
@@ -1712,40 +2109,114 @@ function resolveCardPreferenceDimensions(
 }
 
 type CardLayoutItemStyle = React.CSSProperties & {
+  "--widget-column-start-desktop": number;
+  "--widget-column-start-single": number;
+  "--widget-column-start-three": number;
+  "--widget-column-start-two": number;
   "--widget-column-span-desktop": number;
   "--widget-column-span-single": number;
   "--widget-column-span-three": number;
   "--widget-column-span-two": number;
+  "--widget-row-start-desktop": number;
+  "--widget-row-start-single": number;
+  "--widget-row-start-three": number;
+  "--widget-row-start-two": number;
   "--widget-row-span-multi": number;
   "--widget-row-span-single": number;
 };
 
 function cardLayoutItemStyle(
-  card: LayoutCard,
-  widthLevel: CardLayoutLevel,
-  heightLevel: CardLayoutLevel,
+  placements: CardLayoutPlacementSet,
 ): CardLayoutItemStyle {
-  const dimensionsForTier = (
-    tier: "single" | "two-column" | "three-column" | "desktop",
-  ) =>
-    resolveCardLayoutDimensions({
-      condensed: card.condensed,
-      heightLevel,
-      tier,
-      widthLevel,
-    });
-  const single = dimensionsForTier("single");
-  const two = dimensionsForTier("two-column");
-  const three = dimensionsForTier("three-column");
-  const desktop = dimensionsForTier("desktop");
-
+  const single = placements.single;
+  const two = placements["two-column"];
+  const three = placements["three-column"];
+  const desktop = placements.desktop;
   return {
+    "--widget-column-start-desktop": desktop.columnStart,
+    "--widget-column-start-single": single.columnStart,
+    "--widget-column-start-three": three.columnStart,
+    "--widget-column-start-two": two.columnStart,
     "--widget-column-span-desktop": desktop.columnSpan,
     "--widget-column-span-single": single.columnSpan,
     "--widget-column-span-three": three.columnSpan,
     "--widget-column-span-two": two.columnSpan,
+    "--widget-row-start-desktop": desktop.rowStart,
+    "--widget-row-start-single": single.rowStart,
+    "--widget-row-start-three": three.rowStart,
+    "--widget-row-start-two": two.rowStart,
     "--widget-row-span-multi": two.rowSpan,
     "--widget-row-span-single": single.rowSpan,
+  };
+}
+
+type PackedCardLayouts = Record<CardLayoutTier, CardLayoutPlacement[]>;
+type CardLayoutPlacementSet = Record<CardLayoutTier, CardLayoutPlacement>;
+
+function packCardsForEveryTier(
+  cards: LayoutCard[],
+  preferences: CardPreference[],
+): PackedCardLayouts {
+  return {
+    desktop: packCardsForTier(cards, preferences, "desktop"),
+    single: packCardsForTier(cards, preferences, "single"),
+    "three-column": packCardsForTier(cards, preferences, "three-column"),
+    "two-column": packCardsForTier(cards, preferences, "two-column"),
+  };
+}
+
+function packCardsForTier(
+  cards: LayoutCard[],
+  preferences: CardPreference[],
+  tier: CardLayoutTier,
+) {
+  const columnCount = resolveCardLayoutDimensions({
+    heightLevel: 1,
+    tier,
+    widthLevel: 1,
+  }).columnCount;
+  return packCardLayout(
+    cards.map((card) => {
+      const preference = getPreference(preferences, card.id);
+      const widthLevel = resolveRequestedCardWidthLevel(card, preference);
+      const heightLevel = resolveRequestedCardHeightLevel(
+        card,
+        preference,
+        widthLevel,
+      );
+      const dimensions = resolveCardLayoutDimensions({
+        condensed: card.condensed,
+        heightLevel,
+        tier,
+        widthLevel,
+      });
+      return {
+        columnSpan: dimensions.columnSpan,
+        id: card.id,
+        rowSpan: dimensions.rowSpan,
+      };
+    }),
+    columnCount,
+  );
+}
+
+function placementSetForCard(
+  layouts: PackedCardLayouts,
+  cardId: string,
+): CardLayoutPlacementSet {
+  const find = (tier: CardLayoutTier) => {
+    const placement = layouts[tier].find((candidate) => candidate.id === cardId);
+    if (!placement) {
+      throw new Error(`Widget sem posição no layout: ${cardId}`);
+    }
+    return placement;
+  };
+
+  return {
+    desktop: find("desktop"),
+    single: find("single"),
+    "three-column": find("three-column"),
+    "two-column": find("two-column"),
   };
 }
 
@@ -1785,8 +2256,8 @@ function heightLevelLabel(level: CardLayoutLevel, pixels?: number) {
 function layoutPreviewLabel(layoutWidth: number) {
   if (layoutWidth < 640) return "Celular · 1 coluna";
   if (layoutWidth < 960) return "Tablet · 2 faixas";
-  if (layoutWidth < 1_200) return "Intermediário · 3 faixas";
-  return "Desktop · 4 faixas";
+  if (layoutWidth < 1_040) return "Intermediário · 3 faixas";
+  return "Desktop · 6 níveis de largura";
 }
 
 function formatPosition(index: number) {

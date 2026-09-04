@@ -25,10 +25,7 @@ export type WidgetViewScope = {
 };
 
 export type WidgetViewPresetNamespace =
-  | CardMenuKey
-  | "occupancy-analysis"
-  | "occupancy-live"
-  | "occupancy-reports";
+  CardMenuKey | "occupancy-analysis" | "occupancy-live" | "occupancy-reports";
 
 export type WidgetViewSnapshot = {
   cardIds: string[];
@@ -87,6 +84,7 @@ const menuStorageMatchers: Record<CardMenuKey, RegExp[]> = {
     /^ipxdata\.live-operational-settings\.v1$/,
     /^ipxdata\.live-custom-.+\.scenario-comparison\.v1$/,
   ],
+  demographics: [/^ipxdata\.demographics-range\.v1$/],
   occupancy: [
     /^ipxdata\.occupancy-custom-widgets\.v1$/,
     /^ipxdata\.occupancy-dashboard-settings\.v1$/,
@@ -121,12 +119,12 @@ export function loadWidgetViewPresets(
     const stored = storedEntry
       ? storedEntry.value
       : migrateLegacyOccupancyPresets({
-        companyId,
-        menuKey,
-        namespace,
-        storageKey,
-        userId,
-      });
+          companyId,
+          menuKey,
+          namespace,
+          storageKey,
+          userId,
+        });
     if (!stored) return [];
     const parsed = JSON.parse(stored) as unknown;
     if (!Array.isArray(parsed)) return [];
@@ -230,12 +228,7 @@ export function deleteWidgetViewPreset(
 ) {
   return saveWidgetViewPresets(
     menuKey,
-    loadWidgetViewPresets(
-      menuKey,
-      companyId,
-      userId,
-      presetNamespace,
-    ).filter(
+    loadWidgetViewPresets(menuKey, companyId, userId, presetNamespace).filter(
       (preset) => preset.id !== presetId,
     ),
     companyId,
@@ -253,15 +246,12 @@ export function setDefaultWidgetViewPreset(
 ) {
   return saveWidgetViewPresets(
     menuKey,
-    loadWidgetViewPresets(
-      menuKey,
-      companyId,
-      userId,
-      presetNamespace,
-    ).map((preset) => ({
-      ...preset,
-      isDefault: preset.id === presetId,
-    })),
+    loadWidgetViewPresets(menuKey, companyId, userId, presetNamespace).map(
+      (preset) => ({
+        ...preset,
+        isDefault: preset.id === presetId,
+      }),
+    ),
     companyId,
     userId,
     presetNamespace,
@@ -284,13 +274,7 @@ export function captureWidgetViewSnapshot({
     menuKey,
     preferences:
       preferences ??
-      loadScopedCardPreferences(
-        menuKey,
-        cardIds,
-        companyId,
-        userId,
-        viewId,
-      ),
+      loadScopedCardPreferences(menuKey, cardIds, companyId, userId, viewId),
     sourceScope,
     storage: captureMenuStorage(menuKey, companyId, userId, viewId),
     version: 1,
@@ -314,11 +298,7 @@ export function applyWidgetViewPreset(
   snapshot.storage.forEach((entry) => {
     writeUserGridPreference(
       scopedStorageKey(entry.baseKey, companyId, userId, targetViewId),
-      remapSerializedValue(
-        entry.value,
-        snapshot.sourceScope,
-        targetScope,
-      ),
+      remapSerializedValue(entry.value, snapshot.sourceScope, targetScope),
     );
   });
   saveCardPreferences(
@@ -410,7 +390,9 @@ function captureMenuStorage(
     entries.push({ baseKey, value });
   }
 
-  return entries.sort((left, right) => left.baseKey.localeCompare(right.baseKey));
+  return entries.sort((left, right) =>
+    left.baseKey.localeCompare(right.baseKey),
+  );
 }
 
 function clearMenuStorage(
@@ -502,9 +484,7 @@ function remapValue(
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map((item) =>
-      remapValue(item, sourceScope, targetScope),
-    );
+    return value.map((item) => remapValue(item, sourceScope, targetScope));
   }
   if (value && typeof value === "object") {
     const entries = Object.entries(value);
@@ -521,12 +501,7 @@ function remapValue(
       if (sourceEntry) {
         retainedEntries.push([
           targetScope.id,
-          remapValue(
-            sourceEntry[1],
-            sourceScope,
-            targetScope,
-            targetScope.id,
-          ),
+          remapValue(sourceEntry[1], sourceScope, targetScope, targetScope.id),
         ]);
       }
       return Object.fromEntries(retainedEntries);
@@ -560,12 +535,9 @@ function storageScopeSuffix(
   viewId?: string | null,
 ) {
   const marker = "__ipxdata_widget_view_scope__";
-  return getUserViewScopedStorageKey(
-    marker,
-    companyId,
-    userId,
-    viewId,
-  ).slice(marker.length);
+  return getUserViewScopedStorageKey(marker, companyId, userId, viewId).slice(
+    marker.length,
+  );
 }
 
 function scopedBaseKey(key: string, suffix: string) {
@@ -626,7 +598,8 @@ function occupancyPresetBelongsToNamespace(
   namespace: WidgetViewPresetNamespace,
 ) {
   const scopeId = preset.snapshot.sourceScope?.id ?? "";
-  if (namespace === "occupancy-analysis") return scopeId.startsWith("analysis:");
+  if (namespace === "occupancy-analysis")
+    return scopeId.startsWith("analysis:");
   if (namespace === "occupancy-reports") return scopeId.startsWith("reports:");
   return (
     namespace === "occupancy-live" &&
@@ -647,9 +620,7 @@ function presetsStorageKey(
   );
 }
 
-function presetStorageBaseKey(
-  presetNamespace: WidgetViewPresetNamespace,
-) {
+function presetStorageBaseKey(presetNamespace: WidgetViewPresetNamespace) {
   return `${PRESETS_STORAGE_KEY}.${presetNamespace}`;
 }
 
@@ -729,6 +700,12 @@ function normalizeSnapshot(
         if (!value || typeof value !== "object") return [];
         const item = value as Record<string, unknown>;
         if (typeof item.id !== "string") return [];
+        const scenarioSelectionMode =
+          item.scenarioSelectionMode === "all" ||
+          item.scenarioSelectionMode === "custom"
+            ? item.scenarioSelectionMode
+            : undefined;
+        const scenarioIds = uniqueStrings(item.scenarioIds);
         return [
           {
             chartType:
@@ -738,8 +715,7 @@ function normalizeSnapshot(
               item.chartType === "treemap"
                 ? item.chartType
                 : undefined,
-            color:
-              typeof item.color === "string" ? item.color : undefined,
+            color: typeof item.color === "string" ? item.color : undefined,
             height:
               item.height === "short" ||
               item.height === "standard" ||
@@ -748,6 +724,10 @@ function normalizeSnapshot(
                 : undefined,
             heightLevel: normalizeCardLayoutLevel(item.heightLevel),
             id: item.id,
+            ...(scenarioSelectionMode === "custom" && scenarioIds.length
+              ? { scenarioIds }
+              : {}),
+            ...(scenarioSelectionMode ? { scenarioSelectionMode } : {}),
             size:
               item.size === "compact" ||
               item.size === "wide" ||

@@ -163,9 +163,10 @@ test("descoberta cross-company avança somente após 404 e muta uma única rota"
     api.clearStoredSession();
     api.setStoredSession({
       access_token: accessToken({
+        company_id: "company-base",
         exp: nowSeconds + 900,
+        is_master: true,
         nbf: nowSeconds - 1,
-        role: "super-admin",
       }),
       expires_in: 900,
       refresh_token: "refresh-company-user-route",
@@ -219,6 +220,84 @@ test("descoberta cross-company avança somente após 404 e muta uma única rota"
       1,
       "a descoberta não pode repetir uma mutação em outra variante",
     );
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete globalThis.window;
+    } else {
+      globalThis.window = originalWindow;
+    }
+  }
+});
+
+test("backend atualizado reutiliza a rota global certificada com X-Company-ID", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests = [];
+
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    requests.push({
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+      method: (init.method ?? "GET").toUpperCase(),
+      path: String(url),
+    });
+    return jsonResponse({
+      company_id: "company-selected",
+      id: "user-selected",
+    });
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        exp: nowSeconds + 900,
+        is_master: true,
+        nbf: nowSeconds - 1,
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-company-user-global-header",
+      token_type: "Bearer",
+    });
+
+    const discovered = await companyUserResource.discoverCompanyUserResource(
+      "company-selected",
+      "user-selected",
+    );
+    assert.equal(discovered.route.variant, "global-header");
+    await companyUserResource.mutateCompanyUserResource(
+      discovered.route,
+      "",
+      {
+        body: {
+          active: true,
+          email: "user@example.com",
+          is_master: false,
+          name: "User",
+        },
+        method: "PUT",
+      },
+    );
+
+    assert.deepEqual(requests, [
+      {
+        companyId: "company-selected",
+        method: "GET",
+        path: "/api/v1/users/user-selected",
+      },
+      {
+        companyId: "company-selected",
+        method: "PUT",
+        path: "/api/v1/users/user-selected",
+      },
+    ]);
   } finally {
     api.clearStoredSession();
     globalThis.fetch = originalFetch;
@@ -730,7 +809,7 @@ test("UI do fallback não oferece PUT, granularidade nem revogação", () => {
   assert.match(fallbackSave, /touchedUserPermissionSlugs\.size > 0/);
   assert.match(fallbackNotice, /somente o controle/);
   assert.match(fallbackNotice, /Administrador da empresa/);
-  assert.match(fallbackNotice, /acessos granulares/);
+  assert.match(fallbackNotice, /acessos existentes não serão removidos/);
   assert.match(
     source,
     /if \(error instanceof ApiError && error\.status === 404\) \{[\s\S]*?readCertifiedCompanyUserMembership/,
@@ -804,21 +883,33 @@ test("promoção de admin usa somente permissões explícitas e seguras", () => 
 });
 
 test("rotas administrativas exigem a concessão do próprio recurso", () => {
-  const guardedPages = {
-    cameras: "app/manager/cameras/page.tsx",
-    locations: "app/manager/locations/page.tsx",
-    occupancy: "app/manager/occupancy/page.tsx",
-    scenarios: "app/manager/scenarios/page.tsx",
-    views: "app/manager/views/page.tsx",
-    workers: "app/manager/workers/page.tsx",
+  const routeShell = readFileSync(
+    resolve(projectRoot, "components/app/authenticated-route-shell.tsx"),
+    "utf8",
+  );
+  const managerLayout = readFileSync(
+    resolve(projectRoot, "app/manager/layout.tsx"),
+    "utf8",
+  );
+  const guardedPaths = {
+    cameras: "/manager/cameras",
+    locations: "/manager/locations",
+    occupancy: "/manager/occupancy",
+    scenarios: "/manager/scenarios",
+    views: "/manager/views",
+    workers: "/manager/workers",
   };
 
-  for (const [resource, page] of Object.entries(guardedPages)) {
-    const source = readFileSync(resolve(projectRoot, page), "utf8");
+  assert.match(managerLayout, /<ManagerRouteShell>\{children\}<\/ManagerRouteShell>/);
+  assert.match(
+    routeShell,
+    /<AuthGuard[\s\S]*?requireManager[\s\S]*?requireResource=\{MANAGER_RESOURCE_BY_PATH\[pathname\]\}/,
+  );
+  for (const [resource, pathname] of Object.entries(guardedPaths)) {
     assert.match(
-      source,
-      new RegExp(`requireManager requireResource="${resource}"`),
-      `${page} não pode confiar apenas no acesso genérico ao Manager`,
+      routeShell,
+      new RegExp(`"${pathname}": "${resource}"`),
+      `${pathname} não pode confiar apenas no acesso genérico ao Manager`,
     );
   }
 
@@ -1079,7 +1170,7 @@ test("sincronização de admin é aditiva e alterações granulares não tocam o
   );
 });
 
-test("grade do Master usa todos os módulos e cada PermissionResponse do catálogo Swagger", () => {
+test("grade do Superadmin mostra somente módulos e capacidades reais", () => {
   const source = readFileSync(
     resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
     "utf8",
@@ -1094,7 +1185,9 @@ test("grade do Master usa todos os módulos e cada PermissionResponse do catálo
     groupingStart,
   );
   const groupingSource = source.slice(groupingStart, groupingEnd);
-  const moduleSelectorStart = source.indexOf("function selectVisibleModules");
+  const moduleSelectorStart = source.indexOf(
+    "function selectVisibleProductModules",
+  );
   const moduleSelectorEnd = source.indexOf(
     "function algorithmModuleFamily",
     moduleSelectorStart,
@@ -1106,24 +1199,57 @@ test("grade do Master usa todos os módulos e cada PermissionResponse do catálo
 
   assert.ok(
     moduleSelectorStart >= 0,
-    "o catálogo não pode ser limitado a algoritmos",
+    "a seção de módulos deve ter um seletor explícito",
   );
-  assert.match(source, /selectVisibleModules\(modules\)/);
-  assert.doesNotMatch(source, /selectVisibleAlgorithmModules\(modules\)/);
+  assert.match(source, /selectVisibleProductModules\(modules\)/);
   assert.match(moduleSelectorSource, /modules\.(?:filter|forEach|map)/);
-  assert.doesNotMatch(moduleSelectorSource, /if \(!family\) return/);
-  assert.match(resolverSource, /catalog\.flatMap/);
-  assert.match(resolverSource, /permission\.action/);
+  assert.match(moduleSelectorSource, /if \(!family\) return/);
+  assert.match(
+    moduleSelectorSource,
+    /new Map<AlgorithmModuleFamily, IpxModule>/,
+    "cada família de módulo deve aparecer uma única vez",
+  );
+  assert.match(resolverSource, /catalog\.forEach/);
+  assert.match(resolverSource, /resolvePermissionPresentation/);
+  assert.match(resolverSource, /if \(!presentation\) return;/);
   assert.match(resolverSource, /module_id: moduleId/);
-  assert.match(resolverSource, /slug,/);
+  assert.match(resolverSource, /grants: \[grant\]/);
+  assert.match(groupingSource, /groups\.get\(permission\.group_key\)/);
+  assert.doesNotMatch(source, /Slug: <code>|Módulo: <code>/);
+  assert.doesNotMatch(
+    source,
+    /is_master=true|GET \/companies\/\{companyId\}|API respondeu/,
+    "a interface não deve expor detalhes de implementação",
+  );
   assert.doesNotMatch(
     resolverSource,
-    /!algorithmModuleFamily\(permissionModule\)/,
-    "permissões de módulos adicionais não podem ser descartadas",
+    /managementModuleLabel|humanizePermissionSlug/,
+    "nomes técnicos e slugs desconhecidos não devem virar rótulos visíveis",
   );
-  assert.match(groupingSource, /groups\.get\(permission\.module_id\)/);
-  assert.match(source, /Slug: <code>\{permission\.slug\}<\/code>/);
-  assert.match(source, /Módulo: <code>\{permission\.module_id\}<\/code>/);
+  assert.match(
+    resolverSource,
+    /if \(knownPermission\)[\s\S]*?label: knownPermission\.label/,
+  );
+  assert.match(source, /"Módulos"[\s\S]*?"Capacidades de gestão"/);
+  assert.doesNotMatch(source, /"Recursos administrativos"/);
+  assert.match(
+    resolverSource,
+    /groupName: workspaceCapability[\s\S]*?"Painéis e visões"[\s\S]*?"Configuração operacional"/,
+  );
+  for (const internalModule of [
+    "alarms",
+    "analytics",
+    "audit log",
+    "edge workers",
+    "heatmap",
+    "qr code",
+  ]) {
+    assert.doesNotMatch(
+      resolverSource,
+      new RegExp(`"${internalModule}"`, "i"),
+      `${internalModule} não deve ser apresentado como módulo ou capacidade`,
+    );
+  }
   assert.match(
     source,
     /unavailable: option\.unavailable \|\| !hasEnabledGrant/,
@@ -1729,7 +1855,7 @@ test("comparativo certifica empresa e fuso da fonte horária", () => {
         ...base,
         scenarios: [{ company_id: "company-b", id: "scenario-b" }],
       }),
-    /cenário "scenario-b" pertence a outra empresa/,
+    /a seleção contém um cenário de outra empresa/,
   );
 });
 
@@ -1764,7 +1890,8 @@ test("video wall e comparativo propagam o escopo explícito em todas as consulta
   }
   assert.match(
     liveSource,
-    /aggregatePath\(definition\)[\s\S]*?\{ companyScopeId, signal: controller\.signal \}/,
+    /fetchCompleteAggregateRange\(\{[\s\S]*?companyScopeId,[\s\S]*?signal,[\s\S]*?to:/,
+    "os agregados do Ao Vivo devem manter empresa e cancelamento explícitos",
   );
   assert.match(
     liveSource,
@@ -1780,12 +1907,18 @@ test("video wall e comparativo propagam o escopo explícito em todas as consulta
   );
   assert.match(
     comparisonSource,
-    /`\/analytics\/aggregate\?\$\{params\.toString\(\)\}`,[\s\S]*?\{ companyScopeId \}/,
+    /fetchCompleteAggregateRange\(\{[\s\S]*?companyScopeId,[\s\S]*?signal: options\.signal/,
+    "o comparativo deve propagar empresa e cancelamento ao carregador completo",
+  );
+  assert.match(
+    comparisonSource,
+    /apiFetch<AggregateEventsResponse>\(path, \{[\s\S]*?companyScopeId,[\s\S]*?signal: controller\.signal/,
+    "a requisição compartilhada do comparativo deve permanecer escopada",
   );
   assert.match(
     reportSource,
-    /companyScopeId,[\s\S]*?companyTimeZone,[\s\S]*?from: canonicalDefinition\.from/,
-    "a fonte horária reutilizada pelo comparativo deve carregar sua identidade",
+    /companyScopeId,[\s\S]*?companyTimeZone,[\s\S]*?from: reportComparisonMonthDefinition\.from[\s\S]*?granularity: "month"[\s\S]*?to: reportComparisonMonthDefinition\.to/,
+    "a fonte mensal consolidada reutilizada pelo comparativo deve carregar sua identidade",
   );
   for (const path of ["scenarios", "cameras", "locations"]) {
     assert.match(
@@ -1798,13 +1931,13 @@ test("video wall e comparativo propagam o escopo explícito em todas as consulta
   }
   assert.match(
     reportSource,
-    /fetchHourlyAggregateRanges\(\{[\s\S]*?companyScopeId:/,
+    /fetchBoundedHourlyAggregateRanges\(\{[\s\S]*?companyScopeId:/,
     "o cache horário de relatórios deve receber a empresa explícita",
   );
   assert.match(
     reportSource,
-    /aggregatePath\(definition\),\s*\{ companyScopeId, signal: controller\.signal \}/g,
-    "as demais granularidades de relatório devem manter escopo e cancelamento explícitos",
+    /fetchCompleteAggregateRange\(\{[\s\S]*?companyScopeId: companyScopeId\?\.trim\(\) \|\| undefined,[\s\S]*?signal: controller\.signal/,
+    "as demais granularidades de relatório devem manter escopo e cancelamento explícitos no carregador completo",
   );
 });
 
@@ -2160,8 +2293,535 @@ test("JWT migrado aceita identidade canônica e metadados nested sem mascarar /a
   );
   assert.match(
     authProviderSource,
-    /if \(user\.permissions !== undefined\) \{[\s\S]*?enrichAuthenticatedPermissionMetadata\([\s\S]*?user\.permissions[\s\S]*?assignedMetadata[\s\S]*?permissionCatalog/,
+    /if \(user\.permissions !== undefined\) \{[\s\S]*?certifyAuthenticatedUserPermissionMetadata\([\s\S]*?assignedMetadata[\s\S]*?user\.id[\s\S]*?enrichAuthenticatedPermissionMetadata\([\s\S]*?user\.permissions[\s\S]*?certifiedAssignedMetadata[\s\S]*?permissionCatalog/,
     "permissões explícitas do JWT só podem receber metadados das rotas Swagger",
+  );
+});
+
+test("JWT habilita Demographics somente com grant e company_module da mesma empresa", () => {
+  const now = Date.UTC(2026, 8, 2, 12, 0, 0);
+  const user = currentUser();
+  const demographicsModule = {
+    active: true,
+    id: "module-demographics",
+    name: "Demographics",
+    slug: "demographics",
+  };
+  const commonClaims = {
+    company_id: user.company_id,
+    exp: now / 1000 + 900,
+    permissions: [
+      {
+        action: "view",
+        module: demographicsModule,
+        module_id: demographicsModule.id,
+        slug: "demographics_view",
+      },
+    ],
+    role: "operator",
+    user_id: user.id,
+  };
+
+  const enabled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      ...commonClaims,
+      company_modules: [
+        {
+          company_id: user.company_id,
+          enabled: true,
+          id: "assignment-demographics",
+          module: demographicsModule,
+          module_id: demographicsModule.id,
+        },
+      ],
+    }),
+    now,
+  );
+  assert.equal(enabled?.company_modules?.length, 1);
+  assert.equal(enabled?.company_modules?.[0].enabled, true);
+  assert.equal(permissions.canViewDemographics(enabled), true);
+
+  const disabled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      ...commonClaims,
+      company_modules: [
+        {
+          company_id: user.company_id,
+          enabled: false,
+          module: demographicsModule,
+          module_id: demographicsModule.id,
+        },
+      ],
+    }),
+    now,
+  );
+  assert.equal(disabled?.company_modules?.[0].enabled, false);
+  assert.equal(permissions.canViewDemographics(disabled), false);
+});
+
+test("company_modules do JWT aceita aliases limitados e falha fechado em conflito", () => {
+  const now = Date.UTC(2026, 8, 2, 12, 0, 0);
+  const user = currentUser();
+  const permissionClaims = [{ action: "view", slug: "demographics_view" }];
+  const nested = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company: {
+        id: user.company_id,
+        modules: ["demographics"],
+      },
+      exp: now / 1000 + 900,
+      permissions: permissionClaims,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.equal(nested?.company_modules?.[0].module?.slug, "demographics");
+  assert.equal(permissions.canViewDemographics(nested), true);
+
+  const conflictingAliases = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_modules: ["demographics"],
+      companyModules: [
+        {
+          enabled: false,
+          module: {
+            id: "module-demographics",
+            name: "Demographics",
+            slug: "demographics",
+          },
+          module_id: "module-demographics",
+        },
+      ],
+      exp: now / 1000 + 900,
+      permissions: permissionClaims,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(conflictingAliases?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(conflictingAliases), false);
+
+  const foreignAssignment = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_modules: [
+        {
+          company_id: "company-foreign",
+          enabled: true,
+          module_id: "module-demographics",
+        },
+      ],
+      exp: now / 1000 + 900,
+      permissions: permissionClaims,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(foreignAssignment?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(foreignAssignment), false);
+
+  const malformedAssignment = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_modules: [
+        { enabled: "false", module_id: "module-demographics" },
+      ],
+      exp: now / 1000 + 900,
+      permissions: permissionClaims,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(malformedAssignment?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(malformedAssignment), false);
+});
+
+test("GET company modules apenas enriquece o JWT e uma negativa explícita restringe", () => {
+  const authenticatedAssignments = [
+    {
+      company_id: "company-test",
+      enabled: true,
+      module: {
+        id: "jwt-module:demographics",
+        name: "demographics",
+        slug: "demographics",
+      },
+      module_id: "jwt-module:demographics",
+    },
+  ];
+  const metadata = [
+    {
+      company_id: "company-test",
+      enabled: true,
+      id: "assignment-demographics",
+      module: {
+        active: true,
+        description: "Perfil demográfico",
+        id: "module-demographics",
+        name: "Demographics",
+        slug: "demographics",
+      },
+      module_id: "module-demographics",
+    },
+    {
+      company_id: "company-test",
+      enabled: true,
+      module_id: "module-occupancy",
+      module: {
+        id: "module-occupancy",
+        name: "Ocupação",
+        slug: "occupancy",
+      },
+    },
+  ];
+  const enriched =
+    authenticatedPermissionMetadata.enrichAuthenticatedCompanyModuleMetadata(
+      authenticatedAssignments,
+      metadata,
+      "company-test",
+    );
+  assert.equal(enriched.length, 1, "metadado extra não pode criar módulo");
+  assert.equal(enriched[0].module_id, "module-demographics");
+  assert.equal(
+    enriched[0].module?.name,
+    "demographics",
+    "metadado não deve reescrever um nome já autenticado pelo JWT",
+  );
+  assert.equal(enriched[0].enabled, true);
+
+  const restricted =
+    authenticatedPermissionMetadata.enrichAuthenticatedCompanyModuleMetadata(
+      authenticatedAssignments,
+      [{ ...metadata[0], enabled: false }],
+      "company-test",
+    );
+  assert.equal(restricted[0].enabled, false);
+
+  const foreignMetadata =
+    authenticatedPermissionMetadata.enrichAuthenticatedCompanyModuleMetadata(
+      authenticatedAssignments,
+      [{ ...metadata[0], company_id: "company-foreign" }],
+      "company-test",
+    );
+  assert.equal(foreignMetadata.length, 1);
+  assert.equal(foreignMetadata[0].module_id, "jwt-module:demographics");
+
+  const conflictingIdentity =
+    authenticatedPermissionMetadata.enrichAuthenticatedCompanyModuleMetadata(
+      authenticatedAssignments,
+      [
+        {
+          ...metadata[0],
+          module: { ...metadata[0].module, id: "module-other", slug: "counting" },
+        },
+      ],
+      "company-test",
+    );
+  assert.equal(conflictingIdentity[0].module_id, "jwt-module:demographics");
+  assert.equal(conflictingIdentity[0].module?.slug, "demographics");
+});
+
+test("metadado de permissão por usuário certifica user_id sem afetar o catálogo global", () => {
+  const grant = {
+    action: "view",
+    id: "jwt:runtime-demographics",
+    slug: "runtime-demographics",
+  };
+  const demographicsMetadata = {
+    action: "view",
+    company_id: "company-test",
+    id: "assignment-demographics",
+    module: {
+      active: true,
+      id: "module-demographics",
+      name: "Demographics",
+      slug: "demographics",
+    },
+    module_id: "module-demographics",
+    slug: "runtime-demographics",
+  };
+  const certified =
+    authenticatedPermissionMetadata.certifyAuthenticatedUserPermissionMetadata(
+      [
+        { ...demographicsMetadata, user_id: "user-test" },
+        { ...demographicsMetadata, id: "foreign", user_id: "user-foreign" },
+        { ...demographicsMetadata, id: "unbound" },
+        {
+          ...demographicsMetadata,
+          company_id: undefined,
+          companyId: "company-foreign",
+          id: "foreign-camel-company",
+          userId: "user-test",
+        },
+        {
+          ...demographicsMetadata,
+          id: "conflicting-user-alias",
+          user_id: "user-test",
+          userId: "user-foreign",
+        },
+      ],
+      "user-test",
+      "company-test",
+    );
+  assert.equal(certified.length, 1);
+  assert.equal(certified[0].user_id, "user-test");
+
+  const rejectedForeignMetadata =
+    authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+      [grant],
+      [
+        authenticatedPermissionMetadata.certifyAuthenticatedUserPermissionMetadata(
+          [{ ...demographicsMetadata, user_id: "user-foreign" }],
+          "user-test",
+          "company-test",
+        ),
+      ],
+      "company-test",
+    );
+  assert.equal(rejectedForeignMetadata[0].module, undefined);
+
+  const enrichedFromGlobalCatalog =
+    authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+      [grant],
+      [[{ ...demographicsMetadata, company_id: undefined }]],
+      "company-test",
+    );
+  assert.equal(enrichedFromGlobalCatalog[0].module?.slug, "demographics");
+});
+
+test("company_modules nunca atravessa identidade ou empresa ausente", () => {
+  const now = Date.UTC(2026, 8, 2, 12, 0, 0);
+  const user = currentUser();
+  const base = {
+    company_id: user.company_id,
+    company_modules: ["demographics"],
+    exp: now / 1000 + 900,
+    permissions: [{ action: "view", slug: "demographics_view" }],
+    role: "operator",
+  };
+
+  const conflictingIdentity = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      ...base,
+      user_id: user.id,
+      userId: "user-foreign",
+    }),
+    now,
+  );
+  assert.deepEqual(conflictingIdentity?.company_modules, []);
+  assert.deepEqual(conflictingIdentity?.permissions, []);
+  assert.equal(permissions.canViewDemographics(conflictingIdentity), false);
+
+  const foreignNestedUser = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      permissions: base.permissions,
+      role: "operator",
+      user: { id: "user-foreign", company_modules: ["demographics"] },
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(foreignNestedUser?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(foreignNestedUser), false);
+
+  const companylessUser = { ...user };
+  delete companylessUser.company_id;
+  const missingCompany = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    companylessUser,
+    accessToken({
+      company_modules: ["demographics"],
+      exp: now / 1000 + 900,
+      permissions: base.permissions,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(missingCompany?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(missingCompany), false);
+
+  const previouslyAuthorizedUser = {
+    ...user,
+    company_modules: [
+      {
+        company_id: user.company_id,
+        enabled: true,
+        module_id: "module-demographics",
+        module: {
+          id: "module-demographics",
+          name: "Demographics",
+          slug: "demographics",
+        },
+      },
+    ],
+    is_master: true,
+    permissions: [{ id: "old-grant", slug: "demographics_view" }],
+    role: "super-admin",
+  };
+  const rejectedIdentity =
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      previouslyAuthorizedUser,
+      accessToken({
+        ...base,
+        user_id: user.id,
+        userId: "user-foreign",
+      }),
+      now,
+    );
+  assert.equal(rejectedIdentity?.is_master, false);
+  assert.deepEqual(rejectedIdentity?.permissions, []);
+  assert.deepEqual(rejectedIdentity?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(rejectedIdentity), false);
+
+  const conflictingCompanyAliases =
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      user,
+      accessToken({
+        authorization: {
+          company_modules: ["demographics"],
+          permissions: ["demographics_view"],
+        },
+        company_id: user.company_id,
+        companyId: "company-foreign",
+        exp: now / 1000 + 900,
+        role: "operator",
+        user_id: user.id,
+      }),
+      now,
+    );
+  assert.deepEqual(conflictingCompanyAliases?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(conflictingCompanyAliases), false);
+});
+
+test("fallback de sessão não reutiliza módulos após troca de empresa", () => {
+  const now = Date.UTC(2026, 8, 2, 12, 0, 0);
+  const user = currentUser();
+  assert.equal(
+    accessTokenClaims.accessTokenExplicitlyMismatchesUserContext(
+      accessToken({
+        company_id: "company-other",
+        exp: now / 1000 + 900,
+        role: "operator",
+        user_id: user.id,
+      }),
+      user,
+      now,
+    ),
+    true,
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenExplicitlyMismatchesUserContext(
+      accessToken({
+        company_id: user.company_id,
+        companyId: "company-other",
+        exp: now / 1000 + 900,
+        role: "operator",
+        user_id: user.id,
+      }),
+      user,
+      now,
+    ),
+    true,
+    "aliases de tenant contraditórios não podem preservar o snapshot",
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenExplicitlyMismatchesUserContext(
+      accessToken({
+        company_id: "company-other",
+        exp: now / 1000 + 900,
+        is_master: true,
+        role: "super-admin",
+        user_id: user.id,
+      }),
+      { ...user, is_master: true, role: "super-admin" },
+      now,
+    ),
+    false,
+    "um JWT explicitamente Master continua global",
+  );
+});
+
+test("bootstrap preserva company_modules explícito do JWT quando o catálogo falha", () => {
+  const authProviderSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-provider.tsx"),
+    "utf8",
+  );
+  assert.match(
+    authProviderSource,
+    /const authenticatedAssignments =[\s\S]*?certifyCompanyModuleAssignments\(user\.company_modules, companyId\)[\s\S]*?enrichAuthenticatedCompanyModuleMetadata\([\s\S]*?authenticatedAssignments[\s\S]*?certifiedRows/,
+  );
+  assert.match(
+    authProviderSource,
+    /return authenticatedAssignments !== undefined[\s\S]*?\[\.\.\.authenticatedAssignments\][\s\S]*?: \[\];/,
+  );
+  assert.match(
+    authProviderSource,
+    /return authenticatedAssignments !== undefined[\s\S]*?enrichAuthenticatedCompanyModuleMetadata\([\s\S]*?: certifiedRows;/,
+    "quando o JWT legado omite company_modules, o endpoint autenticado continua sendo a fonte de atribuições",
+  );
+  assert.match(
+    authProviderSource,
+    /if \(user\.company_modules === undefined\) return undefined;/,
+    "a claim omitida precisa continuar distinguível de uma negativa explícita",
+  );
+  assert.match(
+    authProviderSource,
+    /const companyModulesHydrated = Boolean\([\s\S]*?tokenEnrichedUser\.company_modules === undefined[\s\S]*?Promise\.all\(\[[\s\S]*?hydrateUserCompanyModules\(tokenEnrichedUser, authenticatedSession\)/,
+    "o endpoint autoritativo deve ser certificado antes da publicação quando o JWT omite os módulos",
+  );
+  assert.match(
+    authProviderSource,
+    /companyModulesHydrated[\s\S]*?Promise\.resolve\(user\.company_modules \?\? \[\]\)/,
+    "a hidratação descritiva não deve repetir a consulta de módulos já certificada",
+  );
+  assert.match(
+    authProviderSource,
+    /const permissionAssignmentsHydrated = Boolean\([\s\S]*?tokenEnrichedUser\.permissions === undefined/,
+    "o bootstrap deve lembrar quando já consultou as concessões legadas",
+  );
+  assert.match(
+    authProviderSource,
+    /hydrateAuthenticatedUser\([\s\S]*?\{ companyModulesHydrated, permissionAssignmentsHydrated \}/,
+  );
+  assert.match(
+    authProviderSource,
+    /assignmentsHydrated[\s\S]*?\? Promise\.resolve\(\[\]\)[\s\S]*?: readAuthenticatedPermissionMetadata\(/,
+    "a hidratação descritiva não deve repetir imediatamente a mesma consulta de acessos",
+  );
+  assert.match(
+    authProviderSource,
+    /typeof assignment\.enabled !== "boolean"/,
+    "o endpoint não pode transformar strings truthy em módulos habilitados",
+  );
+  assert.match(
+    authProviderSource,
+    /const assignments = new Map<string, CurrentUserCompanyModule>\(\);[\s\S]*?previous\.enabled &&[\s\S]*?certifiedAssignment\.enabled/,
+    "duplicatas contraditórias do endpoint devem ser consolidadas com negativa vencedora",
+  );
+  assert.match(
+    authProviderSource,
+    /company_id: expectedCompanyId/,
+    "toda atribuição certificada deve carregar o tenant autenticado",
+  );
+  assert.match(
+    authProviderSource,
+    /resolveRuntimeIdentifierAliases\(assignment, \[[\s\S]*?"companyId"[\s\S]*?"tenantId"[\s\S]*?resolveRuntimeIdentifierAliases\(assignment, \[[\s\S]*?"moduleId"/,
+    "aliases camelCase de empresa e módulo precisam ser validados antes da canonicalização",
   );
 });
 
@@ -2738,7 +3398,7 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
     is_master: false,
     name: "Regular",
   };
-  assert.strictEqual(
+  const rejectedCrossTenantUser =
     accessTokenClaims.reconcileCurrentUserWithAccessToken(
       authenticatedRegularUser,
       accessToken({
@@ -2748,10 +3408,11 @@ test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinha
         sub: "regular-user",
       }),
       now,
-    ),
-    authenticatedRegularUser,
-    "/auth/me 200 permanece autoritativo, mas claims de outro tenant não complementam papel nem empresa",
-  );
+    );
+  assert.equal(rejectedCrossTenantUser?.company_id, "company-selected");
+  assert.equal(rejectedCrossTenantUser?.role, undefined);
+  assert.deepEqual(rejectedCrossTenantUser?.permissions, []);
+  assert.deepEqual(rejectedCrossTenantUser?.company_modules, []);
 });
 
 test("claims master conflitantes nunca elevam o perfil autenticado", () => {
@@ -3084,9 +3745,10 @@ test("escopo selecionado pelo master segue apenas para rotas tenant-aware", asyn
     api.clearStoredSession();
     api.setStoredSession({
       access_token: accessToken({
+        company_id: "company-base",
         exp: nowSeconds + 900,
+        is_master: true,
         nbf: nowSeconds - 1,
-        role: "super-admin",
       }),
       expires_in: 900,
       refresh_token: "refresh-master",
@@ -3098,7 +3760,11 @@ test("escopo selecionado pelo master segue apenas para rotas tenant-aware", asyn
     });
 
     await api.apiFetch("/cameras");
+    await api.apiFetch("/workers");
+    await api.apiFetch("/scenarios");
     await api.apiFetch("/analytics/aggregate?granularity=hour");
+    await api.apiFetch("/demographics/buckets?from=2026-09-01T03%3A00%3A00.000Z&to=2026-09-02T03%3A00%3A00.000Z");
+    await api.apiFetch("/audit?page=1&limit=50");
     await api.apiFetch("/companies/company-selected/users");
     await api.apiFetch("/cameras", {
       companyScopeId: "company-explicit",
@@ -3111,6 +3777,9 @@ test("escopo selecionado pelo master segue apenas para rotas tenant-aware", asyn
         is_master: false,
         active: true,
       },
+      companyScopeId: "company-explicit",
+    });
+    await api.apiFetch("/users/user-selected/permissions", {
       companyScopeId: "company-explicit",
     });
     await api.apiFetch("/users/master-home/permissions", {
@@ -3132,8 +3801,18 @@ test("escopo selecionado pelo master segue apenas para rotas tenant-aware", asyn
 
     assert.deepEqual(requests, [
       { path: "/api/v1/cameras", companyId: "company-selected" },
+      { path: "/api/v1/workers", companyId: "company-selected" },
+      { path: "/api/v1/scenarios", companyId: "company-selected" },
       {
         path: "/api/v1/analytics/aggregate?granularity=hour",
+        companyId: "company-selected",
+      },
+      {
+        path: "/api/v1/demographics/buckets?from=2026-09-01T03%3A00%3A00.000Z&to=2026-09-02T03%3A00%3A00.000Z",
+        companyId: "company-selected",
+      },
+      {
+        path: "/api/v1/audit?page=1&limit=50",
         companyId: "company-selected",
       },
       {
@@ -3143,6 +3822,10 @@ test("escopo selecionado pelo master segue apenas para rotas tenant-aware", asyn
       { path: "/api/v1/cameras", companyId: "company-explicit" },
       {
         path: "/api/v1/users/user-selected",
+        companyId: "company-explicit",
+      },
+      {
+        path: "/api/v1/users/user-selected/permissions",
         companyId: "company-explicit",
       },
       { path: "/api/v1/users/master-home/permissions", companyId: null },
@@ -3768,11 +4451,31 @@ test("gestores operacionais encaminham explicitamente a empresa efetiva", () => 
   );
   assert.match(
     superAdminSource,
-    /fetchScopedWorkers\(companyId\)[\s\S]*?fetchValidatedRows\("\/locations"[\s\S]*?fetchValidatedRows\("\/cameras"/,
+    /fetchScopedWorkers\(companyId, controller\.signal\)[\s\S]*?fetchValidatedRows\([\s\S]*?"\/locations"[\s\S]*?controller\.signal[\s\S]*?fetchValidatedRows\([\s\S]*?"\/cameras"/,
+  );
+  assert.doesNotMatch(superAdminSource, /canQueryJwtBoundCatalogs/);
+  assert.doesNotMatch(
+    superAdminSource,
+    /lista detalhada de Workers é disponibilizada somente para a empresa assinada/,
   );
   assert.match(
     superAdminSource,
-    /loadCompanyDetails = React\.useCallback\(async \(expectedCompanyId: string\)[\s\S]*?selectedCompanyIdRef\.current !== companyId[\s\S]*?canPublishCompanyDetails\(requestSequence, companyId\)/,
+    /companyUserRows[\s\S]*?returnedCompanyId !== company\.id[\s\S]*?company_id: company\.id/,
+    "a listagem global de masters deve preservar a empresa certificada pela rota",
+  );
+  assert.match(
+    superAdminSource,
+    /const companyId = editingMasterUser[\s\S]*?getScopedRowCompanyId\(editingMasterUser\)[\s\S]*?: selectedCompanyId\.trim\(\)/,
+    "edição de master deve usar a empresa da própria linha, não a seleção visual",
+  );
+  assert.match(
+    superAdminSource,
+    /async function deleteMasterUser[\s\S]*?const companyId = getScopedRowCompanyId\(user\)[\s\S]*?companyScopeId: companyId/,
+    "exclusão de master deve manter o escopo da própria linha",
+  );
+  assert.match(
+    superAdminSource,
+    /loadCompanyDetails = React\.useCallback\(async \(\s*expectedCompanyId: string,[\s\S]*?selectedCompanyIdRef\.current !== companyId[\s\S]*?canPublishCompanyDetails\(requestSequence, companyId\)/,
   );
   assert.match(
     superAdminSource,
@@ -3788,69 +4491,290 @@ test("gestores operacionais encaminham explicitamente a empresa efetiva", () => 
   );
 });
 
-test("painel master isola falhas operacionais sem apagar dados administrativos certificados", () => {
+test("Central Master carrega cada recurso somente quando sua seção é solicitada", () => {
   const source = readFileSync(
     resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
     "utf8",
   );
-  const loadStart = source.indexOf("const loadCompanyDetails = React.useCallback");
-  const loadEnd = source.indexOf("React.useEffect(() =>", loadStart);
-  const loadSource = source.slice(loadStart, loadEnd);
-  const administrativePublish = loadSource.indexOf(
-    "setUsers(scopedUserRows.filter",
+
+  const companiesStart = source.indexOf(
+    "const loadCompanies = React.useCallback",
   );
-  const isolatedOperationalLoad = loadSource.indexOf("Promise.allSettled([");
-  const operationalPublish = loadSource.indexOf(
-    "setCompanyOperationalWarnings(operationalWarnings)",
+  const companiesEnd = source.indexOf(
+    "const loadModuleCatalog = React.useCallback",
+    companiesStart,
+  );
+  const companiesLoader = source.slice(companiesStart, companiesEnd);
+  assert.ok(companiesStart >= 0 && companiesEnd > companiesStart);
+  assert.match(companiesLoader, /apiFetch<Company\[]>\("\/companies"\)/);
+  assert.doesNotMatch(
+    companiesLoader,
+    /"\/(?:modules|permissions|workers|locations|cameras|scenarios|occupancy\/scenarios)"/,
+    "o bootstrap deve consultar somente empresas",
   );
 
-  assert.ok(loadStart >= 0 && loadEnd > loadStart);
+  const bootstrapEffectStart = source.indexOf(
+    "React.useEffect(() => {\n    loadCompanies();",
+  );
+  const bootstrapEffectEnd = source.indexOf(
+    "const ensureCompanyTimeZone",
+    bootstrapEffectStart,
+  );
+  const bootstrapEffect = source.slice(
+    bootstrapEffectStart,
+    bootstrapEffectEnd,
+  );
+  assert.ok(bootstrapEffectStart >= 0 && bootstrapEffectEnd > bootstrapEffectStart);
+  assert.doesNotMatch(
+    bootstrapEffect,
+    /loadCompany(?:Details|Modules|Workers)|loadModuleCatalog|loadPermissionCatalog/,
+  );
+
+  const scopeEffectAnchor = source.indexOf("if (!selectedCompany) return;");
+  const scopeEffectStart = source.lastIndexOf(
+    "React.useEffect(() =>",
+    scopeEffectAnchor,
+  );
+  const scopeEffectEnd = source.indexOf(
+    "React.useEffect(() =>",
+    scopeEffectAnchor + 1,
+  );
+  const scopeEffect = source.slice(scopeEffectStart, scopeEffectEnd);
+  assert.doesNotMatch(
+    scopeEffect,
+    /ensureCompanyTimeZone\(/,
+    "selecionar a empresa não deve hidratar detalhes antes de uma ação que exija fuso",
+  );
+
+  const sectionEffectAnchor = source.indexOf(
+    'if (activeCompanyTab === "users")',
+  );
+  const sectionEffectStart = source.lastIndexOf(
+    "React.useEffect(() =>",
+    sectionEffectAnchor,
+  );
+  const sectionEffectEnd = source.indexOf(
+    "React.useEffect(() =>",
+    sectionEffectAnchor + 1,
+  );
+  const sectionEffect = source.slice(sectionEffectStart, sectionEffectEnd);
+  assert.ok(sectionEffectStart >= 0 && sectionEffectEnd > sectionEffectStart);
+  assert.match(sectionEffect, /activeCompanyTab === "users"[\s\S]*?loadCompanyDetails\(selectedCompanyId\)/);
+  assert.match(sectionEffect, /activeCompanyTab === "modules"[\s\S]*?loadCompanyModules\(selectedCompanyId\)/);
+  assert.match(sectionEffect, /activeCompanyTab === "workers"[\s\S]*?loadCompanyWorkers\(selectedCompanyId\)/);
+  assert.doesNotMatch(
+    sectionEffect,
+    /"\/locations"|"\/cameras"|"\/scenarios"|fetchScopedOccupancyScenarios|includeOperational/,
+  );
+  assert.doesNotMatch(
+    source,
+    /loadCompanyDetails\([^)]*\{\s*(?:force:\s*[^,}]+,\s*)?includeOperational:\s*true/,
+    "o fluxo padrão não pode reativar o fan-out operacional legado",
+  );
+
+  const workerStart = source.indexOf(
+    "const loadCompanyWorkers = React.useCallback",
+  );
+  const workerEnd = source.indexOf("React.useEffect(() =>", workerStart);
+  const workerLoader = source.slice(workerStart, workerEnd);
+  assert.match(workerLoader, /fetchScopedWorkers\(companyId, controller\.signal\)/);
+  assert.doesNotMatch(
+    workerLoader,
+    /"\/locations"|"\/cameras"|"\/scenarios"|fetchScopedOccupancyScenarios/,
+    "a aba Workers deve carregar somente workers",
+  );
+
+  assert.match(
+    source,
+    /fetchScopedWorkers\([\s\S]*?companyScopeId: string,[\s\S]*?signal\?: AbortSignal[\s\S]*?requireWorkerRows\([\s\S]*?selectExplicitCompanyScopedRows\(value, companyScopeId[\s\S]*?companyScopeId/,
+    "worker deve ser particionado explicitamente e revalidado no tenant selecionado",
+  );
+  assert.doesNotMatch(
+    source,
+    /Dados operacionais parciais\./,
+    "o resumo administrativo não deve exibir avisos técnicos globais",
+  );
+});
+
+test("Central Master inicia em Empresas e elimina a navegação lateral legada", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+
+  const companyTabType = source.slice(
+    source.indexOf("type CompanyTab ="),
+    source.indexOf("type CompanyOperationalResource"),
+  );
+  assert.match(companyTabType, /"companies"/);
+  assert.doesNotMatch(companyTabType, /"overview"/);
+
+  const initialSection = source.slice(
+    source.indexOf("function readInitialMasterSection"),
+    source.indexOf("type AlgorithmModuleFamily"),
+  );
+  assert.match(initialSection, /return "companies"/);
+  assert.match(
+    initialSection,
+    /if \(section === "overview"\) return "companies"/,
+    "favoritos da antiga Visão geral devem abrir a seção Empresas",
+  );
+  assert.doesNotMatch(initialSection, /return "overview"/);
+
+  const tabsStart = source.indexOf("<TabsList");
+  const tabsEnd = source.indexOf("</TabsList>", tabsStart);
+  const tabs = source.slice(tabsStart, tabsEnd);
+  const companiesTab = tabs.indexOf('<TabsTrigger value="companies"');
+  const usersTab = tabs.indexOf('<TabsTrigger value="users"');
+  assert.ok(tabsStart >= 0 && tabsEnd > tabsStart);
+  assert.ok(companiesTab >= 0, "Empresas deve existir na navegação principal");
   assert.ok(
-    administrativePublish >= 0 &&
-      isolatedOperationalLoad > administrativePublish &&
-      operationalPublish > isolatedOperationalLoad,
-    "usuários e módulos devem ser publicados antes das consultas operacionais isoladas",
+    usersTab < 0 || companiesTab < usersTab,
+    "Empresas deve ser a primeira seção do Master",
   );
   assert.match(
-    loadSource,
-    /Promise\.allSettled\(\[[\s\S]*?fetchScopedWorkers\(companyId\)[\s\S]*?fetchValidatedRows\("\/locations"[\s\S]*?fetchValidatedRows\("\/cameras"[\s\S]*?fetchValidatedRows\("\/scenarios"[\s\S]*?fetchScopedOccupancyScenarios\(companyId\)/,
+    tabs,
+    /<TabsTrigger value="companies"[\s\S]*?Empresas[\s\S]*?<\/TabsTrigger>/,
   );
-  for (const resource of [
-    "workers",
-    "locations",
-    "cameras",
-    "countingScenarios",
-    "occupancyScenarios",
+  assert.match(source, /<TabsContent value="companies"/);
+  assert.doesNotMatch(source, /value="overview"|CompanyManagementFlow/);
+  assert.doesNotMatch(
+    source,
+    /Diretório de empresas/,
+    "a gestão das empresas deve ocorrer na seção principal, não em uma lateral fixa",
+  );
+});
+
+test("Central Master oferece lotes certificados e controlados nos três CRUDs", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const functionSource = (name, nextName) => {
+    const start = source.indexOf(`async function ${name}`);
+    const end = source.indexOf(`async function ${nextName}`, start + 1);
+    assert.ok(start >= 0 && end > start, `${name} deve existir antes de ${nextName}`);
+    return source.slice(start, end);
+  };
+
+  const companyDelete = functionSource(
+    "deleteCheckedCompanies",
+    "loadUserPermissions",
+  );
+  const companyUserStatus = functionSource(
+    "updateCheckedCompanyUserStatus",
+    "deleteCheckedCompanyUsers",
+  );
+  const companyUserDelete = functionSource(
+    "deleteCheckedCompanyUsers",
+    "deleteCompanyUser",
+  );
+  const masterStatus = functionSource(
+    "updateCheckedMasterUserStatus",
+    "deleteCheckedMasterUsers",
+  );
+  const masterDelete = functionSource(
+    "deleteCheckedMasterUsers",
+    "deleteMasterUser",
+  );
+
+  for (const bulkDelete of [companyDelete, companyUserDelete, masterDelete]) {
+    assert.equal(
+      (bulkDelete.match(/window\.confirm/g) ?? []).length,
+      1,
+      "cada exclusão em lote deve pedir uma única confirmação",
+    );
+    assert.match(bulkDelete, /mapWithConcurrency\([\s\S]*?MASTER_USER_DISCOVERY_CONCURRENCY/);
+    assert.match(bulkDelete, /failedCount/);
+  }
+
+  assert.match(
+    companyUserStatus,
+    /buildCompanyUserProfileUpdate\(managedUser,[\s\S]*?name: managedUser\.name,[\s\S]*?email: managedUser\.email,[\s\S]*?password: "",[\s\S]*?active/,
+    "status de usuário deve reutilizar o payload completo certificado",
+  );
+  assert.doesNotMatch(
+    `${companyUserStatus}\n${companyUserDelete}`,
+    /syncUserPermissions|promoteCompanyUserToAdminAdditively/,
+    "ações em lote de perfil não podem alterar permissões",
+  );
+  assert.match(
+    masterStatus,
+    /body: \{[\s\S]*?name: managedUser\.name,[\s\S]*?email: managedUser\.email,[\s\S]*?is_master: true,[\s\S]*?active/,
+  );
+  assert.match(masterStatus, /managedUser\.id !== currentUser\?\.id/);
+  assert.match(masterDelete, /managedUser\.id !== currentUser\?\.id/);
+
+  assert.match(
+    companyUserDelete,
+    /setCheckedCompanyUserIds\([\s\S]*?deletedIds\.forEach\(\(userId\) => next\.delete\(userId\)\)/,
+    "sucessos devem sair da seleção e falhas devem permanecer para nova tentativa",
+  );
+  assert.match(
+    masterDelete,
+    /setCheckedMasterUserIds\([\s\S]*?deletedIds\.forEach\(\(userId\) => next\.delete\(userId\)\)/,
+  );
+  assert.equal(
+    (companyUserDelete.match(/loadCompanyDetails\(/g) ?? []).length,
+    1,
+    "usuários da empresa devem ser recarregados somente uma vez após o lote",
+  );
+  assert.equal(
+    (masterDelete.match(/loadMasterUsers\(/g) ?? []).length,
+    1,
+    "super-admins devem ser recarregados somente uma vez após o lote",
+  );
+
+  for (const label of [
+    "Selecionar empresas exibidas",
+    "Selecionar usuários exibidos",
+    "Selecionar super-admins exibidos",
   ]) {
+    assert.match(source, new RegExp(`aria-label="${label}"`));
+  }
+});
+
+test("grade comum do Master nunca publica nem altera super-admin em lote", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const functionSource = (name, nextName) => {
+    const start = source.indexOf(`async function ${name}`);
+    const end = source.indexOf(`async function ${nextName}`, start + 1);
+    assert.ok(start >= 0 && end > start, `${name} deve existir antes de ${nextName}`);
+    return source.slice(start, end);
+  };
+  const companySelection = source.slice(
+    source.indexOf("const selectCompanyId = React.useCallback"),
+    source.indexOf("const canPublishCompanyDetails", source.indexOf("const selectCompanyId = React.useCallback")),
+  );
+  const companyUserStatus = functionSource(
+    "updateCheckedCompanyUserStatus",
+    "deleteCheckedCompanyUsers",
+  );
+  const companyUserDelete = functionSource(
+    "deleteCheckedCompanyUsers",
+    "deleteCompanyUser",
+  );
+
+  assert.match(
+    companySelection,
+    /companyNonMasterUsersForScope\(cachedUsers, nextCompanyId\)/,
+    "retornar a uma empresa em cache não pode recolocar masters na grade comum",
+  );
+  assert.match(
+    source,
+    /function companyNonMasterUsersForScope[\s\S]*?managedUser\.is_master === false[\s\S]*?getScopedRowCompanyId\(managedUser\) === expectedCompanyId/,
+    "a publicação deve exigir simultaneamente perfil não-master e tenant certificado",
+  );
+  for (const bulkAction of [companyUserStatus, companyUserDelete]) {
     assert.match(
-      loadSource,
-      new RegExp(`certifiedSettledRows\\([\\s\\S]*?"${resource}"`),
-      `${resource} deve produzir sucesso certificado ou aviso próprio`,
+      bulkAction,
+      /companyNonMasterUsersForScope\(users, companyId\)\.filter/,
+      "ações em lote devem recertificar perfil e empresa mesmo contra estado stale",
     );
   }
-  assert.ok(
-    (loadSource.match(/canPublishCompanyDetails\(requestSequence, companyId\)/g)
-      ?.length ?? 0) >= 3,
-    "publicações administrativas e operacionais devem continuar protegidas contra respostas tardias",
-  );
-  assert.match(loadSource, /cameras: scopedCameras\?\.length \?\? null/);
-  assert.match(loadSource, /countingScenarios: scopedScenarios\?\.length \?\? null/);
-  assert.match(
-    loadSource,
-    /if \(administrativeDetailsCertified\) \{[\s\S]*?allOperationalResourceWarnings\([\s\S]*?message,[\s\S]*?\)[\s\S]*?\} else \{[\s\S]*?setUsers\(\[\]\)[\s\S]*?setCompanyModules\(\[\]\)/,
-    "uma falha operacional inesperada também não pode apagar usuários ou módulos já certificados",
-  );
-  assert.match(
-    source,
-    /fetchScopedWorkers\(companyScopeId: string\)[\s\S]*?requireWorkerRows\(value, companyScopeId\)/,
-    "mismatch explícito de worker deve continuar fail-closed",
-  );
-  assert.match(
-    source,
-    /fetchValidatedRows<T>[\s\S]*?validate\(value, companyScopeId\)/,
-    "validadores tenant-aware não podem ser contornados pelo isolamento",
-  );
-  assert.match(source, /Dados operacionais parciais\./);
 });
 
 test("login é transacional e impede submissões concorrentes", () => {
@@ -3875,8 +4799,28 @@ test("login é transacional e impede submissões concorrentes", () => {
   );
   assert.match(
     authProviderSource,
-    /currentUserRequest\(\)[\s\S]*?assertAuthenticatedSessionCurrent\(authenticatedSession\)[\s\S]*?hydrateAuthenticatedUser\(\s*authenticatedSession/,
+    /currentUserRequest\(\)[\s\S]*?assertAuthenticatedSessionCurrent\(authenticatedSession\)[\s\S]*?certifyAuthenticatedUserForPublication\(\s*authenticatedSession/,
     "a resposta de /auth/me deve permanecer vinculada ao token e à revisão que a autenticaram",
+  );
+  assert.match(
+    authProviderSource,
+    /publishAuthenticatedUser\(certified\.user, certified\.authenticatedSession\)[\s\S]*?hydrateAuthenticatedUserInBackground\(certified\)/,
+    "o principal certificado deve ser publicado antes da hidratação descritiva",
+  );
+  assert.match(
+    authProviderSource,
+    /currentAttempt\?\.accessToken === accessToken &&[\s\S]*?currentAttempt\.sessionRevision === authenticatedSession\.sessionRevision/,
+    "hidratações em background só podem ser reutilizadas na mesma revisão de sessão",
+  );
+  assert.match(
+    authProviderSource,
+    /hasMasterAccess\(certifiedUser\)[\s\S]*?await hydrateStoredMasterCompanyScope\(certifiedUser, authenticatedSession\)/,
+    "o fuso pendente do escopo salvo do Master deve ser resolvido antes de montar o dashboard",
+  );
+  assert.match(
+    authProviderSource,
+    /if \(user\.permissions !== undefined\) return user\.permissions;[\s\S]*?apiFetch<UserPermission\[]>\([\s\S]*?jwtCompanyScopeOnly: true[\s\S]*?return \[\];/,
+    "claims ausentes só podem sair do estado fechado após a rota autenticada do próprio usuário",
   );
   assert.match(
     authProviderSource,
@@ -4017,8 +4961,13 @@ test("bootstrap comum evita detalhe administrativo e master mantém a hidrataç�
   );
   assert.match(
     authSource,
-    /reconcileCurrentUserWithAccessToken\([\s\S]*?hydrateCurrentUser\(\s*tokenEnrichedUser,\s*authenticatedSession/,
+    /reconcileCurrentUserWithAccessToken\([\s\S]*?synchronizeAuthenticatedCompanyScope\(certifiedUser\)/,
     "o JWT precisa ser reconciliado antes da hidratação local da empresa",
+  );
+  assert.match(
+    authSource,
+    /hydrateAuthenticatedUser\([\s\S]*?hydrateCurrentUser\(\s*certifiedUser,\s*authenticatedSession/,
+    "a hidratação em segundo plano deve partir apenas do principal certificado",
   );
   assert.match(
     authSource,

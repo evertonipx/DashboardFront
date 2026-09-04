@@ -4,8 +4,7 @@ import * as React from "react";
 import {
   AlertTriangle,
   Bot,
-  BrainCircuit,
-  Check,
+  BrainCog,
   CheckCircle2,
   Eye,
   EyeOff,
@@ -24,6 +23,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/components/app/auth-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Card,
   CardContent,
@@ -42,7 +42,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError, apiFetch } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 import {
   AI_INSIGHTS_CONFIGURATION_LIMITS,
   AiInsightsApiKeySchema,
@@ -60,6 +60,7 @@ import {
   loadAiInsightsLocalPrompt,
 } from "@/lib/ai-insights-local-settings";
 import { useEffectiveCompanyScopeId } from "@/lib/master-company-scope";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import { cn } from "@/lib/utils";
 
 type ConfigurationForm = Pick<
@@ -85,10 +86,44 @@ const LEGACY_PROMPT_SCOPES: ReadonlyArray<{
 
 const AI_INSIGHTS_CONTEXT_FILE_MAX_BYTES = 64 * 1024;
 
-export function AiInsightsDashboard() {
+type AiInsightsConfigurationRequestOptions = {
+  companyScopeId: string;
+  force?: boolean;
+  userId: string;
+};
+
+const aiInsightsConfigurationCache = new Map<
+  string,
+  AiInsightsStatusResponse
+>();
+const aiInsightsConfigurationRequests = new Map<
+  string,
+  Promise<AiInsightsStatusResponse>
+>();
+
+export type AiInsightsDashboardProps = {
+  companyName?: string | null;
+  companyScopeId?: string | null;
+  embedded?: boolean;
+};
+
+export function AiInsightsDashboard({
+  companyName,
+  companyScopeId: controlledCompanyScopeId,
+  embedded = false,
+}: AiInsightsDashboardProps = {}) {
   const { user } = useAuth();
-  const userId = user?.id ?? "";
-  const companyScopeId = useEffectiveCompanyScopeId(user);
+  const userId = user?.id?.trim() ?? "";
+  const effectiveCompanyScopeId = useEffectiveCompanyScopeId(user);
+  const companyScopeId = (
+    controlledCompanyScopeId === undefined
+      ? effectiveCompanyScopeId
+      : controlledCompanyScopeId ?? ""
+  ).trim();
+  const configurationScopeKey = aiInsightsConfigurationCacheKey({
+    companyScopeId,
+    userId,
+  });
   const [status, setStatus] = React.useState<AiInsightsStatusResponse | null>(null);
   const [form, setForm] = React.useState<ConfigurationForm | null>(null);
   const [apiKey, setApiKey] = React.useState("");
@@ -100,6 +135,7 @@ export function AiInsightsDashboard() {
   const [confirmingRemoval, setConfirmingRemoval] = React.useState(false);
   const [legacyConfigurationFound, setLegacyConfigurationFound] =
     React.useState(false);
+  const [loadedScopeKey, setLoadedScopeKey] = React.useState("");
   const requestSequence = React.useRef(0);
   const contextFileInputRef = React.useRef<HTMLInputElement>(null);
   const configured = status?.configuration;
@@ -107,36 +143,41 @@ export function AiInsightsDashboard() {
     ? "Use a chave completa, sem espaços, entre 20 e 512 caracteres."
     : null;
 
-  const refreshConfiguration = React.useCallback(async () => {
+  const refreshConfiguration = React.useCallback(async (
+    { force = false }: { force?: boolean } = {},
+  ) => {
     const requestId = ++requestSequence.current;
-    setLoading(true);
+    const requestedCompanyScopeId = companyScopeId;
+    const requestedUserId = userId;
+    const requestedScopeKey = configurationScopeKey;
+    setLoading(Boolean(requestedCompanyScopeId && requestedUserId));
+    setStatus(null);
+    setForm(null);
+    setApiKey("");
+    setShowApiKey(false);
+    setSaving(false);
     setError(null);
+    setAnnouncement("");
     setConfirmingRemoval(false);
     setLegacyConfigurationFound(false);
-    if (!companyScopeId || !userId) {
-      setStatus(null);
-      setForm(null);
+    setLoadedScopeKey("");
+    if (!requestedCompanyScopeId || !requestedUserId) {
+      setLoadedScopeKey(requestedScopeKey);
       setLoading(false);
       return;
     }
 
     try {
-      const payload = await apiFetch<unknown>("/ai/insights", {
-        companyScopeId,
+      const nextStatus = await readAiInsightsConfiguration({
+        companyScopeId: requestedCompanyScopeId,
+        force,
+        userId: requestedUserId,
       });
       if (requestSequence.current !== requestId) return;
-      const parsed = AiInsightsStatusResponseSchema.safeParse(payload);
-      if (!parsed.success) {
-        throw new Error(
-          "A API não retornou a configuração administrativa da empresa.",
-        );
-      }
-
-      const nextStatus = parsed.data;
       const configuration = nextStatus.configuration;
       if (!configuration) {
         throw new Error(
-          "A API não retornou a configuração administrativa da empresa.",
+          "Não foi possível validar a configuração de IA da empresa.",
         );
       }
       let nextPrompt = configuration.prompt;
@@ -144,7 +185,10 @@ export function AiInsightsDashboard() {
       let legacyFound = false;
 
       if (!configuration.updatedAt) {
-        const legacyPrompt = findLegacyPrompt(companyScopeId, userId);
+        const legacyPrompt = findLegacyPrompt(
+          requestedCompanyScopeId,
+          requestedUserId,
+        );
         if (legacyPrompt) {
           nextPrompt = legacyPrompt.objective || nextPrompt;
           nextConstraints = legacyPrompt.constraints;
@@ -155,8 +199,8 @@ export function AiInsightsDashboard() {
       const legacyApiKey = configuration.configured
         ? ""
         : loadAiInsightsLocalApiKey({
-            companyId: companyScopeId,
-            userId,
+            companyId: requestedCompanyScopeId,
+            userId: requestedUserId,
           });
       if (legacyApiKey) legacyFound = true;
 
@@ -171,17 +215,21 @@ export function AiInsightsDashboard() {
       setApiKey(legacyApiKey);
       setShowApiKey(false);
       setLegacyConfigurationFound(legacyFound);
-      if (configuration.configured) clearLegacyConfiguration(companyScopeId, userId);
+      setLoadedScopeKey(requestedScopeKey);
+      if (configuration.configured) {
+        clearLegacyConfiguration(requestedCompanyScopeId, requestedUserId);
+      }
     } catch (cause) {
       if (requestSequence.current !== requestId) return;
       setStatus(null);
       setForm(null);
       setApiKey("");
+      setLoadedScopeKey(requestedScopeKey);
       setError(toUiError(cause, "Não foi possível carregar a configuração de IA."));
     } finally {
       if (requestSequence.current === requestId) setLoading(false);
     }
-  }, [companyScopeId, userId]);
+  }, [companyScopeId, configurationScopeKey, userId]);
 
   React.useEffect(() => {
     void refreshConfiguration();
@@ -197,7 +245,7 @@ export function AiInsightsDashboard() {
       return;
     }
     if (!options.removeCredential && !configured?.configured && !apiKey) {
-      setError("Informe a chave da API OpenAI antes de habilitar os insights.");
+      setError("Informe a credencial da OpenAI antes de habilitar os insights.");
       return;
     }
 
@@ -219,11 +267,15 @@ export function AiInsightsDashboard() {
         companyScopeId,
         retry: false,
       });
-      if (requestSequence.current !== requestId) return;
       const parsed = AiInsightsStatusResponseSchema.safeParse(payload);
       if (!parsed.success || !parsed.data.configuration) {
-        throw new Error("A API não confirmou a configuração salva.");
+        throw new Error("Não foi possível confirmar a configuração salva.");
       }
+      writeAiInsightsConfigurationCache(
+        { companyScopeId, userId },
+        parsed.data,
+      );
+      if (requestSequence.current !== requestId) return;
 
       const nextConfiguration = parsed.data.configuration;
       setStatus(parsed.data);
@@ -302,16 +354,26 @@ export function AiInsightsDashboard() {
     }
   }
 
-  if (loading) return <ConfigurationSkeleton />;
+  if (!companyScopeId || !userId) {
+    return <CompanySelectionRequired embedded={embedded} />;
+  }
+
+  if (loading || loadedScopeKey !== configurationScopeKey) {
+    return <ConfigurationSkeleton embedded={embedded} />;
+  }
 
   if (error && !form) {
     return (
-      <Card className="border-destructive/30">
+      <Card className={cn("border-destructive/30", embedded && "shadow-none")}>
         <CardContent className="flex min-h-[260px] flex-col items-center justify-center p-6 text-center">
           <AlertTriangle className="h-8 w-8 text-destructive" />
           <h2 className="mt-3 text-base font-semibold">Configuração indisponível</h2>
           <p className="mt-1 max-w-lg text-sm leading-6 text-muted-foreground">{error}</p>
-          <Button className="mt-4" variant="outline" onClick={() => void refreshConfiguration()}>
+          <Button
+            className="mt-4"
+            variant="outline"
+            onClick={() => void refreshConfiguration({ force: true })}
+          >
             <RefreshCw className="h-4 w-4" />
             Tentar novamente
           </Button>
@@ -323,22 +385,45 @@ export function AiInsightsDashboard() {
   if (!form || !configured || !status) return null;
 
   return (
-    <div className="min-w-0 space-y-4">
+    <div
+      className={cn("min-w-0", embedded ? "space-y-3" : "space-y-4")}
+      data-ai-insights-embedded={embedded ? "true" : "false"}
+    >
       <p className="sr-only" role="status" aria-live="polite">
         {announcement}
       </p>
 
-      <section className="flex min-w-0 flex-col gap-3 rounded-md border border-border bg-card p-4 shadow-soft sm:flex-row sm:items-center sm:justify-between">
+      <section
+        className={cn(
+          "flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between",
+          embedded
+            ? "bg-transparent"
+            : "rounded-md border border-border bg-card p-4 shadow-soft",
+        )}
+      >
         <div className="flex min-w-0 items-start gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary ring-1 ring-primary/15">
-            <BrainCircuit className="h-5 w-5" />
+          <div
+            className={cn(
+              "flex shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary ring-1 ring-primary/15",
+              embedded ? "h-9 w-9" : "h-10 w-10",
+            )}
+          >
+            <BrainCog className={embedded ? "h-4 w-4" : "h-5 w-5"} />
           </div>
           <div className="min-w-0">
             <h2 className="text-base font-semibold text-foreground">
-              Inteligência configurada por empresa
+              {embedded
+                ? "Configuração do IA Advisor"
+                : "Inteligência configurada por empresa"}
             </h2>
             <p className="mt-0.5 max-w-3xl text-sm leading-5 text-muted-foreground">
-              A chave e a diretriz ficam no servidor do frontend. Admin e operador recebem somente o botão de análise quando autorizados.
+              {embedded
+                ? companyName?.trim()
+                  ? `Credencial, diretriz e disponibilidade para ${companyName.trim()}.`
+                  : "Credencial, diretriz e disponibilidade por perfil."
+                : companyName?.trim()
+                  ? `Configuração de ${companyName.trim()}. Defina a credencial, a diretriz e quem poderá solicitar análises.`
+                : "Defina a credencial e a diretriz usadas nas análises desta empresa. Administradores e operadores recebem o recurso somente quando autorizados."}
             </p>
           </div>
         </div>
@@ -349,30 +434,37 @@ export function AiInsightsDashboard() {
         <div className="flex items-start gap-2 rounded-md border border-blue-200 bg-blue-50/70 p-3 text-xs leading-5 text-blue-900 dark:border-blue-400/20 dark:bg-blue-400/[0.07] dark:text-blue-100">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
           <p>
-            A configuração que estava neste navegador foi recuperada. Clique em <strong>Salvar configuração</strong> para migrá-la ao escopo empresarial.
+            Uma configuração anterior foi recuperada. Clique em <strong>Salvar configuração</strong> para vinculá-la à empresa selecionada.
           </p>
         </div>
       ) : null}
 
-      <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
-        <div className="min-w-0 space-y-4">
-          <Card>
+      <div
+        className={cn(
+          "grid min-w-0 items-start gap-4",
+          embedded
+            ? "2xl:grid-cols-[minmax(0,1.2fr)_minmax(300px,0.8fr)]"
+            : "xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]",
+        )}
+      >
+        <div className={cn("min-w-0", embedded ? "space-y-3" : "space-y-4")}>
+          <Card className={embedded ? "shadow-none" : undefined}>
             <CardHeader className="border-b border-border p-4">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <KeyRound className="h-4 w-4 text-primary" />
                 Credencial e modelo
               </CardTitle>
               <CardDescription>
-                A credencial é write-only: depois de salva, nunca volta para o navegador.
+                Depois de salva, a credencial permanece protegida e não pode ser consultada novamente.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.38fr)]">
               <div className="space-y-1.5">
                 <div className="flex min-w-0 items-center justify-between gap-3">
-                  <Label htmlFor="ai-insights-api-key">Chave da API OpenAI</Label>
+                  <Label htmlFor="ai-insights-api-key">Credencial OpenAI</Label>
                   {configured.configured ? (
                     <Badge variant="success" className="shrink-0">
-                      Configurada · {configured.credentialFingerprint ?? "protegida"}
+                      Configurada
                     </Badge>
                   ) : (
                     <Badge variant="warning" className="shrink-0">Pendente</Badge>
@@ -407,7 +499,7 @@ export function AiInsightsDashboard() {
                     className="absolute right-1 top-1 h-8 w-8 text-muted-foreground"
                     onClick={() => setShowApiKey((current) => !current)}
                     disabled={!apiKey || saving}
-                    aria-label={showApiKey ? "Ocultar chave da API" : "Mostrar chave da API"}
+                    aria-label={showApiKey ? "Ocultar credencial" : "Mostrar credencial"}
                     aria-pressed={showApiKey}
                   >
                     {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -446,7 +538,7 @@ export function AiInsightsDashboard() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className={embedded ? "shadow-none" : undefined}>
             <CardHeader className="border-b border-border p-4">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <Bot className="h-4 w-4 text-primary" />
@@ -470,7 +562,10 @@ export function AiInsightsDashboard() {
                   onChange={(event) => updateForm("prompt", event.target.value)}
                   maxLength={AI_INSIGHTS_CONFIGURATION_LIMITS.prompt}
                   disabled={saving}
-                  className="min-h-[180px] resize-y leading-5"
+                  className={cn(
+                    "resize-y leading-5",
+                    embedded ? "min-h-[140px]" : "min-h-[180px]",
+                  )}
                   placeholder={DEFAULT_AI_INSIGHTS_PROMPT}
                 />
               </div>
@@ -511,19 +606,29 @@ export function AiInsightsDashboard() {
                   onChange={(event) => updateForm("constraints", event.target.value)}
                   maxLength={AI_INSIGHTS_CONFIGURATION_LIMITS.constraints}
                   disabled={saving}
-                  className="min-h-[180px] resize-y leading-5"
+                  className={cn(
+                    "resize-y leading-5",
+                    embedded ? "min-h-[140px]" : "min-h-[180px]",
+                  )}
                   placeholder="Registre aprendizados históricos, eventos, públicos e hipóteses da empresa. Identifique datas e marque claramente o que foi realizado, planejado ou projetado."
                 />
                 <p className="text-[11px] leading-4 text-muted-foreground">
-                  O conteúdo fica cifrado e isolado na empresa selecionada. Ele orienta hipóteses e ações futuras, mas não substitui as medições certificadas da visão.
+                  O conteúdo fica protegido e vinculado à empresa selecionada. Ele orienta hipóteses e ações futuras, mas não substitui os indicadores exibidos nos painéis.
                 </p>
               </div>
             </CardContent>
           </Card>
         </div>
 
-        <div className="min-w-0 space-y-4 xl:sticky xl:top-4">
-          <Card>
+        <div
+          className={cn(
+            "min-w-0",
+            embedded
+              ? "space-y-3"
+              : "space-y-4 xl:sticky xl:top-4",
+          )}
+        >
+          <Card className={embedded ? "shadow-none" : undefined}>
             <CardHeader className="border-b border-border p-4">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <ShieldCheck className="h-4 w-4 text-primary" />
@@ -534,28 +639,32 @@ export function AiInsightsDashboard() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3 p-4">
-              <RoleAccessToggle
+              <RoleAccessCheckbox
                 checked={form.enabledForAdmins}
                 description="Usuários administradores da empresa."
                 disabled={saving}
                 icon={UserCog}
+                id="ai-insights-admin-access"
                 label="Administradores"
                 onChange={(checked) => updateForm("enabledForAdmins", checked)}
               />
-              <RoleAccessToggle
+              <RoleAccessCheckbox
                 checked={form.enabledForOperators}
                 description="Usuários de leitura, sem acesso a configurações."
                 disabled={saving}
                 icon={Users}
+                id="ai-insights-operator-access"
                 label="Operadores"
                 onChange={(checked) => updateForm("enabledForOperators", checked)}
               />
-              <div className="rounded-md border border-border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
-                <p className="font-medium text-foreground">Experiência do usuário</p>
-                <p className="mt-1">
-                  Quando habilitado, aparece somente o ícone de IA na barra da tela. Ao clicar, o resultado abre ali mesmo; chave, prompt e modelo permanecem ocultos.
-                </p>
-              </div>
+              {!embedded ? (
+                <div className="rounded-md border border-border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
+                  <p className="font-medium text-foreground">Experiência do usuário</p>
+                  <p className="mt-1">
+                    Quando habilitado, aparece somente o ícone de IA na barra da tela. Ao clicar, o resultado abre ali mesmo; chave, prompt e modelo permanecem ocultos.
+                  </p>
+                </div>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -612,12 +721,14 @@ export function AiInsightsDashboard() {
             )
           ) : null}
 
-          <div className="flex items-start gap-2 rounded-md border border-border bg-muted/20 p-3 text-[11px] leading-5 text-muted-foreground">
-            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-            <p>
-              Persistência provisória no servidor local do frontend, isolada por empresa e cifrada em repouso. A chave nunca é retornada pela API nem enviada ao operador.
-            </p>
-          </div>
+          {!embedded ? (
+            <div className="flex items-start gap-2 rounded-md border border-border bg-muted/20 p-3 text-[11px] leading-5 text-muted-foreground">
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+              <p>
+                A credencial fica protegida por empresa e nunca é disponibilizada aos administradores ou operadores que utilizam a análise.
+              </p>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -649,11 +760,12 @@ function ConfigurationStatus({
   );
 }
 
-function RoleAccessToggle({
+function RoleAccessCheckbox({
   checked,
   description,
   disabled,
   icon: Icon,
+  id,
   label,
   onChange,
 }: {
@@ -661,19 +773,19 @@ function RoleAccessToggle({
   description: string;
   disabled: boolean;
   icon: React.ComponentType<{ className?: string }>;
+  id: string;
   label: string;
   onChange: (checked: boolean) => void;
 }) {
+  const descriptionId = `${id}-description`;
+
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
+    <label
+      htmlFor={id}
       className={cn(
-        "flex w-full min-w-0 items-center gap-3 rounded-md border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60",
+        "flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-md border p-3 text-left transition focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2",
         checked ? "border-primary/30 bg-primary/[0.045]" : "border-border bg-card hover:bg-muted/25",
+        disabled && "cursor-not-allowed opacity-60",
       )}
     >
       <span className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-md", checked ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground")}>
@@ -681,22 +793,41 @@ function RoleAccessToggle({
       </span>
       <span className="min-w-0 flex-1">
         <span className="block text-sm font-medium text-foreground">{label}</span>
-        <span className="mt-0.5 block text-xs leading-4 text-muted-foreground">{description}</span>
-      </span>
-      <span className={cn("flex h-6 w-11 shrink-0 items-center rounded-full p-0.5 transition-colors", checked ? "bg-primary" : "bg-muted-foreground/25")} aria-hidden="true">
-        <span className={cn("flex h-5 w-5 items-center justify-center rounded-full bg-white text-primary shadow-sm transition-transform", checked && "translate-x-5")}>
-          {checked ? <Check className="h-3 w-3" /> : null}
+        <span
+          id={descriptionId}
+          className="mt-0.5 block text-xs leading-4 text-muted-foreground"
+        >
+          {description}
         </span>
       </span>
-    </button>
+      <Checkbox
+        id={id}
+        checked={checked}
+        disabled={disabled}
+        aria-describedby={descriptionId}
+        onCheckedChange={(nextChecked) => onChange(nextChecked === true)}
+      />
+    </label>
   );
 }
 
-function ConfigurationSkeleton() {
+function ConfigurationSkeleton({ embedded = false }: { embedded?: boolean }) {
   return (
-    <div className="space-y-4" aria-label="Carregando configuração de IA" aria-busy="true">
-      <Skeleton className="h-20 w-full" />
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+    <div
+      className="space-y-4"
+      aria-label="Carregando configuração de IA"
+      aria-busy="true"
+      data-ai-insights-embedded={embedded ? "true" : "false"}
+    >
+      <Skeleton className={cn("w-full", embedded ? "h-16" : "h-20")} />
+      <div
+        className={cn(
+          "grid gap-4",
+          embedded
+            ? "2xl:grid-cols-[minmax(0,1.2fr)_minmax(300px,0.8fr)]"
+            : "xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]",
+        )}
+      >
         <div className="space-y-4">
           <Skeleton className="h-48 w-full" />
           <Skeleton className="h-96 w-full" />
@@ -704,6 +835,22 @@ function ConfigurationSkeleton() {
         <Skeleton className="h-80 w-full" />
       </div>
     </div>
+  );
+}
+
+function CompanySelectionRequired({ embedded }: { embedded: boolean }) {
+  return (
+    <Card data-ai-insights-embedded={embedded ? "true" : "false"}>
+      <CardContent className="flex min-h-40 flex-col items-center justify-center p-6 text-center">
+        <BrainCog className="h-7 w-7 text-muted-foreground" />
+        <h2 className="mt-3 text-sm font-semibold text-foreground">
+          Selecione uma empresa
+        </h2>
+        <p className="mt-1 max-w-md text-xs leading-5 text-muted-foreground">
+          Escolha a empresa que receberá a configuração do IA Advisor.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -732,9 +879,68 @@ function clearLegacyConfiguration(companyId: string, userId: string) {
   }
 }
 
-function toUiError(error: unknown, fallback: string) {
-  if (error instanceof ApiError || error instanceof Error) {
-    return error.message || fallback;
+function aiInsightsConfigurationCacheKey({
+  companyScopeId,
+  userId,
+}: {
+  companyScopeId: string;
+  userId: string;
+}) {
+  const companyId = companyScopeId.trim();
+  const authenticatedUserId = userId.trim();
+  return companyId && authenticatedUserId
+    ? `${encodeURIComponent(authenticatedUserId)}:${encodeURIComponent(companyId)}`
+    : "";
+}
+
+async function readAiInsightsConfiguration({
+  companyScopeId,
+  force = false,
+  userId,
+}: AiInsightsConfigurationRequestOptions) {
+  const cacheKey = aiInsightsConfigurationCacheKey({ companyScopeId, userId });
+  if (!cacheKey) {
+    throw new Error("Selecione uma empresa antes de carregar a configuração de IA.");
   }
-  return fallback;
+
+  const pendingRequest = aiInsightsConfigurationRequests.get(cacheKey);
+  if (pendingRequest) return pendingRequest;
+
+  const cached = aiInsightsConfigurationCache.get(cacheKey);
+  if (!force && cached) return cached;
+
+  const request = apiFetch<unknown>("/ai/insights", {
+    companyScopeId,
+  })
+    .then((payload) => {
+      const parsed = AiInsightsStatusResponseSchema.safeParse(payload);
+      if (!parsed.success) {
+        throw new Error(
+          "Não foi possível validar a configuração de IA da empresa.",
+        );
+      }
+      aiInsightsConfigurationCache.set(cacheKey, parsed.data);
+      return parsed.data;
+    })
+    .finally(() => {
+      if (aiInsightsConfigurationRequests.get(cacheKey) === request) {
+        aiInsightsConfigurationRequests.delete(cacheKey);
+      }
+    });
+
+  aiInsightsConfigurationRequests.set(cacheKey, request);
+  return request;
+}
+
+function writeAiInsightsConfigurationCache(
+  scope: { companyScopeId: string; userId: string },
+  nextStatus: AiInsightsStatusResponse,
+) {
+  const cacheKey = aiInsightsConfigurationCacheKey(scope);
+  if (!cacheKey) return;
+  aiInsightsConfigurationCache.set(cacheKey, nextStatus);
+}
+
+function toUiError(error: unknown, fallback: string) {
+  return userFacingErrorMessage(error, fallback);
 }

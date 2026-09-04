@@ -56,7 +56,7 @@ export async function proxyBackendRequest(
     targetUrl = `${resolveBackendBaseUrl(request)}${normalizePathname(pathname)}${request.nextUrl.search}`;
   } catch {
     return NextResponse.json(
-      { error: "Configuração do backend inválida." },
+      { error: "O serviço de dados está temporariamente indisponível." },
       { status: 500 },
     );
   }
@@ -91,8 +91,7 @@ export async function proxyBackendRequest(
   if (!response) {
     return NextResponse.json(
       {
-        error:
-          "Backend indisponível no hostname acessado. Verifique a porta e o protocolo da API.",
+        error: "Não foi possível conectar ao serviço de dados.",
       },
       { status: 502 },
     );

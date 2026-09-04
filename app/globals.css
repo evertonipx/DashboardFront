@@ -76,7 +76,19 @@
     transform: translateZ(0);
     transition:
       border-color 180ms ease,
-      box-shadow 180ms ease;
+      box-shadow 180ms ease,
+      transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  [data-premium-hover][data-premium-hover] {
+    transition-property: color, background-color, border-color, box-shadow,
+      opacity, transform;
+    transition-duration: 220ms;
+    transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  [data-premium-hover][data-premium-hover]:hover {
+    transform: translateY(-1.5px) scale(1.002);
   }
 
   [data-premium-card][data-premium-hover="true"]:hover,
@@ -108,9 +120,9 @@
   }
 
   [data-card-layout-grid] > [data-layout-card-id] {
-    grid-column: span var(--widget-column-span-single, 1) / span
+    grid-column: var(--widget-column-start-single, auto) / span
       var(--widget-column-span-single, 1) !important;
-    grid-row: span var(--widget-row-span-single, 2) / span
+    grid-row: var(--widget-row-start-single, auto) / span
       var(--widget-row-span-single, 2) !important;
   }
 
@@ -332,26 +344,30 @@
   }
 
   [data-card-layout-grid] > [data-layout-card-id] {
-    grid-column: span var(--widget-column-span-two, 6) / span
+    grid-column: var(--widget-column-start-two, auto) / span
       var(--widget-column-span-two, 6) !important;
-    grid-row: span var(--widget-row-span-multi, 2) / span
+    grid-row: var(--widget-row-start-two, auto) / span
       var(--widget-row-span-multi, 2) !important;
   }
 }
 
-/* Doze trilhas oferecem seis larguras enquanto o resolvedor preserva as
-   proporções históricas de duas, três e quatro colunas em cada faixa. */
-@container (min-width: 960px) and (max-width: 1199px) {
+/* Doze trilhas preservam as proporções responsivas e liberam os seis níveis
+   finos assim que há largura útil para um desktop compacto. */
+@container (min-width: 960px) and (max-width: 1039px) {
   [data-card-layout-grid] > [data-layout-card-id] {
-    grid-column: span var(--widget-column-span-three, 4) / span
+    grid-column: var(--widget-column-start-three, auto) / span
       var(--widget-column-span-three, 4) !important;
+    grid-row: var(--widget-row-start-three, auto) / span
+      var(--widget-row-span-multi, 2) !important;
   }
 }
 
-@container (min-width: 1200px) {
+@container (min-width: 1040px) {
   [data-card-layout-grid] > [data-layout-card-id] {
-    grid-column: span var(--widget-column-span-desktop, 3) / span
+    grid-column: var(--widget-column-start-desktop, auto) / span
       var(--widget-column-span-desktop, 3) !important;
+    grid-row: var(--widget-row-start-desktop, auto) / span
+      var(--widget-row-span-multi, 2) !important;
   }
 }
 

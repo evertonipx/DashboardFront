@@ -197,12 +197,11 @@ export function workerScopeDisplay(
   companyId?: string | null,
 ) {
   const status = workerScopeStatus(worker, companyId);
-  const workerCompanyId = resolveWorkerCompanyId(worker);
 
   if (status === "linked") {
     return {
       label: "Vinculado",
-      detail: workerCompanyId,
+      detail: "Empresa confirmada",
       variant: "success" as const,
     };
   }
@@ -210,14 +209,14 @@ export function workerScopeDisplay(
   if (status === "foreign") {
     return {
       label: "Outra empresa",
-      detail: workerCompanyId,
+      detail: "Vínculo divergente",
       variant: "destructive" as const,
     };
   }
 
   return {
-    label: "Sem vinculo explicito",
-    detail: "API nao retornou company_id",
+    label: "Vínculo pendente",
+    detail: "Empresa ainda não confirmada",
     variant: "warning" as const,
   };
 }

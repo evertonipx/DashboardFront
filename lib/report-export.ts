@@ -1,12 +1,22 @@
 "use client";
 
-import { renderEChartToDataUrl, type EnterpriseChartOption } from "@/components/app/echart";
+import type { EnterpriseChartOption } from "@/components/app/echart";
 import {
   CHART_VALUE_LABEL_ANGLE,
   chartValueLabelRightPadding,
   chartValueLabelTopPadding,
   composeChartValueLabelLayout,
 } from "@/lib/chart-value-labels";
+
+async function renderEChartToDataUrl(
+  option: EnterpriseChartOption,
+  dimensions?: { width?: number; height?: number; signal?: AbortSignal },
+) {
+  dimensions?.signal?.throwIfAborted();
+  const chartRuntime = await import("@/components/app/echart");
+  dimensions?.signal?.throwIfAborted();
+  return chartRuntime.renderEChartToDataUrl(option, dimensions);
+}
 
 export type ReportMetric = {
   label: string;
@@ -59,6 +69,7 @@ export type ReportExportMode = "complete" | "charts" | "data";
 
 type ReportExportOptions = {
   mode?: ReportExportMode;
+  signal?: AbortSignal;
 };
 
 const BRAND_BLUE = "1267C4";
@@ -74,8 +85,10 @@ export async function exportReportToExcel(
   options: ReportExportOptions = {},
 ) {
   const mode = options.mode ?? "complete";
+  options.signal?.throwIfAborted();
   const exportedAt = new Date();
   const ExcelJS = (await import("exceljs")).default;
+  options.signal?.throwIfAborted();
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "IPXData";
   workbook.created = exportedAt;
@@ -109,6 +122,7 @@ export async function exportReportToExcel(
   }
 
   for (const [index, chart] of payload.charts.entries()) {
+    options.signal?.throwIfAborted();
     if (mode !== "data") {
       const chartSheet = workbook.addWorksheet(
         safeSheetName(`Gráfico ${index + 1} ${chart.title}`),
@@ -176,8 +190,9 @@ export async function exportReportToExcel(
 
       const dataUrl = await renderEChartToDataUrl(
         withExportBarValueLabels(chart.option),
-        { height: 400, width: 900 },
+        { height: 400, signal: options.signal, width: 900 },
       );
+      options.signal?.throwIfAborted();
       const imageId = workbook.addImage({
         base64: dataUrl,
         extension: "png",
@@ -227,6 +242,7 @@ export async function exportReportToExcel(
     mode,
     payload.charts,
   ).entries()) {
+    options.signal?.throwIfAborted();
     const sheet = workbook.addWorksheet(
       safeSheetName(`Anexo ${index + 1} ${table.title}`),
       {
@@ -257,7 +273,9 @@ export async function exportReportToExcel(
     buildExcelTable(sheet, table, tableStartRow);
   }
 
+  options.signal?.throwIfAborted();
   const buffer = await workbook.xlsx.writeBuffer();
+  options.signal?.throwIfAborted();
   downloadBlob(
     new Blob([buffer as BlobPart], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -271,8 +289,10 @@ export async function exportReportToPdf(
   options: ReportExportOptions = {},
 ) {
   const mode = options.mode ?? "complete";
+  options.signal?.throwIfAborted();
   const exportedAt = new Date();
   const { jsPDF } = await import("jspdf");
+  options.signal?.throwIfAborted();
   const doc = new jsPDF({
     format: "a4",
     orientation: "landscape",
@@ -292,6 +312,7 @@ export async function exportReportToPdf(
 
   if (mode !== "data") {
     for (const [index, chart] of payload.charts.entries()) {
+      options.signal?.throwIfAborted();
       addPdfLandscapePage(doc);
       drawPdfPageHeader(
         doc,
@@ -316,15 +337,18 @@ export async function exportReportToPdf(
         withExportBarValueLabels(chart.option),
         {
           height: 400,
+          signal: options.signal,
           width: 900,
         },
       );
+      options.signal?.throwIfAborted();
       drawPdfChartImage(doc, image, chartTop);
     }
   }
 
   if (mode !== "charts") {
     for (const [index, chart] of payload.charts.entries()) {
+      options.signal?.throwIfAborted();
       addPdfLandscapePage(doc);
       drawPdfPageHeader(
         doc,
@@ -345,6 +369,7 @@ export async function exportReportToPdf(
   }
 
   for (const [index, table] of annexTables.entries()) {
+    options.signal?.throwIfAborted();
     addPdfLandscapePage(doc);
     drawPdfPageHeader(
       doc,
@@ -360,7 +385,9 @@ export async function exportReportToPdf(
     drawPdfTable(doc, table, tableTop, payload, true);
   }
 
+  options.signal?.throwIfAborted();
   drawPdfPageFooters(doc, payload, exportedAt);
+  options.signal?.throwIfAborted();
   doc.save(`${safeFilename(`${payload.filename}-${mode}`)}.pdf`);
 }
 
@@ -394,9 +421,7 @@ function buildExcelHeader(
   sheet.getCell("A5").font = labelFont();
   sheet.getCell("B5").font = valueFont();
 
-  sheet.getCell("A6").value = payload.dataCompleteUntil
-    ? "Dados completos até"
-    : "Certificação temporal";
+  sheet.getCell("A6").value = "Atualizado até";
   sheet.getCell("B6").value = reportCompletenessValue(payload);
   sheet.getCell("A6").font = labelFont();
   sheet.getCell("B6").font = valueFont();
@@ -961,13 +986,13 @@ function certifiedDataCompleteUntil(payload: ReportPayload) {
 function reportCompletenessLabel(payload: ReportPayload) {
   const value = certifiedDataCompleteUntil(payload);
   return value
-    ? `Dados completos até ${formatReportDateTime(payload, value)}`
-    : "Corte temporal não certificado";
+    ? `Dados atualizados até ${formatReportDateTime(payload, value)}`
+    : "Atualização dos dados não informada";
 }
 
 function reportCompletenessValue(payload: ReportPayload) {
   const value = certifiedDataCompleteUntil(payload);
-  return value ? formatReportDateTime(payload, value) : "Não certificado";
+  return value ? formatReportDateTime(payload, value) : "Não informada";
 }
 
 function modeLabel(mode: ReportExportMode) {
@@ -1043,6 +1068,15 @@ function chartTableDescription(chart: ReportChart) {
 function chartExportDensityNote(chart: ReportChart) {
   const rawSeries = (chart.option as { series?: unknown }).series;
   const series = Array.isArray(rawSeries) ? rawSeries : [rawSeries];
+  const hasHeatmap = series.some(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      (item as { type?: unknown }).type === "heatmap",
+  );
+  if (hasHeatmap) {
+    return "Mapa de calor: a cor sintetiza a intensidade; os valores exatos permanecem na tabela de dados.";
+  }
   const maximumPointCount = series.reduce((maximum, item) => {
     if (!item || typeof item !== "object") return maximum;
     const data = (item as { data?: unknown }).data;

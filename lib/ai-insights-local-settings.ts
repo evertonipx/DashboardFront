@@ -6,11 +6,16 @@ import {
   type AiInsightSurface,
 } from "@/lib/ai-insights-contract";
 import { getUserViewScopedStorageKey } from "@/lib/master-company-scope";
+import {
+  AI_INSIGHTS_LOCAL_API_KEY_STORAGE_KEY,
+  AI_INSIGHTS_LOCAL_PROMPT_STORAGE_KEY,
+} from "@/lib/ai-insights-storage-keys";
 
-export const AI_INSIGHTS_LOCAL_API_KEY_STORAGE_KEY =
-  "ipxdata.ai-insights-api-key.v1";
-export const AI_INSIGHTS_LOCAL_PROMPT_STORAGE_KEY =
-  "ipxdata.ai-insights-prompt.v1";
+export {
+  AI_INSIGHTS_LOCAL_API_KEY_STORAGE_KEY,
+  AI_INSIGHTS_LOCAL_PROMPT_STORAGE_KEY,
+  purgeLegacyAiInsightsLocalSettings,
+} from "@/lib/ai-insights-storage-keys";
 
 const PROMPT_SCHEMA_VERSION = 1;
 const PROMPT_TEXT_LIMIT = 500;
@@ -149,30 +154,6 @@ export function saveAiInsightsLocalPrompt(
 export function clearAiInsightsLocalPrompt(scope: LocalPromptScope) {
   const storageKey = aiInsightsLocalPromptStorageKey(scope);
   return removeExactLocalStorageEntry(storageKey);
-}
-
-/**
- * Removes credentials/prompts left by the former browser-managed flow. This
- * migration is intentionally exact-scoped and never enumerates unrelated
- * localStorage entries.
- */
-export function purgeLegacyAiInsightsLocalSettings(
-  scope: LocalCredentialScope,
-) {
-  const keyRemoved = clearAiInsightsLocalApiKey(scope);
-  let promptsRemoved = true;
-  for (const insightModule of ["counting", "occupancy"] as const) {
-    for (const surface of ["live", "analysis", "reports"] as const) {
-      promptsRemoved =
-        clearAiInsightsLocalPrompt({
-          ...scope,
-          module: insightModule,
-          surface,
-        }) &&
-        promptsRemoved;
-    }
-  }
-  return keyRemoved && promptsRemoved;
 }
 
 function normalizeStoredPrompt(value: unknown): AiInsightsLocalPrompt | null {

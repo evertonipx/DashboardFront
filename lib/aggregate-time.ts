@@ -9,6 +9,8 @@ const LOCAL_DATE_TIME_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/;
 const ZONED_DATE_TIME_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+const EXPLICIT_DATE_TIME_PARTS_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|([+-])(\d{2}):(\d{2}))$/;
 
 export function aggregateQueryIso(
   date: Date,
@@ -223,6 +225,14 @@ export function isAggregateBucketAligned(
   value: string | Date,
   granularity: AggregateGranularity,
 ) {
+  if (
+    typeof value === "string" &&
+    (granularity === "minute" || granularity === "hour")
+  ) {
+    if (EXPLICIT_DATE_TIME_PARTS_PATTERN.test(value)) {
+      return isExplicitInstantBucketAligned(value, granularity);
+    }
+  }
   const bucket = parseAggregateBucket(value, granularity);
   if (
     !bucket ||
@@ -393,4 +403,38 @@ function parseLocalDateTime(value: string) {
     date.getSeconds() === second
     ? date
     : null;
+}
+
+function isExplicitInstantBucketAligned(
+  value: string,
+  granularity: "minute" | "hour",
+) {
+  const match = EXPLICIT_DATE_TIME_PARTS_PATTERN.exec(value);
+  if (!match || hasNonZeroFractionalSecond(value)) return false;
+  if (match[8] !== "Z") {
+    const offsetHour = Number(match[10]);
+    const offsetMinute = Number(match[11]);
+    if (offsetHour > 23 || offsetMinute > 59) return false;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6] ?? 0);
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, second, 0);
+
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day &&
+    date.getUTCHours() === hour &&
+    date.getUTCMinutes() === minute &&
+    date.getUTCSeconds() === second &&
+    second === 0 &&
+    (granularity === "minute" || minute === 0) &&
+    !Number.isNaN(Date.parse(value))
+  );
 }

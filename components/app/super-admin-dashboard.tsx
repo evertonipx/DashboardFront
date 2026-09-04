@@ -4,15 +4,10 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import {
   BarChart3,
+  BrainCog,
   Building2,
-  Camera as CameraIcon,
-  CheckCircle2,
   CircuitBoard,
   Edit,
-  ListChecks,
-  MapPinned,
-  Network,
-  Settings2,
   Plus,
   RefreshCw,
   Save,
@@ -24,16 +19,17 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { DeferredAiInsightsDashboard as AiInsightsDashboard } from "@/components/app/deferred-route-panels";
 import { useAuth } from "@/components/app/auth-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -106,8 +102,12 @@ import {
   requireWorkerRows,
 } from "@/lib/metadata-validation";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
-import { operationalPermissionDefinitionForGrant } from "@/lib/permissions";
+import {
+  operationalPermissionDefinitionForGrant,
+  type OperationalModuleFamily,
+} from "@/lib/permissions";
 import { requireScenarioRows } from "@/lib/scenario-validation";
+import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type {
   Location,
   Permission,
@@ -119,7 +119,6 @@ import { getWorkerDisplayInfo } from "@/lib/worker-display";
 import {
   collapseWorkerIdentityChains,
   partitionWorkersByCompanyScope,
-  resolveWorkerCompanyId,
   sortWorkersByActivity,
   workersFromExplicitCompanyScope,
   workerScopeDisplay,
@@ -187,12 +186,16 @@ type UserFormState = {
 };
 
 type PermissionGroup = {
+  category: "product" | "administrative";
   key: string;
   name: string;
   permissions: PermissionOption[];
 };
 
 type PermissionOption = {
+  category: "product" | "administrative";
+  group_key: string;
+  group_name: string;
   id: string;
   module_id: string;
   module_name: string;
@@ -214,7 +217,13 @@ type PermissionGrantOption = {
 
 type WorkerRow = WorkerScopeRow;
 
-type CompanyTab = "users" | "workers" | "modules" | "masters";
+type CompanyTab =
+  | "companies"
+  | "users"
+  | "modules"
+  | "workers"
+  | "insights"
+  | "masters";
 
 type CompanyOperationalResource =
   | "workers"
@@ -265,10 +274,32 @@ const planLabels: Record<string, string> = {
   enterprise: "Enterprise",
 };
 
-type AlgorithmModuleFamily = "counting" | "occupancy";
+const MASTER_USER_DISCOVERY_CONCURRENCY = 4;
+
+const masterSections = new Set<CompanyTab>([
+  "companies",
+  "users",
+  "modules",
+  "workers",
+  "insights",
+  "masters",
+]);
+
+function readInitialMasterSection(): CompanyTab {
+  if (typeof window === "undefined") return "companies";
+
+  const section = new URLSearchParams(window.location.search).get("section");
+  if (section === "overview") return "companies";
+  return section && masterSections.has(section as CompanyTab)
+    ? (section as CompanyTab)
+    : "companies";
+}
+
+type AlgorithmModuleFamily = "counting" | "occupancy" | "demographics";
 
 const algorithmModuleDefinitions: Array<{
   aliases: readonly string[];
+  description: string;
   family: AlgorithmModuleFamily;
   label: string;
 }> = [
@@ -284,6 +315,7 @@ const algorithmModuleDefinitions: Array<{
       "contagem pessoas",
       "contagem de pessoas",
     ],
+    description: "Fluxo de pessoas, comparativos e desempenho operacional.",
     family: "counting",
     label: "Contagem",
   },
@@ -297,8 +329,22 @@ const algorithmModuleDefinitions: Array<{
       "ocupacao de pessoas",
       "ocupacao por area",
     ],
+    description: "Uso dos ambientes, permanência e capacidade por área.",
     family: "occupancy",
     label: "Ocupação",
+  },
+  {
+    aliases: [
+      "demographics",
+      "demographic",
+      "people demographics",
+      "demografia",
+      "demografico",
+      "demográfico",
+    ],
+    description: "Distribuição por gênero, faixa etária e emoções.",
+    family: "demographics",
+    label: "Demographics",
   },
 ];
 
@@ -308,23 +354,56 @@ export function SuperAdminDashboard() {
   const [companies, setCompanies] = React.useState<Company[]>([]);
   const [users, setUsers] = React.useState<ManagedUser[]>([]);
   const [masterUsers, setMasterUsers] = React.useState<ManagedUser[]>([]);
+  const [masterUsersLoaded, setMasterUsersLoaded] = React.useState(false);
+  const [loadingMasterUsers, setLoadingMasterUsers] = React.useState(false);
   const [workers, setWorkers] = React.useState<Worker[]>([]);
   const [modules, setModules] = React.useState<IpxModule[]>([]);
   const [companyModules, setCompanyModules] = React.useState<CompanyModule[]>([]);
   const [selectedCompanyId, setSelectedCompanyId] = React.useState("");
   const [activeCompanyTab, setActiveCompanyTab] =
-    React.useState<CompanyTab>("users");
+    React.useState<CompanyTab>(readInitialMasterSection);
+  const [checkedCompanyIds, setCheckedCompanyIds] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+  const [checkedCompanyUserIds, setCheckedCompanyUserIds] = React.useState<
+    Set<string>
+  >(() => new Set());
+  const [checkedMasterUserIds, setCheckedMasterUserIds] = React.useState<
+    Set<string>
+  >(() => new Set());
+  const [updatingCompanies, setUpdatingCompanies] = React.useState(false);
+  const [updatingCompanyUsers, setUpdatingCompanyUsers] = React.useState(false);
+  const [updatingMasterUsers, setUpdatingMasterUsers] = React.useState(false);
   const [companyQuery, setCompanyQuery] = React.useState("");
   const [userQuery, setUserQuery] = React.useState("");
   const [masterUserQuery, setMasterUserQuery] = React.useState("");
   const [companyStats, setCompanyStats] =
     React.useState<CompanyOperationalStats | null>(null);
   const [companyDetailsError, setCompanyDetailsError] = React.useState("");
+  const [companyModulesError, setCompanyModulesError] = React.useState("");
+  const [moduleCatalogError, setModuleCatalogError] = React.useState("");
+  const [permissionCatalogError, setPermissionCatalogError] =
+    React.useState("");
   const [companyOperationalWarnings, setCompanyOperationalWarnings] =
     React.useState<CompanyOperationalWarning[]>([]);
   const [loadedCompanyId, setLoadedCompanyId] = React.useState("");
+  const [loadedCompanyModulesId, setLoadedCompanyModulesId] =
+    React.useState("");
+  const [loadedWorkersCompanyId, setLoadedWorkersCompanyId] =
+    React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [loadingDetails, setLoadingDetails] = React.useState(false);
+  const [loadingCompanyModules, setLoadingCompanyModules] =
+    React.useState(false);
+  const [loadingModuleCatalog, setLoadingModuleCatalog] =
+    React.useState(false);
+  const [moduleCatalogLoaded, setModuleCatalogLoaded] = React.useState(false);
+  const [loadingPermissionCatalog, setLoadingPermissionCatalog] =
+    React.useState(false);
+  const [permissionCatalogLoaded, setPermissionCatalogLoaded] =
+    React.useState(false);
+  const [loadingOperationalDetails, setLoadingOperationalDetails] =
+    React.useState(false);
   const [companyDialog, setCompanyDialog] = React.useState(false);
   const [userDialog, setUserDialog] = React.useState(false);
   const [masterUserDialog, setMasterUserDialog] = React.useState(false);
@@ -361,6 +440,26 @@ export function SuperAdminDashboard() {
   const [updatingModuleId, setUpdatingModuleId] = React.useState("");
   const [workerScopeWarning, setWorkerScopeWarning] = React.useState("");
   const companyDetailsRequestSequenceRef = React.useRef(0);
+  const companyDetailsRequestControllerRef =
+    React.useRef<AbortController | null>(null);
+  const workerRequestSequenceRef = React.useRef(0);
+  const workerRequestControllerRef = React.useRef<AbortController | null>(null);
+  const companyModulesRequestSequenceRef = React.useRef(0);
+  const companyModulesRequestControllerRef =
+    React.useRef<AbortController | null>(null);
+  const moduleCatalogPromiseRef = React.useRef<Promise<IpxModule[]> | null>(null);
+  const permissionCatalogPromiseRef =
+    React.useRef<Promise<Permission[]> | null>(null);
+  const masterUsersRequestSequenceRef = React.useRef(0);
+  const companyUsersCacheRef = React.useRef(
+    new Map<string, ManagedUser[]>(),
+  );
+  const companyModulesCacheRef = React.useRef(
+    new Map<string, CompanyModule[]>(),
+  );
+  const companyWorkersCacheRef = React.useRef(new Map<string, Worker[]>());
+  const modulesRef = React.useRef<IpxModule[]>([]);
+  const dashboardMountedRef = React.useRef(true);
   const selectedCompanyIdRef = React.useRef(selectedCompanyId);
   const userPermissionRequestSequenceRef = React.useRef(0);
   const userPermissionRequestContextRef = React.useRef<{
@@ -411,9 +510,55 @@ export function SuperAdminDashboard() {
       if (selectedCompanyIdRef.current === nextCompanyId) return;
 
       selectedCompanyIdRef.current = nextCompanyId;
+      companyDetailsRequestControllerRef.current?.abort(
+        new DOMException("Outra empresa foi selecionada.", "AbortError"),
+      );
+      companyDetailsRequestControllerRef.current = null;
       companyDetailsRequestSequenceRef.current += 1;
+      workerRequestControllerRef.current?.abort(
+        new DOMException("Outra empresa foi selecionada.", "AbortError"),
+      );
+      workerRequestControllerRef.current = null;
+      workerRequestSequenceRef.current += 1;
+      companyModulesRequestControllerRef.current?.abort(
+        new DOMException("Outra empresa foi selecionada.", "AbortError"),
+      );
+      companyModulesRequestControllerRef.current = null;
+      companyModulesRequestSequenceRef.current += 1;
       invalidateUserPermissionRequest({ closeDialog: true });
-      setLoadedCompanyId("");
+      const cachedUsers = companyUsersCacheRef.current.get(nextCompanyId);
+      const cachedModules = companyModulesCacheRef.current.get(nextCompanyId);
+      const cachedWorkers = companyWorkersCacheRef.current.get(nextCompanyId);
+      setUsers(
+        cachedUsers
+          ? companyNonMasterUsersForScope(cachedUsers, nextCompanyId)
+          : [],
+      );
+      setCompanyModules(cachedModules ?? []);
+      setWorkers(cachedWorkers ?? []);
+      setLoadedCompanyId(cachedUsers ? nextCompanyId : "");
+      setLoadedCompanyModulesId(cachedModules ? nextCompanyId : "");
+      setLoadedWorkersCompanyId(cachedWorkers ? nextCompanyId : "");
+      setCompanyDetailsError("");
+      setCompanyModulesError("");
+      setCompanyOperationalWarnings([]);
+      setWorkerScopeWarning("");
+      setCheckedCompanyUserIds(new Set());
+      setCompanyStats(
+        cachedModules || cachedWorkers
+          ? {
+              modules: cachedModules
+                ? enabledCompanyModuleCount(cachedModules, modulesRef.current)
+                : 0,
+              cameras: null,
+              locations: null,
+              subLocations: null,
+              countingScenarios: null,
+              occupancyScenarios: null,
+              workers: cachedWorkers?.length ?? null,
+            }
+          : null,
+      );
       setSelectedCompanyId(nextCompanyId);
     },
     [invalidateUserPermissionRequest],
@@ -421,10 +566,35 @@ export function SuperAdminDashboard() {
 
   const canPublishCompanyDetails = React.useCallback(
     (requestSequence: number, companyId: string) =>
+      dashboardMountedRef.current &&
       requestSequence === companyDetailsRequestSequenceRef.current &&
       selectedCompanyIdRef.current === companyId,
     [],
   );
+
+  React.useEffect(() => {
+    dashboardMountedRef.current = true;
+    return () => {
+      dashboardMountedRef.current = false;
+      companyDetailsRequestControllerRef.current?.abort(
+        new DOMException("A gestão da empresa foi fechada.", "AbortError"),
+      );
+      companyDetailsRequestControllerRef.current = null;
+      workerRequestControllerRef.current?.abort(
+        new DOMException("A gestão da empresa foi fechada.", "AbortError"),
+      );
+      workerRequestControllerRef.current = null;
+      companyModulesRequestControllerRef.current?.abort(
+        new DOMException("A gestão da empresa foi fechada.", "AbortError"),
+      );
+      companyModulesRequestControllerRef.current = null;
+      companyDetailsRequestSequenceRef.current += 1;
+      workerRequestSequenceRef.current += 1;
+      companyModulesRequestSequenceRef.current += 1;
+      masterUsersRequestSequenceRef.current += 1;
+      userPermissionRequestSequenceRef.current += 1;
+    };
+  }, []);
 
   const selectedCompany = React.useMemo(
     () => companies.find((company) => company.id === selectedCompanyId) ?? null,
@@ -442,16 +612,58 @@ export function SuperAdminDashboard() {
     );
   }, [companies, companyQuery]);
 
+  const checkedVisibleCompanyCount = React.useMemo(
+    () =>
+      filteredCompanies.reduce(
+        (total, company) => total + Number(checkedCompanyIds.has(company.id)),
+        0,
+      ),
+    [checkedCompanyIds, filteredCompanies],
+  );
+  const allVisibleCompaniesChecked = Boolean(
+    filteredCompanies.length &&
+      checkedVisibleCompanyCount === filteredCompanies.length,
+  );
+
+  React.useEffect(() => {
+    const companyIds = new Set(companies.map((company) => company.id));
+    setCheckedCompanyIds((current) => {
+      const next = new Set(
+        Array.from(current).filter((companyId) => companyIds.has(companyId)),
+      );
+      return next.size === current.size ? current : next;
+    });
+  }, [companies]);
+
+  const companyUsersForSelectedScope = React.useMemo(
+    () => companyNonMasterUsersForScope(users, selectedCompanyId),
+    [selectedCompanyId, users],
+  );
+
   const filteredUsers = React.useMemo(() => {
     const query = userQuery.trim().toLowerCase();
-    if (!query) return users;
+    if (!query) return companyUsersForSelectedScope;
 
-    return users.filter((user) =>
+    return companyUsersForSelectedScope.filter((user) =>
       [user.name, user.email]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(query)),
     );
-  }, [userQuery, users]);
+  }, [companyUsersForSelectedScope, userQuery]);
+
+  const checkedVisibleCompanyUserCount = React.useMemo(
+    () =>
+      filteredUsers.reduce(
+        (total, managedUser) =>
+          total + Number(checkedCompanyUserIds.has(managedUser.id)),
+        0,
+      ),
+    [checkedCompanyUserIds, filteredUsers],
+  );
+  const allVisibleCompanyUsersChecked = Boolean(
+    filteredUsers.length &&
+      checkedVisibleCompanyUserCount === filteredUsers.length,
+  );
 
   const filteredMasterUsers = React.useMemo(() => {
     const query = masterUserQuery.trim().toLowerCase();
@@ -464,8 +676,55 @@ export function SuperAdminDashboard() {
     );
   }, [masterUserQuery, masterUsers]);
 
+  const selectableFilteredMasterUsers = React.useMemo(
+    () =>
+      filteredMasterUsers.filter(
+        (managedUser) => managedUser.id !== currentUser?.id,
+      ),
+    [currentUser?.id, filteredMasterUsers],
+  );
+  const checkedVisibleMasterUserCount = React.useMemo(
+    () =>
+      selectableFilteredMasterUsers.reduce(
+        (total, managedUser) =>
+          total + Number(checkedMasterUserIds.has(managedUser.id)),
+        0,
+      ),
+    [checkedMasterUserIds, selectableFilteredMasterUsers],
+  );
+  const allVisibleMasterUsersChecked = Boolean(
+    selectableFilteredMasterUsers.length &&
+      checkedVisibleMasterUserCount === selectableFilteredMasterUsers.length,
+  );
+
+  React.useEffect(() => {
+    const userIds = new Set(
+      companyUsersForSelectedScope.map((managedUser) => managedUser.id),
+    );
+    setCheckedCompanyUserIds((current) => {
+      const next = new Set(
+        Array.from(current).filter((userId) => userIds.has(userId)),
+      );
+      return next.size === current.size ? current : next;
+    });
+  }, [companyUsersForSelectedScope]);
+
+  React.useEffect(() => {
+    const userIds = new Set(
+      masterUsers
+        .filter((managedUser) => managedUser.id !== currentUser?.id)
+        .map((managedUser) => managedUser.id),
+    );
+    setCheckedMasterUserIds((current) => {
+      const next = new Set(
+        Array.from(current).filter((userId) => userIds.has(userId)),
+      );
+      return next.size === current.size ? current : next;
+    });
+  }, [currentUser?.id, masterUsers]);
+
   const visibleModules = React.useMemo(
-    () => selectVisibleModules(modules),
+    () => selectVisibleProductModules(modules),
     [modules],
   );
 
@@ -494,7 +753,7 @@ export function SuperAdminDashboard() {
           unavailable: option.unavailable || !hasEnabledGrant,
           description:
             option.grants.length && !hasEnabledGrant
-              ? `${option.description} Habilite o módulo para esta empresa antes de conceder este acesso.`
+              ? `${option.description} Habilite o módulo ou recurso correspondente antes de conceder este acesso.`
               : option.description,
         };
       }),
@@ -515,27 +774,12 @@ export function SuperAdminDashboard() {
   const loadCompanies = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [companyPayload, moduleRows, permissionRows] = await Promise.all([
-        apiFetch<Company[]>("/companies"),
-        apiFetch<IpxModule[]>("/modules").catch(() => []),
-        apiFetch<Permission[]>("/permissions").catch(() => []),
-      ]);
+      const companyPayload = await apiFetch<Company[]>("/companies");
+      if (!dashboardMountedRef.current) return;
       const companyRows = companyPayload.map(normalizeCompanyRecord);
-      const companyUserRows = await Promise.all(
-        companyRows.map((company) =>
-          apiFetch<ManagedUser[]>(`/companies/${company.id}/users`, {
-            companyScopeId: company.id,
-          }).catch(() => []),
-        ),
-      );
 
       setCompanies(companyRows);
       writeCompanyCache(companyRows);
-      setModules(moduleRows);
-      setPermissionCatalog(permissionRows);
-      setMasterUsers(
-        uniqueRowsById(companyUserRows.flat()).filter((user) => user.is_master),
-      );
       const storedScope = getStoredMasterCompanyScope();
       const declaredCompanyId = getCurrentUserCompanyId(currentUser);
       const currentCompanyId = selectedCompanyIdRef.current;
@@ -552,25 +796,171 @@ export function SuperAdminDashboard() {
               : companyRows[0]?.id ?? "";
       selectCompanyId(nextCompanyId);
     } catch (error) {
+      if (!dashboardMountedRef.current) return;
       setWorkers([]);
       setWorkerScopeWarning("");
       setCompanyOperationalWarnings([]);
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar empresas.",
+        managementErrorMessage(error, "Não foi possível carregar as empresas."),
       );
     } finally {
-      setLoading(false);
+      if (dashboardMountedRef.current) setLoading(false);
     }
   }, [currentUser, selectCompanyId]);
 
-  const loadCompanyDetails = React.useCallback(async (expectedCompanyId: string) => {
+  const loadModuleCatalog = React.useCallback(async (
+    { force = false }: { force?: boolean } = {},
+  ) => {
+    if (!force && moduleCatalogLoaded) return modulesRef.current;
+    if (moduleCatalogPromiseRef.current) {
+      return moduleCatalogPromiseRef.current;
+    }
+
+    setLoadingModuleCatalog(true);
+    setModuleCatalogError("");
+    const request = apiFetch<IpxModule[]>("/modules")
+      .then((rows) => {
+        if (!dashboardMountedRef.current) return rows;
+        modulesRef.current = rows;
+        setModules(rows);
+        setModuleCatalogLoaded(true);
+        return rows;
+      })
+      .catch((error) => {
+        if (dashboardMountedRef.current) {
+          setModuleCatalogError(
+            managementErrorMessage(
+              error,
+              "Não foi possível carregar o catálogo de módulos.",
+            ),
+          );
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (moduleCatalogPromiseRef.current === request) {
+          moduleCatalogPromiseRef.current = null;
+        }
+        if (dashboardMountedRef.current) setLoadingModuleCatalog(false);
+      });
+    moduleCatalogPromiseRef.current = request;
+    return request;
+  }, [moduleCatalogLoaded]);
+
+  const loadPermissionCatalog = React.useCallback(async (
+    { force = false }: { force?: boolean } = {},
+  ) => {
+    if (!force && permissionCatalogLoaded) return permissionCatalog;
+    if (permissionCatalogPromiseRef.current) {
+      return permissionCatalogPromiseRef.current;
+    }
+
+    setLoadingPermissionCatalog(true);
+    setPermissionCatalogError("");
+    const request = apiFetch<Permission[]>("/permissions")
+      .then((rows) => {
+        if (!dashboardMountedRef.current) return rows;
+        setPermissionCatalog(rows);
+        setPermissionCatalogLoaded(true);
+        return rows;
+      })
+      .catch((error) => {
+        if (dashboardMountedRef.current) {
+          setPermissionCatalogError(
+            managementErrorMessage(
+              error,
+              "Não foi possível carregar as opções de acesso.",
+            ),
+          );
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (permissionCatalogPromiseRef.current === request) {
+          permissionCatalogPromiseRef.current = null;
+        }
+        if (dashboardMountedRef.current) setLoadingPermissionCatalog(false);
+      });
+    permissionCatalogPromiseRef.current = request;
+    return request;
+  }, [permissionCatalog, permissionCatalogLoaded]);
+
+  const loadMasterUsers = React.useCallback(async (
+    { force = false }: { force?: boolean } = {},
+  ) => {
+    if (loading || (!force && masterUsersLoaded)) return;
+
+    const requestSequence = ++masterUsersRequestSequenceRef.current;
+    const companyRows = companies;
+    setLoadingMasterUsers(true);
+    try {
+      const companyUserRows = await mapWithConcurrency(
+        companyRows,
+        MASTER_USER_DISCOVERY_CONCURRENCY,
+        async (company) => {
+          if (requestSequence !== masterUsersRequestSequenceRef.current) {
+            return [];
+          }
+          const cached = companyUsersCacheRef.current.get(company.id);
+          if (!force && cached) return cached;
+
+          const rows = await apiFetch<ManagedUser[]>(
+            `/companies/${company.id}/users`,
+            { companyScopeId: company.id },
+          ).catch(() => []);
+          const scopedRows = rows.flatMap((user) => {
+            const returnedCompanyId = getScopedRowCompanyId(user);
+            if (returnedCompanyId && returnedCompanyId !== company.id) {
+              return [];
+            }
+            return [{ ...user, company_id: company.id }];
+          });
+          companyUsersCacheRef.current.set(company.id, scopedRows);
+          return scopedRows;
+        },
+      );
+      if (requestSequence !== masterUsersRequestSequenceRef.current) return;
+
+      setMasterUsers(
+        uniqueRowsById(companyUserRows.flat()).filter((user) => user.is_master),
+      );
+      setMasterUsersLoaded(true);
+    } finally {
+      if (requestSequence === masterUsersRequestSequenceRef.current) {
+        setLoadingMasterUsers(false);
+      }
+    }
+  }, [companies, loading, masterUsersLoaded]);
+
+  const loadCompanyDetails = React.useCallback(async (
+    expectedCompanyId: string,
+    {
+      force = false,
+      includeOperational = false,
+    }: { force?: boolean; includeOperational?: boolean } = {},
+  ) => {
     const companyId = expectedCompanyId.trim();
     if (selectedCompanyIdRef.current !== companyId) return;
 
+    const cachedUsers = companyUsersCacheRef.current.get(companyId);
+    const cachedModules = companyModulesCacheRef.current.get(companyId);
+    if (!force && !includeOperational && cachedUsers && cachedModules) {
+      setUsers(companyNonMasterUsersForScope(cachedUsers, companyId));
+      setCompanyModules(cachedModules);
+      setLoadedCompanyId(companyId);
+      setLoadedCompanyModulesId(companyId);
+      setCompanyDetailsError("");
+      return;
+    }
+
+    companyDetailsRequestControllerRef.current?.abort(
+      new DOMException("Outra empresa foi selecionada.", "AbortError"),
+    );
+    const controller = new AbortController();
+    companyDetailsRequestControllerRef.current = controller;
     const requestSequence = ++companyDetailsRequestSequenceRef.current;
     if (!companyId) {
+      companyDetailsRequestControllerRef.current = null;
       setUsers([]);
       setCompanyModules([]);
       setWorkers([]);
@@ -579,46 +969,83 @@ export function SuperAdminDashboard() {
       setCompanyStats(null);
       setCompanyDetailsError("");
       setLoadedCompanyId("");
+      setLoadedCompanyModulesId("");
+      setLoadedWorkersCompanyId("");
       setLoadingDetails(false);
+      setLoadingOperationalDetails(false);
       return;
     }
 
     setLoadingDetails(true);
-    setCompanyStats(null);
+    if (includeOperational) setLoadingOperationalDetails(true);
+    if (includeOperational) setCompanyStats(null);
     setCompanyDetailsError("");
     setLoadedCompanyId("");
-    setWorkerScopeWarning("");
-    setCompanyOperationalWarnings([]);
+    if (includeOperational) {
+      setWorkerScopeWarning("");
+      setCompanyOperationalWarnings([]);
+    }
     let administrativeDetailsCertified = false;
     let certifiedModuleRows: CompanyModule[] = [];
     try {
       const [userRows, moduleRows] = await Promise.all([
         apiFetch<ManagedUser[]>(`/companies/${companyId}/users`, {
           companyScopeId: companyId,
+          signal: controller.signal,
         }),
         apiFetch<CompanyModule[]>(
           `/companies/${companyId}/modules`,
-          { companyScopeId: companyId },
+          { companyScopeId: companyId, signal: controller.signal },
         ),
       ]);
       const companyScopeIds = uniqueScopeIds(companyId);
+      const scopedModuleRows = selectExplicitCompanyScopedRows(
+        moduleRows,
+        companyId,
+        { label: "módulos da empresa" },
+      ).rows as CompanyModule[];
       const scopedUserRows = userRows.filter((user) => {
         const userCompanyId = getScopedRowCompanyId(user);
         return !userCompanyId || companyScopeIds.includes(userCompanyId);
       });
+      const certifiedScopedUserRows = scopedUserRows.map((user) => ({
+        ...user,
+        company_id: companyId,
+      }));
       if (!canPublishCompanyDetails(requestSequence, companyId)) return;
+      companyUsersCacheRef.current.set(
+        companyId,
+        certifiedScopedUserRows,
+      );
 
       // Administrative data is certified independently from the operational
       // resources below. A broken tenant scope in Workers or Scenarios must not
       // erase users and modules that came from company-scoped routes.
       administrativeDetailsCertified = true;
-      certifiedModuleRows = moduleRows;
-      setUsers(scopedUserRows.filter((user) => !user.is_master));
-      setCompanyModules(moduleRows);
+      certifiedModuleRows = scopedModuleRows;
+      setUsers(companyNonMasterUsersForScope(certifiedScopedUserRows, companyId));
+      setCompanyModules(scopedModuleRows);
+      setLoadedCompanyModulesId(companyId);
+      companyModulesCacheRef.current.set(companyId, scopedModuleRows);
       setLoadedCompanyId(companyId);
-      const authenticatedCompanyId = getCurrentUserCompanyId(currentUser);
-      const canQueryJwtBoundCatalogs =
-        !authenticatedCompanyId || authenticatedCompanyId === companyId;
+      setLoadingDetails(false);
+      setCompanyStats((current) => ({
+        modules: enabledCompanyModuleCount(
+          scopedModuleRows,
+          modulesRef.current,
+        ),
+        cameras: current?.cameras ?? null,
+        locations: current?.locations ?? null,
+        subLocations: current?.subLocations ?? null,
+        countingScenarios: current?.countingScenarios ?? null,
+        occupancyScenarios: current?.occupancyScenarios ?? null,
+        workers: current?.workers ?? null,
+      }));
+      if (!includeOperational) return;
+      // Let React publish the user/module controls before starting the wider
+      // operational catalog fan-out used only by the summary and collectors.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      if (!canPublishCompanyDetails(requestSequence, companyId)) return;
       const [
         workerResult,
         locationResult,
@@ -626,33 +1053,38 @@ export function SuperAdminDashboard() {
         scenarioResult,
         occupancyScenarioResult,
       ] = await Promise.allSettled([
-        canQueryJwtBoundCatalogs
-          ? fetchScopedWorkers(companyId)
-          : Promise.resolve([]),
-        fetchValidatedRows("/locations", requireLocationRows, companyId),
-        fetchValidatedRows("/cameras", requireCameraRows, companyId),
-        canQueryJwtBoundCatalogs
-          ? fetchValidatedRows("/scenarios", requireScenarioRows, companyId)
-          : Promise.resolve([]),
-        fetchScopedOccupancyScenarios(companyId),
+        fetchScopedWorkers(companyId, controller.signal),
+        fetchValidatedRows(
+          "/locations",
+          requireLocationRows,
+          companyId,
+          controller.signal,
+        ),
+        fetchValidatedRows(
+          "/cameras",
+          requireCameraRows,
+          companyId,
+          controller.signal,
+        ),
+        fetchValidatedRows(
+          "/scenarios",
+          requireScenarioRows,
+          companyId,
+          controller.signal,
+        ),
+        fetchScopedOccupancyScenarios(companyId, controller.signal),
       ]);
       const operationalWarnings: CompanyOperationalWarning[] = [];
-      // These two legacy endpoints derive tenant exclusively from the JWT.
-      // Calling them while a Master selected another company returns valid
-      // rows from the token's home tenant, which must not be presented as an
-      // operational failure (or, worse, as data from the selected company).
-      const workerRows = canQueryJwtBoundCatalogs
-        ? certifiedSettledRows(
-            workerResult,
-            "workers",
-            "Workers",
-            operationalWarnings,
-          )
-        : null;
+      const workerRows = certifiedSettledRows(
+        workerResult,
+        "workers",
+        "Workers",
+        operationalWarnings,
+      );
       const locationRows = certifiedSettledRows(
         locationResult,
         "locations",
-        "Locations",
+        "Locais",
         operationalWarnings,
       );
       const cameraRows = certifiedSettledRows(
@@ -661,14 +1093,12 @@ export function SuperAdminDashboard() {
         "Câmeras",
         operationalWarnings,
       );
-      const scenarioRows = canQueryJwtBoundCatalogs
-        ? certifiedSettledRows(
-            scenarioResult,
-            "countingScenarios",
-            "Cenários de Contagem",
-            operationalWarnings,
-          )
-        : null;
+      const scenarioRows = certifiedSettledRows(
+        scenarioResult,
+        "countingScenarios",
+        "Cenários de Contagem",
+        operationalWarnings,
+      );
       const occupancyScenarioRows = certifiedSettledRows(
         occupancyScenarioResult,
         "occupancyScenarios",
@@ -697,6 +1127,7 @@ export function SuperAdminDashboard() {
             scopedLocations,
             companyScopeIds,
             companyId,
+            controller.signal,
           );
           requireInfrastructureRelations({
             cameras: [],
@@ -708,7 +1139,7 @@ export function SuperAdminDashboard() {
           operationalWarnings.push(
             operationalResourceWarning(
               "subLocations",
-              "Sublocations",
+              "Sublocais",
               error,
             ),
           );
@@ -734,11 +1165,6 @@ export function SuperAdminDashboard() {
       const collapsedWorkerRows = collapseWorkerIdentityChains(
         workersFromExplicitCompanyScope(workerScopePartition),
       );
-      const collapsedWorkerDuplicateCount = collapsedWorkerRows.reduce(
-        (count, worker) =>
-          count + Math.max(0, (worker.__duplicate_record_count ?? 1) - 1),
-        0,
-      );
 
       if (!canPublishCompanyDetails(requestSequence, companyId)) return;
 
@@ -746,7 +1172,10 @@ export function SuperAdminDashboard() {
         workerRows ? sortWorkersByActivity(collapsedWorkerRows) : [],
       );
       setCompanyStats({
-        modules: enabledCompanyModuleCount(moduleRows, modules),
+        modules: enabledCompanyModuleCount(
+          scopedModuleRows,
+          modulesRef.current,
+        ),
         cameras: scopedCameras?.length ?? null,
         locations: scopedLocations?.length ?? null,
         subLocations: subLocationRows?.length ?? null,
@@ -755,30 +1184,23 @@ export function SuperAdminDashboard() {
         workers: workerRows ? collapsedWorkerRows.length : null,
       });
       setCompanyOperationalWarnings(operationalWarnings);
-      setWorkerScopeWarning(
-        workerRows
-          ? buildWorkerScopeWarning(
-              workerScopePartition.foreignRows.length,
-              workerScopePartition.unscopedRows.length,
-              collapsedWorkerDuplicateCount,
-              companyId,
-              uniqueScopeIds(
-                workerScopePartition.foreignRows.map(resolveWorkerCompanyId),
-              ),
-            )
-          : "",
-      );
+      setWorkerScopeWarning("");
     } catch (error) {
       if (!canPublishCompanyDetails(requestSequence, companyId)) return;
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar dados da empresa.";
-      setWorkers([]);
-      setWorkerScopeWarning("");
+      const message = managementErrorMessage(
+        error,
+        "Não foi possível carregar os dados da empresa.",
+      );
+      if (includeOperational) {
+        setWorkers([]);
+        setWorkerScopeWarning("");
+      }
       if (administrativeDetailsCertified) {
         setCompanyStats({
-          modules: enabledCompanyModuleCount(certifiedModuleRows, modules),
+          modules: enabledCompanyModuleCount(
+            certifiedModuleRows,
+            modulesRef.current,
+          ),
           cameras: null,
           locations: null,
           subLocations: null,
@@ -786,21 +1208,21 @@ export function SuperAdminDashboard() {
           occupancyScenarios: null,
           workers: null,
         });
-        setCompanyOperationalWarnings(
-          allOperationalResourceWarnings(
-            message,
-            !getCurrentUserCompanyId(currentUser) ||
-              getCurrentUserCompanyId(currentUser) === companyId,
-          ),
-        );
+        if (includeOperational) {
+          setCompanyOperationalWarnings(
+            allOperationalResourceWarnings(message),
+          );
+        }
         toast.warning(
-          "Dados operacionais parciais. Usuários e módulos certificados foram preservados.",
+          "Parte dos dados operacionais está indisponível. Usuários e módulos foram preservados.",
         );
       } else {
         setUsers([]);
         setCompanyModules([]);
-        setCompanyOperationalWarnings([]);
-        setCompanyStats(null);
+        if (includeOperational) {
+          setCompanyOperationalWarnings([]);
+          setCompanyStats(null);
+        }
         setCompanyDetailsError(message);
         setLoadedCompanyId("");
         toast.error(message);
@@ -808,9 +1230,182 @@ export function SuperAdminDashboard() {
     } finally {
       if (canPublishCompanyDetails(requestSequence, companyId)) {
         setLoadingDetails(false);
+        if (includeOperational) setLoadingOperationalDetails(false);
+      }
+      if (companyDetailsRequestControllerRef.current === controller) {
+        companyDetailsRequestControllerRef.current = null;
       }
     }
-  }, [canPublishCompanyDetails, currentUser, modules]);
+  }, [canPublishCompanyDetails]);
+
+  const loadCompanyModules = React.useCallback(async (
+    expectedCompanyId: string,
+    { force = false }: { force?: boolean } = {},
+  ) => {
+    const companyId = expectedCompanyId.trim();
+    if (!companyId || selectedCompanyIdRef.current !== companyId) return;
+
+    const cached = companyModulesCacheRef.current.get(companyId);
+    if (!force && cached) {
+      setCompanyModules(cached);
+      setLoadedCompanyModulesId(companyId);
+      setCompanyModulesError("");
+      return;
+    }
+
+    companyModulesRequestControllerRef.current?.abort(
+      new DOMException("A consulta de módulos foi substituída.", "AbortError"),
+    );
+    const controller = new AbortController();
+    companyModulesRequestControllerRef.current = controller;
+    const requestSequence = ++companyModulesRequestSequenceRef.current;
+    setLoadingCompanyModules(true);
+    setCompanyModulesError("");
+
+    try {
+      const moduleRows = await apiFetch<CompanyModule[]>(
+        `/companies/${companyId}/modules`,
+        { companyScopeId: companyId, signal: controller.signal },
+      );
+      const scopedRows = selectExplicitCompanyScopedRows(
+        moduleRows,
+        companyId,
+        { label: "módulos da empresa" },
+      ).rows as CompanyModule[];
+      if (
+        controller.signal.aborted ||
+        requestSequence !== companyModulesRequestSequenceRef.current ||
+        selectedCompanyIdRef.current !== companyId
+      ) {
+        return;
+      }
+      companyModulesCacheRef.current.set(companyId, scopedRows);
+      setCompanyModules(scopedRows);
+      setLoadedCompanyModulesId(companyId);
+      setCompanyStats((current) => ({
+        modules: enabledCompanyModuleCount(scopedRows, modulesRef.current),
+        cameras: current?.cameras ?? null,
+        locations: current?.locations ?? null,
+        subLocations: current?.subLocations ?? null,
+        countingScenarios: current?.countingScenarios ?? null,
+        occupancyScenarios: current?.occupancyScenarios ?? null,
+        workers: current?.workers ?? null,
+      }));
+    } catch (error) {
+      if (
+        controller.signal.aborted ||
+        requestSequence !== companyModulesRequestSequenceRef.current ||
+        selectedCompanyIdRef.current !== companyId
+      ) {
+        return;
+      }
+      setCompanyModules([]);
+      setLoadedCompanyModulesId(companyId);
+      setCompanyModulesError(
+        managementErrorMessage(
+          error,
+          "Não foi possível carregar os módulos desta empresa.",
+        ),
+      );
+    } finally {
+      if (
+        requestSequence === companyModulesRequestSequenceRef.current &&
+        selectedCompanyIdRef.current === companyId
+      ) {
+        setLoadingCompanyModules(false);
+      }
+      if (companyModulesRequestControllerRef.current === controller) {
+        companyModulesRequestControllerRef.current = null;
+      }
+    }
+  }, []);
+
+  const loadCompanyWorkers = React.useCallback(async (
+    expectedCompanyId: string,
+    { force = false }: { force?: boolean } = {},
+  ) => {
+    const companyId = expectedCompanyId.trim();
+    if (!companyId || selectedCompanyIdRef.current !== companyId) return;
+
+    const cached = companyWorkersCacheRef.current.get(companyId);
+    if (!force && cached) {
+      setWorkers(cached);
+      setLoadedWorkersCompanyId(companyId);
+      setCompanyOperationalWarnings([]);
+      setCompanyStats((current) => ({
+        modules: current?.modules ?? 0,
+        cameras: current?.cameras ?? null,
+        locations: current?.locations ?? null,
+        subLocations: current?.subLocations ?? null,
+        countingScenarios: current?.countingScenarios ?? null,
+        occupancyScenarios: current?.occupancyScenarios ?? null,
+        workers: cached.length,
+      }));
+      return;
+    }
+
+    workerRequestControllerRef.current?.abort(
+      new DOMException("A consulta de Workers foi substituída.", "AbortError"),
+    );
+    const controller = new AbortController();
+    workerRequestControllerRef.current = controller;
+    const requestSequence = ++workerRequestSequenceRef.current;
+    setLoadingOperationalDetails(true);
+    setCompanyOperationalWarnings([]);
+    setWorkerScopeWarning("");
+
+    try {
+      const workerRows = await fetchScopedWorkers(companyId, controller.signal);
+      const scopedRows = collapseWorkerIdentityChains(
+        workersFromExplicitCompanyScope(
+          partitionWorkersByCompanyScope(workerRows, uniqueScopeIds(companyId)),
+        ),
+      );
+      const sortedRows = sortWorkersByActivity(scopedRows);
+      if (
+        controller.signal.aborted ||
+        requestSequence !== workerRequestSequenceRef.current ||
+        selectedCompanyIdRef.current !== companyId
+      ) {
+        return;
+      }
+      companyWorkersCacheRef.current.set(companyId, sortedRows);
+      setWorkers(sortedRows);
+      setLoadedWorkersCompanyId(companyId);
+      setCompanyStats((current) => ({
+        modules: current?.modules ?? 0,
+        cameras: current?.cameras ?? null,
+        locations: current?.locations ?? null,
+        subLocations: current?.subLocations ?? null,
+        countingScenarios: current?.countingScenarios ?? null,
+        occupancyScenarios: current?.occupancyScenarios ?? null,
+        workers: sortedRows.length,
+      }));
+    } catch (error) {
+      if (
+        controller.signal.aborted ||
+        requestSequence !== workerRequestSequenceRef.current ||
+        selectedCompanyIdRef.current !== companyId
+      ) {
+        return;
+      }
+      setWorkers([]);
+      setLoadedWorkersCompanyId(companyId);
+      setCompanyOperationalWarnings([
+        operationalResourceWarning("workers", "Workers", error),
+      ]);
+    } finally {
+      if (
+        requestSequence === workerRequestSequenceRef.current &&
+        selectedCompanyIdRef.current === companyId
+      ) {
+        setLoadingOperationalDetails(false);
+      }
+      if (workerRequestControllerRef.current === controller) {
+        workerRequestControllerRef.current = null;
+      }
+    }
+  }, []);
 
   React.useEffect(() => {
     loadCompanies();
@@ -843,13 +1438,13 @@ export function SuperAdminDashboard() {
         companyScopeId: company.id,
       });
       if (response.id?.trim() !== company.id) {
-        throw new Error("A API retornou o cadastro de outra empresa.");
+        throw new Error("Os dados recebidos não correspondem à empresa selecionada.");
       }
       const detailedCompany = normalizeCompanyRecord(response);
       const timeZone = canonicalCompanyTimeZone(detailedCompany.timezone);
       if (!timeZone) {
         throw new Error(
-          "O detalhe da empresa não informou um timezone IANA válido.",
+          "A empresa ainda não possui um fuso horário válido.",
         );
       }
       const certifiedCompany = {
@@ -868,9 +1463,10 @@ export function SuperAdminDashboard() {
     } catch (error) {
       if (notifyFailure) {
         toast.error(
-          error instanceof Error
-            ? `Não foi possível certificar o fuso da empresa: ${error.message}`
-            : "Não foi possível certificar o fuso da empresa.",
+          managementErrorMessage(
+            error,
+            "Não foi possível confirmar o fuso horário da empresa.",
+          ),
         );
       }
       return null;
@@ -888,12 +1484,7 @@ export function SuperAdminDashboard() {
     const selectedTimezone =
       canonicalCompanyTimeZone(selectedCompany.timezone) ??
       (!resolution.fallback ? resolution.timeZone : null);
-    const requiresDetailHydration =
-      !canonicalCompanyTimeZone(selectedCompany.timezone) &&
-      resolution.source !== "current-user-company";
     if (
-      selectedTimezone &&
-      !requiresDetailHydration &&
       storedScope?.id === selectedCompany.id &&
       storedScope.name === selectedCompany.name &&
       (storedScope.trade_name ?? null) ===
@@ -909,32 +1500,53 @@ export function SuperAdminDashboard() {
       timezone: selectedTimezone,
       trade_name: selectedCompany.trade_name ?? null,
     });
-
-    if (!requiresDetailHydration && selectedTimezone) return;
-    let active = true;
-    void ensureCompanyTimeZone(selectedCompany).then((certifiedCompany) => {
-      if (
-        !active ||
-        !certifiedCompany ||
-        selectedCompanyIdRef.current !== certifiedCompany.id
-      ) {
-        return;
-      }
-      setStoredMasterCompanyScope({
-        id: certifiedCompany.id,
-        name: certifiedCompany.name,
-        timezone: certifiedCompany.timezone,
-        trade_name: certifiedCompany.trade_name ?? null,
-      });
-    });
-    return () => {
-      active = false;
-    };
-  }, [currentUser, ensureCompanyTimeZone, selectedCompany]);
+  }, [currentUser, selectedCompany]);
 
   React.useEffect(() => {
-    void loadCompanyDetails(selectedCompanyId);
-  }, [loadCompanyDetails, selectedCompanyId]);
+    if (loading || !selectedCompanyId) return;
+
+    if (activeCompanyTab === "users") {
+      void Promise.allSettled([
+        loadModuleCatalog(),
+        loadPermissionCatalog(),
+        loadCompanyDetails(selectedCompanyId),
+      ]);
+      return;
+    }
+
+    if (activeCompanyTab === "modules") {
+      void Promise.allSettled([
+        loadModuleCatalog(),
+        loadCompanyModules(selectedCompanyId),
+      ]);
+      return;
+    }
+
+    if (activeCompanyTab === "workers") {
+      void loadCompanyWorkers(selectedCompanyId);
+    }
+  }, [
+    activeCompanyTab,
+    loadCompanyDetails,
+    loadCompanyModules,
+    loadCompanyWorkers,
+    loadModuleCatalog,
+    loadPermissionCatalog,
+    loading,
+    selectedCompanyId,
+  ]);
+
+  React.useEffect(() => {
+    if (loading || loadingMasterUsers || masterUsersLoaded) return;
+    if (activeCompanyTab !== "masters") return;
+    void loadMasterUsers();
+  }, [
+    activeCompanyTab,
+    loadMasterUsers,
+    loading,
+    loadingMasterUsers,
+    masterUsersLoaded,
+  ]);
 
   function openCompany(company?: Company) {
     setEditingCompany(company ?? null);
@@ -962,6 +1574,15 @@ export function SuperAdminDashboard() {
     }
     if (loadedCompanyId !== companyId) {
       toast.error("Aguarde o carregamento da empresa selecionada.");
+      return;
+    }
+    if (
+      loadingModuleCatalog ||
+      loadingPermissionCatalog ||
+      !moduleCatalogLoaded ||
+      !permissionCatalogLoaded
+    ) {
+      toast.error("Aguarde o carregamento das opções de acesso.");
       return;
     }
 
@@ -1016,7 +1637,7 @@ export function SuperAdminDashboard() {
       !additiveAdminPromotionMode
     ) {
       toast.error(
-        "A API não confirmou o vínculo do usuário com a empresa selecionada. Nenhum acesso pode ser alterado.",
+        "Não foi possível confirmar o vínculo deste usuário com a empresa selecionada. Nenhum acesso foi alterado.",
       );
       return;
     }
@@ -1063,7 +1684,7 @@ export function SuperAdminDashboard() {
     );
     if (!companyAdminOptions.length) {
       toast.error(
-        "Nenhuma permissão operacional publicada está disponível nos módulos habilitados desta empresa.",
+        "Nenhum acesso de gestão está disponível nos módulos habilitados desta empresa.",
       );
       return;
     }
@@ -1088,6 +1709,35 @@ export function SuperAdminDashboard() {
         companyAdminOptions.map((option) => [option.slug, true]),
       ),
     }));
+  }
+
+  function setPermissionGroupAccess(group: PermissionGroup, enabled: boolean) {
+    const editablePermissions = group.permissions.filter(
+      (permission) => !permission.unavailable,
+    );
+    if (!editablePermissions.length || loadingUserPermissions) return;
+
+    setCompanyAdminPromotionRequested(false);
+    setTouchedUserPermissionSlugs((current) => {
+      const next = new Set(current);
+      editablePermissions.forEach((permission) => next.add(permission.slug));
+      return next;
+    });
+    setUserPermissions((current) => {
+      const next = { ...current };
+      editablePermissions.forEach((permission) => {
+        next[permission.slug] = enabled;
+      });
+      setUserForm((form) => ({
+        ...form,
+        isCompanyAdmin: isCertifiedCompanyAdminState(
+          next,
+          visiblePermissionOptions,
+          enabledCompanyModuleIds,
+        ),
+      }));
+      return next;
+    });
   }
 
   function setUserProfileField(
@@ -1129,28 +1779,221 @@ export function SuperAdminDashboard() {
     router.push("/dashboard/live");
   }
 
-  async function openCompanySection(tab: CompanyTab) {
-    if (!selectedCompany) {
-      toast.error("Selecione uma empresa para gerenciar.");
-      return;
-    }
-
-    const certifiedCompany = await ensureCompanyTimeZone(selectedCompany, true);
-    if (!certifiedCompany) return;
-    selectCompanyScope(certifiedCompany);
+  function changeMasterSection(tab: CompanyTab) {
     setActiveCompanyTab(tab);
+    const url = new URL(window.location.href);
+    if (tab === "companies") {
+      url.searchParams.delete("section");
+    } else {
+      url.searchParams.set("section", tab);
+    }
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
   }
 
-  async function openCompanyRoute(path: string) {
-    if (!selectedCompany) {
-      toast.error("Selecione uma empresa para gerenciar.");
+  function toggleCompanyChecked(companyId: string, checked: boolean) {
+    setCheckedCompanyIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(companyId);
+      else next.delete(companyId);
+      return next;
+    });
+  }
+
+  function toggleVisibleCompanies(checked: boolean) {
+    setCheckedCompanyIds((current) => {
+      const next = new Set(current);
+      filteredCompanies.forEach((company) => {
+        if (checked) next.add(company.id);
+        else next.delete(company.id);
+      });
+      return next;
+    });
+  }
+
+  function toggleCompanyUserChecked(userId: string, checked: boolean) {
+    setCheckedCompanyUserIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(userId);
+      else next.delete(userId);
+      return next;
+    });
+  }
+
+  function toggleVisibleCompanyUsers(checked: boolean) {
+    setCheckedCompanyUserIds((current) => {
+      const next = new Set(current);
+      filteredUsers.forEach((managedUser) => {
+        if (checked) next.add(managedUser.id);
+        else next.delete(managedUser.id);
+      });
+      return next;
+    });
+  }
+
+  function toggleMasterUserChecked(userId: string, checked: boolean) {
+    if (userId === currentUser?.id) return;
+    setCheckedMasterUserIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(userId);
+      else next.delete(userId);
+      return next;
+    });
+  }
+
+  function toggleVisibleMasterUsers(checked: boolean) {
+    setCheckedMasterUserIds((current) => {
+      const next = new Set(current);
+      selectableFilteredMasterUsers.forEach((managedUser) => {
+        if (checked) next.add(managedUser.id);
+        else next.delete(managedUser.id);
+      });
+      return next;
+    });
+  }
+
+  async function updateCheckedCompanyStatus(active: boolean) {
+    const selectedRows = companies.filter((company) =>
+      checkedCompanyIds.has(company.id),
+    );
+    if (!selectedRows.length) return;
+
+    const action = active ? "ativar" : "desativar";
+    if (
+      !window.confirm(
+        `${active ? "Ativar" : "Desativar"} ${selectedRows.length} empresa(s) selecionada(s)?`,
+      )
+    ) {
       return;
     }
 
-    const certifiedCompany = await ensureCompanyTimeZone(selectedCompany, true);
-    if (!certifiedCompany) return;
-    selectCompanyScope(certifiedCompany);
-    router.push(path);
+    setUpdatingCompanies(true);
+    const results = await mapWithConcurrency(
+      selectedRows,
+      MASTER_USER_DISCOVERY_CONCURRENCY,
+      async (company) => {
+        try {
+          await apiFetch(`/companies/${company.id}`, {
+            companyScopeId: company.id,
+            method: "PUT",
+            body: { name: company.name, active },
+          });
+          return { company, ok: true } as const;
+        } catch {
+          return { company, ok: false } as const;
+        }
+      },
+    );
+    const updatedIds = new Set(
+      results.filter((result) => result.ok).map((result) => result.company.id),
+    );
+    const failedCount = results.length - updatedIds.size;
+    const updatedCompanies = selectedRows
+      .filter((company) => updatedIds.has(company.id))
+      .map((company) => ({ ...company, active }));
+
+    if (updatedIds.size) {
+      setCompanies((current) =>
+        current.map((company) =>
+          updatedIds.has(company.id) ? { ...company, active } : company,
+        ),
+      );
+      writeCompanyCache(updatedCompanies);
+      setCheckedCompanyIds((current) => {
+        const next = new Set(current);
+        updatedIds.forEach((companyId) => next.delete(companyId));
+        return next;
+      });
+    }
+
+    if (failedCount) {
+      toast.error(
+        `${failedCount} empresa(s) não puderam ser ${action === "ativar" ? "ativadas" : "desativadas"}. As demais foram atualizadas.`,
+      );
+    } else {
+      toast.success(
+        `${updatedIds.size} empresa(s) ${active ? "ativadas" : "desativadas"}.`,
+      );
+    }
+    setUpdatingCompanies(false);
+  }
+
+  async function deleteCheckedCompanies() {
+    const selectedRows = companies.filter((company) =>
+      checkedCompanyIds.has(company.id),
+    );
+    if (!selectedRows.length) return;
+
+    if (
+      !window.confirm(
+        [
+          `Excluir permanentemente ${selectedRows.length} empresa(s) selecionada(s)?`,
+          "Esta ação removerá também os dados vinculados às empresas excluídas e não poderá ser desfeita.",
+        ].join("\n\n"),
+      )
+    ) {
+      return;
+    }
+
+    setUpdatingCompanies(true);
+    try {
+      const results = await mapWithConcurrency(
+        selectedRows,
+        MASTER_USER_DISCOVERY_CONCURRENCY,
+        async (company) => {
+          try {
+            await apiFetch(`/companies/${company.id}`, {
+              companyScopeId: company.id,
+              method: "DELETE",
+            });
+            return { company, ok: true } as const;
+          } catch (error) {
+            return { company, error, ok: false } as const;
+          }
+        },
+      );
+      const deletedIds = new Set(
+        results.filter((result) => result.ok).map((result) => result.company.id),
+      );
+      const failedCount = results.length - deletedIds.size;
+
+      if (deletedIds.size) {
+        deletedIds.forEach((companyId) => {
+          companyUsersCacheRef.current.delete(companyId);
+          companyModulesCacheRef.current.delete(companyId);
+          companyWorkersCacheRef.current.delete(companyId);
+        });
+        const storedScope = getStoredMasterCompanyScope();
+        if (storedScope && deletedIds.has(storedScope.id)) {
+          clearStoredMasterCompanyScope();
+        }
+        if (deletedIds.has(selectedCompanyIdRef.current)) {
+          selectCompanyId("");
+        }
+        setCompanies((current) =>
+          current.filter((company) => !deletedIds.has(company.id)),
+        );
+        setCheckedCompanyIds((current) => {
+          const next = new Set(current);
+          deletedIds.forEach((companyId) => next.delete(companyId));
+          return next;
+        });
+        await loadCompanies();
+      }
+
+      if (failedCount) {
+        toast.error(
+          `${deletedIds.size} empresa(s) excluída(s); ${failedCount} não puderam ser excluída(s).`,
+        );
+      } else {
+        toast.success(`${deletedIds.size} empresa(s) excluída(s).`);
+      }
+    } finally {
+      setUpdatingCompanies(false);
+    }
   }
 
   async function loadUserPermissions(userId: string, companyId: string) {
@@ -1242,15 +2085,16 @@ export function SuperAdminDashboard() {
 
       if (additiveMembershipCertified) {
         toast.warning(
-          "A API não disponibilizou a leitura granular dos acessos. Está disponível apenas a promoção aditiva para Administrador da empresa; nenhum acesso existente poderá ser removido.",
+          "Os acessos atuais não puderam ser consultados. É possível apenas promover o usuário a Administrador da empresa, sem remover acessos existentes.",
         );
       } else {
         toast.error(
           error instanceof ApiError && error.status === 404
-            ? `A API não disponibilizou a leitura de permissões nem confirmou o vínculo deste usuário com a empresa selecionada (${requestedCompanyId}). Os acessos permanecem inalterados.`
-            : error instanceof Error
-              ? error.message
-              : "Não foi possível carregar acessos do usuário.",
+            ? "Não foi possível confirmar este usuário na empresa selecionada. Os acessos permanecem inalterados."
+            : managementErrorMessage(
+                error,
+                "Não foi possível carregar os acessos do usuário.",
+              ),
         );
       }
       setUserPermissions({});
@@ -1317,7 +2161,7 @@ export function SuperAdminDashboard() {
 
     const timeZone = canonicalCompanyTimeZone(companyForm.timezone);
     if (!timeZone) {
-      toast.error("Informe um timezone IANA válido para a empresa.");
+      toast.error("Informe um fuso horário válido para a empresa.");
       return;
     }
 
@@ -1354,7 +2198,9 @@ export function SuperAdminDashboard() {
       setCompanyDialog(false);
       await loadCompanies();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Falha ao salvar empresa.");
+      toast.error(
+        managementErrorMessage(error, "Não foi possível salvar a empresa."),
+      );
     } finally {
       setSaving(false);
     }
@@ -1366,11 +2212,11 @@ export function SuperAdminDashboard() {
     const usersCount = hasLoadedCompany ? companyUsersCount : null;
     const workersCount = hasLoadedCompany ? companyStats?.workers ?? null : null;
     const loadedSummary = hasLoadedCompany
-      ? `Resumo carregado: ${formatCertifiedCount(usersCount)} usuário(s) e ${formatCertifiedCount(workersCount)} worker(s).`
+      ? `Resumo carregado: ${formatCertifiedCount(usersCount)} usuário(s) e ${formatCertifiedCount(workersCount)} Worker(s).`
       : "";
     const message = [
       `Excluir a empresa "${company.name}"?`,
-      "Esta ação é permanente e pode remover dados do tenant no backend.",
+      "Esta ação é permanente e removerá os dados vinculados a esta empresa.",
       loadedSummary,
     ]
       .filter(Boolean)
@@ -1488,10 +2334,10 @@ export function SuperAdminDashboard() {
           userId: editingUser.id,
         });
         toast.success(
-          "Administrador da empresa promovido de forma aditiva. Todas as respostas de permissão foram certificadas.",
+          "Perfil de Administrador da empresa aplicado com sucesso.",
         );
         closeUserDialog();
-        await loadCompanyDetails(companyId);
+        await loadCompanyDetails(companyId, { force: true });
         return;
       }
 
@@ -1521,8 +2367,10 @@ export function SuperAdminDashboard() {
         }
 
         closeUserDialog();
+        setMasterUsersLoaded(false);
+        setMasterUsers([]);
         await loadCompanies();
-        await loadCompanyDetails(companyId);
+        await loadCompanyDetails(companyId, { force: true });
         return;
       }
 
@@ -1570,7 +2418,7 @@ export function SuperAdminDashboard() {
             // acesso que usa a identidade já certificada pela listagem da
             // empresa. A sincronização abaixo continua de forma independente.
             profileUpdateWarning =
-              "Os acessos foram processados separadamente, mas os dados cadastrais não puderam ser atualizados pela API.";
+              "Os acessos foram processados, mas os dados cadastrais não puderam ser atualizados.";
             savedUser = editingUser;
           }
         }
@@ -1602,16 +2450,14 @@ export function SuperAdminDashboard() {
           try {
             await syncUserPermissions(savedUserId, companyId);
           } catch (error) {
-            permissionSyncError =
-              error instanceof ApiError
-                ? `API respondeu ${error.status}: ${error.message}`
-                : error instanceof Error
-                  ? error.message
-                  : "Não foi possível sincronizar os acessos do usuário.";
+            permissionSyncError = managementErrorMessage(
+              error,
+              "Não foi possível sincronizar os acessos do usuário.",
+            );
           }
         } else {
           permissionSyncError =
-            "A API salvou o usuário, mas não retornou nem permitiu localizar o ID para aplicar os acessos.";
+            "O usuário foi salvo, mas não foi possível concluir a configuração dos acessos.";
         }
       }
 
@@ -1621,14 +2467,14 @@ export function SuperAdminDashboard() {
         );
         if (editingUser) return;
         closeUserDialog();
-        await loadCompanyDetails(companyId);
+        await loadCompanyDetails(companyId, { force: true });
         return;
       }
 
       if (profileUpdateWarning) {
         toast.warning(profileUpdateWarning);
         closeUserDialog();
-        await loadCompanyDetails(companyId);
+        await loadCompanyDetails(companyId, { force: true });
         return;
       }
 
@@ -1642,15 +2488,193 @@ export function SuperAdminDashboard() {
             : "Usuário criado.",
       );
       closeUserDialog();
-      await loadCompanyDetails(companyId);
+      await loadCompanyDetails(companyId, { force: true });
     } catch (error) {
       toast.error(
         userForm.isMaster
-          ? masterSaveErrorMessage(error, companyId)
-          : companyUserSaveErrorMessage(error, companyId),
+          ? masterSaveErrorMessage(error)
+          : companyUserSaveErrorMessage(error),
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function updateCheckedCompanyUserStatus(active: boolean) {
+    const companyId = selectedCompanyIdRef.current.trim();
+    const selectedRows = companyNonMasterUsersForScope(users, companyId).filter(
+      (managedUser) => checkedCompanyUserIds.has(managedUser.id),
+    );
+    if (!companyId || !selectedRows.length) return;
+
+    const targetRows = selectedRows.filter(
+      (managedUser) => managedUser.active !== active,
+    );
+    if (!targetRows.length) {
+      toast.info(
+        `Os ${selectedRows.length} usuário(s) selecionado(s) já estão ${active ? "ativos" : "inativos"}.`,
+      );
+      return;
+    }
+    if (
+      !window.confirm(
+        `${active ? "Ativar" : "Desativar"} ${targetRows.length} usuário(s) selecionado(s) de ${selectedCompany?.name ?? "esta empresa"}?`,
+      )
+    ) {
+      return;
+    }
+
+    setUpdatingCompanyUsers(true);
+    try {
+      const results = await mapWithConcurrency(
+        targetRows,
+        MASTER_USER_DISCOVERY_CONCURRENCY,
+        async (managedUser) => {
+          try {
+            const { route } = await discoverCompanyUserResource(
+              companyId,
+              managedUser.id,
+            );
+            const body = buildCompanyUserProfileUpdate(managedUser, {
+              name: managedUser.name,
+              email: managedUser.email,
+              password: "",
+              active,
+            });
+            if (!body) return { managedUser, ok: true } as const;
+            await mutateCompanyUserResource(route, "", {
+              method: "PUT",
+              body,
+            });
+            return { managedUser, ok: true } as const;
+          } catch (error) {
+            return { managedUser, error, ok: false } as const;
+          }
+        },
+      );
+      const updatedIds = new Set(
+        results
+          .filter((result) => result.ok)
+          .map((result) => result.managedUser.id),
+      );
+      const failedCount = results.length - updatedIds.size;
+
+      if (updatedIds.size) {
+        const cachedRows = companyUsersCacheRef.current.get(companyId);
+        if (cachedRows) {
+          companyUsersCacheRef.current.set(
+            companyId,
+            cachedRows.map((managedUser) =>
+              updatedIds.has(managedUser.id)
+                ? { ...managedUser, active }
+                : managedUser,
+            ),
+          );
+        }
+        if (selectedCompanyIdRef.current === companyId) {
+          setUsers((current) =>
+            current.map((managedUser) =>
+              updatedIds.has(managedUser.id)
+                ? { ...managedUser, active }
+                : managedUser,
+            ),
+          );
+          setCheckedCompanyUserIds((current) => {
+            const next = new Set(current);
+            updatedIds.forEach((userId) => next.delete(userId));
+            return next;
+          });
+          await loadCompanyDetails(companyId, { force: true });
+        }
+      }
+
+      if (failedCount) {
+        toast.error(
+          `${updatedIds.size} usuário(s) ${active ? "ativado(s)" : "desativado(s)"}; ${failedCount} não puderam ser atualizados.`,
+        );
+      } else {
+        toast.success(
+          `${updatedIds.size} usuário(s) ${active ? "ativado(s)" : "desativado(s)"}.`,
+        );
+      }
+    } finally {
+      setUpdatingCompanyUsers(false);
+    }
+  }
+
+  async function deleteCheckedCompanyUsers() {
+    const companyId = selectedCompanyIdRef.current.trim();
+    const selectedRows = companyNonMasterUsersForScope(users, companyId).filter(
+      (managedUser) => checkedCompanyUserIds.has(managedUser.id),
+    );
+    if (!companyId || !selectedRows.length) return;
+
+    if (
+      !window.confirm(
+        `Excluir permanentemente ${selectedRows.length} usuário(s) selecionado(s) de ${selectedCompany?.name ?? "esta empresa"}?`,
+      )
+    ) {
+      return;
+    }
+
+    setUpdatingCompanyUsers(true);
+    try {
+      const results = await mapWithConcurrency(
+        selectedRows,
+        MASTER_USER_DISCOVERY_CONCURRENCY,
+        async (managedUser) => {
+          try {
+            const { route } = await discoverCompanyUserResource(
+              companyId,
+              managedUser.id,
+            );
+            await mutateCompanyUserResource(route, "", { method: "DELETE" });
+            return { managedUser, ok: true } as const;
+          } catch (error) {
+            return { managedUser, error, ok: false } as const;
+          }
+        },
+      );
+      const deletedIds = new Set(
+        results
+          .filter((result) => result.ok)
+          .map((result) => result.managedUser.id),
+      );
+      const failedCount = results.length - deletedIds.size;
+
+      if (deletedIds.size) {
+        const cachedRows = companyUsersCacheRef.current.get(companyId);
+        if (cachedRows) {
+          companyUsersCacheRef.current.set(
+            companyId,
+            cachedRows.filter((managedUser) => !deletedIds.has(managedUser.id)),
+          );
+        }
+        if (editingUser && deletedIds.has(editingUser.id)) {
+          closeUserDialog();
+        }
+        if (selectedCompanyIdRef.current === companyId) {
+          setUsers((current) =>
+            current.filter((managedUser) => !deletedIds.has(managedUser.id)),
+          );
+          setCheckedCompanyUserIds((current) => {
+            const next = new Set(current);
+            deletedIds.forEach((userId) => next.delete(userId));
+            return next;
+          });
+          await loadCompanyDetails(companyId, { force: true });
+        }
+      }
+
+      if (failedCount) {
+        toast.error(
+          `${deletedIds.size} usuário(s) excluído(s); ${failedCount} não puderam ser excluídos.`,
+        );
+      } else {
+        toast.success(`${deletedIds.size} usuário(s) excluído(s).`);
+      }
+    } finally {
+      setUpdatingCompanyUsers(false);
     }
   }
 
@@ -1671,11 +2695,11 @@ export function SuperAdminDashboard() {
       if (editingUser?.id === user.id) {
         closeUserDialog();
       }
-      await loadCompanyDetails(companyId);
+      await loadCompanyDetails(companyId, { force: true });
     } catch (error) {
       if (selectedCompanyIdRef.current !== companyId) return;
       toast.error(
-        userDeleteErrorMessage(error, user.name, companyId),
+        userDeleteErrorMessage(error, user.name),
       );
     } finally {
       setDeletingUserId("");
@@ -1704,9 +2728,15 @@ export function SuperAdminDashboard() {
 
     setSaving(true);
     try {
-      const companyId = selectedCompanyId.trim();
+      const companyId = editingMasterUser
+        ? getScopedRowCompanyId(editingMasterUser)
+        : selectedCompanyId.trim();
       if (!companyId) {
-        toast.error("Selecione uma empresa para vincular o super-admin.");
+        toast.error(
+          editingMasterUser
+            ? "Não foi possível identificar a empresa de origem deste super-admin."
+            : "Selecione uma empresa para vincular o super-admin.",
+        );
         return;
       }
 
@@ -1736,28 +2766,213 @@ export function SuperAdminDashboard() {
       }
 
       setMasterUserDialog(false);
-      await loadCompanies();
+      setMasterUsersLoaded(false);
+      await loadMasterUsers({ force: true });
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Falha ao salvar super-admin.",
+        managementErrorMessage(
+          error,
+          "Não foi possível salvar o super-admin.",
+        ),
       );
     } finally {
       setSaving(false);
     }
   }
 
+  async function updateCheckedMasterUserStatus(active: boolean) {
+    const selectedRows = masterUsers.filter(
+      (managedUser) =>
+        checkedMasterUserIds.has(managedUser.id) &&
+        managedUser.id !== currentUser?.id,
+    );
+    if (!selectedRows.length) return;
+
+    const targetRows = selectedRows.filter(
+      (managedUser) => managedUser.active !== active,
+    );
+    if (!targetRows.length) {
+      toast.info(
+        `Os ${selectedRows.length} super-admin(s) selecionado(s) já estão ${active ? "ativos" : "inativos"}.`,
+      );
+      return;
+    }
+    if (
+      !window.confirm(
+        `${active ? "Ativar" : "Desativar"} ${targetRows.length} super-admin(s) selecionado(s)?`,
+      )
+    ) {
+      return;
+    }
+
+    setUpdatingMasterUsers(true);
+    try {
+      const results = await mapWithConcurrency(
+        targetRows,
+        MASTER_USER_DISCOVERY_CONCURRENCY,
+        async (managedUser) => {
+          const companyId = getScopedRowCompanyId(managedUser);
+          if (!companyId) return { managedUser, ok: false } as const;
+          try {
+            await apiFetch(`/users/${managedUser.id}`, {
+              companyScopeId: companyId,
+              method: "PUT",
+              body: {
+                name: managedUser.name,
+                email: managedUser.email,
+                is_master: true,
+                active,
+              },
+            });
+            return { managedUser, ok: true } as const;
+          } catch (error) {
+            return { managedUser, error, ok: false } as const;
+          }
+        },
+      );
+      const updatedIds = new Set(
+        results
+          .filter((result) => result.ok)
+          .map((result) => result.managedUser.id),
+      );
+      const failedCount = results.length - updatedIds.size;
+
+      if (updatedIds.size) {
+        companyUsersCacheRef.current.forEach((rows, companyId) => {
+          companyUsersCacheRef.current.set(
+            companyId,
+            rows.map((managedUser) =>
+              updatedIds.has(managedUser.id)
+                ? { ...managedUser, active }
+                : managedUser,
+            ),
+          );
+        });
+        setMasterUsers((current) =>
+          current.map((managedUser) =>
+            updatedIds.has(managedUser.id)
+              ? { ...managedUser, active }
+              : managedUser,
+          ),
+        );
+        setCheckedMasterUserIds((current) => {
+          const next = new Set(current);
+          updatedIds.forEach((userId) => next.delete(userId));
+          return next;
+        });
+        setMasterUsersLoaded(false);
+        await loadMasterUsers({ force: true });
+      }
+
+      if (failedCount) {
+        toast.error(
+          `${updatedIds.size} super-admin(s) ${active ? "ativado(s)" : "desativado(s)"}; ${failedCount} não puderam ser atualizados.`,
+        );
+      } else {
+        toast.success(
+          `${updatedIds.size} super-admin(s) ${active ? "ativado(s)" : "desativado(s)"}.`,
+        );
+      }
+    } finally {
+      setUpdatingMasterUsers(false);
+    }
+  }
+
+  async function deleteCheckedMasterUsers() {
+    const selectedRows = masterUsers.filter(
+      (managedUser) =>
+        checkedMasterUserIds.has(managedUser.id) &&
+        managedUser.id !== currentUser?.id,
+    );
+    if (!selectedRows.length) return;
+
+    if (
+      !window.confirm(
+        `Excluir permanentemente ${selectedRows.length} super-admin(s) selecionado(s)?`,
+      )
+    ) {
+      return;
+    }
+
+    setUpdatingMasterUsers(true);
+    try {
+      const results = await mapWithConcurrency(
+        selectedRows,
+        MASTER_USER_DISCOVERY_CONCURRENCY,
+        async (managedUser) => {
+          const companyId = getScopedRowCompanyId(managedUser);
+          if (!companyId) return { managedUser, ok: false } as const;
+          try {
+            await apiFetch(`/users/${managedUser.id}`, {
+              companyScopeId: companyId,
+              method: "DELETE",
+            });
+            return { managedUser, ok: true } as const;
+          } catch (error) {
+            return { managedUser, error, ok: false } as const;
+          }
+        },
+      );
+      const deletedIds = new Set(
+        results
+          .filter((result) => result.ok)
+          .map((result) => result.managedUser.id),
+      );
+      const failedCount = results.length - deletedIds.size;
+
+      if (deletedIds.size) {
+        companyUsersCacheRef.current.forEach((rows, companyId) => {
+          companyUsersCacheRef.current.set(
+            companyId,
+            rows.filter((managedUser) => !deletedIds.has(managedUser.id)),
+          );
+        });
+        if (editingMasterUser && deletedIds.has(editingMasterUser.id)) {
+          setMasterUserDialog(false);
+          setEditingMasterUser(null);
+        }
+        setMasterUsers((current) =>
+          current.filter((managedUser) => !deletedIds.has(managedUser.id)),
+        );
+        setCheckedMasterUserIds((current) => {
+          const next = new Set(current);
+          deletedIds.forEach((userId) => next.delete(userId));
+          return next;
+        });
+        setMasterUsersLoaded(false);
+        await loadMasterUsers({ force: true });
+      }
+
+      if (failedCount) {
+        toast.error(
+          `${deletedIds.size} super-admin(s) excluído(s); ${failedCount} não puderam ser excluídos.`,
+        );
+      } else {
+        toast.success(`${deletedIds.size} super-admin(s) excluído(s).`);
+      }
+    } finally {
+      setUpdatingMasterUsers(false);
+    }
+  }
+
   async function deleteMasterUser(user: ManagedUser) {
     if (currentUser?.id === user.id) {
-      toast.error("Você não pode excluir o próprio usuário master logado.");
+      toast.error("Você não pode excluir o próprio super-admin conectado.");
       return;
     }
 
     if (!window.confirm(`Excluir o super-admin "${user.name}"?`)) return;
 
+    const companyId = getScopedRowCompanyId(user);
+    if (!companyId) {
+      toast.error("Não foi possível identificar a empresa de origem deste super-admin.");
+      return;
+    }
+
     setDeletingUserId(user.id);
     try {
       await apiFetch(`/users/${user.id}`, {
-        companyScopeId: selectedCompanyId,
+        companyScopeId: companyId,
         method: "DELETE",
       });
       toast.success("Super-admin excluído.");
@@ -1765,7 +2980,8 @@ export function SuperAdminDashboard() {
         setMasterUserDialog(false);
         setEditingMasterUser(null);
       }
-      await loadCompanies();
+      setMasterUsersLoaded(false);
+      await loadMasterUsers({ force: true });
     } catch (error) {
       toast.error(masterUserDeleteErrorMessage(error, user.name));
     } finally {
@@ -1775,52 +2991,60 @@ export function SuperAdminDashboard() {
 
   function companyDeleteErrorMessage(error: unknown, companyName: string) {
     if (error instanceof ApiError && error.status === 500) {
-      return `Não foi possível excluir "${companyName}". A API retornou erro interno ao remover a empresa; normalmente isso indica vínculo pendente ou ausência de cascade no backend.`;
+      return `Não foi possível excluir "${companyName}". Verifique se ainda existem cadastros vinculados e tente novamente.`;
     }
 
-    const detail =
-      error instanceof Error ? error.message : "Falha ao excluir empresa.";
-    return `Não foi possível excluir "${companyName}". ${detail}`;
+    return managementErrorMessage(
+      error,
+      `Não foi possível excluir "${companyName}".`,
+    );
   }
 
   function userDeleteErrorMessage(
     error: unknown,
     userName: string,
-    companyId: string,
   ) {
     if (error instanceof ApiError && error.status === 404) {
-      return `Não foi possível excluir "${userName}". O usuário não foi localizado pelas rotas compatíveis da empresa selecionada (${companyId}); nenhuma exclusão foi simulada localmente.`;
+      return `Não foi possível excluir "${userName}" porque o cadastro não foi localizado na empresa selecionada.`;
     }
 
-    return error instanceof Error ? error.message : "Falha ao excluir usuário.";
+    return managementErrorMessage(
+      error,
+      `Não foi possível excluir "${userName}".`,
+    );
   }
 
   function masterUserDeleteErrorMessage(error: unknown, userName: string) {
     if (error instanceof ApiError && error.status === 404) {
-      return `Não foi possível excluir o super-admin "${userName}". A API não encontrou esse usuário no escopo do token atual.`;
+      return `Não foi possível excluir o super-admin "${userName}" porque o cadastro não foi localizado.`;
     }
 
-    return error instanceof Error
-      ? error.message
-      : "Falha ao excluir super-admin.";
+    return managementErrorMessage(
+      error,
+      `Não foi possível excluir o super-admin "${userName}".`,
+    );
   }
 
-  function masterSaveErrorMessage(error: unknown, companyId: string) {
+  function masterSaveErrorMessage(error: unknown) {
     if (error instanceof ApiError && error.status === 404) {
-      return `Não foi possível salvar como super-admin. A API não encontrou o usuário no escopo da empresa selecionada (${companyId}).`;
+      return "Não foi possível salvar como super-admin porque o usuário não foi localizado na empresa selecionada.";
     }
 
-    return error instanceof Error
-      ? error.message
-      : "Falha ao salvar super-admin.";
+    return managementErrorMessage(
+      error,
+      "Não foi possível salvar o super-admin.",
+    );
   }
 
-  function companyUserSaveErrorMessage(error: unknown, companyId: string) {
+  function companyUserSaveErrorMessage(error: unknown) {
     if (error instanceof ApiError && error.status === 404) {
-      return `A API não disponibilizou uma rota de permissões para este usuário na empresa selecionada (${companyId}). Nenhum acesso foi alterado.`;
+      return "Os acessos deste usuário não estão disponíveis para edição na empresa selecionada. Nenhuma alteração foi feita.";
     }
 
-    return error instanceof Error ? error.message : "Falha ao salvar usuário.";
+    return managementErrorMessage(
+      error,
+      "Não foi possível salvar o usuário.",
+    );
   }
 
   async function resolveSavedCompanyUserId(
@@ -1892,7 +3116,7 @@ export function SuperAdminDashboard() {
     }));
     if (syncPlan.some((item) => item.action === "blocked-revoke")) {
       throw new Error(
-        "Os acessos atuais não foram certificados pela API. Reabra o usuário antes de remover permissões; nenhum acesso foi revogado.",
+        "Os acessos atuais não puderam ser confirmados. Reabra o usuário antes de remover acessos; nenhuma alteração foi feita.",
       );
     }
 
@@ -1967,7 +3191,7 @@ export function SuperAdminDashboard() {
               uncertifiablePermissionSlugs,
               visiblePermissionOptions,
             )
-          : "A API não confirmou todos os acessos operacionais solicitados. O usuário não foi anunciado como administrador da empresa.",
+          : "Nem todos os acessos solicitados puderam ser confirmados. O perfil de Administrador da empresa não foi aplicado.",
       );
     }
   }
@@ -1993,13 +3217,17 @@ export function SuperAdminDashboard() {
           method: "PUT",
           body: { enabled: !assignment.enabled },
         });
-        toast.success(assignment.enabled ? "Módulo desabilitado." : "Módulo habilitado.");
+        toast.success(
+          assignment.enabled ? "Módulo desabilitado." : "Módulo habilitado.",
+        );
       }
 
-      await loadCompanyDetails(companyId);
+      await loadCompanyModules(companyId, { force: true });
     } catch (error) {
       if (selectedCompanyIdRef.current !== companyId) return;
-      toast.error(error instanceof Error ? error.message : "Falha ao alterar módulo.");
+      toast.error(
+        managementErrorMessage(error, "Não foi possível alterar o módulo."),
+      );
     } finally {
       setUpdatingModuleId("");
     }
@@ -2011,243 +3239,321 @@ export function SuperAdminDashboard() {
   const hasCurrentCompanyDetails = Boolean(
     selectedCompanyId && loadedCompanyId === selectedCompanyId,
   );
-  const companyUsersCount = hasCurrentCompanyDetails ? users.length : null;
-  const authenticatedCompanyId = getCurrentUserCompanyId(currentUser);
-  const canEnumerateSelectedCompanyWorkers = Boolean(
-    selectedCompanyId &&
-      (!authenticatedCompanyId || authenticatedCompanyId === selectedCompanyId),
+  const hasCurrentCompanyWorkers = Boolean(
+    selectedCompanyId && loadedWorkersCompanyId === selectedCompanyId,
   );
+  const companyUsersCount = hasCurrentCompanyDetails ? users.length : null;
 
   return (
     <section className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard
-          icon={Building2}
-          label="Empresas"
-          value={formatNumber(companies.length)}
-          detail={`${formatNumber(
-            companies.filter((company) => company.active).length,
-          )} ativas`}
-        />
-        <MetricCard
-          icon={ShieldCheck}
-          label="Super-admins"
-          value={formatNumber(masterUsers.length)}
-          detail="Acesso global"
-        />
-        <MetricCard
-          icon={Users}
-          label="Usuários da empresa"
-          value={
-            loadingDetails
-              ? "..."
-              : formatCertifiedCount(
-                  hasCurrentCompanyDetails ? companyUsersCount : null,
-                )
-          }
-          detail={
-            companyDetailsError
-              ? "Dados indisponíveis"
-              : selectedCompany
-                ? selectedCompany.name
-                : "Selecione uma empresa"
-          }
-        />
-        <MetricCard
-          icon={ServerCog}
-          label="Workers"
-          value={
-            companyStats?.workers === null || workerOperationalWarning
-              ? "—"
-              : formatNumber(companyStats?.workers ?? 0)
-          }
-          detail={
-            workerOperationalWarning
-              ? "Dados não certificados"
-              : companyStats?.workers === null
-                ? "Catálogo vinculado à sessão"
-                : "Vinculados à empresa"
-          }
-        />
-      </div>
-
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <Input
-            value={companyQuery}
-            onChange={(event) => setCompanyQuery(event.target.value)}
-            placeholder="Buscar empresa"
-            className="w-full sm:w-72"
-          />
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full sm:w-auto"
-            onClick={() => {
-              loadCompanies();
-              loadCompanyDetails(selectedCompanyId);
-            }}
-            disabled={loading || loadingDetails}
-          >
-            <RefreshCw
-              className={cn(
-                "h-4 w-4",
-                (loading || loadingDetails) && "animate-spin",
-              )}
-            />
-            Atualizar
+      <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+        <div className="flex flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">
+              Administração de empresas
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Portfólio, acessos e estrutura operacional em uma única área de gestão.
+            </p>
+          </div>
+          <Button type="button" size="sm" onClick={() => openCompany()}>
+            <Plus className="h-4 w-4" />
+            Nova empresa
           </Button>
         </div>
-        <Button type="button" className="w-full sm:w-auto" onClick={() => openCompany()}>
-          <Plus className="h-4 w-4" />
-          Nova empresa
-        </Button>
-      </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(420px,0.95fr)]">
-        <Card>
-          <CardHeader>
-            <CardTitle>Empresas</CardTitle>
-            <CardDescription>
-              Selecione a empresa para gerenciar ou use Dashboard para abrir os dados.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {loading ? (
-              <TableSkeleton />
-            ) : filteredCompanies.length ? (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Empresa</TableHead>
-                    <TableHead>Plano</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead className="text-right">Ações</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredCompanies.map((company) => (
-                    <TableRow
-                      key={company.id}
-                      className={cn(
-                        "cursor-pointer",
-                        selectedCompanyId === company.id && "bg-primary/10",
-                      )}
-                      onClick={() => selectCompanyScope(company)}
-                    >
-                      <TableCell>
-                        <div className="font-medium text-foreground">
-                          {company.name}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {company.trade_name || company.cnpj || company.id}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline">
-                          {planLabels[company.plan ?? ""] ?? company.plan ?? "-"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge active={company.active} />
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap justify-end gap-2">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              selectCompanyScope(company);
-                            }}
-                          >
-                            <Settings2 className="h-3.5 w-3.5" />
-                            Gerenciar
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              openCompanyDashboard(company);
-                            }}
-                          >
-                            <BarChart3 className="h-3.5 w-3.5" />
-                            Dashboard
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              openCompany(company);
-                            }}
-                          >
-                            <Edit className="h-3.5 w-3.5" />
-                            Editar
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="destructive"
-                            size="sm"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              deleteCompany(company);
-                            }}
-                            disabled={deletingCompanyId === company.id}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            Excluir
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            ) : (
-              <EmptyState text="Nenhuma empresa encontrada." />
-            )}
-          </CardContent>
-        </Card>
-
-        <div className="space-y-4">
-          <CompanySummary company={selectedCompany} loading={loading} />
-
-          <CompanyManagementFlow
-            company={selectedCompany}
-            error={companyDetailsError}
-            loading={loadingDetails}
-            warnings={companyOperationalWarnings}
-            stats={
-              hasCurrentCompanyDetails && companyStats
-                ? {
-                    ...companyStats,
-                    users: users.length,
-                  }
-                : null
-            }
-            onOpenRoute={openCompanyRoute}
-            onOpenTab={openCompanySection}
+        <dl className="grid divide-y divide-border border-y border-border bg-muted/20 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+          <ExecutiveStat
+            label="Empresas cadastradas"
+            value={formatNumber(companies.length)}
           />
+          <ExecutiveStat
+            label="Operações ativas"
+            value={formatNumber(
+              companies.filter((company) => company.active).length,
+            )}
+          />
+          <ExecutiveStat
+            label="Operações inativas"
+            value={formatNumber(
+              companies.filter((company) => !company.active).length,
+            )}
+          />
+        </dl>
 
+      </section>
+
+      <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+        <div className="min-w-0 bg-background">
           <Tabs
             value={activeCompanyTab}
-            onValueChange={(value) => setActiveCompanyTab(value as CompanyTab)}
-            className="space-y-4"
+            onValueChange={(value) => changeMasterSection(value as CompanyTab)}
+            className="space-y-0"
           >
-            <TabsList className="flex h-auto flex-wrap justify-start">
-              <TabsTrigger value="users">Usuários</TabsTrigger>
-              <TabsTrigger value="workers">Workers</TabsTrigger>
-              <TabsTrigger value="modules">Módulos</TabsTrigger>
-              <TabsTrigger value="masters">Super-admins</TabsTrigger>
+            <TabsList className="flex h-auto w-full max-w-full justify-start gap-1 overflow-x-auto rounded-none border-y border-border bg-muted/20 px-4 py-2">
+              <TabsTrigger value="companies" className="gap-2">
+                <Building2 className="h-3.5 w-3.5" />
+                Empresas
+              </TabsTrigger>
+              <TabsTrigger value="users" className="gap-2">
+                <Users className="h-3.5 w-3.5" />
+                Usuários
+              </TabsTrigger>
+              <TabsTrigger value="modules" className="gap-2">
+                <CircuitBoard className="h-3.5 w-3.5" />
+                Módulos
+              </TabsTrigger>
+              <TabsTrigger value="workers" className="gap-2">
+                <ServerCog className="h-3.5 w-3.5" />
+                Workers
+              </TabsTrigger>
+              <TabsTrigger value="insights" className="gap-2">
+                <BrainCog className="h-3.5 w-3.5" />
+                IA Advisor
+              </TabsTrigger>
+              <TabsTrigger value="masters" className="gap-2">
+                <ShieldCheck className="h-3.5 w-3.5" />
+                Super-admins
+              </TabsTrigger>
             </TabsList>
 
-            <TabsContent value="users">
-              <Card>
+            {activeCompanyTab !== "companies" ? (
+              <CompanySummary
+                company={selectedCompany}
+                loading={loading}
+                onEdit={() => selectedCompany && openCompany(selectedCompany)}
+                onOpenDashboard={() =>
+                  selectedCompany && void openCompanyDashboard(selectedCompany)
+                }
+              />
+            ) : null}
+
+            <TabsContent value="companies" className="m-0 p-4">
+              <section className="space-y-4">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center">
+                    <Input
+                      value={companyQuery}
+                      onChange={(event) => setCompanyQuery(event.target.value)}
+                      placeholder="Buscar empresa, nome fantasia ou CNPJ"
+                      className="w-full sm:max-w-md"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full sm:w-auto"
+                      onClick={() => void loadCompanies()}
+                      disabled={loading}
+                    >
+                      <RefreshCw
+                        className={cn("h-4 w-4", loading && "animate-spin")}
+                      />
+                      Atualizar
+                    </Button>
+                  </div>
+
+                  {checkedCompanyIds.size ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="secondary" className="h-8 px-3">
+                        {formatNumber(checkedCompanyIds.size)} selecionada(s)
+                        {checkedCompanyIds.size > checkedVisibleCompanyCount
+                          ? ` · ${formatNumber(
+                              checkedCompanyIds.size - checkedVisibleCompanyCount,
+                            )} fora do filtro`
+                          : ""}
+                      </Badge>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void updateCheckedCompanyStatus(true)}
+                        disabled={updatingCompanies || Boolean(deletingCompanyId)}
+                      >
+                        Ativar
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void updateCheckedCompanyStatus(false)}
+                        disabled={updatingCompanies || Boolean(deletingCompanyId)}
+                      >
+                        Desativar
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => void deleteCheckedCompanies()}
+                        disabled={updatingCompanies || Boolean(deletingCompanyId)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Excluir
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setCheckedCompanyIds(new Set())}
+                        disabled={updatingCompanies || Boolean(deletingCompanyId)}
+                      >
+                        Limpar
+                      </Button>
+                    </div>
+                  ) : (
+                    <Badge variant="outline" className="h-8 px-3">
+                      {formatNumber(filteredCompanies.length)} exibida(s)
+                    </Badge>
+                  )}
+                </div>
+
+                {loading ? (
+                  <TableSkeleton />
+                ) : filteredCompanies.length ? (
+                  <Table scrollRegionLabel="Empresas cadastradas">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-12">
+                          <Checkbox
+                            checked={
+                              allVisibleCompaniesChecked
+                                ? true
+                                : checkedVisibleCompanyCount
+                                  ? "indeterminate"
+                                  : false
+                            }
+                            onCheckedChange={(checked) =>
+                              toggleVisibleCompanies(checked === true)
+                            }
+                            disabled={updatingCompanies || Boolean(deletingCompanyId)}
+                            aria-label="Selecionar empresas exibidas"
+                          />
+                        </TableHead>
+                        <TableHead>Empresa</TableHead>
+                        <TableHead>CNPJ</TableHead>
+                        <TableHead>Plano</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Atualizado</TableHead>
+                        <TableHead className="text-right">Ações</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredCompanies.map((company) => (
+                        <TableRow
+                          key={company.id}
+                          className={cn(
+                            "cursor-pointer",
+                            selectedCompanyId === company.id && "bg-primary/5",
+                          )}
+                          data-state={
+                            selectedCompanyId === company.id ? "selected" : undefined
+                          }
+                          onClick={() => selectCompanyScope(company)}
+                        >
+                          <TableCell
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <Checkbox
+                              checked={checkedCompanyIds.has(company.id)}
+                              onCheckedChange={(checked) =>
+                                toggleCompanyChecked(company.id, checked === true)
+                              }
+                              disabled={
+                                updatingCompanies || Boolean(deletingCompanyId)
+                              }
+                              aria-label={`Selecionar ${company.name}`}
+                            />
+                          </TableCell>
+                          <TableCell className="min-w-56">
+                            <div className="font-medium text-foreground">
+                              {company.name}
+                            </div>
+                            <div className="mt-1 text-xs text-muted-foreground">
+                              {company.trade_name || "Nome fantasia não informado"}
+                            </div>
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap text-muted-foreground">
+                            {company.cnpj || "—"}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline">
+                              {planLabels[company.plan ?? ""] ?? "Personalizado"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge active={company.active} />
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap text-muted-foreground">
+                            {formatDateTime(company.updated_at ?? company.created_at)}
+                          </TableCell>
+                          <TableCell
+                            className="whitespace-nowrap"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <div className="flex items-center justify-end gap-1">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  selectCompanyScope(company);
+                                  changeMasterSection("users");
+                                }}
+                              >
+                                Gerenciar
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 w-8 p-0"
+                                title="Abrir painel"
+                                aria-label={`Abrir painel de ${company.name}`}
+                                onClick={() => void openCompanyDashboard(company)}
+                              >
+                                <BarChart3 className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 w-8 p-0"
+                                title="Editar empresa"
+                                aria-label={`Editar ${company.name}`}
+                                onClick={() => openCompany(company)}
+                              >
+                                <Edit className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 w-8 p-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                                title="Excluir empresa"
+                                aria-label={`Excluir ${company.name}`}
+                                onClick={() => void deleteCompany(company)}
+                                disabled={
+                                  updatingCompanies ||
+                                  deletingCompanyId === company.id
+                                }
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <EmptyState text="Nenhuma empresa encontrada." />
+                )}
+              </section>
+            </TabsContent>
+
+            <TabsContent value="users" className="m-0 p-4">
+              <section className="overflow-hidden rounded-lg border border-border bg-card">
                 <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <CardTitle>Admins e operadores</CardTitle>
@@ -2255,19 +3561,60 @@ export function SuperAdminDashboard() {
                       Usuários pertencentes à empresa selecionada.
                     </CardDescription>
                   </div>
-                  <Button
-                    type="button"
-                    className="w-full sm:w-auto"
-                    onClick={() => openUser()}
-                    disabled={
-                      !selectedCompanyId ||
-                      !hasCurrentCompanyDetails ||
-                      loadingDetails
-                    }
-                  >
-                    <UserPlus className="h-4 w-4" />
-                    Novo usuário
-                  </Button>
+                  <div className="flex w-full items-center gap-2 sm:w-auto">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 w-8 p-0"
+                      title="Atualizar usuários e acessos"
+                      aria-label="Atualizar usuários e acessos"
+                      onClick={() =>
+                        void Promise.allSettled([
+                          loadModuleCatalog({ force: true }),
+                          loadPermissionCatalog({ force: true }),
+                          loadCompanyDetails(selectedCompanyId, { force: true }),
+                        ])
+                      }
+                      disabled={
+                        !selectedCompanyId ||
+                        updatingCompanyUsers ||
+                        Boolean(deletingUserId) ||
+                        loadingDetails ||
+                        loadingModuleCatalog ||
+                        loadingPermissionCatalog
+                      }
+                    >
+                      <RefreshCw
+                        className={cn(
+                          "h-4 w-4",
+                          (loadingDetails ||
+                            loadingModuleCatalog ||
+                            loadingPermissionCatalog) &&
+                            "animate-spin",
+                        )}
+                      />
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="min-w-0 flex-1 sm:flex-none"
+                      onClick={() => openUser()}
+                      disabled={
+                        !selectedCompanyId ||
+                        !hasCurrentCompanyDetails ||
+                        updatingCompanyUsers ||
+                        Boolean(deletingUserId) ||
+                        loadingDetails ||
+                        loadingModuleCatalog ||
+                        loadingPermissionCatalog ||
+                        Boolean(moduleCatalogError || permissionCatalogError)
+                      }
+                    >
+                      <UserPlus className="h-4 w-4" />
+                      Novo usuário
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   {companyDetailsError ? (
@@ -2275,23 +3622,117 @@ export function SuperAdminDashboard() {
                       Usuários indisponíveis: {companyDetailsError}
                     </div>
                   ) : null}
-                  <Input
-                    value={userQuery}
-                    onChange={(event) => setUserQuery(event.target.value)}
-                    placeholder="Buscar usuário"
-                    disabled={
-                      !selectedCompanyId ||
-                      !hasCurrentCompanyDetails ||
-                      loadingDetails
-                    }
-                  />
+                  {moduleCatalogError || permissionCatalogError ? (
+                    <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
+                      Acessos indisponíveis: {permissionCatalogError || moduleCatalogError}
+                    </div>
+                  ) : null}
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <Input
+                      value={userQuery}
+                      onChange={(event) => setUserQuery(event.target.value)}
+                      placeholder="Buscar usuário"
+                      className="w-full lg:max-w-sm"
+                      disabled={
+                        !selectedCompanyId ||
+                        !hasCurrentCompanyDetails ||
+                        updatingCompanyUsers ||
+                        Boolean(deletingUserId) ||
+                        loadingDetails
+                      }
+                    />
+                    {checkedCompanyUserIds.size ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="secondary" className="h-8 px-3">
+                          {formatNumber(checkedCompanyUserIds.size)} selecionado(s)
+                          {checkedCompanyUserIds.size > checkedVisibleCompanyUserCount
+                            ? ` · ${formatNumber(
+                                checkedCompanyUserIds.size -
+                                  checkedVisibleCompanyUserCount,
+                              )} fora do filtro`
+                            : ""}
+                        </Badge>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            void updateCheckedCompanyUserStatus(true)
+                          }
+                          disabled={
+                            updatingCompanyUsers || Boolean(deletingUserId)
+                          }
+                        >
+                          Ativar
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            void updateCheckedCompanyUserStatus(false)
+                          }
+                          disabled={
+                            updatingCompanyUsers || Boolean(deletingUserId)
+                          }
+                        >
+                          Desativar
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => void deleteCheckedCompanyUsers()}
+                          disabled={
+                            updatingCompanyUsers || Boolean(deletingUserId)
+                          }
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Excluir
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setCheckedCompanyUserIds(new Set())}
+                          disabled={
+                            updatingCompanyUsers || Boolean(deletingUserId)
+                          }
+                        >
+                          Limpar
+                        </Button>
+                      </div>
+                    ) : (
+                      <Badge variant="outline" className="h-8 px-3">
+                        {formatNumber(filteredUsers.length)} exibido(s)
+                      </Badge>
+                    )}
+                  </div>
 
                   {loadingDetails ? (
                     <TableSkeleton />
                   ) : filteredUsers.length ? (
-                    <Table>
+                    <Table scrollRegionLabel="Usuários da empresa">
                       <TableHeader>
                         <TableRow>
+                          <TableHead className="w-12">
+                            <Checkbox
+                              checked={
+                                allVisibleCompanyUsersChecked
+                                  ? true
+                                  : checkedVisibleCompanyUserCount
+                                    ? "indeterminate"
+                                    : false
+                              }
+                              onCheckedChange={(checked) =>
+                                toggleVisibleCompanyUsers(checked === true)
+                              }
+                              disabled={
+                                updatingCompanyUsers || Boolean(deletingUserId)
+                              }
+                              aria-label="Selecionar usuários exibidos"
+                            />
+                          </TableHead>
                           <TableHead>Usuário</TableHead>
                           <TableHead>Acesso</TableHead>
                           <TableHead>Status</TableHead>
@@ -2301,6 +3742,21 @@ export function SuperAdminDashboard() {
                       <TableBody>
                         {filteredUsers.map((user) => (
                           <TableRow key={user.id}>
+                            <TableCell>
+                              <Checkbox
+                                checked={checkedCompanyUserIds.has(user.id)}
+                                onCheckedChange={(checked) =>
+                                  toggleCompanyUserChecked(
+                                    user.id,
+                                    checked === true,
+                                  )
+                                }
+                                disabled={
+                                  updatingCompanyUsers || Boolean(deletingUserId)
+                                }
+                                aria-label={`Selecionar ${user.name}`}
+                              />
+                            </TableCell>
                             <TableCell>
                               <div className="font-medium text-foreground">
                                 {user.name}
@@ -2322,6 +3778,9 @@ export function SuperAdminDashboard() {
                                   variant="outline"
                                   size="sm"
                                   onClick={() => openUser(user)}
+                                  disabled={
+                                    updatingCompanyUsers || Boolean(deletingUserId)
+                                  }
                                 >
                                   <Edit className="h-3.5 w-3.5" />
                                   Editar
@@ -2331,7 +3790,10 @@ export function SuperAdminDashboard() {
                                   variant="destructive"
                                   size="sm"
                                   onClick={() => deleteCompanyUser(user)}
-                                  disabled={deletingUserId === user.id}
+                                  disabled={
+                                    updatingCompanyUsers ||
+                                    Boolean(deletingUserId)
+                                  }
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                   Excluir
@@ -2343,46 +3805,167 @@ export function SuperAdminDashboard() {
                       </TableBody>
                     </Table>
                   ) : companyDetailsError ? (
-                    <EmptyState text="Não foi possível certificar os usuários desta empresa." />
+                    <EmptyState text="Não foi possível carregar os usuários desta empresa." />
                   ) : (
                     <EmptyState text="Nenhum usuário para a empresa selecionada." />
                   )}
                 </CardContent>
-              </Card>
+              </section>
             </TabsContent>
 
-            <TabsContent value="masters">
-              <Card>
+            <TabsContent value="masters" className="m-0 p-4">
+              <section className="overflow-hidden rounded-lg border border-border bg-card">
                 <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <CardTitle>Super-admins</CardTitle>
                     <CardDescription>
-                      Usuários com acesso global ao Master.
+                      Gestão global. Novos perfis usam a empresa selecionada
+                      apenas como vínculo de origem.
                     </CardDescription>
                   </div>
-                  <Button
-                    type="button"
-                    className="w-full sm:w-auto"
-                    onClick={() => openMasterUser()}
-                  >
-                    <UserPlus className="h-4 w-4" />
-                    Novo super-admin
-                  </Button>
+                  <div className="flex w-full items-center gap-2 sm:w-auto">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 w-8 p-0"
+                      title="Atualizar super-admins"
+                      aria-label="Atualizar super-admins"
+                      onClick={() => void loadMasterUsers({ force: true })}
+                      disabled={
+                        loading ||
+                        loadingMasterUsers ||
+                        updatingMasterUsers ||
+                        Boolean(deletingUserId)
+                      }
+                    >
+                      <RefreshCw
+                        className={cn(
+                          "h-4 w-4",
+                          loadingMasterUsers && "animate-spin",
+                        )}
+                      />
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="min-w-0 flex-1 sm:flex-none"
+                      onClick={() => openMasterUser()}
+                      disabled={
+                        !selectedCompanyId ||
+                        updatingMasterUsers ||
+                        Boolean(deletingUserId)
+                      }
+                    >
+                      <UserPlus className="h-4 w-4" />
+                      Novo super-admin
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  <Input
-                    value={masterUserQuery}
-                    onChange={(event) => setMasterUserQuery(event.target.value)}
-                    placeholder="Buscar super-admin"
-                    disabled={loading}
-                  />
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <Input
+                      value={masterUserQuery}
+                      onChange={(event) => setMasterUserQuery(event.target.value)}
+                      placeholder="Buscar super-admin"
+                      className="w-full lg:max-w-sm"
+                      disabled={
+                        loading ||
+                        loadingMasterUsers ||
+                        updatingMasterUsers ||
+                        Boolean(deletingUserId)
+                      }
+                    />
+                    {checkedMasterUserIds.size ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="secondary" className="h-8 px-3">
+                          {formatNumber(checkedMasterUserIds.size)} selecionado(s)
+                          {checkedMasterUserIds.size > checkedVisibleMasterUserCount
+                            ? ` · ${formatNumber(
+                                checkedMasterUserIds.size -
+                                  checkedVisibleMasterUserCount,
+                              )} fora do filtro`
+                            : ""}
+                        </Badge>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void updateCheckedMasterUserStatus(true)}
+                          disabled={
+                            updatingMasterUsers || Boolean(deletingUserId)
+                          }
+                        >
+                          Ativar
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void updateCheckedMasterUserStatus(false)}
+                          disabled={
+                            updatingMasterUsers || Boolean(deletingUserId)
+                          }
+                        >
+                          Desativar
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => void deleteCheckedMasterUsers()}
+                          disabled={
+                            updatingMasterUsers || Boolean(deletingUserId)
+                          }
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Excluir
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setCheckedMasterUserIds(new Set())}
+                          disabled={
+                            updatingMasterUsers || Boolean(deletingUserId)
+                          }
+                        >
+                          Limpar
+                        </Button>
+                      </div>
+                    ) : (
+                      <Badge variant="outline" className="h-8 px-3">
+                        {formatNumber(filteredMasterUsers.length)} exibido(s)
+                      </Badge>
+                    )}
+                  </div>
 
-                  {loading ? (
+                  {loading || loadingMasterUsers || !masterUsersLoaded ? (
                     <TableSkeleton />
                   ) : filteredMasterUsers.length ? (
-                    <Table>
+                    <Table scrollRegionLabel="Super-admins cadastrados">
                       <TableHeader>
                         <TableRow>
+                          <TableHead className="w-12">
+                            <Checkbox
+                              checked={
+                                allVisibleMasterUsersChecked
+                                  ? true
+                                  : checkedVisibleMasterUserCount
+                                    ? "indeterminate"
+                                    : false
+                              }
+                              onCheckedChange={(checked) =>
+                                toggleVisibleMasterUsers(checked === true)
+                              }
+                              disabled={
+                                updatingMasterUsers ||
+                                Boolean(deletingUserId) ||
+                                !selectableFilteredMasterUsers.length
+                              }
+                              aria-label="Selecionar super-admins exibidos"
+                            />
+                          </TableHead>
                           <TableHead>Usuário</TableHead>
                           <TableHead>Acesso</TableHead>
                           <TableHead>Status</TableHead>
@@ -2393,6 +3976,24 @@ export function SuperAdminDashboard() {
                         {filteredMasterUsers.map((user) => (
                           <TableRow key={user.id}>
                             <TableCell>
+                              <Checkbox
+                                checked={checkedMasterUserIds.has(user.id)}
+                                onCheckedChange={(checked) =>
+                                  toggleMasterUserChecked(user.id, checked === true)
+                                }
+                                disabled={
+                                  updatingMasterUsers ||
+                                  Boolean(deletingUserId) ||
+                                  currentUser?.id === user.id
+                                }
+                                aria-label={
+                                  currentUser?.id === user.id
+                                    ? `${user.name} é o super-admin conectado`
+                                    : `Selecionar ${user.name}`
+                                }
+                              />
+                            </TableCell>
+                            <TableCell>
                               <div className="font-medium text-foreground">
                                 {user.name}
                               </div>
@@ -2401,7 +4002,7 @@ export function SuperAdminDashboard() {
                               </div>
                             </TableCell>
                             <TableCell>
-                              <Badge variant="default">Master</Badge>
+                              <Badge variant="default">Superadmin</Badge>
                             </TableCell>
                             <TableCell>
                               <StatusBadge active={user.active} />
@@ -2413,6 +4014,9 @@ export function SuperAdminDashboard() {
                                   variant="outline"
                                   size="sm"
                                   onClick={() => openMasterUser(user)}
+                                  disabled={
+                                    updatingMasterUsers || Boolean(deletingUserId)
+                                  }
                                 >
                                   <Edit className="h-3.5 w-3.5" />
                                   Editar
@@ -2423,7 +4027,8 @@ export function SuperAdminDashboard() {
                                   size="sm"
                                   onClick={() => deleteMasterUser(user)}
                                   disabled={
-                                    deletingUserId === user.id ||
+                                    Boolean(deletingUserId) ||
+                                    updatingMasterUsers ||
                                     currentUser?.id === user.id
                                   }
                                 >
@@ -2437,31 +4042,67 @@ export function SuperAdminDashboard() {
                       </TableBody>
                     </Table>
                   ) : (
-                    <EmptyState text="Nenhum super-admin retornado pela API." />
+                    <EmptyState text="Nenhum super-admin disponível." />
                   )}
                 </CardContent>
-              </Card>
+              </section>
             </TabsContent>
 
-            <TabsContent value="modules">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Módulos</CardTitle>
-                  <CardDescription>
-                    Catálogo da plataforma usado para liberar produtos, menus e
-                    recursos da empresa selecionada.
-                  </CardDescription>
+            <TabsContent value="insights" className="m-0 p-4">
+              {activeCompanyTab === "insights" ? (
+                <AiInsightsDashboard
+                  companyScopeId={selectedCompanyId}
+                  companyName={selectedCompany?.name}
+                  embedded
+                />
+              ) : null}
+            </TabsContent>
+
+            <TabsContent value="modules" className="m-0 p-4">
+              <section className="overflow-hidden rounded-lg border border-border bg-card">
+                <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <CardTitle>Módulos</CardTitle>
+                    <CardDescription>
+                      Escolha os módulos disponíveis para a empresa selecionada.
+                    </CardDescription>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      void Promise.allSettled([
+                        loadModuleCatalog({ force: true }),
+                        loadCompanyModules(selectedCompanyId, { force: true }),
+                      ])
+                    }
+                    disabled={
+                      !selectedCompanyId ||
+                      loadingModuleCatalog ||
+                      loadingCompanyModules
+                    }
+                  >
+                    <RefreshCw
+                      className={cn(
+                        "h-4 w-4",
+                        (loadingModuleCatalog || loadingCompanyModules) &&
+                          "animate-spin",
+                      )}
+                    />
+                    Atualizar
+                  </Button>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {companyDetailsError ? (
+                  {companyModulesError || moduleCatalogError ? (
                     <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
-                      Módulos indisponíveis: {companyDetailsError}
+                      Módulos indisponíveis: {companyModulesError || moduleCatalogError}
                     </div>
                   ) : null}
-                  {loadingDetails ? (
+                  {loadingCompanyModules || loadingModuleCatalog ? (
                     <TableSkeleton />
-                  ) : companyDetailsError ? (
-                    <EmptyState text="Não foi possível certificar os módulos desta empresa." />
+                  ) : companyModulesError || moduleCatalogError ? (
+                    <EmptyState text="Não foi possível carregar os módulos desta empresa." />
                   ) : visibleModules.length ? (
                     <div className="divide-y rounded-md border">
                       {visibleModules.map((module) => {
@@ -2498,64 +4139,73 @@ export function SuperAdminDashboard() {
                                   {enabled ? "Habilitado" : "Desabilitado"}
                                 </Badge>
                                 {!module.active ? (
-                                  <Badge variant="outline">Inativo global</Badge>
+                                  <Badge variant="outline">Indisponível</Badge>
                                 ) : null}
                               </div>
                               <div className="mt-1 text-xs text-muted-foreground">
-                                {module.description || module.slug}
+                                {algorithmModuleDescription(module)}
                               </div>
                             </div>
-                            <Button
-                              type="button"
-                              variant={enabled ? "outline" : "default"}
-                              size="sm"
-                              className="w-full sm:w-auto"
-                              onClick={() => toggleCompanyModule(module)}
-                              disabled={
-                                !selectedCompanyId ||
-                                !hasCurrentCompanyDetails ||
-                                !module.active ||
-                                updatingModuleId === module.id
-                              }
-                            >
-                              {enabled ? (
-                                <CheckCircle2 className="h-3.5 w-3.5" />
-                              ) : (
-                                <Plus className="h-3.5 w-3.5" />
+                            <label
+                              className={cn(
+                                "flex shrink-0 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 py-2 text-xs font-medium text-foreground",
+                                (!selectedCompanyId ||
+                                  loadedCompanyModulesId !== selectedCompanyId ||
+                                  !module.active ||
+                                  updatingModuleId === module.id) &&
+                                  "cursor-default opacity-60",
                               )}
-                              {enabled ? "Alterar" : "Habilitar"}
-                            </Button>
+                            >
+                              <Checkbox
+                                checked={enabled}
+                                onCheckedChange={() => void toggleCompanyModule(module)}
+                                disabled={
+                                  !selectedCompanyId ||
+                                  loadedCompanyModulesId !== selectedCompanyId ||
+                                  !module.active ||
+                                  updatingModuleId === module.id
+                                }
+                                aria-label={`${enabled ? "Desabilitar" : "Habilitar"} ${moduleLabel}`}
+                              />
+                              {updatingModuleId === module.id
+                                ? "Salvando..."
+                                : enabled
+                                  ? "Disponível"
+                                  : "Indisponível"}
+                            </label>
                           </div>
                         );
                       })}
                     </div>
                   ) : (
-                    <EmptyState text="Nenhum algoritmo retornado pela API." />
+                    <EmptyState text="Nenhum módulo disponível." />
                   )}
                 </CardContent>
-              </Card>
+              </section>
             </TabsContent>
 
-            <TabsContent value="workers">
-              <Card>
+            <TabsContent value="workers" className="m-0 p-4">
+              <section className="overflow-hidden rounded-lg border border-border bg-card">
                 <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <CardTitle>Workers</CardTitle>
                     <CardDescription>
-                      Workers retornados para a empresa selecionada.
+                      Processos responsáveis por receber os dados da empresa.
                     </CardDescription>
                   </div>
                   <Button
                     type="button"
                     variant="outline"
                     className="w-full sm:w-auto"
-                    onClick={() => loadCompanyDetails(selectedCompanyId)}
-                    disabled={!selectedCompanyId || loadingDetails}
+                    onClick={() =>
+                      void loadCompanyWorkers(selectedCompanyId, { force: true })
+                    }
+                    disabled={!selectedCompanyId || loadingOperationalDetails}
                   >
                     <RefreshCw
                       className={cn(
                         "h-4 w-4",
-                        loadingDetails && "animate-spin",
+                        loadingOperationalDetails && "animate-spin",
                       )}
                     />
                     Atualizar
@@ -2572,20 +4222,16 @@ export function SuperAdminDashboard() {
                       {workerScopeWarning}
                     </div>
                   ) : null}
-                  {loadingDetails ? (
+                  {loadingOperationalDetails || !hasCurrentCompanyWorkers ? (
                     <TableSkeleton />
-                  ) : !canEnumerateSelectedCompanyWorkers ? (
-                    <EmptyState text="A lista detalhada de Workers é disponibilizada somente para a empresa assinada na sessão. Os demais dados certificados da empresa selecionada permanecem acessíveis." />
                   ) : workers.length ? (
                     <Table>
                       <TableHeader>
                         <TableRow>
                           <TableHead>Worker</TableHead>
                           <TableHead>Status</TableHead>
-                          <TableHead>Último heartbeat</TableHead>
-                          <TableHead>Ambiente</TableHead>
+                          <TableHead>Última comunicação</TableHead>
                           <TableHead>Vínculo</TableHead>
-                          <TableHead>Chave</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -2606,9 +4252,7 @@ export function SuperAdminDashboard() {
                                   </Badge>
                                 ) : null}
                                 <div className="mt-1 text-xs text-muted-foreground">
-                                  {worker.description ||
-                                    display.identifier ||
-                                    worker.id}
+                                  {worker.description || "Sem descrição"}
                                 </div>
                               </TableCell>
                               <TableCell>
@@ -2618,23 +4262,10 @@ export function SuperAdminDashboard() {
                                 {formatDateTime(display.lastSeenAt)}
                               </TableCell>
                               <TableCell>
-                                <div className="text-sm text-foreground">
-                                  {display.environment || "-"}
-                                </div>
-                                {display.version ? (
-                                  <div className="mt-1 text-xs text-muted-foreground">
-                                    {display.version}
-                                  </div>
-                                ) : null}
-                              </TableCell>
-                              <TableCell>
                                 <WorkerScopeBadge
                                   companyId={selectedCompanyId}
                                   worker={worker as WorkerRow}
                                 />
-                              </TableCell>
-                              <TableCell className="font-mono text-xs text-muted-foreground">
-                                {display.apiKeyPrefix || "-"}
                               </TableCell>
                             </TableRow>
                           );
@@ -2642,16 +4273,16 @@ export function SuperAdminDashboard() {
                       </TableBody>
                     </Table>
                   ) : workerOperationalWarning ? (
-                    <EmptyState text="Workers não certificados para esta empresa." />
+                    <EmptyState text="Não foi possível confirmar os Workers desta empresa." />
                   ) : (
-                    <EmptyState text="Nenhum worker retornado para esta empresa." />
+                    <EmptyState text="Nenhum Worker disponível para esta empresa." />
                   )}
                 </CardContent>
-              </Card>
+              </section>
             </TabsContent>
           </Tabs>
         </div>
-      </div>
+      </section>
 
       <Dialog open={companyDialog} onOpenChange={setCompanyDialog}>
         <DialogContent className="sm:max-w-2xl">
@@ -2715,7 +4346,7 @@ export function SuperAdminDashboard() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
-            <FormField label="Timezone">
+            <FormField label="Fuso horário">
               <Input
                 value={companyForm.timezone}
                 onChange={(event) =>
@@ -2835,12 +4466,13 @@ export function SuperAdminDashboard() {
                 additiveAdminPromotionMode && "cursor-default opacity-60",
               )}
             >
-              <input
-                type="checkbox"
-                className="mt-1 h-4 w-4 accent-primary"
+              <Checkbox
+                className="mt-1"
                 checked={userForm.isMaster}
                 disabled={additiveAdminPromotionMode}
-                onChange={(event) => setSuperAdminAccess(event.target.checked)}
+                onCheckedChange={(checked) =>
+                  setSuperAdminAccess(checked === true)
+                }
               />
               <span className="min-w-0">
                 <span className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -2848,8 +4480,7 @@ export function SuperAdminDashboard() {
                   Super-admin
                 </span>
                 <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                  Acesso global ao Master. Salva o usuário com is_master=true e
-                  não depende dos acessos operacionais.
+                  Acesso completo à gestão de todas as empresas e módulos.
                 </span>
               </span>
             </label>
@@ -2868,9 +4499,8 @@ export function SuperAdminDashboard() {
                   : "border-border bg-card",
               )}
             >
-              <input
-                type="checkbox"
-                className="mt-1 h-4 w-4 accent-primary"
+              <Checkbox
+                className="mt-1"
                 checked={userForm.isCompanyAdmin}
                 disabled={
                   userForm.isMaster ||
@@ -2879,7 +4509,9 @@ export function SuperAdminDashboard() {
                     !userPermissionBaselineCertified &&
                     !additiveAdminPromotionMode)
                 }
-                onChange={(event) => setCompanyAdminAccess(event.target.checked)}
+                onCheckedChange={(checked) =>
+                  setCompanyAdminAccess(checked === true)
+                }
               />
               <span className="min-w-0">
                 <span className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -2887,8 +4519,8 @@ export function SuperAdminDashboard() {
                   Administrador da empresa
                 </span>
                 <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                  Concede, de forma aditiva, todas as permissões publicadas dos
-                  módulos operacionais habilitados. Não é superadmin.
+                  Concede os acessos de gestão disponíveis nos módulos
+                  habilitados para esta empresa.
                 </span>
               </span>
             </label>
@@ -2900,8 +4532,8 @@ export function SuperAdminDashboard() {
                     Menus e acessos
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Selecione individualmente as permissões publicadas em
-                    Módulos pela API.
+                    Escolha individualmente o que este usuário pode acessar e
+                    administrar.
                   </div>
                 </div>
                 {loadingUserPermissions ? (
@@ -2911,117 +4543,144 @@ export function SuperAdminDashboard() {
 
               {userForm.isMaster ? (
                 <div className="mt-3 rounded-md border border-border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
-                  Super-admin usa is_master=true. O frontend não chama
-                  {` /users/{id}/permissions `}para este tipo de usuário.
+                  Este perfil já possui acesso global e não precisa de acessos
+                  adicionais.
                 </div>
               ) : additiveAdminPromotionMode ? (
                 <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-sm text-foreground">
-                  A API confirmou este usuário em
-                  {` GET /companies/{companyId}/users`}, mas não disponibilizou
-                  a leitura de suas permissões. Neste modo, somente o controle
+                  Os acessos atuais deste usuário não puderam ser consultados.
+                  Neste modo, somente o controle
                   <strong> Administrador da empresa</strong> está disponível.
-                  Ao salvar, o vínculo será relido e todos os acessos dos
-                  módulos habilitados serão concedidos de forma aditiva. Dados
-                  cadastrais, acessos granulares e permissões existentes não
-                  serão alterados ou removidos.
+                  Ao salvar, todos os acessos dos
+                  módulos e capacidades disponíveis serão concedidos de forma
+                  aditiva. Dados
+                  cadastrais e acessos existentes não serão removidos.
                 </div>
               ) : editingUser &&
                 !loadingUserPermissions &&
                 !userPermissionBaselineCertified ? (
                 <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-sm text-foreground">
-                  Os acessos deste usuário não foram certificados pela API para
-                  a empresa selecionada. A edição de permissões foi bloqueada
-                  para evitar uma alteração parcial ou em outro tenant.
+                  Os acessos deste usuário não puderam ser confirmados para a
+                  empresa selecionada. A edição foi bloqueada para evitar uma
+                  alteração parcial.
                 </div>
               ) : permissionGroups.length ? (
                 <div className="mt-3 space-y-3">
-                  {permissionGroups.map((group) => (
-                    <div
-                      key={group.key}
-                      className="rounded-md border border-border bg-muted/20 p-3"
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-sm font-medium text-foreground">
-                          {group.name}
-                        </div>
-                        <Badge variant="outline">
-                          {formatNumber(group.permissions.length)}
-                        </Badge>
-                      </div>
+                  {permissionGroups.map((group, index) => {
+                    const editablePermissions = group.permissions.filter(
+                      (permission) => !permission.unavailable,
+                    );
+                    const selectedPermissionCount = editablePermissions.filter(
+                      (permission) => userPermissions[permission.slug],
+                    ).length;
+                    const groupChecked = Boolean(
+                      editablePermissions.length &&
+                        selectedPermissionCount === editablePermissions.length,
+                    );
 
-                      <div className="mt-3 grid gap-2 md:grid-cols-2">
-                        {group.permissions.map((permission) => (
-                          <label
-                            key={permission.id}
-                            className={cn(
-                              "flex cursor-pointer items-start gap-3 rounded-md border px-3 py-3 transition",
-                              userPermissions[permission.slug]
-                                ? "border-primary/30 bg-primary/10"
-                                : "border-border bg-card",
-                              (loadingUserPermissions || permission.unavailable) &&
-                                "cursor-default opacity-80",
-                            )}
-                          >
-                            <input
-                              type="checkbox"
-                              className="mt-1 h-4 w-4 accent-primary"
-                              checked={Boolean(userPermissions[permission.slug])}
-                              disabled={loadingUserPermissions || permission.unavailable}
-                              onChange={(event) => {
-                                setCompanyAdminPromotionRequested(false);
-                                setTouchedUserPermissionSlugs((current) => {
-                                  const next = new Set(current);
-                                  next.add(permission.slug);
-                                  return next;
-                                });
-                                setUserPermissions((current) => {
-                                  const next = {
-                                    ...current,
-                                    [permission.slug]: event.target.checked,
-                                  };
-                                  setUserForm((form) => ({
-                                    ...form,
-                                    isCompanyAdmin: isCertifiedCompanyAdminState(
-                                      next,
-                                      visiblePermissionOptions,
-                                      enabledCompanyModuleIds,
-                                    ),
-                                  }));
-                                  return next;
-                                });
-                              }}
+                    return (
+                    <React.Fragment key={group.key}>
+                      {index === 0 ||
+                      permissionGroups[index - 1]?.category !== group.category ? (
+                        <div className="pt-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          {group.category === "product"
+                            ? "Módulos"
+                            : "Capacidades de gestão"}
+                        </div>
+                      ) : null}
+                      <div className="rounded-md border border-border bg-muted/20 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium text-foreground">
+                            {group.name}
+                          </div>
+                          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-muted-foreground">
+                            <Checkbox
+                              checked={
+                                groupChecked
+                                  ? true
+                                  : selectedPermissionCount
+                                    ? "indeterminate"
+                                    : false
+                              }
+                              disabled={
+                                loadingUserPermissions ||
+                                !editablePermissions.length
+                              }
+                              onCheckedChange={(checked) =>
+                                setPermissionGroupAccess(group, checked === true)
+                              }
+                              aria-label={`Selecionar todos os acessos de ${group.name}`}
                             />
-                            <span className="min-w-0">
-                              <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
-                                <span>{permission.label}</span>
-                                <Badge variant="outline">
-                                  {formatPermissionAction(permission)}
-                                </Badge>
-                                {permission.unavailable ? (
-                                  <Badge variant="outline">Indisponível</Badge>
-                                ) : null}
-                              </span>
-                              <span className="mt-1 block break-words text-xs leading-5 text-muted-foreground">
-                                {permission.description}
-                              </span>
-                              <span className="mt-2 grid min-w-0 gap-1 text-[11px] leading-4 text-muted-foreground">
-                                <span className="min-w-0 break-all">
-                                  Slug: <code>{permission.slug}</code>
-                                </span>
-                                <span className="min-w-0 break-all">
-                                  Módulo: <code>{permission.module_id}</code>
-                                </span>
-                              </span>
-                            </span>
+                            Selecionar grupo
                           </label>
-                        ))}
+                        </div>
+
+                        <div className="mt-3 grid gap-2 md:grid-cols-2">
+                          {group.permissions.map((permission) => (
+                            <label
+                              key={permission.id}
+                              className={cn(
+                                "flex cursor-pointer items-start gap-3 rounded-md border px-3 py-3 transition",
+                                userPermissions[permission.slug]
+                                  ? "border-primary/30 bg-primary/10"
+                                  : "border-border bg-card",
+                                (loadingUserPermissions || permission.unavailable) &&
+                                  "cursor-default opacity-80",
+                              )}
+                            >
+                              <Checkbox
+                                className="mt-1"
+                                checked={Boolean(userPermissions[permission.slug])}
+                                disabled={loadingUserPermissions || permission.unavailable}
+                                onCheckedChange={(checked) => {
+                                  setCompanyAdminPromotionRequested(false);
+                                  setTouchedUserPermissionSlugs((current) => {
+                                    const next = new Set(current);
+                                    next.add(permission.slug);
+                                    return next;
+                                  });
+                                  setUserPermissions((current) => {
+                                    const next = {
+                                      ...current,
+                                      [permission.slug]: checked === true,
+                                    };
+                                    setUserForm((form) => ({
+                                      ...form,
+                                      isCompanyAdmin: isCertifiedCompanyAdminState(
+                                        next,
+                                        visiblePermissionOptions,
+                                        enabledCompanyModuleIds,
+                                      ),
+                                    }));
+                                    return next;
+                                  });
+                                }}
+                              />
+                              <span className="min-w-0">
+                                <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
+                                  <span>{permission.label}</span>
+                                  <Badge variant="outline">
+                                    {formatPermissionAction(permission)}
+                                  </Badge>
+                                  {permission.unavailable ? (
+                                    <Badge variant="outline">Indisponível</Badge>
+                                  ) : null}
+                                </span>
+                                <span className="mt-1 block break-words text-xs leading-5 text-muted-foreground">
+                                  {permission.description}
+                                </span>
+                              </span>
+                            </label>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    </React.Fragment>
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="mt-3">
-                  <EmptyState text="Catálogo de permissões não retornado pela API." />
+                  <EmptyState text="Os acessos disponíveis não puderam ser carregados." />
                 </div>
               )}
             </div>
@@ -3059,7 +4718,7 @@ export function SuperAdminDashboard() {
               {editingMasterUser ? "Editar super-admin" : "Novo super-admin"}
             </DialogTitle>
             <DialogDescription>
-              Acesso global para gestão de empresas e dashboards.
+              Acesso global para gestão de empresas e painéis.
             </DialogDescription>
           </DialogHeader>
 
@@ -3135,284 +4794,134 @@ export function SuperAdminDashboard() {
   );
 }
 
-function MetricCard({
-  icon: Icon,
+function managementErrorMessage(error: unknown, fallback: string) {
+  if (!(error instanceof ApiError)) return fallback;
+  if (error.status === 400 || error.status === 422) {
+    return "Revise os dados informados e tente novamente.";
+  }
+  if (error.status === 401) {
+    return "Sua sessão expirou. Entre novamente para continuar.";
+  }
+  if (error.status === 403) {
+    return "Seu perfil não permite concluir esta ação.";
+  }
+  if (error.status === 404) {
+    return "A informação solicitada não foi encontrada. Atualize a página e tente novamente.";
+  }
+  if (error.status === 409) {
+    return "Os dados foram atualizados recentemente. Recarregue as informações e tente novamente.";
+  }
+  if (error.status >= 500) {
+    return "O serviço está temporariamente indisponível. Tente novamente em instantes.";
+  }
+  return fallback;
+}
+
+function ExecutiveStat({
   label,
   value,
-  detail,
 }: {
-  icon: React.ComponentType<{ className?: string }>;
   label: string;
   value: string;
-  detail: string;
 }) {
   return (
-    <Card>
-      <CardContent className="flex items-center gap-3 p-4">
-        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 text-primary">
-          <Icon className="h-5 w-5" />
-        </div>
-        <div className="min-w-0">
-          <div className="text-xs font-semibold uppercase text-muted-foreground">
-            {label}
-          </div>
-          <div className="mt-1 text-2xl font-semibold tracking-normal text-foreground">
-            {value}
-          </div>
-          <div className="truncate text-xs text-muted-foreground">{detail}</div>
-        </div>
-      </CardContent>
-    </Card>
+    <div className="px-4 py-3">
+      <dt className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {label}
+      </dt>
+      <dd className="mt-1 text-xl font-semibold tabular-nums text-foreground">
+        {value}
+      </dd>
+    </div>
   );
 }
 
 function CompanySummary({
   company,
   loading,
+  onEdit,
+  onOpenDashboard,
 }: {
   company: Company | null;
   loading: boolean;
+  onEdit: () => void;
+  onOpenDashboard: () => void;
 }) {
   if (loading) {
-    return <Skeleton className="h-32 w-full" />;
+    return <Skeleton className="m-4 h-24 w-auto" />;
   }
 
   if (!company) {
     return (
-      <Card>
-        <CardContent className="p-4">
-          <EmptyState text="Selecione uma empresa para ver detalhes." />
-        </CardContent>
-      </Card>
+      <div className="p-4">
+        <EmptyState text="Selecione uma empresa para ver detalhes." />
+      </div>
     );
   }
 
   return (
-    <Card>
-      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <CardTitle>{company.name}</CardTitle>
-          <CardDescription>
-            {company.trade_name || company.cnpj || company.id}
-          </CardDescription>
+    <header className="px-4 py-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="truncate text-lg font-semibold text-foreground">
+              {company.name}
+            </h2>
+            <StatusBadge active={company.active} />
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {company.trade_name || company.cnpj || "Empresa cadastrada"}
+          </p>
         </div>
-        <StatusBadge active={company.active} />
-      </CardHeader>
-      <CardContent>
-        <div className="grid gap-3 text-sm sm:grid-cols-3">
-          <Detail label="Plano" value={planLabels[company.plan ?? ""] ?? company.plan ?? "-"} />
-          <Detail label="Timezone" value={company.timezone ?? "-"} />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onEdit}>
+            <Edit className="h-3.5 w-3.5" />
+            Editar
+          </Button>
+          <Button type="button" size="sm" onClick={onOpenDashboard}>
+            <BarChart3 className="h-3.5 w-3.5" />
+            Abrir painel
+          </Button>
+        </div>
+      </div>
+      <dl className="mt-4 grid gap-x-6 gap-y-3 border-t border-border pt-3 text-sm sm:grid-cols-3">
+          <Detail
+            label="Plano"
+            value={planLabels[company.plan ?? ""] ?? "Personalizado"}
+          />
+          <Detail
+            label="Fuso horário"
+            value={company.timezone ? "Configurado" : "Não informado"}
+          />
           <Detail
             label="Atualizado"
             value={formatDateTime(company.updated_at ?? company.created_at)}
           />
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function CompanyManagementFlow({
-  company,
-  error,
-  loading,
-  stats,
-  warnings,
-  onOpenRoute,
-  onOpenTab,
-}: {
-  company: Company | null;
-  error: string;
-  loading: boolean;
-  warnings: CompanyOperationalWarning[];
-  stats:
-    | (CompanyOperationalStats & {
-        users: number;
-        workers: number | null;
-      })
-    | null;
-  onOpenRoute: (path: string) => void;
-  onOpenTab: (tab: CompanyTab) => void;
-}) {
-  const disabled = !company || loading || !stats;
-  const scenarioTotal =
-    stats?.countingScenarios !== null &&
-    stats?.countingScenarios !== undefined &&
-    stats.occupancyScenarios !== null
-      ? stats.countingScenarios + stats.occupancyScenarios
-      : null;
-  const steps = stats
-    ? [
-    {
-      index: "01",
-      label: "Usuários",
-      detail: "Perfis e permissões",
-      count: stats.users,
-      icon: Users,
-      onClick: () => onOpenTab("users"),
-    },
-    {
-      index: "02",
-      label: "Workers",
-      detail: "Edge e API key",
-      count: stats.workers,
-      icon: ServerCog,
-      onClick: () => onOpenTab("workers"),
-    },
-    {
-      index: "03",
-      label: "Módulos",
-      detail: "Produtos e acessos habilitados",
-      count: stats.modules,
-      icon: CircuitBoard,
-      onClick: () => onOpenTab("modules"),
-    },
-    {
-      index: "04",
-      label: "Câmeras",
-      detail: "Origem de vídeo",
-      count: stats.cameras,
-      icon: CameraIcon,
-      onClick: () => onOpenRoute("/manager/cameras"),
-    },
-    {
-      index: "05",
-      label: "Locations",
-      detail: "Unidades principais",
-      count: stats.locations,
-      icon: MapPinned,
-      onClick: () => onOpenRoute("/manager/locations"),
-    },
-    {
-      index: "06",
-      label: "Sublocations",
-      detail: "Grupos de câmeras",
-      count: stats.subLocations,
-      icon: Network,
-      onClick: () => onOpenRoute("/manager/locations#locations"),
-    },
-    {
-      index: "07",
-      label: "Cenários",
-      detail: `${formatCertifiedOperationalCount(
-        stats.countingScenarios,
-      )} contagem / ${formatCertifiedOperationalCount(
-        stats.occupancyScenarios,
-      )} ocupação`,
-      count: scenarioTotal,
-      icon: ListChecks,
-      onClick: () => onOpenRoute("/manager/scenarios"),
-    },
-  ]
-    : [];
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Gestão da empresa</CardTitle>
-        <CardDescription>
-          {company ? company.name : "Selecione uma empresa para ver a hierarquia."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {error ? (
-          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm font-medium text-destructive">
-            Totais operacionais não certificados: {error}
-          </div>
-        ) : (
-          <>
-            {warnings.length ? (
-              <div className="space-y-2 rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-3 text-xs leading-5 text-amber-800 dark:text-amber-200">
-                <div className="font-semibold">Dados operacionais parciais.</div>
-                <div className="space-y-1">
-                  {warnings.map((warning) => (
-                    <OperationalResourceWarningNotice
-                      key={warning.resource}
-                      warning={warning}
-                      embedded
-                    />
-                  ))}
-                </div>
-              </div>
-            ) : null}
-            <div className="grid gap-2 md:grid-cols-2">
-              {steps.map((step) => {
-                const Icon = step.icon;
-
-                return (
-                  <button
-                    key={step.index}
-                    type="button"
-                    className={cn(
-                      "group flex min-h-20 items-center gap-3 rounded-md border border-border bg-background px-3 py-3 text-left transition",
-                      "hover:border-primary/30 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60",
-                    )}
-                    onClick={step.onClick}
-                    disabled={disabled || step.count === null}
-                    data-premium-hover
-                  >
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <Icon className="h-4 w-4" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] font-semibold text-muted-foreground">
-                          {step.index}
-                        </span>
-                        <span className="truncate text-sm font-medium text-foreground">
-                          {step.label}
-                        </span>
-                      </div>
-                      <div className="mt-1 truncate text-xs text-muted-foreground">
-                        {step.detail}
-                      </div>
-                    </div>
-                    <div className="rounded-md border border-border bg-card px-2 py-1 text-xs font-semibold text-foreground">
-                      {loading
-                        ? "..."
-                        : formatCertifiedOperationalCount(step.count)}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </>
-        )}
-      </CardContent>
-    </Card>
+      </dl>
+    </header>
   );
 }
 
 function OperationalResourceWarningNotice({
   warning,
-  embedded = false,
 }: {
   warning: CompanyOperationalWarning;
-  embedded?: boolean;
 }) {
   return (
-    <div
-      className={cn(
-        "break-words",
-        !embedded &&
-          "rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300",
-      )}
-    >
+    <div className="break-words rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
       <span className="font-semibold">{warning.label}:</span>{" "}
       {warning.message}
     </div>
   );
 }
 
-function formatCertifiedOperationalCount(value: number | null) {
-  return value === null ? "—" : formatNumber(value);
-}
-
 function Detail({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border bg-muted/40 px-3 py-2">
-      <div className="text-xs font-medium text-muted-foreground">{label}</div>
-      <div className="mt-1 truncate font-medium text-foreground">{value}</div>
+    <div className="min-w-0">
+      <dt className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {label}
+      </dt>
+      <dd className="mt-1 truncate font-medium text-foreground">{value}</dd>
     </div>
   );
 }
@@ -3473,7 +4982,7 @@ function WorkerStatusBadge({ worker }: { worker: Worker }) {
     return <Badge variant="success">Online</Badge>;
   }
 
-  return <Badge variant="warning">Sem heartbeat</Badge>;
+  return <Badge variant="warning">Sem comunicação recente</Badge>;
 }
 
 function WorkerScopeBadge({
@@ -3485,55 +4994,11 @@ function WorkerScopeBadge({
 }) {
   const scope = workerScopeDisplay(worker, companyId);
 
-  return (
-    <div className="space-y-1">
-      <Badge variant={scope.variant}>{scope.label}</Badge>
-      {scope.detail ? (
-        <div className="max-w-[180px] truncate font-mono text-[11px] text-muted-foreground">
-          {scope.detail}
-        </div>
-      ) : null}
-    </div>
-  );
+  return <Badge variant={scope.variant}>{scope.label}</Badge>;
 }
 
 function formatCertifiedCount(value?: number | null) {
   return typeof value === "number" ? formatNumber(value) : "—";
-}
-
-function buildWorkerScopeWarning(
-  foreignCount: number,
-  unscopedCount: number,
-  duplicateCount: number,
-  selectedCompanyId?: string,
-  foreignCompanyIds: string[] = [],
-) {
-  const messages = [];
-  if (foreignCount) {
-    const returnedScopes = foreignCompanyIds.length
-      ? ` Recebido: ${foreignCompanyIds.join(", ")}.`
-      : "";
-    const requestedScope = selectedCompanyId
-      ? ` Solicitado: ${selectedCompanyId}.`
-      : "";
-    messages.push(
-      `${formatNumber(foreignCount)} worker(s) de outra empresa foram ocultados.${returnedScopes}${requestedScope}`,
-    );
-  }
-  if (unscopedCount) {
-    messages.push(
-      foreignCount
-        ? `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram ocultados porque a resposta também contém outra empresa.`
-        : `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram mantidos no escopo autenticado solicitado.`,
-    );
-  }
-  if (duplicateCount) {
-    messages.push(
-      `${formatNumber(duplicateCount)} registro(s) duplicado(s) de revalidação foram consolidados pela cadeia de identidade do worker.`,
-    );
-  }
-
-  return messages.join(" ");
 }
 
 function certifiedSettledRows<T>(
@@ -3553,34 +5018,22 @@ function operationalResourceWarning(
   label: string,
   error: unknown,
 ): CompanyOperationalWarning {
-  const errorMessage =
-    error instanceof Error
-      ? error.message.trim()
-      : typeof error === "string"
-        ? error.trim()
-        : "";
   return {
     resource,
     label,
-    message:
-      errorMessage ||
-      "A API não retornou dados certificados para este recurso.",
+    message: managementErrorMessage(
+      error,
+      "As informações deste recurso estão temporariamente indisponíveis.",
+    ),
   };
 }
 
-function allOperationalResourceWarnings(
-  error: unknown,
-  includeJwtBoundCatalogs = true,
-) {
+function allOperationalResourceWarnings(error: unknown) {
   const resources: Array<readonly [CompanyOperationalResource, string]> = [
-    ...(includeJwtBoundCatalogs
-      ? ([
-          ["workers", "Workers"],
-          ["countingScenarios", "Cenários de Contagem"],
-        ] as const)
-      : []),
-    ["locations", "Locations"],
-    ["subLocations", "Sublocations"],
+    ["workers", "Workers"],
+    ["countingScenarios", "Cenários de Contagem"],
+    ["locations", "Locais"],
+    ["subLocations", "Subáreas"],
     ["cameras", "Câmeras"],
     ["occupancyScenarios", "Cenários de Ocupação"],
   ];
@@ -3594,13 +5047,21 @@ async function fetchCompanySubLocations(
   locations: Location[],
   companyScopeIds: string[],
   companyScopeId: string,
+  signal?: AbortSignal,
 ) {
   const rows = await Promise.all(
     locations.map((location) => {
       return apiFetch<unknown>(
         `/locations/${location.id}/sub-locations`,
-        { companyScopeId },
-      ).then((value) => requireSubLocationRows(value, companyScopeId));
+        { companyScopeId, signal },
+      ).then((value) =>
+        requireSubLocationRows(
+          selectExplicitCompanyScopedRows(value, companyScopeId, {
+            label: "sublocais",
+          }).rows,
+          companyScopeId,
+        ),
+      );
     }),
   );
 
@@ -3614,20 +5075,50 @@ async function fetchValidatedRows<T>(
   path: string,
   validate: (value: unknown, expectedCompanyId?: string | null) => T[],
   companyScopeId: string,
+  signal?: AbortSignal,
 ) {
-  return apiFetch<unknown>(path, { companyScopeId }).then((value) =>
-    validate(value, companyScopeId),
+  return apiFetch<unknown>(path, { companyScopeId, signal }).then((value) =>
+    validate(
+      selectExplicitCompanyScopedRows(value, companyScopeId, {
+        label: "recursos operacionais",
+      }).rows,
+      companyScopeId,
+    ),
   );
 }
 
-async function fetchScopedWorkers(companyScopeId: string) {
-  return apiFetch<unknown>("/workers", { companyScopeId })
-    .then((value) => requireWorkerRows(value, companyScopeId));
+async function fetchScopedWorkers(
+  companyScopeId: string,
+  signal?: AbortSignal,
+) {
+  return apiFetch<unknown>("/workers", { companyScopeId, signal })
+    .then((value) =>
+      requireWorkerRows(
+        selectExplicitCompanyScopedRows(value, companyScopeId, {
+          collectionKeys: ["data", "workers", "items", "results"],
+          label: "workers",
+        }).rows,
+        companyScopeId,
+      ),
+    );
 }
 
-async function fetchScopedOccupancyScenarios(companyScopeId: string) {
-  return apiFetch<unknown>("/occupancy/scenarios", { companyScopeId }).then(
-    (value) => requireOccupancyScenarioRows(value, companyScopeId),
+async function fetchScopedOccupancyScenarios(
+  companyScopeId: string,
+  signal?: AbortSignal,
+) {
+  return apiFetch<unknown>("/occupancy/scenarios", {
+    companyScopeId,
+    signal,
+  }).then(
+    (value) =>
+      requireOccupancyScenarioRows(
+        selectExplicitCompanyScopedRows(value, companyScopeId, {
+          collectionKeys: ["data"],
+          label: "cenários de ocupação",
+        }).rows,
+        companyScopeId,
+      ),
   );
 }
 
@@ -3665,6 +5156,42 @@ function uniqueScopeIds(...groups: Array<string | null | undefined | Array<strin
   return [...ids];
 }
 
+function companyNonMasterUsersForScope(
+  rows: ManagedUser[],
+  companyId: string,
+) {
+  const expectedCompanyId = companyId.trim();
+  if (!expectedCompanyId) return [];
+
+  return rows.filter(
+    (managedUser) =>
+      managedUser.is_master === false &&
+      getScopedRowCompanyId(managedUser) === expectedCompanyId,
+  );
+}
+
+async function mapWithConcurrency<T, R>(
+  rows: readonly T[],
+  concurrency: number,
+  mapper: (row: T) => Promise<R>,
+) {
+  const results = new Array<R>(rows.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), rows.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < rows.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await mapper(rows[index]);
+      }
+    }),
+  );
+
+  return results;
+}
+
 function uniqueRowsById<T extends { id?: string | null }>(rows: T[]) {
   const seen = new Set<string>();
 
@@ -3688,7 +5215,13 @@ function enabledCompanyModuleCount(
     if (!assignment.enabled) return;
     const catalogModule =
       assignment.module ?? modulesById.get(assignment.module_id);
-    if (catalogModule?.active === false) return;
+    if (
+      !catalogModule ||
+      catalogModule.active === false ||
+      !algorithmModuleFamily(catalogModule)
+    ) {
+      return;
+    }
     if (assignment.module_id) enabledModuleIds.add(assignment.module_id);
   });
 
@@ -3866,7 +5399,7 @@ async function grantPermissionSlugs(
           continue;
         }
 
-        throw permissionGrantError(error, accessLabel, slug);
+        throw permissionGrantError(error, accessLabel);
       }
     }
   } catch (error) {
@@ -3878,9 +5411,7 @@ async function grantPermissionSlugs(
     const detail = error instanceof Error ? error.message : "erro desconhecido";
     if (rollbackErrors.length) {
       throw new Error(
-        `${detail} A promoção ficou incompleta e a reversão também falhou para: ${rollbackErrors.join(
-          ", ",
-        )}.`,
+        `${detail} A promoção ficou incompleta e alguns acessos não puderam ser restaurados automaticamente.`,
       );
     }
     throw new Error(
@@ -3894,7 +5425,6 @@ async function grantPermissionSlugs(
 function permissionGrantError(
   error: unknown,
   accessLabel: string,
-  slug: string,
 ) {
   if (error instanceof ApiError && error.status === 404) {
     return error;
@@ -3902,19 +5432,15 @@ function permissionGrantError(
 
   if (error instanceof Error && error.message.includes("module not enabled")) {
     return new Error(
-      `Habilite o módulo da permissão "${accessLabel}" para esta empresa antes de salvar o acesso.`,
+      `Habilite o módulo relacionado a "${accessLabel}" antes de salvar este acesso.`,
     );
   }
 
-  if (error instanceof ApiError && error.status === 500) {
-    return new Error(
-      `Falha ao conceder "${accessLabel}" (${slug}). A API retornou erro interno na rota de acesso previamente certificada para a empresa selecionada.`,
-    );
-  }
-
-  const detail = error instanceof Error ? error.message : "erro desconhecido";
   return new Error(
-    `Falha ao conceder "${accessLabel}" (${slug}). Backend retornou: ${detail}`,
+    managementErrorMessage(
+      error,
+      `Não foi possível conceder o acesso "${accessLabel}".`,
+    ),
   );
 }
 
@@ -3967,15 +5493,16 @@ function groupPermissionCatalog(permissions: PermissionOption[]): PermissionGrou
   const groups = new Map<string, PermissionGroup>();
 
   permissions.forEach((permission) => {
-    const current = groups.get(permission.module_id);
+    const current = groups.get(permission.group_key);
     if (current) {
       current.permissions.push(permission);
       return;
     }
 
-    groups.set(permission.module_id, {
-      key: permission.module_id,
-      name: permission.module_name,
+    groups.set(permission.group_key, {
+      category: permission.category,
+      key: permission.group_key,
+      name: permission.group_name,
       permissions: [permission],
     });
   });
@@ -3991,6 +5518,9 @@ function groupPermissionCatalog(permissions: PermissionOption[]): PermissionGrou
       ),
     }))
     .sort((left, right) => {
+      if (left.category !== right.category) {
+        return left.category === "product" ? -1 : 1;
+      }
       const leftFamily = algorithmModuleFamily(left.name);
       const rightFamily = algorithmModuleFamily(right.name);
       if (leftFamily && rightFamily) {
@@ -4004,18 +5534,35 @@ function companyAdminCertificationErrorMessage(
   slugs: readonly string[],
   options: readonly PermissionOption[],
 ) {
-  const labels = slugs.map(
-    (slug) => options.find((option) => option.slug === slug)?.label ?? slug,
-  );
-  return `Não foi possível certificar o perfil de administrador da empresa. O catálogo ou os módulos habilitados não oferecem acesso explícito para: ${labels.join(
-    ", ",
-  )}. Nenhuma permissão existente foi removida.`;
+  const labels = slugs
+    .map((slug) => options.find((option) => option.slug === slug)?.label)
+    .filter((label): label is string => Boolean(label));
+  const detail = labels.length
+    ? ` Verifique os seguintes acessos: ${labels.join(", ")}.`
+    : "";
+  return `Não foi possível aplicar o perfil de Administrador da empresa.${detail} Nenhum acesso existente foi removido.`;
 }
 
 function formatPermissionAction(permission: PermissionOption) {
-  return permission.action
-    ? `Ação: ${permission.action}`
-    : "Ação não informada pela API";
+  return permissionActionLabel(permission.action);
+}
+
+function permissionActionLabel(rawAction: string) {
+  const action = normalizeSlug(rawAction);
+  const terms = new Set(action.split(" ").filter(Boolean));
+  if (["view", "read", "list"].some((term) => terms.has(term))) {
+    return "Visualização";
+  }
+  if (["create", "add"].some((term) => terms.has(term))) return "Criação";
+  if (["edit", "update"].some((term) => terms.has(term))) return "Edição";
+  if (["delete", "remove"].some((term) => terms.has(term))) return "Exclusão";
+  if (["export", "download"].some((term) => terms.has(term))) {
+    return "Exportação";
+  }
+  if (["manage", "write", "admin"].some((term) => terms.has(term))) {
+    return "Gestão";
+  }
+  return "Acesso específico";
 }
 
 function normalizeSlug(value: string) {
@@ -4027,32 +5574,24 @@ function normalizeSlug(value: string) {
     .trim();
 }
 
-function selectVisibleModules(modules: IpxModule[]) {
-  const modulesById = new Map<string, IpxModule>();
+function selectVisibleProductModules(modules: IpxModule[]) {
+  const modulesByFamily = new Map<AlgorithmModuleFamily, IpxModule>();
 
   modules.forEach((module) => {
     const id = module.id?.trim();
     if (!id || !module.name?.trim() || !module.slug?.trim()) return;
-    if (!modulesById.has(id)) modulesById.set(id, module);
+    const family = algorithmModuleFamily(module);
+    if (!family) return;
+    const current = modulesByFamily.get(family);
+    if (!current || (!current.active && module.active)) {
+      modulesByFamily.set(family, module);
+    }
   });
 
-  return Array.from(modulesById.values()).sort(compareCatalogModules);
-}
-
-function compareCatalogModules(left: IpxModule, right: IpxModule) {
-  const leftFamily = algorithmModuleFamily(left);
-  const rightFamily = algorithmModuleFamily(right);
-  if (leftFamily && rightFamily) {
-    const familyDifference =
-      algorithmFamilyOrder(leftFamily) - algorithmFamilyOrder(rightFamily);
-    if (familyDifference) return familyDifference;
-  } else if (leftFamily || rightFamily) {
-    return leftFamily ? -1 : 1;
-  }
-
-  return algorithmModuleLabel(left).localeCompare(
-    algorithmModuleLabel(right),
-    "pt-BR",
+  return Array.from(modulesByFamily.values()).sort(
+    (left, right) =>
+      algorithmFamilyOrder(algorithmModuleFamily(left) as AlgorithmModuleFamily) -
+      algorithmFamilyOrder(algorithmModuleFamily(right) as AlgorithmModuleFamily),
   );
 }
 
@@ -4085,7 +5624,17 @@ function algorithmModuleLabel(module: IpxModule) {
 }
 
 function algorithmFamilyOrder(family: AlgorithmModuleFamily) {
-  return family === "counting" ? 0 : 1;
+  if (family === "counting") return 0;
+  if (family === "occupancy") return 1;
+  return 2;
+}
+
+function algorithmModuleDescription(module: IpxModule) {
+  const family = algorithmModuleFamily(module);
+  return (
+    algorithmModuleDefinitions.find((definition) => definition.family === family)
+      ?.description ?? "Módulo de análise operacional."
+  );
 }
 
 function resolveOperationalPermissionOptions(
@@ -4093,7 +5642,9 @@ function resolveOperationalPermissionOptions(
   modules: IpxModule[],
 ): PermissionOption[] {
   const modulesById = new Map(modules.map((module) => [module.id, module]));
-  const options = catalog.flatMap((permission): PermissionOption[] => {
+  const optionsByCapability = new Map<string, PermissionOption>();
+
+  catalog.forEach((permission) => {
     const id = permission.id?.trim();
     const moduleId = getPermissionModuleId(permission).trim();
     const slug = permission.slug?.trim();
@@ -4115,52 +5666,139 @@ function resolveOperationalPermissionOptions(
       !slug ||
       !permissionModule
     ) {
-      return [];
+      return;
     }
 
-    const action = permission.action?.trim() ?? "";
-    const moduleName = algorithmModuleLabel(permissionModule);
-    const knownPermission = operationalPermissionDefinitionForGrant({ slug });
+    const presentation = resolvePermissionPresentation(
+      permission,
+      permissionModule,
+    );
+    if (!presentation) return;
+
     const grant = {
       id,
       module_id: moduleId,
       slug,
     };
-
-    return [
-      {
-        id,
-        module_id: moduleId,
-        module_name: moduleName,
-        module_slug: permissionModule.slug,
-        slug,
-        action,
-        label: knownPermission?.label ?? humanizePermissionSlug(slug),
-        description:
-          knownPermission?.description ??
-          `Permissão publicada pela API para o módulo ${moduleName}.`,
-        slugs: [slug],
-        grants: [grant],
-        unavailable: permissionModule.active === false,
-      },
-    ];
-  });
-
-  const optionsByPermission = new Map<string, PermissionOption>();
-  options.forEach((option) => {
-    if (!optionsByPermission.has(option.id)) {
-      optionsByPermission.set(option.id, option);
+    const optionKey = `${moduleId}\u0000${presentation.slug}`;
+    const current = optionsByCapability.get(optionKey);
+    if (current) {
+      current.grants.push(grant);
+      if (!current.slugs.includes(slug)) current.slugs.push(slug);
+      current.unavailable =
+        Boolean(current.unavailable) && permissionModule.active === false;
+      return;
     }
+
+    optionsByCapability.set(optionKey, {
+      action: presentation.action,
+      category: presentation.category,
+      description: presentation.description,
+      grants: [grant],
+      group_key: presentation.groupKey,
+      group_name: presentation.groupName,
+      id,
+      label: presentation.label,
+      module_id: moduleId,
+      module_name: presentation.groupName,
+      module_slug: presentation.groupKey,
+      slug: presentation.slug,
+      slugs: [slug],
+      unavailable: permissionModule.active === false,
+    });
   });
 
-  return Array.from(optionsByPermission.values());
+  return Array.from(optionsByCapability.values());
 }
 
-function humanizePermissionSlug(slug: string) {
-  const label = slug
-    .split(/[_\-.]+/)
-    .filter(Boolean)
-    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
-    .join(" ");
-  return label || slug;
+type PermissionPresentation = {
+  action: "manage" | "view";
+  category: PermissionGroup["category"];
+  description: string;
+  groupKey: string;
+  groupName: string;
+  label: string;
+  slug: string;
+};
+
+function resolvePermissionPresentation(
+  permission: Permission,
+  module: IpxModule,
+): PermissionPresentation | null {
+  const knownPermission = operationalPermissionDefinitionForGrant(permission);
+  if (knownPermission) {
+    const workspaceCapability =
+      knownPermission.slug === "dashboard_widgets_manage" ||
+      knownPermission.slug === "views_manage";
+    return {
+      action: "manage",
+      category: "administrative",
+      description: knownPermission.description,
+      groupKey: workspaceCapability
+        ? "capability:workspace"
+        : "capability:operation",
+      groupName: workspaceCapability
+        ? "Painéis e visões"
+        : "Configuração operacional",
+      label: knownPermission.label,
+      slug: knownPermission.slug,
+    };
+  }
+
+  const family = algorithmModuleFamily(module);
+  if (!family) return null;
+  const mode = productPermissionMode(permission, family);
+  if (!mode) return null;
+  const productName = algorithmModuleDefinitions.find(
+    (definition) => definition.family === family,
+  )?.label;
+  if (!productName) return null;
+
+  return {
+    action: mode,
+    category: "product",
+    description:
+      mode === "view"
+        ? `Consultar os painéis de ${productName}.`
+        : `Configurar o módulo ${productName} e seus recursos.`,
+    groupKey: `product:${family}`,
+    groupName: productName,
+    label: mode === "view" ? "Visualização" : "Gestão",
+    slug: `${family}_${mode}`,
+  };
+}
+
+function productPermissionMode(
+  permission: Permission,
+  family: OperationalModuleFamily,
+): "manage" | "view" | null {
+  const definition = algorithmModuleDefinitions.find(
+    (candidate) => candidate.family === family,
+  );
+  if (!definition) return null;
+
+  const normalizedSlug = normalizeSlug(permission.slug);
+  const matchingAlias = definition.aliases
+    .map(normalizeSlug)
+    .sort((left, right) => right.length - left.length)
+    .find(
+      (alias) =>
+        normalizedSlug === alias || normalizedSlug.startsWith(`${alias} `),
+    );
+  if (!matchingAlias) return null;
+
+  const suffix = normalizedSlug.slice(matchingAlias.length).trim();
+  const suffixMode = productPermissionActionMode(suffix);
+  const declaredMode = productPermissionActionMode(
+    normalizeSlug(permission.action ?? ""),
+  );
+  if (suffix && !suffixMode) return null;
+  if (suffixMode && declaredMode && suffixMode !== declaredMode) return null;
+  return declaredMode ?? suffixMode;
+}
+
+function productPermissionActionMode(value: string): "manage" | "view" | null {
+  if (["manage", "admin"].includes(value)) return "manage";
+  if (["view", "read", "list", "export"].includes(value)) return "view";
+  return null;
 }

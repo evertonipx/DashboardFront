@@ -27,6 +27,7 @@ const validMenuKeys = new Set<CardMenuKey>([
   "live",
   "reports",
   "analysis",
+  "demographics",
   "occupancy",
 ]);
 const dataDirectory = path.join(process.cwd(), ".ipxdata");
@@ -124,7 +125,7 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   } catch {
     return {
       response: NextResponse.json(
-        { error: "Configuração do backend inválida." },
+        { error: "O serviço de dados está temporariamente indisponível." },
         { status: 500 },
       ),
     };
@@ -149,7 +150,7 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   if (!user) {
     return {
       response: NextResponse.json(
-        { error: "O backend retornou uma sessão inválida." },
+        { error: "Não foi possível validar a sessão neste momento." },
         { status: 502 },
       ),
     };
@@ -192,7 +193,7 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
     if (!permissions) {
       return {
         response: NextResponse.json(
-          { error: "O backend retornou permissões inválidas." },
+          { error: "Não foi possível confirmar o acesso neste momento." },
           { status: 502 },
         ),
       };
@@ -239,7 +240,7 @@ function backendFailureResponse(status: number, action: string) {
     return NextResponse.json({ error: "Sessão inválida." }, { status: 401 });
   }
   return NextResponse.json(
-    { error: `Backend indisponível ao ${action}.` },
+    { error: `Serviço temporariamente indisponível ao ${action}.` },
     { status: status === 0 ? 502 : 503 },
   );
 }

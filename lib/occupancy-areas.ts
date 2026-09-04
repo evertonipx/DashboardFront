@@ -249,17 +249,12 @@ export function buildOccupancyAreaOptions(
 
     const areaLabel = row.area_label?.trim();
     const cameraLabel = row.camera_name?.trim();
-    const areaText = areaLabel || regionNameFromAreaId(areaId) || areaId;
-    const cameraText = cameraLabel || compactOccupancyId(cameraId);
-    const detail =
-      areaText !== areaId || cameraLabel
-        ? `${areaId} / ${compactOccupancyId(cameraId)}`
-        : undefined;
+    const areaText = areaLabel || regionNameFromAreaId(areaId) || "Área sem nome";
+    const cameraText = cameraLabel || "Câmera sem nome";
 
     options.set(key, {
       area_id: areaId,
       camera_id: cameraId,
-      detail,
       key,
       label: `${areaText} / ${cameraText}`,
       object_class: objectClass,
@@ -541,9 +536,4 @@ function numberFromUnknown(value: unknown) {
 
   const parsed = Number(value.trim());
   return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function compactOccupancyId(value: string) {
-  if (value.length <= 12) return value;
-  return `${value.slice(0, 8)}...${value.slice(-4)}`;
 }

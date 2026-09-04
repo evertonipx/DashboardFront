@@ -1,17 +1,5 @@
-import { AppShell } from "@/components/app/app-shell";
-import { AuthGuard } from "@/components/app/auth-guard";
-import { InfrastructureManager } from "@/components/app/infrastructure-manager";
+import { DeferredInfrastructureManager as InfrastructureManager } from "@/components/app/deferred-route-panels";
 
 export default function ManagerLocationsPage() {
-  return (
-    <AuthGuard requireManager requireResource="locations">
-      <AppShell
-        mode="manager"
-        title="Locations"
-        description="Cadastro de localidades e sub-locations operacionais."
-      >
-        <InfrastructureManager view="locations" />
-      </AppShell>
-    </AuthGuard>
-  );
+  return <InfrastructureManager view="locations" />;
 }

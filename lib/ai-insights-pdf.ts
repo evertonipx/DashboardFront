@@ -8,7 +8,6 @@ import type {
 export type AiInsightsPdfReport = AiInsightsReport;
 
 export type AiInsightsPdfOptions = {
-  companyId?: string;
   companyLabel?: string;
   exportedAt?: Date;
   filename?: string;
@@ -156,11 +155,11 @@ export async function createAiInsightsPdfDocument(
 
 export function buildAiInsightsPdfHeader(
   report: AiInsightsPdfReport,
-  options: Pick<AiInsightsPdfOptions, "companyId" | "companyLabel"> = {},
+  options: Pick<AiInsightsPdfOptions, "companyLabel"> = {},
 ): AiInsightsPdfHeader {
   return {
     company: normalizeAiInsightsPdfText(
-      options.companyLabel || options.companyId || "Empresa não informada",
+      options.companyLabel || "Empresa selecionada",
     ),
     period: analyzedPeriodLabel(report.insights),
   };
@@ -368,7 +367,7 @@ export function createAiInsightsPdfFilename(
   );
   return ensurePdfExtension(
     safeAiInsightsPdfFilename(
-      `ia-advisor-${companySegment}${insights.source.module}-${insights.source.surface}-${date}`,
+      `ia-advisor-${companySegment}${date}`,
     ),
   );
 }
@@ -389,7 +388,7 @@ export function formatAiInsightsPdfDateTime(
 function renderAiInsightsPdf(
   doc: PdfDocument,
   report: AiInsightsPdfReport,
-  options: Pick<AiInsightsPdfOptions, "companyId" | "companyLabel">,
+  options: Pick<AiInsightsPdfOptions, "companyLabel">,
 ) {
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();

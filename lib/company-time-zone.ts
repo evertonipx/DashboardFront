@@ -71,7 +71,7 @@ export function resolveCompanyTimeZone(
 
   const fallback = canonicalCompanyTimeZone(fallbackTimeZone);
   if (!fallback) {
-    throw new Error("O timezone padrão configurado para as empresas é inválido.");
+    throw new Error("O fuso horário padrão configurado para as empresas é inválido.");
   }
 
   const declaredInvalidTimeZone = candidates.some(
@@ -84,8 +84,8 @@ export function resolveCompanyTimeZone(
     source: "fallback",
     timeZone: fallback,
     warning: declaredInvalidTimeZone
-      ? `O timezone informado pela empresa é inválido; usando explicitamente ${fallback}.`
-      : `A empresa não informou timezone; usando explicitamente ${fallback}.`,
+      ? "O fuso horário configurado para a empresa está inválido; os horários usam temporariamente a configuração padrão."
+      : "O fuso horário da empresa ainda não foi configurado; os horários usam temporariamente a configuração padrão.",
   };
 }
 
@@ -337,7 +337,7 @@ export function companyDateKey(date: Date, timeZone: string) {
 
 export function requireCompanyTimeZone(value: unknown) {
   const timeZone = canonicalCompanyTimeZone(value);
-  if (!timeZone) throw new Error("O timezone da empresa é inválido.");
+  if (!timeZone) throw new Error("O fuso horário da empresa é inválido.");
   return timeZone;
 }
 
@@ -346,7 +346,7 @@ export function requireCertifiedCompanyTimeZone(
 ) {
   if (resolution.fallback) {
     throw new Error(
-      "Fuso da empresa não certificado. Cadastre um timezone IANA válido antes de consultar dados civis.",
+      "Fuso horário da empresa indisponível. Revise as configurações da empresa antes de consultar este período.",
     );
   }
   return requireCompanyTimeZone(resolution.timeZone);
@@ -405,7 +405,7 @@ function timeZoneOffsetMinutes(date: Date, timeZone: string) {
 
 function requireValidDate(date: Date) {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
-    throw new Error("O instante usado no timezone da empresa é inválido.");
+    throw new Error("O horário informado para a empresa é inválido.");
   }
 }
 

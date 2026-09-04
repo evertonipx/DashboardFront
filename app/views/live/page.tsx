@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { AuthGuard } from "@/components/app/auth-guard";
-import { EmbeddedLiveView } from "@/components/app/embedded-live-view";
+import { DeferredEmbeddedLiveView as EmbeddedLiveView } from "@/components/app/deferred-live-views";
 
 export default function LiveViewPage() {
   return (

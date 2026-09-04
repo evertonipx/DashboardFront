@@ -1,15 +1,26 @@
 "use client";
 
 import * as React from "react";
+import { usePathname } from "next/navigation";
 
 import { useAuth } from "@/components/app/auth-provider";
+import { DashboardPanelLoading } from "@/components/app/dashboard-panel-loading";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Skeleton } from "@/components/ui/skeleton";
+import {
+  cancelScheduledDashboardPanelPreload,
+  preloadDashboardPanel,
+  scheduleDashboardPanelPreload,
+  type AppDashboardModule,
+} from "@/lib/app-route-preload";
 import {
   getUserViewScopedStorageKey,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
-import { canViewCounting, canViewOccupancy } from "@/lib/permissions";
+import {
+  canViewCounting,
+  canViewDemographics,
+  canViewOccupancy,
+} from "@/lib/permissions";
 import {
   claimLegacyUserGridPreference,
   hasUserGridKnownDeletion,
@@ -17,18 +28,21 @@ import {
   writeUserGridPreference,
 } from "@/lib/user-grid-local";
 
-type DashboardModule = "counting" | "occupancy";
+type DashboardModule = AppDashboardModule;
 
 const DASHBOARD_MODULE_STORAGE_KEY = "ipxdata.dashboard-module.v1";
 
 export function DashboardModuleTabs({
   counting,
+  demographics,
   occupancy,
 }: {
   counting: React.ReactNode;
+  demographics: React.ReactNode;
   occupancy: React.ReactNode;
 }) {
   const { loading, user } = useAuth();
+  const pathname = usePathname();
   const companyScopeId = useEffectiveCompanyScopeId(user);
   const storageKey = dashboardModuleStorageKey(companyScopeId, user?.id);
   const legacyUserStorageKey = dashboardModuleStorageKey(null, user?.id);
@@ -101,16 +115,7 @@ export function DashboardModuleTabs({
   );
 
   if (loading || !ready) {
-    return (
-      <div
-        aria-busy="true"
-        aria-label="Carregando módulo do dashboard"
-        className="space-y-3"
-      >
-        <Skeleton className="h-10 w-full sm:w-[220px]" />
-        <Skeleton className="h-[280px] w-full" />
-      </div>
-    );
+    return <DashboardPanelLoading />;
   }
 
   const selectedModule =
@@ -130,11 +135,34 @@ export function DashboardModuleTabs({
           Nenhum módulo disponível
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
-          Seu perfil não possui acesso de visualização a Contagem ou Ocupação.
+          Seu perfil não possui acesso de visualização a Contagem, Ocupação ou
+          Demographics.
         </p>
       </div>
     );
   }
+
+  const preloadHandlers = (targetModule: DashboardModule) => ({
+    onBlur: () =>
+      cancelScheduledDashboardPanelPreload(pathname, targetModule),
+    onFocus: () => {
+      if (targetModule !== selectedModule) {
+        scheduleDashboardPanelPreload(pathname, targetModule);
+      }
+    },
+    onPointerDown: () => {
+      if (targetModule !== selectedModule) {
+        preloadDashboardPanel(pathname, targetModule);
+      }
+    },
+    onPointerEnter: () => {
+      if (targetModule !== selectedModule) {
+        scheduleDashboardPanelPreload(pathname, targetModule);
+      }
+    },
+    onPointerLeave: () =>
+      cancelScheduledDashboardPanelPreload(pathname, targetModule),
+  });
 
   return (
     <Tabs
@@ -143,14 +171,26 @@ export function DashboardModuleTabs({
       onValueChange={selectModule}
     >
       <TabsList
-        aria-label="Módulo do dashboard"
-        className={`grid w-full ${availableModules.length === 1 ? "grid-cols-1" : "grid-cols-2"} sm:w-fit`}
+        aria-label="Módulo do painel"
+        className={`grid w-full ${dashboardModuleGridClass(availableModules.length)} sm:w-fit`}
       >
         {availableModules.includes("counting") ? (
-          <TabsTrigger value="counting">Contagem</TabsTrigger>
+          <TabsTrigger value="counting" {...preloadHandlers("counting")}>
+            Contagem
+          </TabsTrigger>
         ) : null}
         {availableModules.includes("occupancy") ? (
-          <TabsTrigger value="occupancy">Ocupação</TabsTrigger>
+          <TabsTrigger value="occupancy" {...preloadHandlers("occupancy")}>
+            Ocupação
+          </TabsTrigger>
+        ) : null}
+        {availableModules.includes("demographics") ? (
+          <TabsTrigger
+            value="demographics"
+            {...preloadHandlers("demographics")}
+          >
+            Demographics
+          </TabsTrigger>
         ) : null}
       </TabsList>
       {availableModules.includes("counting") ? (
@@ -163,12 +203,27 @@ export function DashboardModuleTabs({
           {occupancy}
         </TabsContent>
       ) : null}
+      {availableModules.includes("demographics") ? (
+        <TabsContent className="mt-3" value="demographics">
+          {demographics}
+        </TabsContent>
+      ) : null}
     </Tabs>
   );
 }
 
 function isDashboardModule(value: unknown): value is DashboardModule {
-  return value === "counting" || value === "occupancy";
+  return (
+    value === "counting" ||
+    value === "occupancy" ||
+    value === "demographics"
+  );
+}
+
+function dashboardModuleGridClass(moduleCount: number) {
+  if (moduleCount <= 1) return "grid-cols-1";
+  if (moduleCount === 2) return "grid-cols-2";
+  return "grid-cols-3";
 }
 
 function readDashboardModuleSelection(
@@ -235,8 +290,10 @@ function persistDashboardModuleSelection(
 ) {
   try {
     if (module) {
-      writeUserGridPreference(storageKey, module);
-    } else {
+      if (window.localStorage.getItem(storageKey) !== module) {
+        writeUserGridPreference(storageKey, module);
+      }
+    } else if (window.localStorage.getItem(storageKey) !== null) {
       removeUserGridPreference(storageKey);
     }
   } catch {
@@ -271,5 +328,6 @@ function dashboardModulesForUser(
   const modules: DashboardModule[] = [];
   if (canViewCounting(user)) modules.push("counting");
   if (canViewOccupancy(user)) modules.push("occupancy");
+  if (canViewDemographics(user)) modules.push("demographics");
   return modules;
 }

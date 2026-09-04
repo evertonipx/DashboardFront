@@ -25,6 +25,14 @@ test("composição do IA Advisor separa o cabeçalho e preserva somente conteúd
     company: "Shopping Exemplo",
     period: "01/08/2026 a 26/08/2026",
   });
+  assert.deepEqual(
+    pdf.buildAiInsightsPdfHeader(report),
+    {
+      company: "Empresa selecionada",
+      period: "01/08/2026 a 26/08/2026",
+    },
+    "o cabeçalho sem nome amigável deve usar uma descrição neutra",
+  );
 
   for (const expected of [
     report.insights.summary,
@@ -169,11 +177,15 @@ test("nome do PDF é seguro e usa a data civil do fuso da análise", () => {
   );
   assert.equal(
     pdf.createAiInsightsPdfFilename(report, instant),
-    "ia-advisor-counting-analysis-2026-08-26.pdf",
+    "ia-advisor-2026-08-26.pdf",
   );
   assert.equal(
     pdf.createAiInsightsPdfFilename(report, instant, "Shopping São José"),
-    "ia-advisor-shopping-sao-jose-counting-analysis-2026-08-26.pdf",
+    "ia-advisor-shopping-sao-jose-2026-08-26.pdf",
+  );
+  assert.doesNotMatch(
+    pdf.createAiInsightsPdfFilename(report, instant, "Shopping São José"),
+    /counting|occupancy|live|analysis|reports/,
   );
   assert.match(
     pdf.formatAiInsightsPdfDateTime(instant, "America/Sao_Paulo"),
@@ -228,7 +240,7 @@ test("renderizador gera A4 retrato multipágina com conteúdo extremo", async ()
   assert.ok(width < height, "o documento deve permanecer em A4 retrato");
   assert.ok(doc.getNumberOfPages() > 10, "conteúdo extenso deve paginar");
   assert.ok(bytes.byteLength > 20_000, "o PDF precisa conter conteúdo vetorial");
-  assert.equal(filename, "ia-advisor-counting-analysis-2026-08-27.pdf");
+  assert.equal(filename, "ia-advisor-2026-08-27.pdf");
 });
 
 test("exportador não depende de screenshots, captura do DOM ou impressão", () => {

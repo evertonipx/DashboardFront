@@ -22,6 +22,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -32,11 +33,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { Scenario } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import {
+  buildOpaqueViewUrl,
+  saveViewLinkTarget,
+} from "@/lib/view-link-reference";
 import {
   VIDEO_WALL_UPDATED_EVENT,
   createVideoWallOutput,
   createVideoWallProfile,
-  deleteSavedLiveView,
+  deleteSavedLiveViews,
   loadSavedLiveViews,
   loadVideoWallProfiles,
   resolveSavedLiveViewUrl,
@@ -83,6 +89,9 @@ type WindowWithScreenDetails = Window & {
   getScreenDetails?: () => Promise<ScreenDetailsLike>;
 };
 
+const EMPTY_SAVED_VIEWS: SavedLiveView[] = [];
+const EMPTY_VIDEO_WALL_PROFILES: VideoWallProfile[] = [];
+
 export function VideoWallManager({
   companyId,
   loadingScenarios = false,
@@ -90,16 +99,65 @@ export function VideoWallManager({
   scenarios,
   userId,
 }: VideoWallManagerProps) {
-  const [savedViews, setSavedViews] = React.useState<SavedLiveView[]>([]);
-  const [profiles, setProfiles] = React.useState<VideoWallProfile[]>([]);
+  const [storedSavedViews, setSavedViews] = React.useState<SavedLiveView[]>([]);
+  const [storedProfiles, setProfiles] = React.useState<VideoWallProfile[]>([]);
+  const [loadedConfigurationScopeKey, setLoadedConfigurationScopeKey] =
+    React.useState("");
   const [activeProfileId, setActiveProfileId] = React.useState("");
   const [screens, setScreens] = React.useState<DetectedScreen[]>([]);
   const [screenApiAvailable, setScreenApiAvailable] = React.useState(false);
   const [detectingScreens, setDetectingScreens] = React.useState(false);
   const [openWindowCount, setOpenWindowCount] = React.useState(0);
+  const [selectedOutputIds, setSelectedOutputIds] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+  const [selectedSavedViewIds, setSelectedSavedViewIds] = React.useState<
+    Set<string>
+  >(() => new Set());
   const wallWindowsRef = React.useRef(new Map<string, Window>());
+  const configurationScopeKey = `${companyId?.trim() ?? ""}\u0000${userId?.trim() ?? ""}`;
+  const configurationScopeCertified =
+    loadedConfigurationScopeKey === configurationScopeKey;
+  const savedViews = configurationScopeCertified
+    ? storedSavedViews
+    : EMPTY_SAVED_VIEWS;
+  const profiles = configurationScopeCertified
+    ? storedProfiles
+    : EMPTY_VIDEO_WALL_PROFILES;
   const activeProfile =
     profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
+  const selectedOutputCount =
+    activeProfile?.outputs.filter((output) => selectedOutputIds.has(output.id))
+      .length ?? 0;
+  const allOutputsSelected = Boolean(
+    activeProfile?.outputs.length &&
+      selectedOutputCount === activeProfile.outputs.length,
+  );
+  const outputSelectionState = allOutputsSelected
+    ? true
+    : selectedOutputCount
+      ? "indeterminate"
+      : false;
+  const selectedSavedViewCount = savedViews.filter((view) =>
+    selectedSavedViewIds.has(view.id),
+  ).length;
+  const allSavedViewsSelected =
+    savedViews.length > 0 && selectedSavedViewCount === savedViews.length;
+  const savedViewSelectionState = allSavedViewsSelected
+    ? true
+    : selectedSavedViewCount
+      ? "indeterminate"
+      : false;
+
+  React.useEffect(() => {
+    wallWindowsRef.current.forEach((popup) => {
+      if (!popup.closed) popup.close();
+    });
+    wallWindowsRef.current.clear();
+    setOpenWindowCount(0);
+    setSelectedOutputIds(new Set());
+    setSelectedSavedViewIds(new Set());
+  }, [configurationScopeKey]);
 
   React.useEffect(() => {
     function syncStoredConfiguration() {
@@ -110,7 +168,11 @@ export function VideoWallManager({
         : [createVideoWallProfile("Video wall principal", nextViews[0]?.id)];
 
       setSavedViews(nextViews);
+      setSelectedSavedViewIds((current) =>
+        retainAvailableIds(current, nextViews.map((view) => view.id)),
+      );
       setProfiles(nextProfiles);
+      setLoadedConfigurationScopeKey(configurationScopeKey);
       setActiveProfileId((current) =>
         nextProfiles.some((profile) => profile.id === current)
           ? current
@@ -128,7 +190,16 @@ export function VideoWallManager({
       );
       window.removeEventListener("storage", syncStoredConfiguration);
     };
-  }, [companyId, userId]);
+  }, [companyId, configurationScopeKey, userId]);
+
+  React.useEffect(() => {
+    setSelectedOutputIds((current) =>
+      retainAvailableIds(
+        current,
+        activeProfile?.outputs.map((output) => output.id) ?? [],
+      ),
+    );
+  }, [activeProfile]);
 
   React.useEffect(() => {
     const currentScreen = readCurrentScreen();
@@ -208,17 +279,23 @@ export function VideoWallManager({
       `${activeProfile.name} - cópia`,
       savedViews[0]?.id,
     );
-    profile.outputs = activeProfile.outputs.map((output, index) => ({
-      ...createVideoWallOutput(index + 1),
-      ...output,
-      id: createVideoWallOutput(index + 1).id,
-    }));
+    profile.outputs = activeProfile.outputs.map((output, index) => {
+      const identity = createVideoWallOutput(index + 1);
+      return {
+        ...output,
+        id: identity.id,
+        linkReference: identity.linkReference,
+      };
+    });
     persistProfiles([profile, ...profiles]);
     setActiveProfileId(profile.id);
   }
 
   function removeProfile() {
     if (!activeProfile) return;
+    if (!window.confirm(`Excluir a configuração "${activeProfile.name}"?`)) {
+      return;
+    }
     const remaining = profiles.filter(
       (profile) => profile.id !== activeProfile.id,
     );
@@ -228,6 +305,7 @@ export function VideoWallManager({
     nextProfiles[0].outputs[0].scenarioId ||= scenarios[0]?.id ?? "";
     persistProfiles(nextProfiles);
     setActiveProfileId(nextProfiles[0].id);
+    setSelectedOutputIds(new Set());
   }
 
   function addOutput() {
@@ -244,13 +322,17 @@ export function VideoWallManager({
   }
 
   function duplicateOutput(output: VideoWallOutput) {
+    const identity = createVideoWallOutput(
+      (activeProfile?.outputs.length ?? 0) + 1,
+    );
     updateActiveProfile((profile) => ({
       ...profile,
       outputs: [
         ...profile.outputs,
         {
           ...output,
-          id: createVideoWallOutput(profile.outputs.length + 1).id,
+          id: identity.id,
+          linkReference: identity.linkReference,
           name: `${output.name} - cópia`,
           screenKey: "auto",
         },
@@ -263,13 +345,87 @@ export function VideoWallManager({
       ...profile,
       outputs: profile.outputs.filter((output) => output.id !== outputId),
     }));
+    setSelectedOutputIds((current) => {
+      if (!current.has(outputId)) return current;
+      const next = new Set(current);
+      next.delete(outputId);
+      return next;
+    });
+  }
+
+  function toggleOutputSelection(outputId: string, selected: boolean) {
+    setSelectedOutputIds((current) => updateSelectedIds(current, outputId, selected));
+  }
+
+  function toggleAllOutputs(selected: boolean) {
+    setSelectedOutputIds(
+      selected && activeProfile
+        ? new Set(activeProfile.outputs.map((output) => output.id))
+        : new Set(),
+    );
+  }
+
+  function duplicateSelectedOutputs() {
+    if (!activeProfile) return;
+    const selected = activeProfile.outputs.filter((output) =>
+      selectedOutputIds.has(output.id),
+    );
+    if (!selected.length) return;
+    const copies = selected.map((output, index) => {
+      const identity = createVideoWallOutput(
+        activeProfile.outputs.length + index + 1,
+      );
+      return {
+        ...output,
+        id: identity.id,
+        linkReference: identity.linkReference,
+        name: `${output.name} - cópia`,
+        screenKey: "auto",
+      };
+    });
+    updateActiveProfile((profile) => ({
+      ...profile,
+      outputs: [...profile.outputs, ...copies],
+    }));
+    setSelectedOutputIds(new Set(copies.map((output) => output.id)));
+    toast.success(
+      `${copies.length} saída${copies.length === 1 ? " duplicada" : "s duplicadas"}.`,
+    );
+  }
+
+  function removeSelectedOutputs() {
+    if (!activeProfile) return;
+    const selected = activeProfile.outputs.filter((output) =>
+      selectedOutputIds.has(output.id),
+    );
+    if (!selected.length) return;
+    if (selected.length >= activeProfile.outputs.length) {
+      toast.error("Mantenha ao menos uma saída no video wall.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `Remover ${selected.length} saída${selected.length === 1 ? "" : "s"} desta configuração?`,
+      )
+    ) {
+      return;
+    }
+    const selectedIds = new Set(selected.map((output) => output.id));
+    updateActiveProfile((profile) => ({
+      ...profile,
+      outputs: profile.outputs.filter((output) => !selectedIds.has(output.id)),
+    }));
+    setSelectedOutputIds(new Set());
+    toast.success(
+      `${selected.length} saída${selected.length === 1 ? " removida" : "s removidas"}.`,
+    );
   }
 
   async function detectScreens() {
     const getScreenDetails = (window as WindowWithScreenDetails).getScreenDetails;
     if (!getScreenDetails) {
       setScreens([readCurrentScreen()]);
-      toast.info("O navegador usará posicionamento manual das janelas.");
+      toast.info("Use o posicionamento manual das janelas neste dispositivo.");
       return;
     }
 
@@ -302,7 +458,7 @@ export function VideoWallManager({
     const resolvedOutputs = activeProfile.outputs.map((output, index) => ({
       output,
       screen: resolveOutputScreen(output, screens, index),
-      url: resolveOutputUrl(output, savedViews, companyId),
+      url: resolveOutputUrl(output, savedViews, scenarios, companyId, userId),
     }));
     const invalidOutput = resolvedOutputs.find(({ url }) => !url);
     if (invalidOutput) {
@@ -360,7 +516,13 @@ export function VideoWallManager({
   }
 
   function previewOutput(output: VideoWallOutput) {
-    const url = resolveOutputUrl(output, savedViews, companyId);
+    const url = resolveOutputUrl(
+      output,
+      savedViews,
+      scenarios,
+      companyId,
+      userId,
+    );
     if (!url) {
       toast.error(`Configure a fonte de ${output.name}.`);
       return;
@@ -368,16 +530,45 @@ export function VideoWallManager({
     window.open(url, "_blank", "noopener,noreferrer");
   }
 
-  function removeSavedView(viewId: string) {
-    const nextViews = deleteSavedLiveView(viewId, companyId, userId);
+  function removeSavedViews(viewIds: Iterable<string>) {
+    const selectedIds = new Set(viewIds);
+    if (!selectedIds.size) return;
+    const nextViews = deleteSavedLiveViews(selectedIds, companyId, userId);
     setSavedViews(nextViews);
     persistProfiles(
       profiles.map((profile) => ({
         ...profile,
         outputs: profile.outputs.map((output) =>
-          output.viewId === viewId ? { ...output, viewId: "" } : output,
+          selectedIds.has(output.viewId) ? { ...output, viewId: "" } : output,
         ),
       })),
+    );
+    setSelectedSavedViewIds(new Set());
+  }
+
+  function removeSavedView(view: SavedLiveView) {
+    if (!window.confirm(`Excluir a visão "${view.name}"?`)) return;
+    removeSavedViews([view.id]);
+    toast.success("Visão excluída.");
+  }
+
+  function removeSelectedSavedViews() {
+    const selected = savedViews.filter((view) =>
+      selectedSavedViewIds.has(view.id),
+    );
+    if (!selected.length) return;
+    if (
+      !window.confirm(
+        `Excluir ${selected.length} ${selected.length === 1 ? "visão salva" : "visões salvas"}?`,
+      )
+    ) {
+      return;
+    }
+    removeSavedViews(selected.map((view) => view.id));
+    toast.success(
+      selected.length === 1
+        ? "1 visão excluída."
+        : `${selected.length} visões excluídas.`,
     );
   }
 
@@ -449,12 +640,79 @@ export function VideoWallManager({
             </Button>
           </div>
 
+          <div
+            className="flex min-w-0 flex-col gap-2 rounded-md border bg-muted/20 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+            role="toolbar"
+            aria-label="Ações para saídas selecionadas"
+          >
+            <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
+              <Checkbox
+                checked={outputSelectionState}
+                onCheckedChange={(checked) => toggleAllOutputs(checked === true)}
+                aria-label="Selecionar todas as saídas"
+              />
+              {selectedOutputCount
+                ? `${selectedOutputCount} selecionada${selectedOutputCount === 1 ? "" : "s"}`
+                : "Selecionar todas"}
+            </label>
+            {selectedOutputCount ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={duplicateSelectedOutputs}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  Duplicar
+                </Button>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  disabled={selectedOutputCount >= activeProfile.outputs.length}
+                  onClick={removeSelectedOutputs}
+                  title={
+                    selectedOutputCount >= activeProfile.outputs.length
+                      ? "Mantenha ao menos uma saída"
+                      : undefined
+                  }
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Remover
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedOutputIds(new Set())}
+                >
+                  Limpar
+                </Button>
+              </div>
+            ) : null}
+          </div>
+
           {activeProfile.outputs.map((output, index) => (
-            <Card key={output.id}>
+            <Card
+              key={output.id}
+              className={cn(
+                "transition-colors",
+                selectedOutputIds.has(output.id) &&
+                  "border-primary/40 bg-primary/5",
+              )}
+            >
               <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <CardTitle className="flex items-center gap-2">
+                      <Checkbox
+                        checked={selectedOutputIds.has(output.id)}
+                        onCheckedChange={(checked) =>
+                          toggleOutputSelection(output.id, checked === true)
+                        }
+                        aria-label={`Selecionar saída ${output.name}`}
+                      />
                       <Monitor className="h-4 w-4 shrink-0 text-primary" />
                       Saída {index + 1}
                     </CardTitle>
@@ -477,7 +735,7 @@ export function VideoWallManager({
               </CardHeader>
               <CardContent>
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                  <Field label="Identificação">
+                  <Field label="Nome da saída">
                     <Input value={output.name} onChange={(event) => updateOutput(output.id, { name: event.target.value })} />
                   </Field>
 
@@ -604,13 +862,74 @@ export function VideoWallManager({
             </div>
             {savedViews.length ? (
               <div className="space-y-2">
-                {savedViews.map((view) => (
-                  <div key={view.id} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{view.name}</div>
-                      <div className="truncate text-xs text-muted-foreground">{view.path}</div>
+                <div
+                  className="flex min-w-0 flex-col gap-2 rounded-md border bg-muted/20 px-3 py-2"
+                  role="toolbar"
+                  aria-label="Ações para visões salvas selecionadas"
+                >
+                  <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
+                    <Checkbox
+                      checked={savedViewSelectionState}
+                      onCheckedChange={(checked) =>
+                        setSelectedSavedViewIds(
+                          checked === true
+                            ? new Set(savedViews.map((view) => view.id))
+                            : new Set(),
+                        )
+                      }
+                      aria-label="Selecionar todas as visões salvas"
+                    />
+                    {selectedSavedViewCount
+                      ? `${selectedSavedViewCount} selecionada${selectedSavedViewCount === 1 ? "" : "s"}`
+                      : "Selecionar todas"}
+                  </label>
+                  {selectedSavedViewCount ? (
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        onClick={removeSelectedSavedViews}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Excluir
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSelectedSavedViewIds(new Set())}
+                      >
+                        Limpar
+                      </Button>
                     </div>
-                    <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" onClick={() => removeSavedView(view.id)} title="Excluir visão" aria-label={`Excluir ${view.name}`}>
+                  ) : null}
+                </div>
+                {savedViews.map((view) => (
+                  <div
+                    key={view.id}
+                    className={cn(
+                      "flex items-center justify-between gap-2 rounded-md border px-3 py-2 transition-colors",
+                      selectedSavedViewIds.has(view.id) &&
+                        "border-primary/40 bg-primary/5",
+                    )}
+                  >
+                    <Checkbox
+                      checked={selectedSavedViewIds.has(view.id)}
+                      onCheckedChange={(checked) =>
+                        setSelectedSavedViewIds((current) =>
+                          updateSelectedIds(current, view.id, checked === true),
+                        )
+                      }
+                      aria-label={`Selecionar visão ${view.name}`}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium">{view.name}</div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        Visão pronta para exibição
+                      </div>
+                    </div>
+                    <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" onClick={() => removeSavedView(view)} title="Excluir visão" aria-label={`Excluir ${view.name}`}>
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
@@ -626,6 +945,29 @@ export function VideoWallManager({
       </div>
     </section>
   );
+}
+
+function updateSelectedIds(
+  current: Set<string>,
+  id: string,
+  selected: boolean,
+) {
+  const next = new Set(current);
+  if (selected) next.add(id);
+  else next.delete(id);
+  return next;
+}
+
+function retainAvailableIds(current: Set<string>, availableIds: string[]) {
+  const available = new Set(availableIds);
+  const retained = new Set([...current].filter((id) => available.has(id)));
+  if (
+    retained.size === current.size &&
+    [...retained].every((id) => current.has(id))
+  ) {
+    return current;
+  }
+  return retained;
 }
 
 function Field({ children, label }: { children: React.ReactNode; label: string }) {
@@ -654,19 +996,35 @@ function outputSourceSummary(
 function resolveOutputUrl(
   output: VideoWallOutput,
   views: SavedLiveView[],
+  scenarios: Scenario[],
   companyId?: string | null,
+  userId?: string | null,
 ) {
   if (output.source === "saved_view") {
     const view = views.find((item) => item.id === output.viewId);
-    return view ? resolveSavedLiveViewUrl(view, window.location.origin) : "";
+    return view
+      ? resolveSavedLiveViewUrl(view, window.location.origin, userId)
+      : "";
   }
-  if (!output.scenarioId) return "";
+  if (
+    !output.scenarioId ||
+    !scenarios.some((scenario) => scenario.id === output.scenarioId)
+  ) {
+    return "";
+  }
 
   const url = new URL("/views/dashboard/live", window.location.origin);
   if (companyId) url.searchParams.set("company_id", companyId);
   url.searchParams.set("scope_mode", "scenario");
   url.searchParams.set("scope_id", output.scenarioId);
-  return url.toString();
+  const reference = saveViewLinkTarget(url, userId, output.linkReference);
+  return reference
+    ? buildOpaqueViewUrl(
+        "/views/dashboard/live",
+        reference,
+        window.location.origin,
+      )
+    : "";
 }
 
 function resolveOutputScreen(

@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
     backendBaseUrl = resolveBackendBaseUrl(request);
   } catch {
     return NextResponse.json(
-      { error: "Configuração do backend inválida." },
+      { error: "O serviço de dados está temporariamente indisponível." },
       { status: 500 },
     );
   }

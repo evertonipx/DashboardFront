@@ -1,17 +1,5 @@
-import { AppShell } from "@/components/app/app-shell";
-import { AuthGuard } from "@/components/app/auth-guard";
-import { SuperAdminDashboard } from "@/components/app/super-admin-dashboard";
+import { DeferredSuperAdminDashboard as SuperAdminDashboard } from "@/components/app/deferred-route-panels";
 
 export default function ManagerMasterPage() {
-  return (
-    <AuthGuard requireManager requireMaster>
-      <AppShell
-        mode="manager"
-        title="Master"
-        description="Gestão cross-tenant de empresas, admins, operadores e módulos."
-      >
-        <SuperAdminDashboard />
-      </AppShell>
-    </AuthGuard>
-  );
+  return <SuperAdminDashboard />;
 }

@@ -98,9 +98,9 @@ export function buildCurrentUserCompanyCacheRecord(
   return {
     ...user.company,
     id: companyId,
-    // `/auth/me` omits the company name today. The ID is a stable placeholder
-    // that lets the same-tenant IANA certification survive token rotation.
-    name: companyName || companyId,
+    // Keep a neutral display name when the authenticated response omits it;
+    // the identifier remains available only in the dedicated `id` field.
+    name: companyName || "Empresa",
     timezone: timeZone,
     trade_name:
       user.company?.trade_name ?? user.company_trade_name ?? null,

@@ -6,6 +6,7 @@ import {
   canManageViews,
   canManageWidgets,
   canManageWorkers,
+  canViewAudit,
   hasAnyOperationalPermission,
 } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/types";
@@ -16,7 +17,7 @@ export function hasMasterAccess(user: CurrentUser | null) {
 }
 
 export function hasDeclaredManagerAccess(user: CurrentUser | null) {
-  return hasMasterAccess(user);
+  return canViewAudit(user);
 }
 
 export function hasVisualAdminAccess(user: CurrentUser | null) {
@@ -42,6 +43,8 @@ export function resolveAuthorizedHomePath(user: CurrentUser | null) {
     if (canManageLocations(user)) return "/manager/locations";
     if (canManageScenarioCatalogs(user)) return "/manager/scenarios";
   }
+
+  if (canViewAudit(user)) return "/manager/audit";
 
   return "/dashboard/live";
 }

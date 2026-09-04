@@ -74,6 +74,24 @@ export function getCurrentUserCompanyId(user: CurrentUser | null) {
   return getEntityCompanyId(user);
 }
 
+/**
+ * A Master can receive an explicitly multi-company catalogue from endpoints
+ * that are tenant-scoped for regular users. In that case the selected tenant
+ * must be certified from each response row instead of inheriting the company
+ * attached to the JWT principal.
+ */
+export function usesMasterCrossCompanyScope(
+  user: CurrentUser | null,
+  companyScopeId: string | null | undefined,
+) {
+  const selectedCompanyId = companyScopeId?.trim() ?? "";
+  return Boolean(
+    isMasterUser(user) &&
+      selectedCompanyId &&
+      selectedCompanyId !== getCurrentUserCompanyId(user),
+  );
+}
+
 export function getEffectiveCompanyTimeZoneResolution(
   user: CurrentUser | null,
 ): CompanyTimeZoneResolution {
@@ -213,7 +231,7 @@ export function certifyCompanyScopeTimeZoneOverride(
   if (resolution.fallback) {
     return {
       companyScopeId,
-      error: "Fuso da empresa do video wall não certificado.",
+      error: "Fuso horário da empresa indisponível para esta visão.",
     };
   }
 

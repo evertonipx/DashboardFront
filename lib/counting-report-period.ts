@@ -17,6 +17,8 @@ export type CountingReportPeriodPreset =
   | "last_12_months"
   | "custom";
 
+export const COUNTING_REPORT_HISTORY_YEARS = 4;
+
 const STORAGE_KEY = "ipxdata.counting-report-period.v1";
 const MONTH_PATTERN = /^(\d{4})-(0[1-9]|1[0-2])$/;
 
@@ -24,7 +26,7 @@ export function defaultCountingReportPeriod(
   now = new Date(),
 ): CountingReportPeriod {
   return {
-    from: `${COUNTING_HISTORY_START_YEAR}-01`,
+    from: minimumCountingReportMonth(now),
     to: monthInputValue(now),
   };
 }
@@ -178,8 +180,19 @@ export function formatCountingReportPeriod(period: CountingReportPeriod) {
   return `${formatMonth(normalized.from)} a ${formatMonth(normalized.to)}`;
 }
 
-export function minimumCountingReportMonth() {
-  return `${COUNTING_HISTORY_START_YEAR}-01`;
+export function minimumCountingReportMonth(now = new Date()) {
+  return monthInputValue(countingReportHistoryFrom(now));
+}
+
+export function countingReportHistoryFrom(now = new Date()) {
+  const currentYear = now.getFullYear();
+  const rangeStartYear = currentYear - (COUNTING_REPORT_HISTORY_YEARS - 1);
+  const minimumYear = Math.min(
+    currentYear,
+    Math.max(COUNTING_HISTORY_START_YEAR, rangeStartYear),
+  );
+
+  return new Date(minimumYear, 0, 1);
 }
 
 export function maximumCountingReportMonth(now = new Date()) {

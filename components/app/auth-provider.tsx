@@ -21,11 +21,16 @@ import {
   type CurrentUserSessionResponse,
 } from "@/lib/api";
 import {
+  accessTokenExplicitlyMismatchesUserContext,
   accessTokenExplicitlyMismatchesUserIdentity,
   accessTokensShareUserIdentity,
   reconcileCurrentUserWithAccessToken,
 } from "@/lib/access-token-claims";
-import { enrichAuthenticatedPermissionMetadata } from "@/lib/authenticated-permission-metadata";
+import {
+  certifyAuthenticatedUserPermissionMetadata,
+  enrichAuthenticatedCompanyModuleMetadata,
+  enrichAuthenticatedPermissionMetadata,
+} from "@/lib/authenticated-permission-metadata";
 import { hasDeclaredManagerAccess, hasMasterAccess } from "@/lib/access";
 import {
   buildCurrentUserCompanyCacheRecord,
@@ -69,6 +74,25 @@ type AuthContextValue = {
   refreshUser: () => Promise<CurrentUser | null>;
 };
 
+type CertifiedAuthenticatedUser = {
+  authenticatedSession: CurrentUserSessionResponse;
+  companyModulesHydrated: boolean;
+  permissionAssignmentsHydrated: boolean;
+  user: CurrentUser;
+};
+
+type CertifiedUserPublication = {
+  companyModulesHydrated: boolean;
+  permissionAssignmentsHydrated: boolean;
+  user: CurrentUser;
+};
+
+type BackgroundHydrationAttempt = {
+  accessToken: string;
+  promise: Promise<CurrentUser>;
+  sessionRevision: number;
+};
+
 const AuthContext = React.createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -76,6 +100,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = React.useState<CurrentUser | null>(null);
   const [isManager, setIsManager] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
+  const [gridReadyAccessToken, setGridReadyAccessToken] = React.useState("");
+  const backgroundHydrationRef = React.useRef<BackgroundHydrationAttempt | null>(
+    null,
+  );
   const gridSyncErrorShown = React.useRef(false);
   const userRef = React.useRef<CurrentUser | null>(null);
 
@@ -90,12 +118,89 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return false;
   }, []);
 
-  const refreshUser = React.useCallback(async () => {
-    try {
-      const currentUser = await requestAuthenticatedUser(userRef.current);
+  const publishAuthenticatedUser = React.useCallback(
+    (
+      currentUser: CurrentUser,
+      authenticatedSession: CurrentUserSessionResponse,
+    ) => {
+      if (!currentUserSessionIsCurrent(authenticatedSession)) return false;
+      userRef.current = currentUser;
       setUser(currentUser);
       setIsManager(resolveManagerAccess(currentUser));
-      return currentUser;
+      return true;
+    },
+    [resolveManagerAccess],
+  );
+
+  const hydrateAuthenticatedUserInBackground = React.useCallback(
+    ({
+      authenticatedSession,
+      companyModulesHydrated,
+      permissionAssignmentsHydrated,
+      user: certifiedUser,
+    }: CertifiedAuthenticatedUser) => {
+      const accessToken = authenticatedSession.accessToken;
+      const currentAttempt = backgroundHydrationRef.current;
+      if (
+        currentAttempt?.accessToken === accessToken &&
+        currentAttempt.sessionRevision === authenticatedSession.sessionRevision
+      ) {
+        return currentAttempt.promise;
+      }
+
+      const metadataPromise = hydrateAuthenticatedUser(
+        certifiedUser,
+        authenticatedSession,
+        { companyModulesHydrated, permissionAssignmentsHydrated },
+      )
+        .then((hydratedUser) => {
+          publishAuthenticatedUser(hydratedUser, authenticatedSession);
+          return hydratedUser;
+        })
+        .catch(() => {
+          // Every optional metadata source already falls back locally. A
+          // rejection here therefore means that this session lineage was
+          // superseded; the winning refresh/login owns the published state.
+          return certifiedUser;
+        });
+      const gridPromise = hydrateAuthenticatedUserGrid(
+        certifiedUser,
+        authenticatedSession,
+      )
+        .then(() => {
+          if (currentUserSessionIsCurrent(authenticatedSession)) {
+            setGridReadyAccessToken(accessToken);
+          }
+        })
+        .catch(() => undefined);
+      const promise = Promise.all([metadataPromise, gridPromise])
+        .then(([hydratedUser]) => hydratedUser)
+        .finally(() => {
+          if (backgroundHydrationRef.current?.promise === promise) {
+            backgroundHydrationRef.current = null;
+          }
+        });
+      backgroundHydrationRef.current = {
+        accessToken,
+        promise,
+        sessionRevision: authenticatedSession.sessionRevision,
+      };
+      return promise;
+    },
+    [publishAuthenticatedUser],
+  );
+
+  const refreshUser = React.useCallback(async () => {
+    try {
+      const certified = await requestAuthenticatedUser();
+      if (!publishAuthenticatedUser(certified.user, certified.authenticatedSession)) {
+        return null;
+      }
+      setGridReadyAccessToken((current) =>
+        current === certified.authenticatedSession.accessToken ? current : "",
+      );
+      void hydrateAuthenticatedUserInBackground(certified);
+      return certified.user;
     } catch (error) {
       if (
         error instanceof ApiError &&
@@ -103,6 +208,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         !getStoredSession()
       ) {
         clearUserGridSync();
+        setGridReadyAccessToken("");
         setUser(null);
         setIsManager(false);
         return null;
@@ -121,17 +227,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (
         fallbackUser &&
         accessToken &&
-        !accessTokenExplicitlyMismatchesUserIdentity(accessToken, fallbackUser)
+        !accessTokenExplicitlyMismatchesUserContext(accessToken, fallbackUser)
       ) {
         return fallbackUser;
       }
       clearUserGridSync();
+      setGridReadyAccessToken("");
       userRef.current = null;
       setUser(null);
       setIsManager(false);
       return null;
     }
-  }, [resolveManagerAccess]);
+  }, [hydrateAuthenticatedUserInBackground, publishAuthenticatedUser]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -165,6 +272,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const session = getStoredSession();
 
       clearUserGridSync();
+      setGridReadyAccessToken("");
       userRef.current = null;
       setUser(null);
       setIsManager(false);
@@ -198,9 +306,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refreshUser, router]);
 
   React.useEffect(() => {
-    if (!user?.id) return;
+    if (
+      !user?.id ||
+      !gridReadyAccessToken ||
+      getStoredSession()?.access_token !== gridReadyAccessToken
+    ) {
+      return;
+    }
     return startUserGridSync(user.id);
-  }, [user?.id]);
+  }, [gridReadyAccessToken, user?.id]);
 
   React.useEffect(() => {
     function handleGridSyncStatus(event: Event) {
@@ -208,7 +322,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (detail?.status === "error" && !gridSyncErrorShown.current) {
         gridSyncErrorShown.current = true;
         toast.error(
-          "Não foi possível sincronizar as configurações com o servidor. As alterações continuam disponíveis neste navegador e serão reenviadas automaticamente.",
+          "Não foi possível sincronizar as configurações agora. As alterações foram preservadas e serão reenviadas automaticamente.",
         );
         return;
       }
@@ -231,6 +345,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     function handleSessionExpired() {
       clearStoredSession();
       clearUserGridSync();
+      setGridReadyAccessToken("");
       userRef.current = null;
       setUser(null);
       setIsManager(false);
@@ -265,11 +380,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = React.useCallback(async (email: string, password: string) => {
     const issuedSession = await loginRequest(email, password);
     try {
-      const currentUser = await requestAuthenticatedUser();
-      const canManage = await resolveManagerAccess(currentUser);
-      setUser(currentUser);
-      setIsManager(canManage);
-      return currentUser;
+      const certified = await requestAuthenticatedUser();
+      if (!publishAuthenticatedUser(certified.user, certified.authenticatedSession)) {
+        throw new ApiError(
+          "A sessão foi atualizada durante a validação. Tente novamente.",
+          409,
+        );
+      }
+      setGridReadyAccessToken("");
+      void hydrateAuthenticatedUserInBackground(certified);
+      return certified.user;
     } catch (error) {
       // Login is transactional from the browser's perspective. Keeping the
       // newly-issued tokens after /auth/me fails or contradicts the JWT would
@@ -282,12 +402,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       ) {
         clearStoredSession();
         clearUserGridSync();
+        setGridReadyAccessToken("");
+        userRef.current = null;
         setUser(null);
         setIsManager(false);
       }
       throw error;
     }
-  }, [resolveManagerAccess]);
+  }, [hydrateAuthenticatedUserInBackground, publishAuthenticatedUser]);
 
   const logout = React.useCallback(async () => {
     const initialSession = getStoredSession();
@@ -336,6 +458,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // happened while the personal grid was being flushed.
     clearStoredSession();
     clearUserGridSync();
+    setGridReadyAccessToken("");
+    backgroundHydrationRef.current = null;
     userRef.current = null;
     setUser(null);
     setIsManager(false);
@@ -382,29 +506,28 @@ async function hydrateCurrentUser(
   user: CurrentUser,
   authenticatedSession: CurrentUserSessionResponse,
   fallbackUser: CurrentUser | null = null,
+  {
+    companyModulesHydrated = false,
+    permissionAssignmentsHydrated = false,
+  }: {
+    companyModulesHydrated?: boolean;
+    permissionAssignmentsHydrated?: boolean;
+  } = {},
 ) {
   assertAuthenticatedSessionCurrent(authenticatedSession);
-  const preliminaryCompanyScope = getUserCompanyScope(user);
-  if (hasMasterAccess(user)) {
-    clearStoredCurrentCompanyScope();
-    synchronizeMasterCompanyScope(preliminaryCompanyScope);
-  } else {
-    clearStoredMasterCompanyScope();
-    if (preliminaryCompanyScope) {
-      setStoredCurrentCompanyScope(preliminaryCompanyScope);
-    } else {
-      clearStoredCurrentCompanyScope();
-    }
-  }
+  synchronizeAuthenticatedCompanyScope(user);
 
   const [permissions, company, companyModules] = await Promise.all([
     hydrateUserPermissions(
       user,
       user.permissions ?? fallbackUser?.permissions ?? [],
       authenticatedSession,
+      { assignmentsHydrated: permissionAssignmentsHydrated },
     ),
     hydrateUserCompany(user, authenticatedSession),
-    hydrateUserCompanyModules(user, authenticatedSession),
+    companyModulesHydrated
+      ? Promise.resolve(user.company_modules ?? [])
+      : hydrateUserCompanyModules(user, authenticatedSession),
   ]);
   assertAuthenticatedSessionCurrent(authenticatedSession);
 
@@ -438,49 +561,46 @@ async function hydrateCurrentUser(
 }
 
 async function hydrateAuthenticatedUser(
+  certifiedUser: CurrentUser,
   authenticatedSession: CurrentUserSessionResponse,
-  fallbackUser: CurrentUser | null = null,
+  options: {
+    companyModulesHydrated?: boolean;
+    permissionAssignmentsHydrated?: boolean;
+  } = {},
 ) {
   assertAuthenticatedSessionCurrent(authenticatedSession);
-  const accessToken = authenticatedSession.accessToken;
-  const tokenEnrichedUser = reconcileCurrentUserWithAccessToken(
-    authenticatedSession.user,
-    accessToken,
-  );
-  if (!tokenEnrichedUser) {
-    throw new ApiError(
-      "A identidade retornada pela API diverge do contexto autenticado no JWT.",
-      401,
-    );
-  }
-  setAuthenticatedMasterAccess(tokenEnrichedUser, accessToken);
   const hydratedUser = await hydrateCurrentUser(
-    tokenEnrichedUser,
+    certifiedUser,
     authenticatedSession,
-    fallbackUser,
+    null,
+    options,
   );
-  assertAuthenticatedSessionCurrent(authenticatedSession);
-  const sessionIsCurrent = () =>
-    currentUserSessionIsCurrent(authenticatedSession);
-  await hydrateUserGridFromServer(hydratedUser.id, {
-    expectedAccessToken: accessToken,
-    shouldApply: sessionIsCurrent,
-  });
   assertAuthenticatedSessionCurrent(authenticatedSession);
   return hydratedUser;
 }
 
-async function requestAuthenticatedUser(
-  fallbackUser: CurrentUser | null = null,
+async function hydrateAuthenticatedUserGrid(
+  certifiedUser: CurrentUser,
+  authenticatedSession: CurrentUserSessionResponse,
 ) {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
+  await hydrateUserGridFromServer(certifiedUser.id, {
+    expectedAccessToken: authenticatedSession.accessToken,
+    shouldApply: () => currentUserSessionIsCurrent(authenticatedSession),
+  });
+  assertAuthenticatedSessionCurrent(authenticatedSession);
+}
+
+async function requestAuthenticatedUser(): Promise<CertifiedAuthenticatedUser> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const authenticatedSession = await currentUserRequest();
     try {
       assertAuthenticatedSessionCurrent(authenticatedSession);
-      return await hydrateAuthenticatedUser(
+      const user = await certifyAuthenticatedUserForPublication(
         authenticatedSession,
-        fallbackUser,
       );
+      assertAuthenticatedSessionCurrent(authenticatedSession);
+      return { authenticatedSession, ...user };
     } catch (error) {
       if (!currentUserSessionIsCurrent(authenticatedSession)) continue;
       throw error;
@@ -497,6 +617,7 @@ async function hydrateUserPermissions(
   user: CurrentUser,
   fallbackPermissions: UserPermission[],
   authenticatedSession: CurrentUserSessionResponse,
+  { assignmentsHydrated = false }: { assignmentsHydrated?: boolean } = {},
 ) {
   assertAuthenticatedSessionCurrent(authenticatedSession);
   // When `/auth/me` was reconciled with an explicit JWT permission claim, that
@@ -507,19 +628,27 @@ async function hydrateUserPermissions(
     if (!user.id || !user.permissions.length) return user.permissions;
 
     const [assignedMetadata, permissionCatalog] = await Promise.all([
-      readAuthenticatedPermissionMetadata(
-        `/users/${user.id}/permissions`,
-        authenticatedSession,
-      ),
+      assignmentsHydrated
+        ? Promise.resolve([])
+        : readAuthenticatedPermissionMetadata(
+            `/users/${user.id}/permissions`,
+            authenticatedSession,
+          ),
       readAuthenticatedPermissionMetadata(
         "/permissions",
         authenticatedSession,
       ),
     ]);
     assertAuthenticatedSessionCurrent(authenticatedSession);
+    const certifiedAssignedMetadata =
+      certifyAuthenticatedUserPermissionMetadata(
+        assignedMetadata,
+        user.id,
+        getCurrentUserCompanyId(user),
+      );
     return enrichAuthenticatedPermissionMetadata(
       user.permissions,
-      [assignedMetadata, permissionCatalog],
+      [certifiedAssignedMetadata, permissionCatalog],
       getCurrentUserCompanyId(user),
     );
   }
@@ -541,8 +670,14 @@ async function hydrateUserPermissions(
       authenticatedSession,
     );
     assertAuthenticatedSessionCurrent(authenticatedSession);
+    const certifiedAssignedPermissions =
+      certifyAuthenticatedUserPermissionMetadata(
+        assignedPermissions,
+        user.id,
+        getCurrentUserCompanyId(user),
+      );
     return enrichAuthenticatedPermissionMetadata(
-      assignedPermissions,
+      certifiedAssignedPermissions,
       [permissionCatalog],
       getCurrentUserCompanyId(user),
     );
@@ -564,6 +699,10 @@ async function hydrateUserCompanyModules(
 
   const companyId = getCurrentUserCompanyId(user);
   if (!companyId) return [];
+  const authenticatedAssignments =
+    user.company_modules === undefined
+      ? undefined
+      : certifyCompanyModuleAssignments(user.company_modules, companyId);
   try {
     const rows = await apiFetch<CurrentUserCompanyModule[]>(
       "/company/modules",
@@ -573,19 +712,317 @@ async function hydrateUserCompanyModules(
       },
     );
     assertAuthenticatedSessionCurrent(authenticatedSession);
-    if (!Array.isArray(rows)) return [];
-
-    return rows.filter((assignment) => {
-      const assignmentCompanyId = assignment.company_id?.trim();
-      const moduleId = assignment.module_id?.trim() || assignment.module?.id?.trim();
-      return Boolean(
-        moduleId &&
-          (!assignmentCompanyId || assignmentCompanyId === companyId),
-      );
-    });
+    const certifiedRows = certifyCompanyModuleAssignments(rows, companyId);
+    // An explicit JWT list is the assignment authority for this session. The
+    // Swagger endpoint can enrich matching records (and explicitly restrict an
+    // enabled claim), but an extra endpoint row cannot manufacture module
+    // access omitted by the accepted token.
+    return authenticatedAssignments !== undefined
+      ? enrichAuthenticatedCompanyModuleMetadata(
+          authenticatedAssignments,
+          certifiedRows,
+          companyId,
+        )
+      : certifiedRows;
   } catch (error) {
     if (!currentUserSessionIsCurrent(authenticatedSession)) throw error;
+    // If the accepted JWT explicitly carries assignments, a transient metadata
+    // failure must not erase them. JWT omission still fails closed because the
+    // documented endpoint is then the only assignment source.
+    return authenticatedAssignments !== undefined
+      ? [...authenticatedAssignments]
+      : [];
+  }
+}
+
+function certifyCompanyModuleAssignments(
+  value: unknown,
+  expectedCompanyId: string,
+): CurrentUserCompanyModule[] {
+  if (!Array.isArray(value)) return [];
+  const assignments = new Map<string, CurrentUserCompanyModule>();
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      return [];
+    }
+    const assignment = candidate as Record<string, unknown>;
+    const company = resolveRuntimeIdentifierAliases(assignment, [
+      "company_id",
+      "companyId",
+      "tenant_id",
+      "tenantId",
+    ]);
+    if (company.invalid) return [];
+    if (
+      company.value &&
+      !runtimeIdentifiersMatch(company.value, expectedCompanyId)
+    ) {
+      continue;
+    }
+    if (typeof assignment.enabled !== "boolean") return [];
+
+    const moduleRecord =
+      assignment.module &&
+      typeof assignment.module === "object" &&
+      !Array.isArray(assignment.module)
+        ? (assignment.module as Record<string, unknown>)
+        : null;
+    if (assignment.module !== undefined && assignment.module !== null && !moduleRecord) {
+      return [];
+    }
+    const declaredModule = resolveRuntimeIdentifierAliases(assignment, [
+      "module_id",
+      "moduleId",
+    ]);
+    if (declaredModule.invalid) return [];
+    const declaredModuleId = declaredModule.value;
+    const nestedModuleId =
+      typeof moduleRecord?.id === "string" ? moduleRecord.id.trim() : "";
+    if (
+      (moduleRecord?.id !== undefined && !nestedModuleId) ||
+      (declaredModuleId &&
+        nestedModuleId &&
+        !runtimeIdentifiersMatch(declaredModuleId, nestedModuleId))
+    ) {
+      return [];
+    }
+    const moduleId = declaredModuleId || nestedModuleId;
+    if (!moduleId) return [];
+    if (
+      moduleRecord?.active !== undefined &&
+      moduleRecord.active !== null &&
+      typeof moduleRecord.active !== "boolean"
+    ) {
+      return [];
+    }
+    const moduleSlug =
+      typeof moduleRecord?.slug === "string" ? moduleRecord.slug.trim() : "";
+    const moduleName =
+      typeof moduleRecord?.name === "string" ? moduleRecord.name.trim() : "";
+    if (
+      (moduleRecord?.slug !== undefined && !moduleSlug) ||
+      (moduleRecord?.name !== undefined && !moduleName)
+    ) {
+      return [];
+    }
+
+    const certifiedAssignment: CurrentUserCompanyModule = {
+      ...(typeof assignment.id === "string" && assignment.id.trim()
+        ? { id: assignment.id.trim() }
+        : undefined),
+      company_id: expectedCompanyId,
+      enabled: assignment.enabled,
+      module_id: moduleId,
+      ...(moduleRecord && moduleSlug && moduleName
+        ? {
+            module: {
+              id: nestedModuleId || moduleId,
+              slug: moduleSlug,
+              name: moduleName,
+              ...(typeof moduleRecord.description === "string"
+                ? { description: moduleRecord.description }
+                : undefined),
+              ...(typeof moduleRecord.active === "boolean"
+                ? { active: moduleRecord.active }
+                : undefined),
+            },
+          }
+        : undefined),
+    };
+    const identity = moduleId.toLowerCase();
+    const previous = assignments.get(identity);
+    if (!previous) {
+      assignments.set(identity, certifiedAssignment);
+      continue;
+    }
+
+    const previousSlug = previous.module?.slug.trim().toLowerCase() ?? "";
+    const currentSlug = certifiedAssignment.module?.slug.trim().toLowerCase() ?? "";
+    const ambiguousIdentity = Boolean(
+      previousSlug && currentSlug && previousSlug !== currentSlug,
+    );
+    const richerModule = previous.module ?? certifiedAssignment.module;
+    assignments.set(identity, {
+      ...previous,
+      company_id: expectedCompanyId,
+      // Duplicate endpoint rows are one assertion. Any explicit negative or
+      // incompatible identity must win instead of leaving a truthy sibling
+      // that `.some()` could use to grant the module.
+      enabled:
+        !ambiguousIdentity &&
+        previous.enabled &&
+        certifiedAssignment.enabled,
+      ...(richerModule
+        ? {
+            module: {
+              ...richerModule,
+              ...(previous.module?.active === false ||
+              certifiedAssignment.module?.active === false
+                ? { active: false }
+                : undefined),
+            },
+          }
+        : undefined),
+    });
+  }
+  return [...assignments.values()];
+}
+
+function resolveRuntimeIdentifierAliases(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+) {
+  const values: string[] = [];
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+    const rawValue = record[key];
+    if (typeof rawValue !== "string" || !rawValue.trim()) {
+      return { invalid: true, value: "" };
+    }
+    const value = rawValue.trim();
+    if (!values.some((candidate) => runtimeIdentifiersMatch(candidate, value))) {
+      values.push(value);
+    }
+  }
+  return {
+    invalid: values.length > 1,
+    value: values.length === 1 ? values[0] : "",
+  };
+}
+
+function runtimeIdentifiersMatch(left: string, right: string) {
+  if (left === right) return true;
+  const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  return (
+    uuidPattern.test(left) &&
+    uuidPattern.test(right) &&
+    left.toLowerCase() === right.toLowerCase()
+  );
+}
+
+/**
+ * Resolves only the security-critical principal used by route guards. The
+ * Bearer has already been accepted by `/auth/me`; JWT claims may fill fields
+ * omitted by that response, but explicit identity/company conflicts remain
+ * fail-closed in `reconcileCurrentUserWithAccessToken`.
+ *
+ * Compatibility requests can delay this stage only when the accepted
+ * principal omitted security-critical grants/modules, or when a master scope
+ * still needs an authoritative timezone. Descriptions, catalog enrichment and
+ * user-grid hydration deliberately run after publication.
+ */
+async function certifyAuthenticatedUserForPublication(
+  authenticatedSession: CurrentUserSessionResponse,
+): Promise<CertifiedUserPublication> {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
+  const accessToken = authenticatedSession.accessToken;
+  const tokenEnrichedUser = reconcileCurrentUserWithAccessToken(
+    authenticatedSession.user,
+    accessToken,
+  );
+  if (!tokenEnrichedUser) {
+    throw new ApiError(
+      "Não foi possível validar sua sessão. Entre novamente.",
+      401,
+    );
+  }
+
+  setAuthenticatedMasterAccess(tokenEnrichedUser, accessToken);
+  const declaredCompanyModules = certifyUserCompanyModulesForPublication(
+    tokenEnrichedUser,
+  );
+  const companyModulesHydrated = Boolean(
+    !hasMasterAccess(tokenEnrichedUser) &&
+      tokenEnrichedUser.company_modules === undefined,
+  );
+  const permissionAssignmentsHydrated = Boolean(
+    !hasMasterAccess(tokenEnrichedUser) &&
+      tokenEnrichedUser.permissions === undefined &&
+      tokenEnrichedUser.id,
+  );
+  const [permissions, companyModules] = await Promise.all([
+    certifyUserPermissionsForPublication(
+      tokenEnrichedUser,
+      authenticatedSession,
+    ),
+    companyModulesHydrated
+      ? hydrateUserCompanyModules(tokenEnrichedUser, authenticatedSession)
+      : Promise.resolve(declaredCompanyModules),
+  ]);
+  assertAuthenticatedSessionCurrent(authenticatedSession);
+  const certifiedUser: CurrentUser = {
+    ...tokenEnrichedUser,
+    ...(permissions === undefined ? undefined : { permissions }),
+    ...(companyModules === undefined
+      ? undefined
+      : { company_modules: companyModules }),
+  };
+  synchronizeAuthenticatedCompanyScope(certifiedUser);
+  setAuthenticatedMasterAccess(certifiedUser, accessToken);
+  if (hasMasterAccess(certifiedUser)) {
+    await hydrateStoredMasterCompanyScope(certifiedUser, authenticatedSession);
+    assertAuthenticatedSessionCurrent(authenticatedSession);
+  }
+  return {
+    companyModulesHydrated,
+    permissionAssignmentsHydrated,
+    user: certifiedUser,
+  };
+}
+
+async function certifyUserPermissionsForPublication(
+  user: CurrentUser,
+  authenticatedSession: CurrentUserSessionResponse,
+) {
+  assertAuthenticatedSessionCurrent(authenticatedSession);
+  if (user.permissions !== undefined) return user.permissions;
+  // Master access is already certified by `/auth/me` and/or the accepted JWT.
+  // Keep an omitted list omitted so background hydration can still enrich it.
+  if (hasMasterAccess(user)) return undefined;
+  if (!user.id) return [];
+
+  try {
+    const assignedPermissions = await apiFetch<UserPermission[]>(
+      `/users/${user.id}/permissions`,
+      {
+        expectedAccessToken: authenticatedSession.accessToken,
+        jwtCompanyScopeOnly: true,
+      },
+    );
+    assertAuthenticatedSessionCurrent(authenticatedSession);
+    return certifyAuthenticatedUserPermissionMetadata(
+      assignedPermissions,
+      user.id,
+      getCurrentUserCompanyId(user),
+    );
+  } catch (error) {
+    if (!currentUserSessionIsCurrent(authenticatedSession)) throw error;
+    // No accepted claim and no certified assignment response means no grant.
     return [];
+  }
+}
+
+function certifyUserCompanyModulesForPublication(user: CurrentUser) {
+  if (hasMasterAccess(user)) return user.company_modules;
+  const companyId = getCurrentUserCompanyId(user);
+  if (!companyId) return [];
+  if (user.company_modules === undefined) return undefined;
+  return certifyCompanyModuleAssignments(user.company_modules, companyId);
+}
+
+function synchronizeAuthenticatedCompanyScope(user: CurrentUser) {
+  const companyScope = getUserCompanyScope(user);
+  if (hasMasterAccess(user)) {
+    clearStoredCurrentCompanyScope();
+    synchronizeMasterCompanyScope(companyScope);
+    return;
+  }
+
+  clearStoredMasterCompanyScope();
+  if (companyScope) {
+    setStoredCurrentCompanyScope(companyScope);
+  } else {
+    clearStoredCurrentCompanyScope();
   }
 }
 
@@ -645,7 +1082,7 @@ async function hydrateUserCompany(
     );
     assertAuthenticatedSessionCurrent(authenticatedSession);
     if (response.id?.trim() !== companyId) {
-      throw new Error("A API retornou o cadastro de outra empresa.");
+      throw new Error("Não foi possível validar os dados da empresa selecionada.");
     }
     const company = mergeCurrentUserCompanies(
       companyId,
@@ -692,7 +1129,7 @@ function getUserCompanyScope(user: CurrentUser) {
       user.company_name ||
       user.company?.trade_name ||
       user.company_trade_name ||
-      id,
+      "Empresa",
     timezone: timeZone,
     trade_name: user.company?.trade_name ?? user.company_trade_name ?? null,
   };
@@ -714,7 +1151,7 @@ function mergeCurrentUserCompanies(
   return {
     ...merged,
     id: companyId,
-    name: merged.name || companyId,
+    name: merged.name || "Empresa",
     timezone: timeZone,
   };
 }
@@ -750,7 +1187,7 @@ async function hydrateStoredMasterCompanyScope(
   const storedScope = getStoredMasterCompanyScope();
   if (!storedScope) return;
   const resolution = getCompanyTimeZoneResolutionForScope(user, storedScope.id);
-  if (!resolution.fallback && resolution.source === "current-user-company") {
+  if (!resolution.fallback) {
     if (canonicalCompanyTimeZone(storedScope.timezone) !== resolution.timeZone) {
       setStoredMasterCompanyScope({
         ...storedScope,

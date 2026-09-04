@@ -1,5 +1,4 @@
 import {
-  canonicalCompanyTimeZone,
   requireCertifiedCompanyTimeZone,
   requireCompanyTimeZone,
   requireRuntimeCompanyTimeZone,
@@ -17,11 +16,8 @@ export function requireCountingRuntimeTimeZone(timeZone: string) {
   try {
     return requireRuntimeCompanyTimeZone(expected);
   } catch {
-    const runtime = canonicalCompanyTimeZone(
-      Intl.DateTimeFormat().resolvedOptions().timeZone,
-    );
     throw new Error(
-      `Fuso incompatível: navegador ${runtime ?? "desconhecido"}; empresa ${expected}. Ajuste o navegador.`,
+      "O horário deste Worker não corresponde ao da empresa. Atualize a configuração de data e hora.",
     );
   }
 }

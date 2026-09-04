@@ -16,7 +16,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { AiAnalysisAction } from "@/components/app/ai-analysis-action";
+import { AiAnalysisAction } from "@/components/app/deferred-ai-analysis-action";
 import {
   CardLayout,
   ReorderModeButton,
@@ -25,7 +25,7 @@ import {
   COMPACT_METRIC_LAYOUT_DEFAULTS,
   CompactMetricCard,
 } from "@/components/app/compact-metric-card";
-import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
 import { OccupancyBlockingState } from "@/components/app/occupancy-blocking-state";
 import {
   OccupancyDateRangePicker,
@@ -63,7 +63,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import { hasVisualAdminAccess } from "@/lib/access";
-import { AI_INSIGHTS_LIMITS } from "@/lib/ai-insights-contract";
+import { AI_INSIGHTS_LIMITS } from "@/lib/ai-insights-limits";
 import {
   aggregateQueryIso,
   endOfAggregateBucket,
@@ -80,6 +80,7 @@ import {
   occupancyAnalysisDatasetKey,
   resolveOccupancyAnalysisRange,
   saveOccupancyAnalysisDateRange,
+  shiftOccupancyAnalysisDateInput,
   type ResolvedOccupancyAnalysisRange,
 } from "@/lib/occupancy-analysis-window";
 import {
@@ -90,12 +91,9 @@ import {
   type OccupancyAnalysisResolutionSegment,
 } from "@/lib/occupancy-analysis-resolution";
 import {
-  CAMERA_GROUPS_UPDATED_EVENT,
   type CameraGroup,
   buildLocationCameraOptions,
   buildSubLocationCameraOptions,
-  readCameraGroups,
-  resolveCameraGroupCompanyScope,
 } from "@/lib/camera-groups";
 import {
   loadLiveDashboardSettings,
@@ -104,10 +102,10 @@ import {
 } from "@/lib/live-dashboard-settings";
 import {
   filterScopedApiRows,
-  MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
   useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import {
   companyDateKey,
   endOfCompanyTimeZoneHour,
@@ -131,6 +129,7 @@ import {
 import {
   emptyOccupancyMetric,
 } from "@/lib/occupancy-metrics";
+import { occupancyObjectClassLabel } from "@/lib/occupancy-object-class";
 import {
   DEFAULT_OCCUPANCY_DASHBOARD_SETTINGS,
   loadOccupancyDashboardSettings,
@@ -261,7 +260,6 @@ const DAY_MS = 24 * HOUR_MS;
 const BUCKET_CONCURRENCY = 8;
 const AI_OCCUPANCY_DAILY_CHUNK_DAYS = 62;
 const MAX_CLOSED_SEGMENT_CACHE_ENTRIES = 256;
-const REPORT_REFRESH_MS = 60_000;
 const DEFAULT_OBJECT_CLASS = "person";
 const EMPTY_OCCUPANCY_REPORT_DATA: Record<string, OccupancyReportState> = {};
 
@@ -273,8 +271,21 @@ export function OccupancyReportsDashboard({
   const userId = user?.id;
   const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const companyScopeId = useEffectiveCompanyScopeId(user);
-  const companyTimeZoneResolution =
+  const rawCompanyTimeZoneResolution =
     useEffectiveCompanyTimeZoneResolution(user);
+  const companyTimeZoneResolution = React.useMemo(
+    () => ({
+      fallback: rawCompanyTimeZoneResolution.fallback,
+      source: rawCompanyTimeZoneResolution.fallback
+        ? ("fallback" as const)
+        : ("deployment-default" as const),
+      timeZone: rawCompanyTimeZoneResolution.timeZone,
+    }),
+    [
+      rawCompanyTimeZoneResolution.fallback,
+      rawCompanyTimeZoneResolution.timeZone,
+    ],
+  );
   const companyTimeZone = companyTimeZoneResolution.timeZone;
   const settingsViewId = analysis ? "analysis" : "reports";
   const liveSettingsScope = { userId, viewId: settingsViewId };
@@ -285,10 +296,6 @@ export function OccupancyReportsDashboard({
   const scopeModeSelectId = React.useId();
   const scopeSelectId = React.useId();
   const [scenarios, setScenarios] = React.useState<OccupancyScenario[]>([]);
-  const [cameras, setCameras] = React.useState<Camera[]>([]);
-  const [locations, setLocations] = React.useState<Location[]>([]);
-  const [subLocations, setSubLocations] = React.useState<SubLocation[]>([]);
-  const [cameraGroups, setCameraGroups] = React.useState<CameraGroup[]>([]);
   const [scopeMode, setScopeMode] =
     React.useState<OccupancyReportScopeMode>("scenario");
   const [selectedId, setSelectedId] = React.useState("");
@@ -344,6 +351,8 @@ export function OccupancyReportsDashboard({
   const [metadataError, setMetadataError] = React.useState("");
   const [chartLoadError, setChartLoadError] = React.useState("");
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
+  const [reportRequested, setReportRequested] = React.useState(false);
+  const [configurationReadyKey, setConfigurationReadyKey] = React.useState("");
   const [currentSnapshot, setCurrentSnapshot] =
     React.useState<CertifiedCurrentSnapshot | null>(null);
   const [currentSnapshotError, setCurrentSnapshotError] = React.useState("");
@@ -355,17 +364,41 @@ export function OccupancyReportsDashboard({
   const [layoutPreferences, setLayoutPreferences] = React.useState<
     CardPreference[]
   >([]);
+  const [layoutPreferencesScopeKey, setLayoutPreferencesScopeKey] =
+    React.useState("");
   const [analysisRangeInput, setAnalysisRangeInput] = React.useState(() => {
     const todayInput = companyDateKey(new Date(), companyTimeZone);
     return { endInput: todayInput, startInput: todayInput };
   });
   const metadataRequestSequenceRef = React.useRef(0);
+  const metadataAbortControllerRef = React.useRef<AbortController | null>(null);
+  const activeMetadataRequestKeyRef = React.useRef("");
+  const completedMetadataRequestKeyRef = React.useRef("");
+  const metadataConsumerAttachedRef = React.useRef(false);
+  const metadataAbortTimerRef = React.useRef<number | null>(null);
   const focusRef = React.useRef({ scopeMode, selectedId });
   const chartRequestSequenceRef = React.useRef(0);
   const chartAbortControllerRef = React.useRef<AbortController | null>(null);
+  const activeChartRequestKeyRef = React.useRef("");
+  const completedChartRequestKeyRef = React.useRef("");
+  const chartConsumerAttachedRef = React.useRef(false);
+  const chartAbortTimerRef = React.useRef<number | null>(null);
   const closedSegmentCacheRef = React.useRef(
     new Map<string, OccupancyReportState>(),
   );
+  const configurationScopeKey = [
+    analysis ? "analysis" : "reports",
+    companyScopeId ?? "",
+    userId ?? "",
+    companyTimeZoneResolution.timeZone,
+    companyTimeZoneResolution.fallback ? "fallback" : "certified",
+  ].join("|");
+  const metadataRequestKey = [
+    analysis ? "analysis" : "reports",
+    companyScopeId ?? "",
+    userId ?? "",
+    manager ? "manager" : "operator",
+  ].join("|");
 
   const companyTodayInput = React.useMemo(
     () => companyDateKey(clock, companyTimeZone),
@@ -401,40 +434,115 @@ export function OccupancyReportsDashboard({
   const scopeOptions = React.useMemo(
     () =>
       buildOccupancyReportScopes({
-        cameras,
-        groups: cameraGroups,
-        locations,
+        cameras: [],
+        groups: [],
+        locations: [],
         manager,
         mode: scopeMode,
         scenarios,
-        subLocations,
+        subLocations: [],
       }),
-    [
-      cameraGroups,
-      cameras,
-      locations,
-      manager,
-      scenarios,
-      scopeMode,
-      subLocations,
-    ],
+    [manager, scenarios, scopeMode],
   );
   const selectedScope = React.useMemo(
     () => scopeOptions.find((scope) => scope.id === selectedId) ?? null,
     [scopeOptions, selectedId],
   );
+  const reportPreferenceScopeId = selectedScope
+    ? `${analysis ? "analysis" : "reports"}:${selectedScope.id}`
+    : undefined;
+  const layoutPreferencesIdentityKey = reportPreferenceScopeId
+    ? [companyScopeId ?? "", userId ?? "", reportPreferenceScopeId].join("|")
+    : "";
+  const layoutPreferencesReady = Boolean(
+    layoutPreferencesIdentityKey &&
+      layoutPreferencesScopeKey === layoutPreferencesIdentityKey,
+  );
+  const handleLayoutPreferencesChange = React.useCallback(
+    (preferences: CardPreference[]) => {
+      if (!layoutPreferencesIdentityKey) return;
+      setLayoutPreferences(preferences);
+      setLayoutPreferencesScopeKey(layoutPreferencesIdentityKey);
+    },
+    [layoutPreferencesIdentityKey],
+  );
+  const requestedDefinitionIdsKey = React.useMemo(() => {
+    if (!layoutPreferencesReady) return "";
+    const preferenceById = new Map(
+      layoutPreferences.map((preference) => [preference.id, preference]),
+    );
+    const isVisible = (id: string) =>
+      preferenceById.get(id)?.visible !== false;
+    const visibleMetricIds = [
+      "occupancy_report_current",
+      ...(metricVisibility.average ? ["occupancy_report_average"] : []),
+      ...(metricVisibility.peak ? ["occupancy_report_peak"] : []),
+      ...(metricVisibility.minimum ? ["occupancy_report_minimum"] : []),
+    ].filter(isVisible);
+
+    return definitions
+      .filter(
+        (definition) =>
+          isVisible(definition.id) ||
+          (definition.id === "occupancy_report_day" &&
+            visibleMetricIds.length > 0),
+      )
+      .map((definition) => definition.id)
+      .sort()
+      .join("|");
+  }, [
+    definitions,
+    layoutPreferences,
+    layoutPreferencesReady,
+    metricVisibility.average,
+    metricVisibility.minimum,
+    metricVisibility.peak,
+  ]);
+  const currentSnapshotRequested = React.useMemo(() => {
+    if (!layoutPreferencesReady) return false;
+    return (
+      layoutPreferences.find(
+        (preference) => preference.id === "occupancy_report_current",
+      )?.visible !== false
+    );
+  }, [layoutPreferences, layoutPreferencesReady]);
+  const comparisonDefinitionIdsKey = React.useMemo(() => {
+    if (!layoutPreferencesReady) return "";
+    const preferenceById = new Map(
+      layoutPreferences.map((preference) => [preference.id, preference]),
+    );
+    return definitions
+      .filter(
+        (definition) => preferenceById.get(definition.id)?.visible !== false,
+      )
+      .map((definition) => definition.id)
+      .sort()
+      .join("|");
+  }, [definitions, layoutPreferences, layoutPreferencesReady]);
+  const requestPlanKey = `${requestedDefinitionIdsKey}|snapshot:${
+    currentSnapshotRequested ? "1" : "0"
+  }|comparison:${showPreviousPeriod ? comparisonDefinitionIdsKey : ""}`;
+  const requestedDefinitionIdSet = new Set(
+    requestedDefinitionIdsKey.split("|").filter(Boolean),
+  );
+  const queriedDefinitions = definitions.filter((definition) =>
+    requestedDefinitionIdSet.has(definition.id),
+  );
+  const comparisonDefinitionIdSet = new Set(
+    comparisonDefinitionIdsKey.split("|").filter(Boolean),
+  );
   const requestedChartScopeKey = React.useMemo(
     () =>
-      occupancyAnalysisDatasetKey({
-        analysis,
-        companyScopeId,
-        endDateInput: analysisRangeInput.endInput,
-        intradayComparison,
-        scopeId: selectedScope?.id,
-        showPreviousPeriod,
-        startDateInput: analysisRangeInput.startInput,
-        timeZone: companyTimeZone,
-      }),
+      `${occupancyAnalysisDatasetKey({
+          analysis,
+          companyScopeId,
+          endDateInput: analysisRangeInput.endInput,
+          intradayComparison,
+          scopeId: selectedScope?.id,
+          showPreviousPeriod,
+          startDateInput: analysisRangeInput.startInput,
+          timeZone: companyTimeZone,
+        })}|plan:${requestPlanKey}`,
     [
       analysis,
       analysisRangeInput.endInput,
@@ -442,6 +550,7 @@ export function OccupancyReportsDashboard({
       companyScopeId,
       companyTimeZone,
       intradayComparison,
+      requestPlanKey,
       selectedScope?.id,
       showPreviousPeriod,
     ],
@@ -453,6 +562,8 @@ export function OccupancyReportsDashboard({
     chartRequestSequenceRef.current += 1;
     chartAbortControllerRef.current?.abort();
     chartAbortControllerRef.current = null;
+    activeChartRequestKeyRef.current = "";
+    completedChartRequestKeyRef.current = "";
   }, [requestedChartScopeKey]);
   const chartDataIsCurrent =
     Boolean(selectedScope) && chartDataScopeKey === requestedChartScopeKey;
@@ -465,7 +576,8 @@ export function OccupancyReportsDashboard({
     : "";
   const visibleLastUpdated = chartDataIsCurrent ? lastUpdated : null;
   const chartsPending =
-    loadingCharts || Boolean(selectedScope && !chartDataIsCurrent);
+    loadingCharts ||
+    Boolean(reportRequested && selectedScope && !chartDataIsCurrent);
   const rangeMetric = React.useMemo(
     () =>
       summarizeOccupancyRangeMetrics(
@@ -485,14 +597,27 @@ export function OccupancyReportsDashboard({
       ),
   );
 
-  const loadScopes = React.useCallback(async () => {
+  const loadScopes = React.useCallback(async (force = false) => {
+    if (
+      !force &&
+      (activeMetadataRequestKeyRef.current === metadataRequestKey ||
+        completedMetadataRequestKeyRef.current === metadataRequestKey)
+    ) {
+      return;
+    }
+
     const requestSequence = ++metadataRequestSequenceRef.current;
+    metadataAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    metadataAbortControllerRef.current = controller;
+    activeMetadataRequestKeyRef.current = metadataRequestKey;
+    if (force) completedMetadataRequestKeyRef.current = "";
     setLoadingScopes(true);
     setMetadataError("");
     try {
       const scenarioResponse = await apiFetch<unknown>(
         "/occupancy/scenarios",
-        { companyScopeId },
+        { companyScopeId, signal: controller.signal },
       );
       const nextScenarios = filterScopedApiRows(
         requireOccupancyScenarioRows(scenarioResponse, companyScopeId),
@@ -501,12 +626,16 @@ export function OccupancyReportsDashboard({
       const visibleScenarios = manager
         ? nextScenarios
         : nextScenarios.filter((scenario) => scenario.active);
-      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      if (
+        controller.signal.aborted ||
+        !metadataConsumerAttachedRef.current ||
+        requestSequence !== metadataRequestSequenceRef.current ||
+        activeMetadataRequestKeyRef.current !== metadataRequestKey
+      ) {
+        return;
+      }
       setMetadataError("");
       setScenarios(visibleScenarios);
-      setCameras([]);
-      setLocations([]);
-      setSubLocations([]);
       const modes = buildAvailableScopeModes(visibleScenarios);
       const resolvedFocus = resolveDashboardFocus<OccupancyReportScopeMode>({
         availableModes: modes.map((mode) => mode.value),
@@ -538,16 +667,21 @@ export function OccupancyReportsDashboard({
       focusRef.current = nextFocus;
       setScopeMode(nextFocus.scopeMode);
       setSelectedId(nextFocus.selectedId);
+      completedMetadataRequestKeyRef.current = metadataRequestKey;
     } catch (error) {
-      if (requestSequence !== metadataRequestSequenceRef.current) return;
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar as visões de ocupação.";
+      if (
+        controller.signal.aborted ||
+        !metadataConsumerAttachedRef.current ||
+        requestSequence !== metadataRequestSequenceRef.current ||
+        activeMetadataRequestKeyRef.current !== metadataRequestKey
+      ) {
+        return;
+      }
+      const message = occupancyReportErrorMessage(
+        error,
+        "Não foi possível carregar as visões de ocupação.",
+      );
       setScenarios([]);
-      setCameras([]);
-      setLocations([]);
-      setSubLocations([]);
       setSelectedId("");
       setChartData({});
       setChartDataScopeKey("");
@@ -556,11 +690,26 @@ export function OccupancyReportsDashboard({
       setMetadataError(message);
       toast.error(message);
     } finally {
-      if (requestSequence === metadataRequestSequenceRef.current) {
+      if (metadataAbortControllerRef.current === controller) {
+        metadataAbortControllerRef.current = null;
+      }
+      if (activeMetadataRequestKeyRef.current === metadataRequestKey) {
+        activeMetadataRequestKeyRef.current = "";
+      }
+      if (
+        metadataConsumerAttachedRef.current &&
+        requestSequence === metadataRequestSequenceRef.current
+      ) {
         setLoadingScopes(false);
       }
     }
-  }, [companyScopeId, dashboardFocusSurface, manager, userId]);
+  }, [
+    companyScopeId,
+    dashboardFocusSurface,
+    manager,
+    metadataRequestKey,
+    userId,
+  ]);
 
   const loadCharts = React.useCallback(
     async (
@@ -568,19 +717,31 @@ export function OccupancyReportsDashboard({
       silent = false,
       forceClosedRefresh = false,
     ): Promise<void> => {
-      const requestScopeKey = occupancyAnalysisDatasetKey({
-        analysis,
-        companyScopeId,
-        endDateInput: analysisRangeInput.endInput,
-        intradayComparison,
-        scopeId: scope.id,
-        showPreviousPeriod,
-        startDateInput: analysisRangeInput.startInput,
-        timeZone: companyTimeZone,
-      });
+      const requestScopeKey = `${occupancyAnalysisDatasetKey({
+          analysis,
+          companyScopeId,
+          endDateInput: analysisRangeInput.endInput,
+          intradayComparison,
+          scopeId: scope.id,
+          showPreviousPeriod,
+          startDateInput: analysisRangeInput.startInput,
+          timeZone: companyTimeZone,
+        })}|plan:${requestPlanKey}`;
       if (requestScopeKey !== requestedChartScopeKeyRef.current) return;
 
-      if (forceClosedRefresh) closedSegmentCacheRef.current.clear();
+      if (
+        !forceClosedRefresh &&
+        (activeChartRequestKeyRef.current === requestScopeKey ||
+          completedChartRequestKeyRef.current === requestScopeKey)
+      ) {
+        return;
+      }
+
+      if (forceClosedRefresh) {
+        closedSegmentCacheRef.current.clear();
+        completedChartRequestKeyRef.current = "";
+      }
+      activeChartRequestKeyRef.current = requestScopeKey;
 
       if (silent) setRefreshing(true);
       else setLoadingCharts(true);
@@ -600,20 +761,30 @@ export function OccupancyReportsDashboard({
           companyDateKey(now, companyTimeZone),
         );
         const usesLiveDay = !analysis || currentRange.includesToday;
+        const requiredDefinitionIds = new Set(
+          requestedDefinitionIdsKey.split("|").filter(Boolean),
+        );
         const currentDefinitions = buildOccupancyReportDefinitions(
           currentRange.reference,
           usesLiveDay ? now : undefined,
           analysis,
           analysis ? currentRange : undefined,
           companyTimeZone,
+        ).filter((definition) => requiredDefinitionIds.has(definition.id));
+        const requiredComparisonDefinitionIds = new Set(
+          comparisonDefinitionIdsKey.split("|").filter(Boolean),
         );
         const definitionsWindowKey = occupancyReportDefinitionsWindowKey(
           currentDefinitions,
         );
         const previousDefinitions = showPreviousPeriod
-          ? currentDefinitions.map((definition) =>
-              buildComparisonDefinition(definition, intradayComparison),
-            )
+          ? currentDefinitions
+              .filter((definition) =>
+                requiredComparisonDefinitionIds.has(definition.id),
+              )
+              .map((definition) =>
+                buildComparisonDefinition(definition, intradayComparison),
+              )
           : [];
 
         try {
@@ -629,7 +800,7 @@ export function OccupancyReportsDashboard({
                       companyScopeId,
                       companyTimeZone,
                       now,
-                      companyTimeZoneResolution.warning,
+                      undefined,
                       controller.signal,
                       closedSegmentCacheRef.current,
                     );
@@ -639,17 +810,17 @@ export function OccupancyReportsDashboard({
                       definition.id,
                       {
                         points: buildEmptyPoints(definition),
-                        error:
-                          error instanceof Error
-                            ? error.message
-                            : "Não foi possível carregar este período.",
+                        error: occupancyReportErrorMessage(
+                          error,
+                          "Não foi possível carregar este período.",
+                        ),
                       },
                     ] as const;
                   }
                 },
               ),
             ),
-            scope.scenario
+            currentSnapshotRequested && scope.scenario
               ? captureOccupancyLoad(
                   apiFetch<unknown>(
                     occupancyScenarioHistoryPath(
@@ -672,14 +843,15 @@ export function OccupancyReportsDashboard({
                     };
                   }),
                   analysis && !usesLiveDay
-                    ? "Não foi possível carregar o snapshot final do intervalo."
-                    : "Não foi possível carregar o snapshot atual.",
+                    ? "Não foi possível carregar a leitura final do intervalo."
+                    : "Não foi possível carregar a leitura atual.",
                 )
               : Promise.resolve({ data: null, error: "" }),
           ]);
 
           if (
             controller.signal.aborted ||
+            !chartConsumerAttachedRef.current ||
             chartAbortControllerRef.current !== controller ||
             requestSequence !== chartRequestSequenceRef.current ||
             requestScopeKey !== requestedChartScopeKeyRef.current
@@ -704,6 +876,8 @@ export function OccupancyReportsDashboard({
                 analysis,
                 analysis ? latestRange : undefined,
                 companyTimeZone,
+              ).filter((definition) =>
+                requiredDefinitionIds.has(definition.id),
               ),
             );
           if (definitionsWindowKey !== latestDefinitionsWindowKey) {
@@ -735,23 +909,25 @@ export function OccupancyReportsDashboard({
           if (currentSnapshotResult.error && !silent) {
             toast.error(
               analysis && !usesLiveDay
-                ? "O snapshot final do intervalo não pôde ser carregado."
-                : "O snapshot atual não pôde ser carregado.",
+                ? "A leitura final do intervalo não pôde ser carregada."
+                : "A leitura atual não pôde ser carregada.",
             );
           }
+          completedChartRequestKeyRef.current = requestScopeKey;
         } catch (error) {
           if (
             controller.signal.aborted ||
+            !chartConsumerAttachedRef.current ||
             chartAbortControllerRef.current !== controller ||
             requestSequence !== chartRequestSequenceRef.current ||
             requestScopeKey !== requestedChartScopeKeyRef.current
           ) {
             return;
           }
-          const message =
-            error instanceof Error
-              ? error.message
-              : "Não foi possível carregar os relatórios de ocupação.";
+          const message = occupancyReportErrorMessage(
+            error,
+            "Não foi possível carregar os relatórios de ocupação.",
+          );
           setChartData({});
           setChartDataScopeKey(requestScopeKey);
           setChartLoadError(message);
@@ -761,6 +937,9 @@ export function OccupancyReportsDashboard({
         } finally {
           if (chartAbortControllerRef.current === controller) {
             chartAbortControllerRef.current = null;
+          }
+          if (activeChartRequestKeyRef.current === requestScopeKey) {
+            activeChartRequestKeyRef.current = "";
           }
           if (requestSequence === chartRequestSequenceRef.current) {
             setLoadingCharts(false);
@@ -778,26 +957,62 @@ export function OccupancyReportsDashboard({
       companyScopeId,
       companyTimeZone,
       companyTimeZoneResolution,
+      comparisonDefinitionIdsKey,
+      currentSnapshotRequested,
       intradayComparison,
+      requestPlanKey,
+      requestedDefinitionIdsKey,
       showPreviousPeriod,
     ],
   );
 
   const retryOccupancyData = React.useCallback(() => {
-    void loadScopes();
-    if (selectedScope) {
+    if (metadataError || !selectedScope) {
+      void loadScopes(true);
+    } else {
+      setReportRequested(true);
       void loadCharts(selectedScope, true, true);
     }
-  }, [loadCharts, loadScopes, selectedScope]);
+  }, [loadCharts, loadScopes, metadataError, selectedScope]);
 
   React.useEffect(() => {
-    loadScopes();
-  }, [loadScopes]);
+    if (configurationReadyKey !== configurationScopeKey) return;
+    metadataConsumerAttachedRef.current = true;
+    if (metadataAbortTimerRef.current !== null) {
+      window.clearTimeout(metadataAbortTimerRef.current);
+      metadataAbortTimerRef.current = null;
+    }
+    void loadScopes();
+
+    return () => {
+      metadataConsumerAttachedRef.current = false;
+      metadataAbortTimerRef.current = window.setTimeout(() => {
+        metadataAbortTimerRef.current = null;
+        if (metadataConsumerAttachedRef.current) return;
+        metadataRequestSequenceRef.current += 1;
+        metadataAbortControllerRef.current?.abort();
+        metadataAbortControllerRef.current = null;
+        activeMetadataRequestKeyRef.current = "";
+      }, 0);
+    };
+  }, [
+    configurationReadyKey,
+    configurationScopeKey,
+    loadScopes,
+    metadataRequestKey,
+  ]);
 
   React.useEffect(() => {
+    metadataRequestSequenceRef.current += 1;
+    metadataAbortControllerRef.current?.abort();
+    metadataAbortControllerRef.current = null;
+    activeMetadataRequestKeyRef.current = "";
+    completedMetadataRequestKeyRef.current = "";
     chartRequestSequenceRef.current += 1;
     chartAbortControllerRef.current?.abort();
     chartAbortControllerRef.current = null;
+    activeChartRequestKeyRef.current = "";
+    completedChartRequestKeyRef.current = "";
     closedSegmentCacheRef.current.clear();
     const settings = loadLiveDashboardSettings(companyScopeId, {
       userId: user?.id,
@@ -806,9 +1021,6 @@ export function OccupancyReportsDashboard({
     setMetadataError("");
     setChartLoadError("");
     setScenarios([]);
-    setCameras([]);
-    setLocations([]);
-    setSubLocations([]);
     focusRef.current = { scopeMode: "scenario", selectedId: "" };
     setScopeMode("scenario");
     setSelectedId("");
@@ -830,17 +1042,27 @@ export function OccupancyReportsDashboard({
     setLoadingCharts(false);
     setRefreshing(false);
     const now = new Date();
-    setAnalysisRangeInput(
-      loadOccupancyAnalysisDateRange(
-        companyDateKey(now, companyTimeZone),
-        companyScopeId,
-        user?.id,
-      ),
+    const companyTodayInput = companyDateKey(now, companyTimeZone);
+    const previousDayInput = shiftOccupancyAnalysisDateInput(
+      companyTodayInput,
+      -1,
     );
+    const storedRange = loadOccupancyAnalysisDateRange(
+      companyTodayInput,
+      companyScopeId,
+      user?.id,
+    );
+    const initialRange = analysis
+      ? { endInput: previousDayInput, startInput: previousDayInput }
+      : storedRange;
+    setAnalysisRangeInput(initialRange);
+    setReportRequested(analysis);
+    setConfigurationReadyKey(configurationScopeKey);
   }, [
     analysis,
     companyScopeId,
     companyTimeZone,
+    configurationScopeKey,
     metricVisibilityScopeKey,
     settingsViewId,
     user?.id,
@@ -851,24 +1073,24 @@ export function OccupancyReportsDashboard({
   }, [scopeMode, selectedId]);
 
   React.useEffect(() => {
-    return () => chartAbortControllerRef.current?.abort();
-  }, []);
-
-  React.useEffect(() => {
-    function syncCameraGroups() {
-      const scopeId = resolveCameraGroupCompanyScope(user);
-      setCameraGroups(readCameraGroups(scopeId));
+    chartConsumerAttachedRef.current = true;
+    if (chartAbortTimerRef.current !== null) {
+      window.clearTimeout(chartAbortTimerRef.current);
+      chartAbortTimerRef.current = null;
     }
 
-    syncCameraGroups();
-    window.addEventListener(CAMERA_GROUPS_UPDATED_EVENT, syncCameraGroups);
-    window.addEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCameraGroups);
-
     return () => {
-      window.removeEventListener(CAMERA_GROUPS_UPDATED_EVENT, syncCameraGroups);
-      window.removeEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCameraGroups);
+      chartConsumerAttachedRef.current = false;
+      chartAbortTimerRef.current = window.setTimeout(() => {
+        chartAbortTimerRef.current = null;
+        if (chartConsumerAttachedRef.current) return;
+        chartRequestSequenceRef.current += 1;
+        chartAbortControllerRef.current?.abort();
+        chartAbortControllerRef.current = null;
+        activeChartRequestKeyRef.current = "";
+      }, 0);
     };
-  }, [user]);
+  }, []);
 
   React.useEffect(() => {
     if (!availableModes.some((mode) => mode.value === scopeMode)) {
@@ -906,6 +1128,7 @@ export function OccupancyReportsDashboard({
   }, [companyScopeId, dashboardFocusSurface, selectedScope, userId]);
 
   React.useEffect(() => {
+    if (configurationReadyKey !== configurationScopeKey) return;
     if (!selectedScope) {
       chartRequestSequenceRef.current += 1;
       chartAbortControllerRef.current?.abort();
@@ -920,63 +1143,19 @@ export function OccupancyReportsDashboard({
       return;
     }
 
+    if (!layoutPreferencesReady) return;
+    // Analysis always opens with the latest fully closed day. Reports remain
+    // explicitly requested, and picker edits wait for Apply.
+    if (!reportRequested) return;
     loadCharts(selectedScope);
-  }, [loadCharts, selectedScope]);
-
-  React.useEffect(() => {
-    if (!selectedScope || (analysis && !analysisIncludesToday)) return;
-
-    let disposed = false;
-    let timeout: number | undefined;
-    let refreshRunning = false;
-
-    const scheduleNextRefresh = () => {
-      if (disposed) return;
-      if (timeout !== undefined) window.clearTimeout(timeout);
-      timeout = window.setTimeout(() => {
-        timeout = undefined;
-        void refreshWhenVisible();
-      }, occupancyReportRefreshDelay(REPORT_REFRESH_MS));
-    };
-
-    const refreshWhenVisible = async () => {
-      if (
-        disposed ||
-        refreshRunning ||
-        chartAbortControllerRef.current !== null
-      ) {
-        if (!disposed && !refreshRunning) scheduleNextRefresh();
-        return;
-      }
-      if (document.visibilityState !== "visible") {
-        scheduleNextRefresh();
-        return;
-      }
-
-      refreshRunning = true;
-      try {
-        await loadCharts(selectedScope, true);
-      } finally {
-        refreshRunning = false;
-        scheduleNextRefresh();
-      }
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState !== "visible") return;
-      if (timeout !== undefined) window.clearTimeout(timeout);
-      timeout = undefined;
-      void refreshWhenVisible();
-    };
-
-    scheduleNextRefresh();
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      disposed = true;
-      if (timeout !== undefined) window.clearTimeout(timeout);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [analysis, analysisIncludesToday, loadCharts, selectedScope]);
+  }, [
+    configurationReadyKey,
+    configurationScopeKey,
+    layoutPreferencesReady,
+    loadCharts,
+    reportRequested,
+    selectedScope,
+  ]);
 
   React.useEffect(() => {
     if (metricVisibilityState.scopeKey !== metricVisibilityScopeKey) return;
@@ -1008,7 +1187,7 @@ export function OccupancyReportsDashboard({
     setCurrentSnapshotError("");
     setLastUpdated(null);
     setRefreshing(false);
-    setLoadingCharts(Boolean(selectedScope));
+    setLoadingCharts(reportRequested && Boolean(selectedScope));
   }
 
   function updateAnalysisRangeInput(
@@ -1024,10 +1203,12 @@ export function OccupancyReportsDashboard({
       nextValue.startInput === analysisRangeInput.startInput &&
       nextValue.endInput === analysisRangeInput.endInput
     ) {
+      setReportRequested(true);
       return;
     }
     invalidateChartDataset();
     setClock(now);
+    setReportRequested(true);
     setAnalysisRangeInput(nextValue);
     saveOccupancyAnalysisDateRange(
       nextValue,
@@ -1069,23 +1250,23 @@ export function OccupancyReportsDashboard({
       label: analysis
         ? analysisIncludesToday
           ? selectedScope?.scenario
-            ? "Snapshot parcial do último dia"
+            ? "Leitura parcial do último dia"
             : "Parcial do último dia"
           : selectedScope?.scenario
-            ? "Snapshot final do último dia"
+            ? "Leitura final do último dia"
             : "Fechamento do último dia"
         : selectedScope?.scenario
-          ? "Último snapshot"
+          ? "Última leitura"
           : "Atual",
       value: selectedScope?.scenario
         ? visibleCurrentSnapshot?.total ?? null
         : rangeMetric.current,
       description:
         (visibleCurrentSnapshotError
-          ? "snapshot temporariamente indisponível"
+          ? "leitura temporariamente indisponível"
           : "") ||
         (selectedScope?.scenario && visibleCurrentSnapshot
-          ? `fonte em ${formatDateTime(visibleCurrentSnapshot.asOf, companyTimeZone)}`
+          ? `Atualizado em ${formatDateTime(visibleCurrentSnapshot.asOf, companyTimeZone)}`
           : selectedScope?.name ?? "visão selecionada"),
       tone: "primary" as const,
     },
@@ -1101,9 +1282,9 @@ export function OccupancyReportsDashboard({
                 ? "agregado temporariamente indisponível"
                 : "") ||
               (rangeMetricIncomplete && rangeMetric.average === null
-                ? "último dia sem cobertura certificada"
+                ? "último dia sem dados completos"
                 : analysis
-                  ? "agregado certificado do último dia"
+                  ? "resultado consolidado do último dia"
                   : "agregado diário da visão"),
             tone: "average" as const,
           },
@@ -1127,7 +1308,7 @@ export function OccupancyReportsDashboard({
                 : "") ||
               (rangeMetric.peak === null && rangeMetricIncomplete
                 ? "período sem cobertura diária completa"
-                : "maior pico diário certificado"),
+                : "maior pico diário disponível"),
             tone: "maximum" as const,
           },
         ]
@@ -1150,7 +1331,7 @@ export function OccupancyReportsDashboard({
                 : "") ||
               (rangeMetric.minimum === null && rangeMetricIncomplete
                 ? "período sem cobertura diária completa"
-                : "menor valor diário certificado"),
+                : "menor valor diário disponível"),
             tone: "minimum" as const,
           },
         ]
@@ -1162,7 +1343,7 @@ export function OccupancyReportsDashboard({
       ...COMPACT_METRIC_LAYOUT_DEFAULTS,
       id: card.id,
       label: card.label,
-      node: (
+      node: () => (
         <MetricCard
           description={card.description}
           icon={card.icon}
@@ -1181,7 +1362,10 @@ export function OccupancyReportsDashboard({
       defaultSize: "wide" as const,
       id: definition.id,
       label: definition.label,
-      node: (
+      // CardLayout invokes function nodes only near the viewport. In
+      // particular, buildEmptyPoints can span years in Análises and must not
+      // run for every off-screen chart during the dashboard render.
+      node: () => (
         <OccupancyReportChartCard
           definition={definition}
           loading={chartsPending}
@@ -1205,9 +1389,6 @@ export function OccupancyReportsDashboard({
       zoomEnabled: true,
     })),
   ];
-  const reportPreferenceScopeId = selectedScope
-    ? `${analysis ? "analysis" : "reports"}:${selectedScope.id}`
-    : undefined;
   const reportCardIds = occupancyReportLayoutCards.map((card) => card.id);
   const reportCardIdSet = new Set(reportCardIds);
   const reportPreferenceById = new Map(
@@ -1228,87 +1409,30 @@ export function OccupancyReportsDashboard({
     : reportCardIds;
   const resolveReportCardTitle = (cardId: string, fallback: string) =>
     reportPreferenceById.get(cardId)?.title?.trim() || fallback;
-  const exportPalette = getOccupancyChartPalette("light");
-  const exportMetricByCardId = new Map<string, ReportMetric>(
-    metricCards.map((card) => [
-      card.id,
-      {
-        description: card.description,
-        label: resolveReportCardTitle(card.id, card.label),
-        value: formatOccupancyValue(card.value),
-      },
-    ]),
-  );
-  const exportChartByCardId = new Map(
-    definitions.map((definition) => {
-      const points =
-        visibleChartData[definition.id]?.points ?? buildEmptyPoints(definition);
-      const previousPoints =
-        visibleChartData[previousId(definition.id)]?.points ?? [];
-      const title = resolveReportCardTitle(definition.id, definition.label);
-      const table: ReportTable = {
-        columns: [
-          { key: "period", label: "Período", width: 24 },
-          { key: "current", label: "Atual", numeric: true, width: 16 },
-          ...(metricVisibility.average
-            ? [{ key: "average", label: "Média", numeric: true, width: 16 }]
-            : []),
-          ...(metricVisibility.minimum
-            ? [{ key: "minimum", label: "Mínimo", numeric: true, width: 16 }]
-            : []),
-          ...(metricVisibility.peak
-            ? [{ key: "peak", label: "Máximo", numeric: true, width: 16 }]
-            : []),
-        ],
-        description: definition.description,
-        rows: points.map((point) => ({
-          average: point.average,
-          current: point.current,
-          minimum: point.minimum,
-          peak: point.peak,
-          period: point.label,
-        })),
-        title: `Dados - ${title}`,
-      };
-      return [
-        definition.id,
-        {
-          comparison: showPreviousPeriod
-            ? comparisonDescription(definition, intradayComparison)
-            : undefined,
-          description: definition.description,
-          option: buildOccupancyReportChartOption(
-            definition,
-            points,
-            showPreviousPeriod ? previousPoints : [],
-            metricVisibility,
-            {
-              maximum: selectedScope?.scenario?.max_total ?? undefined,
-              minimum: selectedScope?.scenario?.min_total ?? undefined,
-            },
-            exportPalette,
-          ),
-          table,
-          title,
-        },
-      ] as const;
-    }),
-  );
   const reportCertificationSources = [
-    {
-      asOf: visibleCurrentSnapshot?.asOf,
-      error:
-        visibleCurrentSnapshotError ||
-        (!visibleCurrentSnapshot ? "Snapshot atual indisponível." : undefined),
-    },
-    ...definitions.flatMap((definition) => {
+    ...(currentSnapshotRequested
+      ? [
+          {
+            asOf: visibleCurrentSnapshot?.asOf,
+            error:
+              visibleCurrentSnapshotError ||
+              (!visibleCurrentSnapshot
+                ? "Leitura atual indisponível."
+                : undefined),
+          },
+        ]
+      : []),
+    ...queriedDefinitions.flatMap((definition) => {
       const currentState = visibleChartData[definition.id];
       const sources = [
         currentState ?? {
           error: "Série atual indisponível.",
         },
       ];
-      if (showPreviousPeriod) {
+      if (
+        showPreviousPeriod &&
+        comparisonDefinitionIdSet.has(definition.id)
+      ) {
         sources.push(
           visibleChartData[previousId(definition.id)] ?? {
             error: "Série comparativa indisponível.",
@@ -1321,56 +1445,116 @@ export function OccupancyReportsDashboard({
   const reportDataCompleteUntil = resolveCertifiedOccupancyDataCutoff(
     reportCertificationSources,
   );
-  const occupancyReportPayload: ReportPayload = {
-    charts: orderedVisibleReportCardIds
-      .map((id) => exportChartByCardId.get(id))
-      .filter((chart): chart is NonNullable<typeof chart> => Boolean(chart)),
-    context: [
-      selectedScope
-        ? `${scopeModeLabel(selectedScope.mode)}: ${selectedScope.name}`
-        : "",
-      analysis
-        ? `Período: ${formatOccupancyAnalysisRangeLabel(analysisRangeInput)}`
-        : `Dia civil da empresa: ${companyTodayInput}`,
-      `Fuso: ${companyTimeZone}`,
-      showPreviousPeriod
-        ? `Comparativo: ${intradayComparison === "last_week" ? "semana passada" : "ontem"}`
-        : "Sem período anterior",
-      "Ausência de bucket permanece sem valor e nunca é convertida em ocupação zero.",
-    ].filter(Boolean),
-    dataCompleteUntil: reportDataCompleteUntil,
-    filename: `ipxdata-ocupacao-${analysis ? "analise" : "relatorio"}-${occupancyReportDateSlug(
-      reportDataCompleteUntil ?? clock,
-    )}`,
-    generatedAt: clock,
-    metrics: orderedVisibleReportCardIds
-      .map((id) => exportMetricByCardId.get(id))
-      .filter((metric): metric is ReportMetric => Boolean(metric)),
-    subtitle: analysis
-      ? `Intervalo ${formatOccupancyAnalysisRangeLabel(analysisRangeInput)}`
-      : "Séries históricas e leitura atual da visão selecionada.",
-    tables: [],
-    timeZone: companyTimeZone,
-    title: selectedScope
-      ? `${analysis ? "Análise" : "Relatório"} de Ocupação - ${selectedScope.name}`
-      : analysis
-        ? "Análise de Ocupação"
-        : "Relatório de Ocupação",
-  };
-  const occupancyDailyDefinition = definitions.find(
-    (definition) => definition.id === "occupancy_report_day",
-  );
-  const occupancyDailySegments = occupancyDailyDefinition
-    ? listDefinitionQuerySegments(occupancyDailyDefinition)
-    : [];
-  const occupancyDailyAiBucketStarts = occupancyDailySegments.every(
-    (segment) => segment.granularity === "day",
-  )
-    ? occupancyDailySegments.flatMap((segment) => segment.bucketStarts)
-    : [];
-  const occupancyDailyAiTable = (() => {
+  function buildOccupancyReportPayload(): ReportPayload {
+    const exportPalette = getOccupancyChartPalette("light");
+    const exportMetricByCardId = new Map<string, ReportMetric>(
+      metricCards.map((card) => [
+        card.id,
+        {
+          description: card.description,
+          label: resolveReportCardTitle(card.id, card.label),
+          value: formatOccupancyValue(card.value),
+        },
+      ]),
+    );
+    const exportChartByCardId = new Map(
+      definitions.map((definition) => {
+        const points =
+          visibleChartData[definition.id]?.points ??
+          buildEmptyPoints(definition);
+        const previousPoints =
+          visibleChartData[previousId(definition.id)]?.points ?? [];
+        const title = resolveReportCardTitle(definition.id, definition.label);
+        const table: ReportTable = {
+          columns: [
+            { key: "period", label: "Período", width: 24 },
+            { key: "current", label: "Atual", numeric: true, width: 16 },
+            ...(metricVisibility.average
+              ? [{ key: "average", label: "Média", numeric: true, width: 16 }]
+              : []),
+            ...(metricVisibility.minimum
+              ? [{ key: "minimum", label: "Mínimo", numeric: true, width: 16 }]
+              : []),
+            ...(metricVisibility.peak
+              ? [{ key: "peak", label: "Máximo", numeric: true, width: 16 }]
+              : []),
+          ],
+          description: definition.description,
+          rows: points.map((point) => ({
+            average: point.average,
+            current: point.current,
+            minimum: point.minimum,
+            peak: point.peak,
+            period: point.label,
+          })),
+          title: `Dados - ${title}`,
+        };
+        return [
+          definition.id,
+          {
+            comparison: showPreviousPeriod
+              ? comparisonDescription(definition, intradayComparison)
+              : undefined,
+            description: definition.description,
+            option: buildOccupancyReportChartOption(
+              definition,
+              points,
+              showPreviousPeriod ? previousPoints : [],
+              metricVisibility,
+              {
+                maximum: selectedScope?.scenario?.max_total ?? undefined,
+                minimum: selectedScope?.scenario?.min_total ?? undefined,
+              },
+              exportPalette,
+            ),
+            table,
+            title,
+          },
+        ] as const;
+      }),
+    );
+
+    return {
+      charts: orderedVisibleReportCardIds
+        .map((id) => exportChartByCardId.get(id))
+        .filter((chart): chart is NonNullable<typeof chart> => Boolean(chart)),
+      context: [
+        selectedScope
+          ? `${scopeModeLabel(selectedScope.mode)}: ${selectedScope.name}`
+          : "",
+        analysis
+          ? `Período: ${formatOccupancyAnalysisRangeLabel(analysisRangeInput)}`
+          : `Dia analisado: ${companyTodayInput}`,
+        showPreviousPeriod
+          ? `Comparativo: ${intradayComparison === "last_week" ? "semana passada" : "ontem"}`
+          : "Sem período anterior",
+        "Períodos sem dados permanecem vazios e nunca são tratados como ocupação zero.",
+      ].filter(Boolean),
+      dataCompleteUntil: reportDataCompleteUntil,
+      filename: `ipxdata-ocupacao-${analysis ? "analise" : "relatorio"}-${occupancyReportDateSlug(
+        reportDataCompleteUntil ?? clock,
+      )}`,
+      generatedAt: clock,
+      metrics: orderedVisibleReportCardIds
+        .map((id) => exportMetricByCardId.get(id))
+        .filter((metric): metric is ReportMetric => Boolean(metric)),
+      subtitle: analysis
+        ? `Intervalo ${formatOccupancyAnalysisRangeLabel(analysisRangeInput)}`
+        : "Séries históricas e leitura atual da visão selecionada.",
+      tables: [],
+      timeZone: companyTimeZone,
+      title: selectedScope
+        ? `${analysis ? "Análise" : "Relatório"} de Ocupação - ${selectedScope.name}`
+        : analysis
+          ? "Análise de Ocupação"
+          : "Relatório de Ocupação",
+    };
+  }
+  function buildOccupancyDailyAiTableFromVisibleData(
+    occupancyDailyDefinition: OccupancyReportDefinition,
+    occupancyDailyAiBucketStarts: Date[],
+  ) {
     if (
-      !occupancyDailyDefinition ||
       !occupancyDailyAiBucketStarts.length
     ) {
       return null;
@@ -1389,12 +1573,39 @@ export function OccupancyReportsDashboard({
       // diálogo da IA, sem permitir que dados auxiliares quebrem o dashboard.
       return null;
     }
-  })();
-  // A exportação continua refletindo somente o layout visível. A IA recebe a
-  // série diária completa que já está em memória mesmo quando o respectivo
-  // widget foi ocultado; intervalos consolidados nunca são rotulados como dias.
-  const occupancyAiPayload: ReportPayload = occupancyDailyAiTable
-    ? {
+  }
+
+  const getOccupancyAiPayload = async (
+    signal?: AbortSignal,
+  ): Promise<ReportPayload> => {
+    signal?.throwIfAborted();
+    const occupancyReportPayload = buildOccupancyReportPayload();
+    const scope = selectedScope;
+    const dailyDefinition = definitions.find(
+      (definition) => definition.id === "occupancy_report_day",
+    );
+    if (!scope || !dailyDefinition || !companyScopeId) {
+      throw new Error(
+        "Selecione uma visão de ocupação antes de gerar a análise diária.",
+      );
+    }
+    // A lista diária pode conter milhares de buckets em Análises. Ela é
+    // exclusiva da IA e, portanto, só deve ser materializada depois do clique.
+    const dailySegments = listDefinitionQuerySegments(dailyDefinition);
+    const occupancyDailyAiBucketStarts = dailySegments.every(
+      (segment) => segment.granularity === "day",
+    )
+      ? dailySegments.flatMap((segment) => segment.bucketStarts)
+      : [];
+    // A exportação continua refletindo somente o layout visível. A IA recebe a
+    // série diária completa que já está em memória mesmo quando o respectivo
+    // widget foi ocultado; intervalos consolidados nunca são rotulados como dias.
+    const occupancyDailyAiTable = buildOccupancyDailyAiTableFromVisibleData(
+      dailyDefinition,
+      occupancyDailyAiBucketStarts,
+    );
+    if (occupancyDailyAiTable) {
+      return {
         ...occupancyReportPayload,
         subtitle: `Série diária completa: ${occupancyAiDailyPeriodLabel(
           occupancyDailyAiBucketStarts,
@@ -1404,20 +1615,8 @@ export function OccupancyReportsDashboard({
           ...(occupancyReportPayload.tables ?? []),
           occupancyDailyAiTable,
         ],
-      }
-    : occupancyReportPayload;
-  const getOccupancyAiPayload = async (
-    signal?: AbortSignal,
-  ): Promise<ReportPayload> => {
-    signal?.throwIfAborted();
-    const scope = selectedScope;
-    const dailyDefinition = occupancyDailyDefinition;
-    if (!scope || !dailyDefinition || !companyScopeId) {
-      throw new Error(
-        "Selecione uma visão de ocupação antes de gerar a análise diária.",
-      );
+      };
     }
-    if (occupancyDailyAiTable) return occupancyAiPayload;
 
     requireCertifiedRuntimeCompanyTimeZone(companyTimeZoneResolution);
     const requestedAt = new Date();
@@ -1448,7 +1647,7 @@ export function OccupancyReportsDashboard({
         companyScopeId,
         companyTimeZone,
         requestedAt,
-        companyTimeZoneResolution.warning,
+        undefined,
         signal,
         closedSegmentCacheRef.current,
       );
@@ -1459,7 +1658,7 @@ export function OccupancyReportsDashboard({
       );
       if (state.error || state.warning) {
         throw new Error(
-          `A série diária completa não pôde ser certificada. ${
+          `A série diária completa não pôde ser consolidada. ${
             state.error || state.warning
           }`,
         );
@@ -1472,7 +1671,7 @@ export function OccupancyReportsDashboard({
     );
     if (!dailyDataCompleteUntil) {
       throw new Error(
-        "A série diária foi recebida sem um corte temporal certificado.",
+        "Não foi possível determinar até quando a série diária está completa.",
       );
     }
     const dailyTable = buildOccupancyAiDailyTable({
@@ -1502,7 +1701,6 @@ export function OccupancyReportsDashboard({
       key={`${companyScopeId ?? ""}|${user?.id ?? ""}`}
       maximumInput={companyTodayInput}
       onApply={updateAnalysisRangeInput}
-      timeZoneLabel={companyTimeZone}
       value={analysisRangeInput}
     />
   ) : null;
@@ -1516,7 +1714,7 @@ export function OccupancyReportsDashboard({
           Boolean(occupancyCertificationError) ||
           reportDataCompleteUntil === null
         }
-        payload={occupancyReportPayload}
+        getPayload={buildOccupancyReportPayload}
       />
       <AiAnalysisAction
         disabled={
@@ -1527,7 +1725,6 @@ export function OccupancyReportsDashboard({
         }
         getPayload={getOccupancyAiPayload}
         manager={manager}
-        payload={occupancyAiPayload}
         source={{
           module: "occupancy",
           surface: analysis ? "analysis" : "reports",
@@ -1555,20 +1752,34 @@ export function OccupancyReportsDashboard({
       ) : null}
       <Button
         type="button"
-        variant="outline"
+        variant={reportRequested ? "outline" : "default"}
         size="icon"
         className="h-8 w-8 shrink-0"
         onClick={() => {
-          if (selectedScope) loadCharts(selectedScope, true, true);
-          loadScopes();
+          if (selectedScope) {
+            setReportRequested(true);
+            void loadCharts(selectedScope, true, true);
+          } else {
+            void loadScopes(true);
+          }
         }}
         disabled={refreshing || chartsPending}
         aria-label={
-          analysis
+          !reportRequested
+            ? analysis
+              ? "Consultar análise de Ocupação"
+              : "Consultar relatório de Ocupação"
+            : analysis
             ? "Atualizar análise de Ocupação"
             : "Atualizar relatório de Ocupação"
         }
-        title={analysis ? "Atualizar análise" : "Atualizar relatório"}
+        title={
+          !reportRequested
+            ? "Consultar dados"
+            : analysis
+              ? "Atualizar análise"
+              : "Atualizar relatório"
+        }
       >
         <RefreshCw
           className={cn(
@@ -1605,8 +1816,8 @@ export function OccupancyReportsDashboard({
       {analysis ? (
         <p role="status" className="sr-only">
           {analysisIncludesToday
-            ? "O intervalo inclui hoje; somente os buckets de hoje podem estar parciais."
-            : "O intervalo é totalmente histórico e usa apenas buckets fechados."}
+            ? "O intervalo inclui hoje; somente os períodos de hoje podem estar parciais."
+            : "O intervalo é totalmente histórico e usa apenas períodos encerrados."}
         </p>
       ) : null}
 
@@ -1944,11 +2155,12 @@ export function OccupancyReportsDashboard({
 
       {scopeOptions.length && !occupancyCertificationError ? (
         <CardLayout
+          key={layoutPreferencesIdentityKey}
           cards={occupancyReportLayoutCards}
           menuKey="occupancy"
           monitorMode={monitorMode}
           onOrganizerOpenChange={setLayoutOrganizerOpen}
-          onPreferencesChange={setLayoutPreferences}
+          onPreferencesChange={handleLayoutPreferencesChange}
           onReorderModeChange={setLayoutReorderMode}
           organizerOpen={layoutOrganizerOpen}
           presetNamespace={
@@ -2081,7 +2293,7 @@ function OccupancyReportChartCard({
     hasReferenceLimit;
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] items-start gap-2">
           <div className="min-w-0">
@@ -2110,18 +2322,18 @@ function OccupancyReportChartCard({
           </div>
         ) : null}
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {!loading && !state?.error && state?.warning ? (
           <p className="sr-only">
             Este gráfico contém períodos ainda sem dados.
           </p>
         ) : null}
         {loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1" />
         ) : state?.error ? (
           <EmptyChartState text="Dados temporariamente indisponíveis para este gráfico." />
         ) : hasData ? (
-          <div className="h-full min-h-0 w-full">
+          <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden">
             <EChart
               option={option}
               themeMode="explicit"
@@ -2140,7 +2352,7 @@ function OccupancyReportChartCard({
 
 function EmptyChartState({ text }: { text: string }) {
   return (
-    <div className="flex h-full min-h-0 items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+    <div className="flex h-full min-h-0 flex-1 items-center justify-center overflow-hidden rounded-md border border-dashed bg-muted/20 px-4 text-center text-sm text-muted-foreground">
       {text}
     </div>
   );
@@ -2473,21 +2685,9 @@ function analysisResolutionDescription(
     return "Resolução diária automática, sem consolidação adicional.";
   }
   if (granularity === "week") {
-    return "Semanas civis completas são consolidadas pela API; as bordas do filtro permanecem diárias.";
+    return "Semanas civis completas são consolidadas; os dias parciais nas extremidades permanecem detalhados.";
   }
-  return "Meses civis completos são consolidados pela API; as bordas do filtro permanecem diárias.";
-}
-
-function occupancyReportRefreshDelay(refreshMs: number) {
-  const now = new Date();
-  const nextMinute = endOfAggregateBucket(startOfMinute(now), "minute");
-  return Math.max(
-    0,
-    Math.min(
-      Math.max(250, refreshMs),
-      nextMinute.getTime() - now.getTime() + 50,
-    ),
-  );
+  return "Meses civis completos são consolidados; os dias parciais nas extremidades permanecem detalhados.";
 }
 
 async function loadOccupancyReportState(
@@ -2788,7 +2988,7 @@ function joinOccupancyWarnings(...warnings: Array<string | undefined>) {
 function buildRowsMetric(rows: CertifiedOccupancyRow[]): OccupancyReportMetric {
   if (rows.length !== 1 || rows[0].area !== undefined) {
     throw new Error(
-      "A API não retornou um total temporal certificado da câmera para este escopo; uma área isolada e mínimos ou máximos de múltiplas áreas/câmeras não podem representar o total.",
+      "O total do período não está disponível para esta seleção. Uma área isolada, ou os extremos de várias áreas, não representa o total combinado.",
     );
   }
   const row = rows[0];
@@ -2848,7 +3048,7 @@ function buildOccupancyReportChartOption(
       data: points.map((point) => point.current),
       effect: true,
       fill: palette.current,
-      name: "Final do bucket",
+      name: "Valor no período",
       offset: [0, 0],
       size: denseMarkerSize(definition, "current"),
       symbol: "circle",
@@ -3323,7 +3523,7 @@ function buildOccupancyReportScopes({
 
   return scenarios.map<OccupancyReportScope>((scenario) => ({
     cameraIds: [],
-    description: `${scenario.object_class || DEFAULT_OBJECT_CLASS} por cenário de ocupação.`,
+    description: `${occupancyObjectClassLabel(scenario.object_class)} no cenário de ocupação.`,
     id: scenario.id,
     mode: "scenario",
     name: scenario.name,
@@ -3332,8 +3532,8 @@ function buildOccupancyReportScopes({
 }
 
 function scopeModeLabel(mode: OccupancyReportScopeMode) {
-  if (mode === "location") return "Location";
-  if (mode === "sub_location") return "Sub-location";
+  if (mode === "location") return "Local";
+  if (mode === "sub_location") return "Sublocal";
   return "Cenário";
 }
 
@@ -3352,7 +3552,7 @@ function buildComparisonDefinition(
       const last = bucketStarts.at(-1);
       if (!first || !last) {
         throw new Error(
-          "O comparativo de ocupação não possui buckets certificados.",
+          "O comparativo de ocupação não possui dados disponíveis no período.",
         );
       }
       return {
@@ -3422,7 +3622,7 @@ function comparisonDescription(
     description = "Comparando cada ano com o ano anterior.";
   }
 
-  return `${description} O bucket em andamento só entra no comparativo depois de fechado.`;
+  return `${description} O período em andamento só entra no comparativo depois de encerrado.`;
 }
 
 function maskOpenBucketComparisons(
@@ -3590,7 +3790,7 @@ function buildOccupancyAiDailyTable({
   for (const point of points) {
     const bucket = new Date(point.bucket);
     if (Number.isNaN(bucket.getTime())) {
-      throw new Error("A série diária de ocupação possui um bucket inválido.");
+      throw new Error("A série diária de ocupação contém um período inválido.");
     }
     const dateKey = companyDateKey(bucket, companyTimeZone);
     if (!expectedDateKeys.has(dateKey)) continue;
@@ -3617,7 +3817,7 @@ function buildOccupancyAiDailyTable({
       { key: "peak", label: "Máximo", numeric: true, width: 16 },
     ],
     description:
-      "Um registro por dia civil selecionado, em ordem cronológica e sem amostragem. Valores ausentes permanecem nulos.",
+      "Um registro por dia selecionado, em ordem cronológica e sem amostragem. Valores ausentes permanecem nulos.",
     rows: dateKeys.map((date) => {
       const point = pointByDate.get(date)!;
       return {
@@ -3748,7 +3948,7 @@ function splitOpenQuerySegment(
   }
 
   if (!result.length) {
-    throw new Error("O bucket aberto de ocupação não pertence ao segmento.");
+    throw new Error("O período em andamento não pertence ao intervalo selecionado.");
   }
   return result;
 }
@@ -3799,7 +3999,7 @@ function listWindowBucketStarts(
 
   if (cursor < end) {
     throw new RangeError(
-      "O intervalo do relatório excedeu o limite de buckets e não pode ser truncado.",
+      "O intervalo selecionado é extenso demais para este relatório. Reduza o período.",
     );
   }
 
@@ -4027,9 +4227,13 @@ async function captureOccupancyLoad<T>(
   } catch (error) {
     return {
       data: null,
-      error: error instanceof Error ? error.message : fallbackMessage,
+      error: userFacingErrorMessage(error, fallbackMessage),
     };
   }
+}
+
+function occupancyReportErrorMessage(error: unknown, fallback: string) {
+  return userFacingErrorMessage(error, fallback);
 }
 
 async function mapWithConcurrency<T, R>(

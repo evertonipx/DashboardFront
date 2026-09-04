@@ -2,13 +2,15 @@ import {
   reconcileAggregateRows,
   rollupAggregateRows,
 } from "@/lib/aggregate-reconciliation";
+import { startOfAggregateBucket } from "@/lib/aggregate-time";
 import {
   buildCountingIntelligenceModel,
-  COUNTING_HISTORY_START_YEAR,
   type CountingIntelligenceModel,
   type CountingIntelligenceScope,
 } from "@/lib/counting-intelligence";
 import type { AggregateEventRow, Scenario } from "@/lib/types";
+
+export const LIVE_ANNUAL_HISTORY_YEARS = 4;
 
 export type LiveAnnualComparisonRanges = {
   historyFrom: Date;
@@ -35,11 +37,16 @@ export function resolveLiveAnnualComparisonRanges(
     currentMonthStart.getMonth(),
     1,
   );
+  const periodFrom = new Date(
+    currentMonthStart.getFullYear() - (LIVE_ANNUAL_HISTORY_YEARS - 1),
+    0,
+    1,
+  );
 
   return {
-    historyFrom: new Date(COUNTING_HISTORY_START_YEAR - 1, 0, 1),
+    historyFrom: periodFrom,
     historyTo: recentFrom,
-    periodFrom: new Date(COUNTING_HISTORY_START_YEAR, 0, 1),
+    periodFrom,
     periodTo: new Date(now.getFullYear(), now.getMonth() + 1, 1),
     recentFrom,
   };
@@ -60,6 +67,7 @@ export function rollupLiveAnnualHistoryRows(
 }
 
 export function buildLiveAnnualComparisonModel({
+  comparableDailyRows,
   historicalMonthRows,
   hourlyRows,
   now,
@@ -67,6 +75,7 @@ export function buildLiveAnnualComparisonModel({
   scenarios,
   scope,
 }: {
+  comparableDailyRows?: AggregateEventRow[];
   historicalMonthRows: AggregateEventRow[];
   hourlyRows: AggregateEventRow[];
   now: Date;
@@ -75,7 +84,7 @@ export function buildLiveAnnualComparisonModel({
   scope: CountingIntelligenceScope;
 }): CountingIntelligenceModel {
   const range = resolveLiveAnnualComparisonRanges(now);
-  const monthlyRows = reconcileAggregateRows(
+  const consolidatedMonthlyRows = reconcileAggregateRows(
     historicalMonthRows,
     "month",
     recentMonthRows,
@@ -83,8 +92,35 @@ export function buildLiveAnnualComparisonModel({
     range.recentFrom,
     range.periodTo,
   );
+  const openMonthFrom = new Date(now.getFullYear(), now.getMonth(), 1);
+  const closedHourTo = startOfAggregateBucket(now, "hour");
+  const openDayFrom = startOfAggregateBucket(now, "day");
+  const reconciledDailyRows = comparableDailyRows
+    ? reconcileAggregateRows(
+        comparableDailyRows,
+        "day",
+        hourlyRows,
+        "hour",
+        openDayFrom,
+        closedHourTo,
+      )
+    : undefined;
+  const monthlyRows =
+    openMonthFrom < closedHourTo
+      ? reconcileAggregateRows(
+          consolidatedMonthlyRows,
+          "month",
+          reconciledDailyRows ?? hourlyRows,
+          reconciledDailyRows ? "day" : "hour",
+          openMonthFrom,
+          closedHourTo,
+        )
+      : consolidatedMonthlyRows;
 
   return buildCountingIntelligenceModel({
+    comparisonDataFrom: range.historyFrom,
+    comparableDailyRows,
+    comparableHourlyRows: comparableDailyRows ? hourlyRows : undefined,
     hourlyRows,
     includeOpenPeriod: true,
     monthlyRows,

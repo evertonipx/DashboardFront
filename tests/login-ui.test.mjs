@@ -8,6 +8,7 @@ const loginSource = readFileSync("app/login/page.tsx", "utf8");
 const brandingSource = readFileSync("lib/login-branding.ts", "utf8");
 const layoutSource = readFileSync("app/layout.tsx", "utf8");
 const themeSource = readFileSync("components/app/theme-provider.tsx", "utf8");
+const userFacingErrorSource = readFileSync("lib/user-facing-error.ts", "utf8");
 
 function loadLoginBrandingModule() {
   const compiled = ts.transpileModule(brandingSource, {
@@ -26,11 +27,42 @@ function loadLoginBrandingModule() {
   return compiledModule.exports;
 }
 
+function loadUserFacingErrorModule() {
+  const compiled = ts.transpileModule(userFacingErrorSource, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+    },
+  }).outputText;
+  const compiledModule = { exports: {} };
+  vm.runInNewContext(compiled, {
+    Error,
+    exports: compiledModule.exports,
+    module: compiledModule,
+  });
+  return compiledModule.exports;
+}
+
 test("login enterprise preserva o contrato autenticado e a navegação pós-login", () => {
   assert.match(loginSource, /await login\(email\.trim\(\), password\)/);
   assert.match(
     loginSource,
-    /router\.replace\(await resolvePostLoginPath\(currentUser\)\)/,
+    /const path = await resolvePostLoginPath\(currentUser\);[\s\S]*?navigateToAuthenticatedRoute\(router, path, currentUser\)/,
+  );
+  assert.match(
+    loginSource,
+    /if \(!loading && user && !submitOwnsNavigationRef\.current\)/,
+    "o efeito de sessão não deve repetir a navegação possuída pelo submit",
+  );
+  assert.match(
+    loginSource,
+    /submitOwnsNavigationRef\.current = true[\s\S]*?navigateToAuthenticatedRoute\(router, path, currentUser\)/,
+    "o submit deve reservar e executar sua própria navegação",
+  );
+  assert.match(
+    loginSource,
+    /router\.prefetch\(path\)[\s\S]*?preloadAppRoute\(path, preferredDashboardModule\(user\)\)[\s\S]*?router\.replace\(path\)/,
+    "a rota e o painel autorizado devem ser aquecidos antes da transição",
   );
   assert.doesNotMatch(loginSource, /company_id\s*[:=]|X-Company-ID|apiFetch\(/);
 });
@@ -73,6 +105,8 @@ test("apresentação do login permanece enterprise e textualmente minimalista", 
   assert.doesNotMatch(loginSource, /Acesso restrito a usuários autorizados/);
   assert.doesNotMatch(loginSource, /Governança multiempresa/);
   assert.match(loginSource, /title: "Inteligência de dados"/);
+  assert.match(loginSource, /icon: ChartSpline/);
+  assert.doesNotMatch(loginSource, /BrainCircuit/);
   assert.match(loginSource, /flex min-w-0 items-center gap-3/);
 });
 
@@ -83,6 +117,56 @@ test("formulário de acesso expõe estados e controles para tecnologia assistiva
   assert.match(loginSource, /autoComplete="current-password"/);
   assert.match(loginSource, /aria-pressed=\{showPassword\}/);
   assert.match(loginSource, /LoaderCircle[\s\S]*?Validando acesso/);
+});
+
+test("erros apresentados ao usuário ocultam rotas e identificadores internos", () => {
+  const { userFacingErrorMessage } = loadUserFacingErrorModule();
+  const fallback = "Não foi possível concluir a operação.";
+
+  assert.equal(
+    userFacingErrorMessage(
+      new Error(
+        'A API retornou company_id "20a13438-9963-4e9e-8945-40d95385608c" fora do JWT.',
+      ),
+      fallback,
+    ),
+    fallback,
+  );
+  assert.equal(
+    userFacingErrorMessage(new Error("Informe um período válido."), fallback),
+    "Informe um período válido.",
+  );
+  assert.equal(
+    userFacingErrorMessage(new Error("user not found"), fallback),
+    fallback,
+  );
+  assert.equal(
+    userFacingErrorMessage(
+      new Error(
+        "O timezone IANA divergiu em 2026-09-01T14:35:00Z para scenario_total_avg.",
+      ),
+      fallback,
+    ),
+    fallback,
+  );
+  assert.equal(
+    userFacingErrorMessage(new Error("module not enabled"), fallback),
+    fallback,
+  );
+  assert.equal(
+    userFacingErrorMessage(
+      new Error("A data selecionada não existe no fuso America/Sao_Paulo."),
+      fallback,
+    ),
+    fallback,
+  );
+  assert.equal(
+    userFacingErrorMessage(
+      new Error("Não foi possível conectar a 192.168.14.6."),
+      fallback,
+    ),
+    fallback,
+  );
 });
 
 test("branding opcional nunca bloqueia o login quando storage está indisponível", () => {

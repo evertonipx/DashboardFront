@@ -1,24 +1,11 @@
-import { NextRequest } from "next/server";
-
-import { proxyBackendRequest } from "@/lib/backend-routing";
-
-type RouteContext = {
-  params: Promise<{
-    path?: string[];
-  }>;
-};
+import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
 
-async function handler(request: NextRequest, context: RouteContext) {
-  const { path = [] } = await context.params;
-  const suffix = path.map(encodeURIComponent).join("/");
-  const pathname = suffix ? `/swagger/${suffix}` : "/swagger";
-
-  return proxyBackendRequest(request, pathname);
+function notAvailable() {
+  return new NextResponse(null, { status: 404 });
 }
 
-export const GET = handler;
-export const HEAD = handler;
-export const OPTIONS = handler;
+export const GET = notAvailable;
+export const HEAD = notAvailable;
+export const OPTIONS = notAvailable;

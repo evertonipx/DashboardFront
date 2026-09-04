@@ -15,8 +15,10 @@ import {
   COMPACT_METRIC_LAYOUT_DEFAULTS,
   CompactMetricCard,
 } from "@/components/app/compact-metric-card";
-import { EChart, type EnterpriseChartOption } from "@/components/app/echart";
+import type { LayoutCardRenderContext } from "@/components/app/card-layout";
+import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
+import { useTheme } from "@/components/app/theme-provider";
 import {
   WidgetTitleText,
   useWidgetColor,
@@ -43,10 +45,13 @@ import {
   buildAnnualAccumulatedComparisonChartOption,
   buildAnnualComparisonChartOption,
   buildAccessShareChartOption,
+  buildCountingDayMonthHeatmapChartOption,
   buildCountingMonthlyComparison,
+  buildCountingMonthYearHeatmapChartOption,
   buildDirectionalHourlyChartOption,
   COUNTING_INTELLIGENCE_CARD_IDS,
   COUNTING_MONTH_LABELS,
+  formatCountingDirectionalPeriod,
   formatCountingIntelligencePeriod,
   formatDelta,
   formatPercentage,
@@ -57,6 +62,7 @@ import type { Scenario } from "@/lib/types";
 import { cn, formatNumber } from "@/lib/utils";
 
 type CountingIntelligenceWidgetsProps = {
+  inheritedScenarioIds?: string[];
   loading: boolean;
   model: CountingIntelligenceModel;
   onRankingScenarioIdsChange: (ids: string[]) => void;
@@ -65,10 +71,14 @@ type CountingIntelligenceWidgetsProps = {
   rankingOrder: "asc" | "desc";
   rankingScenarioIds: string[];
   rankingSelectionMode: "all" | "custom";
+  resolveModel?: (
+    scenarioSelection: LayoutCardRenderContext["scenarioSelection"],
+  ) => CountingIntelligenceModel;
   scenarios: Scenario[];
 };
 
 export function buildCountingIntelligenceWidgetCards({
+  inheritedScenarioIds,
   loading,
   model,
   onRankingScenarioIdsChange,
@@ -77,97 +87,129 @@ export function buildCountingIntelligenceWidgetCards({
   rankingOrder,
   rankingScenarioIds,
   rankingSelectionMode,
+  resolveModel,
   scenarios,
 }: CountingIntelligenceWidgetsProps) {
-  const monthLabel = COUNTING_MONTH_LABELS[model.currentMonth];
-  const leader = model.accesses[0];
-  const periodLabel = formatCountingIntelligencePeriod(model);
+  const renderWithModel = (
+    render: (resolvedModel: CountingIntelligenceModel) => React.ReactNode,
+  ) =>
+    resolveModel
+      ? ({ scenarioSelection }: LayoutCardRenderContext) =>
+          render(resolveModel(scenarioSelection))
+      : render(model);
+  const renderAccessRanking = (
+    resolvedModel: CountingIntelligenceModel,
+    scenarioSettingsEnabled: boolean,
+  ) => (
+    <AccessRankingCard
+      loading={loading}
+      model={resolvedModel}
+      onScenarioIdsChange={onRankingScenarioIdsChange}
+      onOrderChange={onRankingOrderChange}
+      onSelectionModeChange={onRankingSelectionModeChange}
+      order={rankingOrder}
+      scenarioIds={rankingScenarioIds}
+      scenarios={scenarios}
+      scenarioSettingsEnabled={scenarioSettingsEnabled}
+      selectionMode={rankingSelectionMode}
+    />
+  );
   return [
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.periodTotal,
       label: "Total do período",
       defaultSize: "compact" as const,
-      node: (
+      node: renderWithModel((resolvedModel) => (
         <ExecutiveMetricCard
           description={
             comparisonDescription(
-              model.periodDelta,
-              "o mesmo período do ano anterior",
+              resolvedModel.periodDelta,
+              resolvedModel.periodComparisonLimited
+                ? "os meses comparáveis do ano anterior"
+                : "o mesmo período do ano anterior",
             )
           }
           icon={Gauge}
           label="Total do período"
           loading={loading}
-          period={periodLabel}
-          trend={model.periodDelta}
-          value={formatNumber(model.periodValue)}
+          period={formatCountingIntelligencePeriod(resolvedModel)}
+          trend={resolvedModel.periodDelta}
+          value={formatNumber(resolvedModel.periodValue)}
         />
-      ),
+      )),
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.endMonth,
       label: "Mês final do período",
       defaultSize: "compact" as const,
-      node: (
-        <ExecutiveMetricCard
-          description={
-            comparisonDescription(
-              model.currentMonthDelta,
-              monthLabel + "/" + (model.currentYear - 1),
-            )
-          }
-          icon={CalendarRange}
-          label={monthLabel + "/" + model.currentYear}
-          loading={loading}
-          period="Mês final do período"
-          trend={model.currentMonthDelta}
-          value={formatNumber(model.currentMonthValue)}
-        />
-      ),
+      node: renderWithModel((resolvedModel) => {
+        const monthLabel = COUNTING_MONTH_LABELS[resolvedModel.currentMonth];
+        return (
+          <ExecutiveMetricCard
+            description={
+              comparisonDescription(
+                resolvedModel.currentMonthDelta,
+                monthLabel + "/" + (resolvedModel.currentYear - 1),
+              )
+            }
+            icon={CalendarRange}
+            label={monthLabel + "/" + resolvedModel.currentYear}
+            loading={loading}
+            period="Mês final do período"
+            trend={resolvedModel.currentMonthDelta}
+            value={formatNumber(resolvedModel.currentMonthValue)}
+          />
+        );
+      }),
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.monthlyAverage,
       label: "Média mensal",
       defaultSize: "compact" as const,
-      node: (
+      node: renderWithModel((resolvedModel) => (
         <ExecutiveMetricCard
           description={
-            "Base anterior: " +
-            formatNumber(model.previousPeriodAverage) +
+            (resolvedModel.periodComparisonLimited
+              ? "Base comparável anterior: "
+              : "Base anterior: ") +
+            formatNumber(resolvedModel.previousPeriodAverage) +
             " por mês"
           }
           icon={Clock3}
           label="Média mensal"
           loading={loading}
           period={
-            model.periodMonthCount +
-            (model.periodMonthCount === 1
+            resolvedModel.periodMonthCount +
+            (resolvedModel.periodMonthCount === 1
               ? " mês com dados"
               : " meses com dados")
           }
-          value={formatNumber(model.periodAverage)}
+          value={formatNumber(resolvedModel.periodAverage)}
         />
-      ),
+      )),
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.accessLeader,
       label: "Acesso líder",
       defaultSize: "compact" as const,
-      node: (
-        <ExecutiveMetricCard
-          description={
-            leader
-              ? formatPercentage(leader.share) + " do fluxo no período"
-              : "Sem fluxo direcional no período"
-          }
-          icon={Trophy}
-          label="Acesso líder"
-          loading={loading}
-          period={periodLabel}
-          textValue
-          value={leader?.name ?? "-"}
-        />
-      ),
+      node: renderWithModel((resolvedModel) => {
+        const leader = resolvedModel.accesses[0];
+        return (
+          <ExecutiveMetricCard
+            description={
+              leader
+                ? formatPercentage(leader.share) + " do fluxo no período"
+                : "Sem fluxo direcional no período"
+            }
+            icon={Trophy}
+            label="Acesso líder"
+            loading={loading}
+            period={formatCountingIntelligencePeriod(resolvedModel)}
+            textValue
+            value={leader?.name ?? "-"}
+          />
+        );
+      }),
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.annualComparison,
@@ -176,9 +218,13 @@ export function buildCountingIntelligenceWidgetCards({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
-        <AnnualComparisonCard loading={loading} model={model} period={periodLabel} />
-      ),
+      node: renderWithModel((resolvedModel) => (
+        <AnnualComparisonCard
+          loading={loading}
+          model={resolvedModel}
+          period={formatCountingIntelligencePeriod(resolvedModel)}
+        />
+      )),
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison,
@@ -187,13 +233,37 @@ export function buildCountingIntelligenceWidgetCards({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
+      node: renderWithModel((resolvedModel) => (
         <AnnualAccumulatedComparisonCard
           loading={loading}
-          model={model}
-          period={periodLabel}
+          model={resolvedModel}
+          period={formatCountingIntelligencePeriod(resolvedModel)}
         />
-      ),
+      )),
+    },
+    {
+      id: COUNTING_INTELLIGENCE_CARD_IDS.dayMonthHeatmap,
+      colorPreview: "gradient" as const,
+      label: "Mapa de calor · dias x meses",
+      previewKind: "heatmap" as const,
+      defaultHeight: "tall" as const,
+      defaultSize: "full" as const,
+      className: "sm:col-span-2 xl:col-span-4",
+      node: renderWithModel((resolvedModel) => (
+        <DayMonthHeatmapCard loading={loading} model={resolvedModel} />
+      )),
+    },
+    {
+      id: COUNTING_INTELLIGENCE_CARD_IDS.monthYearHeatmap,
+      colorPreview: "gradient" as const,
+      label: "Mapa de calor · meses x anos",
+      previewKind: "heatmap" as const,
+      defaultHeight: "tall" as const,
+      defaultSize: "full" as const,
+      className: "sm:col-span-2 xl:col-span-4",
+      node: renderWithModel((resolvedModel) => (
+        <MonthYearHeatmapCard loading={loading} model={resolvedModel} />
+      )),
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.yearOverYearMonth,
@@ -202,25 +272,27 @@ export function buildCountingIntelligenceWidgetCards({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: <YearOverYearMatrixCard loading={loading} model={model} />,
+      node: renderWithModel((resolvedModel) => (
+        <YearOverYearMatrixCard loading={loading} model={resolvedModel} />
+      )),
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.directionalFlow,
       chartTypeEnabled: true,
-      label: "Fluxo direcional por hora",
+      label: "Fluxo direcional · últimos 7 dias",
       defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
       className: "sm:col-span-2 xl:col-span-2",
-      node: (
+      node: renderWithModel((resolvedModel) => (
         <ExecutiveChartCard
-          badge={formatCountingIntelligencePeriod(model)}
-          description="Entradas e saídas consolidadas por hora e cenário no período selecionado."
-          empty={!model.directionalHours.some((item) => item.total > 0)}
+          badge={formatCountingDirectionalPeriod(resolvedModel)}
+          description="Perfil por hora em uma janela de até 7 dias no fim do período aplicado."
+          empty={!resolvedModel.directionalHours.some((item) => item.total > 0)}
           loading={loading}
-          option={buildDirectionalHourlyChartOption(model)}
-          title="Fluxo direcional por hora"
+          option={buildDirectionalHourlyChartOption(resolvedModel)}
+          title="Fluxo direcional · últimos 7 dias"
         />
-      ),
+      )),
     },
     {
       id: COUNTING_INTELLIGENCE_CARD_IDS.accessRanking,
@@ -230,24 +302,25 @@ export function buildCountingIntelligenceWidgetCards({
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",
-      node: (
-        <AccessRankingCard
-          loading={loading}
-          model={model}
-          onScenarioIdsChange={onRankingScenarioIdsChange}
-          onOrderChange={onRankingOrderChange}
-          onSelectionModeChange={onRankingSelectionModeChange}
-          order={rankingOrder}
-          scenarioIds={rankingScenarioIds}
-          scenarios={scenarios}
-          selectionMode={rankingSelectionMode}
-        />
-      ),
+      node: resolveModel
+        ? ({ scenarioSelection }: LayoutCardRenderContext) =>
+            renderAccessRanking(
+              resolveModel(scenarioSelection),
+              scenarioSelection.mode === "inherit",
+            )
+        : renderAccessRanking(model, true),
     },
   ].map((card) => ({
     ...card,
     ...(isCountingIntelligenceCompactCard(card.id)
       ? COMPACT_METRIC_LAYOUT_DEFAULTS
+      : {}),
+    ...(resolveModel
+      ? {
+          inheritedScenarioIds,
+          inheritedScenarioLabel: model.scopeName,
+          scenarioConfigurable: true as const,
+        }
       : {}),
     titleEditable: true as const,
   }));
@@ -323,7 +396,7 @@ function AnnualComparisonCard({
   return (
     <ExecutiveChartCard
       badge={period}
-      chartClassName="h-full min-h-0"
+      chartClassName="h-full min-h-0 w-full flex-1 self-stretch"
       description={`Anos lado a lado. Linha tracejada: média mensal de ${
         model.currentYear - 1
       } como média-base, quando houver dados.`}
@@ -353,7 +426,7 @@ function AnnualAccumulatedComparisonCard({
   return (
     <ExecutiveChartCard
       badge={period}
-      chartClassName="h-full min-h-0"
+      chartClassName="h-full min-h-0 w-full flex-1 self-stretch"
       description="Soma progressiva mês a mês para comparar a trajetória acumulada de cada ano e identificar avanço ou atraso."
       loading={loading}
       option={option}
@@ -363,11 +436,105 @@ function AnnualAccumulatedComparisonCard({
   );
 }
 
+function DayMonthHeatmapCard({
+  loading,
+  model,
+}: {
+  loading: boolean;
+  model: CountingIntelligenceModel;
+}) {
+  const widgetColor = useWidgetColor();
+  const { effectiveTheme } = useTheme();
+  const option = React.useMemo(
+    () =>
+      buildCountingDayMonthHeatmapChartOption(
+        model,
+        widgetColor,
+        effectiveTheme,
+      ),
+    [effectiveTheme, model, widgetColor],
+  );
+  const hasCertifiedCoverage = model.dayMonthHeatmapCells.some(
+    (cell) => cell.total !== null,
+  );
+
+  return (
+    <ExecutiveChartCard
+      badge={formatDayMonthHeatmapPeriod(model)}
+      description="Intensidade diária nos meses do último ano do período; dias sem movimento permanecem visíveis."
+      empty={!hasCertifiedCoverage}
+      emptyText="Não há dias fechados disponíveis no ano final do período selecionado."
+      loading={loading}
+      option={option}
+      primarySeriesIndex={null}
+      title="Mapa de calor · dias x meses"
+    />
+  );
+}
+
+function MonthYearHeatmapCard({
+  loading,
+  model,
+}: {
+  loading: boolean;
+  model: CountingIntelligenceModel;
+}) {
+  const widgetColor = useWidgetColor();
+  const { effectiveTheme } = useTheme();
+  const option = React.useMemo(
+    () =>
+      buildCountingMonthYearHeatmapChartOption(
+        model,
+        widgetColor,
+        effectiveTheme,
+      ),
+    [effectiveTheme, model, widgetColor],
+  );
+  const hasCertifiedCoverage = model.yearRows.some((row) =>
+    row.months.some((value) => value !== null),
+  );
+
+  return (
+    <ExecutiveChartCard
+      badge={formatCountingIntelligencePeriod(model)}
+      description="Intensidade mensal entre os anos selecionados; cada linha representa um ano do período."
+      empty={!hasCertifiedCoverage}
+      emptyText="Não há meses disponíveis no período selecionado."
+      loading={loading}
+      option={option}
+      primarySeriesIndex={null}
+      title="Mapa de calor · meses x anos"
+    />
+  );
+}
+
+function formatDayMonthHeatmapPeriod(model: CountingIntelligenceModel) {
+  if (model.dayMonthHeatmapTo <= model.dayMonthHeatmapFrom) {
+    return `${model.dayMonthHeatmapYear} · sem dias fechados`;
+  }
+
+  const lastClosedDay = new Date(
+    model.dayMonthHeatmapTo.getFullYear(),
+    model.dayMonthHeatmapTo.getMonth(),
+    model.dayMonthHeatmapTo.getDate() - 1,
+  );
+  const formatDayMonth = (date: Date) =>
+    new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+    }).format(date);
+
+  return `${model.dayMonthHeatmapYear} · ${formatDayMonth(
+    model.dayMonthHeatmapFrom,
+  )} a ${formatDayMonth(lastClosedDay)}`;
+}
+
 function ExecutiveChartCard({
   badge,
-  chartClassName = "h-[250px]",
+  chartClassName = "h-full min-h-0 w-full flex-1 self-stretch",
   description,
   empty = false,
+  emptyText = "Sem fluxo de entrada ou saída registrado no período selecionado.",
   loading,
   option,
   primarySeriesIndex = 0,
@@ -377,6 +544,7 @@ function ExecutiveChartCard({
   chartClassName?: string;
   description: string;
   empty?: boolean;
+  emptyText?: string;
   loading: boolean;
   option: React.ComponentProps<typeof EChart>["option"];
   primarySeriesIndex?: number | null;
@@ -392,7 +560,7 @@ function ExecutiveChartCard({
   );
 
   return (
-    <Card className="h-full min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="border-b px-4 py-3">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] items-start gap-2">
           <div className="min-w-0">
@@ -412,12 +580,15 @@ function ExecutiveChartCard({
           </Badge>
         </div>
       </CardHeader>
-      <CardContent className="px-3 pb-3 pt-2">
+      <CardContent
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-3 pb-3 pt-2"
+        data-echart-layout="natural"
+      >
         {loading ? (
           <Skeleton className={cn("w-full", chartClassName)} />
         ) : empty ? (
           <div className={cn("flex items-center justify-center rounded-md border border-dashed bg-muted/15 px-4 text-center text-xs text-muted-foreground", chartClassName)}>
-            Sem fluxo de entrada ou saída registrado no período selecionado.
+            {emptyText}
           </div>
         ) : (
           <EChart option={coloredOption} className={chartClassName} />
@@ -436,6 +607,7 @@ function AccessRankingCard({
   order,
   scenarioIds,
   scenarios,
+  scenarioSettingsEnabled = true,
   selectionMode,
 }: {
   loading: boolean;
@@ -446,6 +618,7 @@ function AccessRankingCard({
   order: "asc" | "desc";
   scenarioIds: string[];
   scenarios: Scenario[];
+  scenarioSettingsEnabled?: boolean;
   selectionMode: "all" | "custom";
 }) {
   const widgetColor = useWidgetColor();
@@ -455,7 +628,7 @@ function AccessRankingCard({
     [model, widgetColor],
   );
   return (
-    <Card className="h-full min-w-0 overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <CardHeader className="border-b px-4 py-3">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2">
           <div className="min-w-0">
@@ -492,17 +665,19 @@ function AccessRankingCard({
                 <ArrowUp className="h-3.5 w-3.5" />
               </Button>
             </div>
-            <Button
-              type="button"
-              variant={settingsOpen ? "default" : "outline"}
-              size="icon"
-              className="h-8 w-8 shrink-0"
-              onClick={() => setSettingsOpen(true)}
-              aria-label="Selecionar cenários do ranking"
-              title="Selecionar cenários"
-            >
-              <Settings2 className="h-3.5 w-3.5" />
-            </Button>
+            {scenarioSettingsEnabled ? (
+              <Button
+                type="button"
+                variant={settingsOpen ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                onClick={() => setSettingsOpen(true)}
+                aria-label="Selecionar cenários do ranking"
+                title="Selecionar cenários"
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
           </div>
           <div className="col-span-full flex min-w-0 flex-wrap items-center gap-1.5">
             <Badge
@@ -519,23 +694,26 @@ function AccessRankingCard({
         </div>
       </CardHeader>
       <CardContent
-        className="min-h-0 flex-1 overflow-hidden p-3"
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-3"
         data-echart-layout="natural"
       >
         {loading ? (
-          <Skeleton className="h-full min-h-0 w-full" />
+          <Skeleton className="h-full min-h-0 w-full flex-1 self-stretch" />
         ) : model.accesses.length ? (
           <div className="h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-            <EChart option={option} />
+            <EChart className="h-full min-h-0 w-full flex-1" option={option} />
           </div>
         ) : (
-          <div className="flex h-[180px] items-center justify-center px-4 text-center text-xs text-muted-foreground">
+          <div className="flex h-full min-h-0 min-w-0 w-full flex-1 self-stretch items-center justify-center overflow-hidden px-4 text-center text-xs text-muted-foreground">
             Sem dados direcionais. Configure as linhas de entrada e saída nos
             cenários de acesso.
           </div>
         )}
       </CardContent>
-      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+      <Dialog
+        open={scenarioSettingsEnabled && settingsOpen}
+        onOpenChange={setSettingsOpen}
+      >
         <DialogContent className="grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Selecionar cenários do ranking</DialogTitle>
@@ -577,7 +755,7 @@ function YearOverYearMatrixCard({
   );
 
   return (
-    <Card className="h-full min-w-0 max-w-full overflow-hidden">
+    <Card className="flex h-full min-h-0 min-w-0 max-w-full flex-col overflow-hidden">
       <CardHeader className="border-b px-4 py-3 sm:px-5">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] items-start gap-2">
           <div className="min-w-0">
@@ -602,12 +780,12 @@ function YearOverYearMatrixCard({
       </CardHeader>
       <CardContent
         aria-label="Comparativo anual; role horizontalmente para ver todos os meses"
-        className="enterprise-horizontal-scroll max-w-full overflow-x-auto px-2 pb-3 pt-2 sm:px-4"
+        className="enterprise-horizontal-scroll flex min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-auto px-2 pb-3 pt-2 sm:px-4"
         role="region"
         tabIndex={0}
       >
         {loading ? (
-          <Skeleton className="h-[190px] min-w-[1040px]" />
+          <Skeleton className="h-full min-h-0 min-w-[1040px] flex-1 self-stretch" />
         ) : comparison.rows.length ? (
           <table className="w-full min-w-[1040px] table-fixed border-separate border-spacing-0 text-[11px]">
             <colgroup>
@@ -646,7 +824,11 @@ function YearOverYearMatrixCard({
                   average={row.average}
                   baselineOnly={row.baselineOnly}
                   current={row.year === comparison.latestYear}
-                  key={row.year}
+                  key={`${row.year}:${
+                    row.baselineOnly
+                      ? "comparison-baseline"
+                      : "selected-period"
+                  }`}
                   label={String(row.year)}
                   values={row.months}
                 />
@@ -673,7 +855,7 @@ function YearOverYearMatrixCard({
             </tbody>
           </table>
         ) : (
-          <div className="flex h-[150px] min-w-[980px] items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
+          <div className="flex h-full min-h-0 min-w-[980px] flex-1 self-stretch items-center justify-center overflow-hidden rounded-md border border-dashed text-xs text-muted-foreground">
             Nenhum mês com dados dentro do período selecionado.
           </div>
         )}

@@ -830,9 +830,11 @@ function shouldSendMasterCompanyScope(path: string) {
   return [
     "/ai",
     "/analytics",
+    "/audit",
     "/cameras",
     "/company/modules",
     "/dashboard-views",
+    "/demographics",
     "/locations",
     "/occupancy",
     "/scenarios",

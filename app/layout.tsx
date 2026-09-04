@@ -6,7 +6,7 @@ import { AppToaster, ThemeProvider } from "@/components/app/theme-provider";
 
 export const metadata: Metadata = {
   title: "IPXData",
-  description: "Frontend operacional para analytics de video do IPXData.",
+  description: "Plataforma de inteligência de dados para operações presenciais.",
 };
 
 export default function RootLayout({

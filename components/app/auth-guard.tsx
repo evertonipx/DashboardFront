@@ -13,13 +13,16 @@ import {
   canManageScenarioCatalogs,
   canManageViews,
   canManageWorkers,
+  canViewAudit,
   canViewCounting,
+  canViewDemographics,
   canViewOccupancy,
   type OperationalModuleFamily,
 } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/types";
 
 type ManagerResource =
+  | "audit"
   | "cameras"
   | "locations"
   | "occupancy"
@@ -119,6 +122,8 @@ function canManageResource(
   if (!resource) return true;
 
   switch (resource) {
+    case "audit":
+      return canViewAudit(user);
     case "cameras":
       return canManageCameras(user);
     case "locations":
@@ -139,5 +144,12 @@ function canViewModule(
   module: OperationalModuleFamily | undefined,
 ) {
   if (!module) return true;
-  return module === "counting" ? canViewCounting(user) : canViewOccupancy(user);
+  switch (module) {
+    case "counting":
+      return canViewCounting(user);
+    case "occupancy":
+      return canViewOccupancy(user);
+    case "demographics":
+      return canViewDemographics(user);
+  }
 }

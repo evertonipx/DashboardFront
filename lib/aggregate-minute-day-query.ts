@@ -13,6 +13,8 @@ import type {
 
 const DEFAULT_METRIC_TYPE = "count";
 const MAX_CACHE_ENTRIES = 4;
+const AGGREGATE_RESPONSE_ROW_CEILING = 1_000;
+const MAX_COMPLETENESS_SPLIT_DEPTH = 16;
 
 type MinuteDayAggregateReadyEntry = Readonly<{
   catchUpError?: string;
@@ -72,6 +74,16 @@ export async function fetchMinuteDayAggregateBootstrap({
   const key = minuteDayAggregateCacheKey(cacheScope, metricType, from);
   const cached = cache.get(key);
   if (cached?.status === "ready") return [...cached.rows];
+
+  if (from.getTime() === to.getTime()) {
+    cache.set(key, {
+      coveredTo: to.toISOString(),
+      rows: [],
+      status: "ready",
+    });
+    trimCache(cache);
+    return [];
+  }
 
   const retryRevision = startOfAggregateBucket(
     now,
@@ -248,7 +260,7 @@ function requireFetchOptions(
       throw new TypeError("A referência da consulta minuto a minuto é inválida.");
     }
   });
-  if (from >= to) {
+  if (from > to) {
     throw new RangeError("O intervalo minuto a minuto é inválido.");
   }
 }
@@ -258,6 +270,7 @@ async function fetchMinuteAggregateRange({
   from,
   metricType,
   signal,
+  splitDepth = 0,
   to,
 }: {
   companyScopeId?: string;
@@ -265,7 +278,8 @@ async function fetchMinuteAggregateRange({
   metricType: string;
   signal?: AbortSignal;
   to: Date;
-}) {
+  splitDepth?: number;
+}): Promise<AggregateEventRow[]> {
   const params = new URLSearchParams({
     from: aggregateQueryIso(from, "minute"),
     granularity: "minute",
@@ -280,13 +294,43 @@ async function fetchMinuteAggregateRange({
     response.granularity,
     "minute",
   );
-  return requireAggregateRowsInRange(
+  const rows = requireAggregateRowsInRange(
     response.data,
     granularity,
     from,
     to,
     metricType,
   );
+  if (rows.length < AGGREGATE_RESPONSE_ROW_CEILING) return rows;
+
+  const durationMinutes = Math.floor(
+    (to.getTime() - from.getTime()) / 60_000,
+  );
+  if (durationMinutes <= 1 || splitDepth >= MAX_COMPLETENESS_SPLIT_DEPTH) {
+    throw new Error(
+      "A consulta minuto a minuto excedeu o limite seguro em um único intervalo.",
+    );
+  }
+  const split = new Date(
+    from.getTime() + Math.floor(durationMinutes / 2) * 60_000,
+  );
+  const left = await fetchMinuteAggregateRange({
+    companyScopeId,
+    from,
+    metricType,
+    signal,
+    splitDepth: splitDepth + 1,
+    to: split,
+  });
+  const right = await fetchMinuteAggregateRange({
+    companyScopeId,
+    from: split,
+    metricType,
+    signal,
+    splitDepth: splitDepth + 1,
+    to,
+  });
+  return [...left, ...right];
 }
 
 function trimCache(cache: MinuteDayAggregateCache) {

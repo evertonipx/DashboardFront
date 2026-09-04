@@ -1,17 +1,5 @@
-import { AppShell } from "@/components/app/app-shell";
-import { AuthGuard } from "@/components/app/auth-guard";
-import { WorkerManager } from "@/components/app/worker-manager";
+import { DeferredWorkerManager as WorkerManager } from "@/components/app/deferred-route-panels";
 
 export default function ManagerWorkersPage() {
-  return (
-    <AuthGuard requireManager requireResource="workers">
-      <AppShell
-        mode="manager"
-        title="Workers"
-        description="Workers de borda, API keys e heartbeats da empresa."
-      >
-        <WorkerManager />
-      </AppShell>
-    </AuthGuard>
-  );
+  return <WorkerManager />;
 }

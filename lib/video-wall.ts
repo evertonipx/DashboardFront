@@ -6,6 +6,10 @@ import {
 } from "@/lib/master-company-scope";
 import { requestUserGridSync } from "@/lib/user-grid";
 import { writeUserGridPreference } from "@/lib/user-grid-local";
+import {
+  createViewLinkReference,
+  ensureOpaqueViewPath,
+} from "@/lib/view-link-reference";
 
 export type SavedLiveView = {
   createdAt: string;
@@ -19,6 +23,7 @@ export type VideoWallOutputSource = "live_dashboard" | "saved_view";
 
 export type VideoWallOutput = {
   id: string;
+  linkReference: string;
   name: string;
   scenarioId: string;
   screenKey: string;
@@ -43,12 +48,23 @@ export function loadSavedLiveViews(
   companyId?: string | null,
   userId?: string | null,
 ) {
-  return readScopedArray(
+  const views = readScopedArray(
     SAVED_VIEWS_STORAGE_KEY,
     companyId,
     userId,
     normalizeSavedLiveView,
-  ).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  );
+  let migrated = false;
+  const opaqueViews = views.map((view) => {
+    const path = ensureOpaqueViewPath(view.path, userId);
+    if (!path || path === view.path) return view;
+    migrated = true;
+    return { ...view, path };
+  });
+  if (migrated) writeSavedLiveViews(opaqueViews, companyId, userId);
+  return opaqueViews.sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt),
+  );
 }
 
 export function saveLiveViewPreset(
@@ -84,6 +100,23 @@ export function deleteSavedLiveView(
 ) {
   const next = loadSavedLiveViews(companyId, userId).filter(
     (view) => view.id !== viewId,
+  );
+  writeSavedLiveViews(next, companyId, userId);
+  return next;
+}
+
+export function deleteSavedLiveViews(
+  viewIds: Iterable<string>,
+  companyId?: string | null,
+  userId?: string | null,
+) {
+  const selectedIds = new Set(
+    [...viewIds].map((viewId) => viewId.trim()).filter(Boolean),
+  );
+  if (!selectedIds.size) return loadSavedLiveViews(companyId, userId);
+
+  const next = loadSavedLiveViews(companyId, userId).filter(
+    (view) => !selectedIds.has(view.id),
   );
   writeSavedLiveViews(next, companyId, userId);
   return next;
@@ -144,6 +177,7 @@ export function createVideoWallOutput(
 ): VideoWallOutput {
   return {
     id: createId("wall-output"),
+    linkReference: createViewLinkReference(),
     name: `Monitor ${position}`,
     scenarioId: "",
     screenKey: "auto",
@@ -152,8 +186,12 @@ export function createVideoWallOutput(
   };
 }
 
-export function resolveSavedLiveViewUrl(view: SavedLiveView, origin: string) {
-  return new URL(view.path, origin).toString();
+export function resolveSavedLiveViewUrl(
+  view: SavedLiveView,
+  origin: string,
+  userId?: string | null,
+) {
+  return new URL(ensureOpaqueViewPath(view.path, userId) || view.path, origin).toString();
 }
 
 function writeSavedLiveViews(
@@ -281,6 +319,10 @@ function normalizeVideoWallOutput(value: unknown): VideoWallOutput | null {
 
   return {
     id: record.id,
+    linkReference:
+      typeof record.linkReference === "string" && record.linkReference.trim()
+        ? record.linkReference.trim()
+        : createViewLinkReference(),
     name: record.name.trim() || "Monitor",
     scenarioId: typeof record.scenarioId === "string" ? record.scenarioId : "",
     screenKey: typeof record.screenKey === "string" ? record.screenKey : "auto",

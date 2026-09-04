@@ -258,7 +258,7 @@ export function buildWorkerBackedLocationOptions({
     const workerDescription = worker
       ? `Worker vinculado: ${worker.name}.`
       : workerId
-        ? "Worker vinculado não foi retornado pela API."
+        ? "O Worker vinculado não está disponível."
         : "Worker ainda não vinculado.";
 
     return {
@@ -292,7 +292,7 @@ export function buildLocationCameraOptions({
       return {
         cameraIds,
         description:
-          location.description || "Location formada pelas câmeras vinculadas.",
+          location.description || "Local formado pelas câmeras vinculadas.",
         id: location.id,
         location,
         name: location.name,
@@ -350,7 +350,7 @@ export function buildSubLocationCameraOptions({
 
       return {
         cameraIds,
-        description: `Sub-location de ${location.name}.`,
+        description: `Sublocal de ${location.name}.`,
         group,
         id: group ? cameraGroupOptionId(group.id) : `sub-location:${subLocation.id}`,
         location,
@@ -398,7 +398,7 @@ export function buildWorkerCameraGroupOptions({
 
       return {
         cameraIds,
-        description: `Sub-location personalizada do worker ${worker.name}.`,
+        description: `Grupo personalizado do Worker ${worker.name}.`,
         group,
         id: cameraGroupOptionId(group.id),
         name: group.name,

@@ -673,7 +673,7 @@ export function sumSelectedScenarioRows({
   sourceGranularity: AggregateGranularity;
   to: Date;
 }) {
-  const multipliers = buildCombinedMultiplierMap(scenarios);
+  const multipliers = buildCombinedScenarioMultiplierMap(scenarios);
   const fromTime = from.getTime();
   const toTime = to.getTime();
 
@@ -699,7 +699,7 @@ function aggregateSelectedRowsByBucket(
   to: Date,
   includeOverlappingSourceBuckets: boolean,
 ) {
-  const multipliers = buildCombinedMultiplierMap(scenarios);
+  const multipliers = buildCombinedScenarioMultiplierMap(scenarios);
   const totals = new Map<number, number>();
   const fromTime = from.getTime();
   const toTime = to.getTime();
@@ -728,7 +728,7 @@ function aggregateSelectedRowsByBucket(
   return totals;
 }
 
-function buildCombinedMultiplierMap(scenarios: Scenario[]) {
+export function buildCombinedScenarioMultiplierMap(scenarios: Scenario[]) {
   const multipliers = new Map<string, number>();
 
   scenarios.forEach((scenario) => {

@@ -7,7 +7,7 @@ import {
   AlertCircle,
   ArrowRight,
   BarChart3,
-  BrainCircuit,
+  ChartSpline,
   Eye,
   EyeOff,
   LoaderCircle,
@@ -31,6 +31,17 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { resolvePostLoginPath } from "@/lib/access";
 import {
+  preloadAppRoute,
+  type AppDashboardModule,
+} from "@/lib/app-route-preload";
+import {
+  canViewCounting,
+  canViewDemographics,
+  canViewOccupancy,
+} from "@/lib/permissions";
+import type { CurrentUser } from "@/lib/types";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
+import {
   DEFAULT_LOGIN_BRANDING,
   type LoginBranding,
   loginBrandColorWithAlpha,
@@ -49,7 +60,7 @@ const LOGIN_CAPABILITIES = [
     title: "Análises com contexto",
   },
   {
-    icon: BrainCircuit,
+    icon: ChartSpline,
     title: "Inteligência de dados",
   },
 ] as const;
@@ -66,6 +77,7 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState("");
   const loginAttemptRef = React.useRef(0);
+  const submitOwnsNavigationRef = React.useRef(false);
   const submitInFlightRef = React.useRef(false);
   const isDefaultBrand = branding.key === DEFAULT_LOGIN_BRANDING.key;
 
@@ -76,12 +88,12 @@ export default function LoginPage() {
   React.useEffect(() => {
     let mounted = true;
 
-    if (!loading && user) {
+    if (!loading && user && !submitOwnsNavigationRef.current) {
       loginAttemptRef.current += 1;
       setFormError("");
       setSubmitting(false);
       resolvePostLoginPath(user).then((path) => {
-        if (mounted) router.replace(path);
+        if (mounted) navigateToAuthenticatedRoute(router, path, user);
       });
     }
 
@@ -97,6 +109,7 @@ export default function LoginPage() {
     // successful login requests with the same credentials.
     if (submitInFlightRef.current) return;
     submitInFlightRef.current = true;
+    submitOwnsNavigationRef.current = true;
     const loginAttempt = ++loginAttemptRef.current;
     setFormError("");
     setSubmitting(true);
@@ -105,11 +118,15 @@ export default function LoginPage() {
       const currentUser = await login(email.trim(), password);
       if (loginAttempt !== loginAttemptRef.current) return;
       toast.success("Login realizado com sucesso");
-      router.replace(await resolvePostLoginPath(currentUser));
+      const path = await resolvePostLoginPath(currentUser);
+      navigateToAuthenticatedRoute(router, path, currentUser);
     } catch (error) {
       if (loginAttempt !== loginAttemptRef.current) return;
-      const message =
-        error instanceof Error ? error.message : "Não foi possível autenticar.";
+      submitOwnsNavigationRef.current = false;
+      const message = userFacingErrorMessage(
+        error,
+        "Não foi possível autenticar. Verifique os dados informados e tente novamente.",
+      );
       setFormError(message);
       toast.error(message);
     } finally {
@@ -166,7 +183,7 @@ export default function LoginPage() {
           <IPXDataMark />
           <div className="min-w-0">
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/60">
-              Intelligence platform
+              Inteligência de dados
             </div>
             <div className="text-lg font-semibold tracking-tight">IPXData</div>
           </div>
@@ -219,7 +236,7 @@ export default function LoginPage() {
             <div className="min-w-0">
               <div className="text-sm font-semibold">IPXData</div>
               <div className="text-xs text-muted-foreground">
-                Intelligence platform
+                Inteligência de dados
               </div>
             </div>
           </div>
@@ -356,7 +373,7 @@ export default function LoginPage() {
 
                 <div className="flex items-center gap-2 border-t border-border/70 pt-4 text-xs leading-5 text-muted-foreground">
                   <LockKeyhole className="h-3.5 w-3.5 shrink-0 text-primary" />
-                  Sua sessão e suas permissões são validadas antes do acesso.
+                  Acesso protegido para sua empresa.
                 </div>
               </form>
             </CardContent>
@@ -369,6 +386,25 @@ export default function LoginPage() {
       </section>
     </main>
   );
+}
+
+function navigateToAuthenticatedRoute(
+  router: ReturnType<typeof useRouter>,
+  path: string,
+  user: CurrentUser,
+) {
+  router.prefetch(path);
+  preloadAppRoute(path, preferredDashboardModule(user));
+  router.replace(path);
+}
+
+function preferredDashboardModule(
+  user: CurrentUser,
+): AppDashboardModule | undefined {
+  if (canViewCounting(user)) return "counting";
+  if (canViewOccupancy(user)) return "occupancy";
+  if (canViewDemographics(user)) return "demographics";
+  return undefined;
 }
 
 function IPXDataMark({ compact = false }: { compact?: boolean }) {

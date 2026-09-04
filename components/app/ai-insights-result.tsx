@@ -4,12 +4,12 @@ import * as React from "react";
 import {
   AlertTriangle,
   ArrowRight,
+  BrainCog,
   CalendarClock,
   CircleGauge,
   Lightbulb,
   Loader2,
   RefreshCw,
-  Sparkles,
   Target,
   TrendingUp,
 } from "lucide-react";
@@ -121,7 +121,7 @@ export function AiInsightsResult({
             tabIndex={-1}
             className="flex items-center gap-2 text-base focus:outline-none"
           >
-            <Sparkles className="h-4 w-4 text-primary" />
+            <BrainCog className="h-4 w-4 text-primary" />
             Direção recomendada
           </CardTitle>
           <CardDescription>

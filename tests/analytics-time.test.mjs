@@ -19,6 +19,9 @@ const aggregateHourQuery = loadTypeScriptModule(
 const aggregateMinuteDayQuery = loadTypeScriptModule(
   "lib/aggregate-minute-day-query.ts",
 );
+const aggregateRangeQuery = loadTypeScriptModule(
+  "lib/aggregate-range-query.ts",
+);
 const aggregateReconciliation = loadTypeScriptModule(
   "lib/aggregate-reconciliation.ts",
 );
@@ -79,8 +82,17 @@ const workerScope = loadTypeScriptModule("lib/worker-scope.ts");
 const occupancyAggregateValidation = loadTypeScriptModule(
   "lib/occupancy-aggregate-validation.ts",
 );
+const occupancyBucketTime = loadTypeScriptModule(
+  "lib/occupancy-bucket-time.ts",
+);
+const occupancyDuration = loadTypeScriptModule(
+  "lib/occupancy-duration.ts",
+);
 const occupancyAnalysisWindow = loadTypeScriptModule(
   "lib/occupancy-analysis-window.ts",
+);
+const analysisPeriodSelection = loadTypeScriptModule(
+  "lib/analysis-period-selection.ts",
 );
 const occupancyAreaOptions = loadTypeScriptModule(
   "lib/occupancy-area-options.ts",
@@ -88,6 +100,9 @@ const occupancyAreaOptions = loadTypeScriptModule(
 const occupancyAreas = loadTypeScriptModule("lib/occupancy-areas.ts");
 const occupancyMetrics = loadTypeScriptModule(
   "lib/occupancy-metrics.ts",
+);
+const occupancyObjectClass = loadTypeScriptModule(
+  "lib/occupancy-object-class.ts",
 );
 const occupancyHourAxis = loadTypeScriptModule(
   "lib/occupancy-hour-axis.ts",
@@ -156,9 +171,18 @@ const scenarioAnalytics = loadTypeScriptModule("lib/scenario-analytics.ts");
 const scenarioValidation = loadTypeScriptModule(
   "lib/scenario-validation.ts",
 );
+const tenantScopeValidation = loadTypeScriptModule(
+  "lib/tenant-scope-validation.ts",
+);
 const viewPreferences = loadTypeScriptModule("lib/view-preferences.ts");
+const widgetScenarioSelection = loadTypeScriptModule(
+  "lib/widget-scenario-selection.ts",
+);
 const userGridLocal = loadTypeScriptModule("lib/user-grid-local.ts");
 const videoWall = loadTypeScriptModule("lib/video-wall.ts");
+const viewLinkReference = loadTypeScriptModule(
+  "lib/view-link-reference.ts",
+);
 const widgetViewPresets = loadTypeScriptModule("lib/widget-view-presets.ts");
 
 test("proxy de snapshots preserva erro e nunca converte ausência em zero", async () => {
@@ -234,7 +258,7 @@ test("exportação não transforma corte temporal ausente no relógio do navegad
   );
 
   assert.match(exportSource, /dataCompleteUntil: Date \| null/);
-  assert.match(exportSource, /Corte temporal não certificado/);
+  assert.match(exportSource, /Atualização dos dados não informada/);
   assert.doesNotMatch(
     exportSource,
     /dataCompleteUntil\s*\?\?\s*payload\.generatedAt/,
@@ -378,6 +402,127 @@ test("barras verticais preservam semântica, ordem e navegação responsiva", ()
     /data: indexedEntries\.map\(\(entry\) => entry\.scenarioId\)/,
     "o eixo categórico deve manter a ordem de entrada dos cenários",
   );
+});
+
+test("runtime modular registra dataZoom antes de renderizar o gráfico", () => {
+  const runtimeSource = readFileSync(
+    resolve(projectRoot, "components/app/echarts-runtime/core.ts"),
+    "utf8",
+  );
+  const registrationSource = readFileSync(
+    resolve(
+      projectRoot,
+      "components/app/echarts-runtime/register-data-zoom.ts",
+    ),
+    "utf8",
+  );
+  const chartSource = readFileSync(
+    resolve(projectRoot, "components/app/echart.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    runtimeSource,
+    /dataZoom:\s*\(\) => import\("@\/components\/app\/echarts-runtime\/register-data-zoom"\)/,
+  );
+  assert.match(
+    runtimeSource,
+    /import \{[\s\S]*?DataZoomComponent,[\s\S]*?\} from "echarts\/components"/,
+    "dataZoom automático deve fazer parte do núcleo e não depender apenas de um side-effect em cache durante HMR",
+  );
+  assert.match(
+    runtimeSource,
+    /registerECharts\(\[[\s\S]*?DataZoomComponent,[\s\S]*?GridComponent/,
+    "DataZoomComponent deve estar registrado antes de qualquer init/setOption",
+  );
+  assert.match(registrationSource, /import \{ DataZoomComponent \} from "echarts\/components"/);
+  assert.match(registrationSource, /registerECharts\(\[DataZoomComponent\]\)/);
+  assert.match(chartSource, /if \(option\.dataZoom\) capabilities\.add\("dataZoom"\)/);
+  assert.match(
+    chartSource,
+    /await runtime\.ensureEChartCapabilities\([\s\S]*?chart = runtime\.initEChart\(/,
+    "o componente deve estar registrado antes da inicialização do ECharts",
+  );
+});
+
+test("primeira pintura do acumulado diário não depende de hover", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-08-01",
+    "2026-08-03",
+  );
+  assert.ok(period);
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data: analysisData({
+      baseline: {
+        previous_period: {
+          granularity: "day",
+          rows: [
+            aggregateRow("2026-07-29", "line-entry", 80),
+            aggregateRow("2026-07-30", "line-entry", 90),
+            aggregateRow("2026-07-31", "line-entry", 100),
+          ],
+        },
+      },
+      dayRows: [
+        aggregateRow("2026-08-01", "line-entry", 100),
+        aggregateRow("2026-08-02", "line-entry", 120),
+        aggregateRow("2026-08-03", "line-entry", 140),
+      ],
+    }),
+    period,
+    scenarios: [entryScenario],
+    widget: analysisWidget("cumulative"),
+  });
+  assert.equal(model.hasData, true);
+  assert.ok(model.option);
+
+  const chart = echarts.init(null, null, {
+    height: 360,
+    renderer: "svg",
+    ssr: true,
+    width: 900,
+  });
+  try {
+    chart.setOption(model.option, {
+      lazyUpdate: false,
+      notMerge: true,
+    });
+    const firstFrame = chart.renderToSVGString();
+
+    assert.ok(firstFrame.length > 1_000);
+    assert.match(firstFrame, /ecmeta_series_index="0"/);
+    assert.match(firstFrame, /ecmeta_series_index="1"/);
+    assert.match(firstFrame, /fill="#A3AFBF"/i);
+    assert.match(firstFrame, /fill="#1267C4"/i);
+  } finally {
+    chart.dispose();
+  }
+
+  const chartSource = readFileSync(
+    resolve(projectRoot, "components/app/echart.tsx"),
+    "utf8",
+  );
+  assert.match(
+    chartSource,
+    /chart\.setOption\(themedOption,\s*\{[\s\S]{0,420}?lazyUpdate:\s*false/,
+    "a primeira pintura interativa deve ser confirmada imediatamente",
+  );
+  assert.match(
+    chartSource,
+    /renderer:\s*"canvas",[\s\S]{0,360}?useDirtyRect:\s*false/,
+    "o canvas não pode depender do redraw parcial para revelar a série",
+  );
+  assert.match(
+    chartSource,
+    /const chartPainted = chartMounted && paintedChartKey === chartKey/,
+  );
+  assert.match(
+    chartSource,
+    /chart\.setOption\([\s\S]{0,700}?setPaintedChartKey\(chartKey\)/,
+    "o loading só deve terminar depois do primeiro setOption síncrono",
+  );
+  assert.match(chartSource, /aria-busy=\{!chartPainted\}/);
 });
 
 test("meia rosca real mantém ângulo estritamente zero no motor ECharts", () => {
@@ -959,6 +1104,36 @@ test("validação do editor hexagonal relata conflitos sem alterar o documento",
     result.warnings.map((issue) => issue.code).sort(),
     ["unavailable-scenario", "unlinked-cell"],
   );
+  const visibleMessages = [...result.errors, ...result.warnings]
+    .map((issue) => issue.message)
+    .join(" ");
+  for (const technicalIdentifier of [
+    "duplicate",
+    "outside",
+    "unlinked",
+    "missing",
+    "decimal",
+    "huge",
+    "nan",
+    "zero",
+  ]) {
+    assert.equal(
+      visibleMessages.includes(technicalIdentifier),
+      false,
+      `a validação não deve exibir o identificador ${technicalIdentifier}`,
+    );
+  }
+});
+
+test("classes de objeto de ocupação usam rótulos de negócio", () => {
+  assert.equal(occupancyObjectClass.occupancyObjectClassLabel("person"), "Pessoas");
+  assert.equal(occupancyObjectClass.occupancyObjectClassLabel(" VEHICLE "), "Veículos");
+  assert.equal(occupancyObjectClass.occupancyObjectClassLabel("bicycle"), "Bicicletas");
+  assert.equal(
+    occupancyObjectClass.occupancyObjectClassLabel("internal_detector_code"),
+    "Objetos monitorados",
+  );
+  assert.equal(occupancyObjectClass.occupancyObjectClassLabel(), "Pessoas");
 });
 
 test("simulador hexagonal distingue zero certificado de célula sem vínculo", () => {
@@ -1804,31 +1979,540 @@ test("dashboards de ocupação isolam o bucket aberto e descartam respostas de o
     /let refreshRunning = false;[\s\S]*?refreshRunning = true;[\s\S]*?await loadScenarioData\(selectedScenario, \{ silent: true \}\);[\s\S]*?finally \{[\s\S]*?refreshRunning = false;[\s\S]*?scheduleNextRefresh\(\)/,
     "o Ao Vivo deve esperar a rodada terminar antes de reagendar, sem abortar consultas lentas a cada tick",
   );
-  assert.match(
+  assert.doesNotMatch(
     reportSource,
-    /let refreshRunning = false;[\s\S]*?chartAbortControllerRef\.current !== null[\s\S]*?refreshRunning = true;[\s\S]*?await loadCharts\(selectedScope, true\);[\s\S]*?finally \{[\s\S]*?refreshRunning = false;[\s\S]*?scheduleNextRefresh\(\)/,
-    "relatórios e análises de ocupação devem manter uma única rodada e reagendar somente após a conclusão",
+    /setInterval|scheduleNextRefresh|refreshWhenVisible|visibilitychange/,
+    "relatórios e análises de ocupação só devem consultar ao abrir, aplicar filtros ou atualizar explicitamente",
   );
 });
 
-test("análise por período não reinicia uma consulta ainda em andamento", () => {
+test("Ocupação Ao Vivo consulta somente as fontes exigidas pelos widgets visíveis", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const buildPlan = loadStandaloneFunction(
+    "components/app/occupancy-scenario-dashboard.tsx",
+    "buildOccupancyLiveDataPlan",
+    {
+      OCCUPANCY_CHART_CARD_IDS: [
+        "occupancy_chart_minute",
+        "occupancy_chart_hour",
+        "occupancy_chart_day",
+        "occupancy_chart_week",
+        "occupancy_chart_month",
+      ],
+    },
+  );
+  const plan = buildPlan(
+    [
+      { id: "occupancy_chart_minute", visible: true },
+      { id: "occupancy_chart_month", visible: false },
+      { id: "occupancy_current_total", visible: false },
+      { id: "occupancy_alerts", visible: false },
+      { id: "occupancy_custom_hidden", visible: false },
+      { id: "occupancy_custom_visible", visible: true },
+    ],
+    [
+      {
+        granularity: "month",
+        id: "hidden",
+        kind: "trend",
+      },
+      {
+        granularity: "day",
+        id: "visible",
+        kind: "trend",
+      },
+    ],
+  );
+
+  assert.deepEqual(plan.granularities, ["minute", "day"]);
+  assert.equal(plan.history, false);
+  assert.equal(plan.alerts, false);
+  const appearanceOnlyPlan = buildPlan(
+    [
+      {
+        color: "#ff00aa",
+        id: "occupancy_custom_visible",
+        order: 1,
+        title: "Título personalizado",
+        visible: true,
+      },
+      {
+        color: "#00ffaa",
+        id: "occupancy_chart_minute",
+        order: 99,
+        title: "Outra aparência",
+        visible: true,
+      },
+    ],
+    [
+      {
+        granularity: "day",
+        id: "visible",
+        kind: "trend",
+      },
+    ],
+  );
+  assert.equal(
+    appearanceOnlyPlan.key,
+    plan.key,
+    "título, cor e ordem não podem alterar a identidade do plano de dados",
+  );
+  assert.deepEqual(
+    buildPlan([{ id: "occupancy_alerts", visible: true }], []),
+    {
+      alerts: true,
+      granularities: [],
+      history: false,
+      key: JSON.stringify([false, true, []]),
+    },
+    "alertas não podem disparar /history",
+  );
+  for (const cardId of [
+    "occupancy_average",
+    "occupancy_minimum",
+    "occupancy_peak",
+  ]) {
+    assert.deepEqual(
+      buildPlan([{ id: cardId, visible: true }], []).granularities,
+      ["day"],
+      `${cardId} deve carregar a fonte diária consumida pelo KPI`,
+    );
+  }
+  for (const metric of ["average", "minimum", "peak"]) {
+    assert.deepEqual(
+      buildPlan(
+        [{ id: `occupancy_custom_${metric}`, visible: true }],
+        [{ id: metric, kind: "metric", metric }],
+      ).granularities,
+      ["day"],
+      `o KPI personalizado ${metric} deve carregar a fonte diária`,
+    );
+  }
+  assert.match(
+    source,
+    /occupancyPreferencesScopeKey = \[[\s\S]*?companyScopeId \?\? ""[\s\S]*?userId \?\? ""[\s\S]*?selectedId[\s\S]*?occupancyPreferencesReadyKey === occupancyPreferencesScopeKey/,
+    "a hidratação deve ser identificada por empresa, usuário e visão",
+  );
+  assert.match(
+    source,
+    /hydratedOccupancyPreferences = occupancyPreferencesReady[\s\S]*?EMPTY_OCCUPANCY_PREFERENCES[\s\S]*?buildOccupancyLiveDataPlan\(\s*hydratedOccupancyPreferences/,
+    "o plano deve receber uma seleção vazia enquanto o novo escopo hidrata",
+  );
+  assert.match(
+    source,
+    /useOccupancyComparisonCards\(\{[\s\S]*?preferences: hydratedOccupancyPreferences[\s\S]*?useOccupancyDurationCards\(\{[\s\S]*?preferences: hydratedOccupancyPreferences/,
+    "hooks filhos não podem receber preferências remanescentes do escopo anterior",
+  );
+  assert.match(
+    source,
+    /const loadScenarioData = React\.useCallback\([\s\S]*?if \(!occupancyPreferencesReady\) return;/,
+    "nenhuma consulta da visão deve começar antes da hidratação",
+  );
+  assert.match(source, /dueDefinitions = definitions\.filter/);
+  assert.match(source, /dueHistory[\s\S]*?dueAlerts[\s\S]*?dueDefinitions\.length === 0/);
+  assert.match(source, /Promise\.all\([\s\S]*?dueDefinitions\.map/);
+  assert.match(
+    source,
+    /minute: OCCUPANCY_REFRESH_MS,[\s\S]*?hour: MINUTE_MS,[\s\S]*?day: 5 \* MINUTE_MS,[\s\S]*?week: 15 \* MINUTE_MS,[\s\S]*?month: HOUR_MS/,
+  );
+  assert.match(source, /const OCCUPANCY_ALERTS_REFRESH_MS = 30_000/);
+  assert.match(
+    source,
+    /computedOccupancyDataPlan = buildOccupancyLiveDataPlan[\s\S]*?React\.useMemo\([\s\S]*?occupancyLiveDataPlanFromKey\(computedOccupancyDataPlan\.key\)[\s\S]*?\[computedOccupancyDataPlan\.key\]/,
+    "mudanças apenas de aparência não podem recriar o plano nem a callback de consulta",
+  );
+});
+
+test("comparativos de Ocupação desligam fontes ocultas e não atualizam cinco anos em cinco segundos", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const dashboardSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+
+  for (const guard of [
+    "needsSnapshots",
+    "needsHourlyAggregate",
+    "needsCurrentHourMaximum",
+    "needsMaximumTrend",
+  ]) {
+    assert.match(source, new RegExp(`if \\(!${guard}\\) return;`));
+  }
+  assert.match(source, /const DEFAULT_MAXIMUM_TREND_REFRESH_MS = 60 \* 60_000/);
+  assert.match(
+    source,
+    /delayMs = maximumTrendRefreshMs[\s\S]*?temporalRefreshDelay\(delayMs, boundary\)/,
+  );
+  assert.match(
+    dashboardSource,
+    /aggregateRefreshMs: OCCUPANCY_COMPARISON_AGGREGATE_REFRESH_MS/,
+  );
+  assert.match(
+    source,
+    /aggregateCoversCurrentHour[\s\S]*?broader hourly request owns this source[\s\S]*?aggregateDataset\.series\.find/,
+  );
+  assert.match(source, /if \(!needsHourlyAggregate\) \{[\s\S]*?scheduleNext/);
+});
+
+test("retorno à Ocupação respeita o TTL independente de cada fonte", () => {
+  const remaining = loadStandaloneFunction(
+    "components/app/occupancy-comparison-widgets.tsx",
+    "occupancyComparisonFreshnessRemainingMs",
+  );
+  const freshness = {
+    completedAt: 10_000,
+    refreshVersion: 3,
+    scopeKey: "company|scenario",
+    windowKey: "window-a",
+  };
+  const request = {
+    now: new Date(25_000),
+    refreshMs: 60_000,
+    refreshVersion: 3,
+    scopeKey: "company|scenario",
+    windowKey: "window-a",
+  };
+
+  assert.equal(remaining(freshness, request), 45_000);
+  assert.equal(
+    remaining(freshness, { ...request, now: new Date(70_000) }),
+    0,
+  );
+  assert.equal(
+    remaining(freshness, { ...request, windowKey: "window-b" }),
+    0,
+    "a virada da janela deve atualizar mesmo dentro do TTL",
+  );
+  assert.equal(
+    remaining(freshness, { ...request, refreshVersion: 4 }),
+    0,
+    "a atualização manual deve ignorar o TTL",
+  );
+
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  for (const resource of [
+    "snapshots",
+    "aggregate",
+    "currentHourMaximum",
+    "maximumTrend",
+  ]) {
+    assert.match(
+      source,
+      new RegExp(
+        `occupancyComparisonFreshnessRemainingMs\\(\\s*resourceFreshnessRef\\.current\\.${resource}`,
+      ),
+      `${resource} deve certificar o próprio frescor antes da consulta`,
+    );
+  }
+  assert.match(
+    source,
+    /refreshVersion: manualRefreshVersion[\s\S]*?freshnessRemainingMs > 0/,
+  );
+  assert.match(
+    source,
+    /return \{ cards, refresh, reportAssets, settings, updateSettings \}/,
+    "o botão Atualizar precisa continuar forçando as fontes visíveis",
+  );
+});
+
+test("Ocupação estabiliza o fuso e executa uma única carga após atualizar metadados", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const loader = source.slice(
+    source.indexOf("  const loadScenarioData = React.useCallback"),
+    source.indexOf("  const refreshOccupancyDashboard = React.useCallback"),
+  );
+  const refresh = source.slice(
+    source.indexOf("  const refreshOccupancyDashboard = React.useCallback"),
+    source.indexOf("  const updateDashboardSettings = React.useCallback"),
+  );
+
+  assert.match(
+    source,
+    /React\.useMemo<CompanyTimeZoneResolution>[\s\S]*?companyTimeZoneResolution\.fallback,[\s\S]*?companyTimeZoneResolution\.source,[\s\S]*?companyTimeZoneResolution\.timeZone,[\s\S]*?companyTimeZoneResolution\.warning/,
+  );
+  assert.doesNotMatch(
+    loader,
+    /\bcompanyTimeZoneResolution\b/,
+    "a identidade transitória do objeto de fuso não pode recriar o loader",
+  );
+  assert.match(
+    loader,
+    /requireCertifiedRuntimeCompanyTimeZone\(\s*certifiedCompanyTimeZoneResolution/,
+  );
+  assert.match(
+    refresh,
+    /if \(metadataError\) \{[\s\S]*?metadataLoadedKeyRef\.current = "";[\s\S]*?await loadScenarios\(selectedScenario\?\.id\);[\s\S]*?\} else if \(selectedScenario\) \{[\s\S]*?await loadScenarioData\(selectedScenario, \{ force: true \}\);[\s\S]*?refreshOccupancyComparisons\(\)/,
+    "o catálogo só deve ser reconsultado quando o erro pertence aos metadados",
+  );
+  assert.doesNotMatch(
+    refresh,
+    /Promise\.all/,
+    "metadados e dados não podem ser carregados em paralelo e se abortar",
+  );
+  assert.match(
+    source,
+    /onClick=\{\(\) => void refreshOccupancyDashboard\(\)\}/,
+  );
+  assert.match(
+    source,
+    /loadScenarioData\(selectedScenario\);/,
+    "mudança de plano deve carregar apenas recursos vencidos ou novos",
+  );
+});
+
+test("Ocupação compartilha a série horária certificada do cenário em foco", () => {
+  const dashboardSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const aggregateEffect = comparisonSource.slice(
+    comparisonSource.indexOf("    async function refreshAggregates()"),
+    comparisonSource.indexOf("  React.useEffect(() => {\n    if (!needsCurrentHourMaximum)"),
+  );
+
+  assert.match(
+    dashboardSource,
+    /focusHourlyAggregate = React\.useMemo<OccupancySharedHourlyAggregate \| null>/,
+  );
+  assert.match(
+    dashboardSource,
+    /useOccupancyComparisonCards\(\{[\s\S]*?focusHourlyAggregate,[\s\S]*?focusSnapshotPending,/,
+  );
+  assert.match(
+    dashboardSource,
+    /visible\.has\("occupancy_scenario_max_hour"\)[\s\S]*?granularities\.add\("hour"\)/,
+    "o pai deve assumir a fonte horária quando apenas o máximo por hora está visível",
+  );
+  assert.match(
+    comparisonSource,
+    /hourlyAggregateDayCount = needsHourlyHeatmap \? settings\.dayCount : 1/,
+    "o comparativo simples não deve buscar sete dias sem necessidade",
+  );
+  assert.match(
+    aggregateEffect,
+    /resolveSharedOccupancyHourlyAggregate\([\s\S]*?sharedFocus\.covered && !sharedFocus\.series[\s\S]*?return;/,
+    "a comparação deve aguardar a requisição idêntica que já pertence ao pai",
+  );
+  assert.match(
+    aggregateEffect,
+    /scenario\.id === focusScenarioId &&[\s\S]*?sharedFocus\.series[\s\S]*?return sharedFocus\.series;/,
+    "a série certificada do foco deve substituir sua segunda chamada",
+  );
+  assert.ok(
+    aggregateEffect.indexOf("return sharedFocus.series;") <
+      aggregateEffect.indexOf("apiFetch<OccupancyScenarioAggregateResponse>"),
+    "a reutilização precisa ocorrer antes de qualquer GET do cenário",
+  );
+  assert.match(
+    dashboardSource,
+    /const focusSnapshotPending = Boolean\([\s\S]*?!certifiedHistoryError[\s\S]*?!sharedFocusSnapshot/,
+    "uma falha de /history deve liberar o lote dos demais cenários",
+  );
+  assert.match(
+    comparisonSource,
+    /focusSnapshotPending &&[\s\S]*?requestedIds\.has\(focusScenarioId\)[\s\S]*?return;/,
+    "o comparativo deve aguardar somente enquanto a requisição do pai está em voo",
+  );
+  assert.match(
+    comparisonSource,
+    /const focusHourlyAggregateKey = focusHourlyAggregate[\s\S]*?focusHourlyAggregateKey,[\s\S]*?focusScenarioId/,
+    "atualizações do objeto compartilhado não podem abortar o lote dos demais cenários",
+  );
+});
+
+test("falhas parciais da Ocupação preservam respostas e frescor independentes", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const loader = source.slice(
+    source.indexOf("  const loadScenarioData = React.useCallback"),
+    source.indexOf("  const refreshOccupancyDashboard = React.useCallback"),
+  );
+
+  assert.match(
+    loader,
+    /occupancyScenarioHistoryPath[\s\S]*?\.catch\(\(error\) => \{[\s\S]*?succeeded: false as const/,
+    "history não pode rejeitar o lote inteiro",
+  );
+  assert.match(
+    loader,
+    /dueAlerts[\s\S]*?succeeded: true as const[\s\S]*?succeeded: false as const/,
+    "alertas precisam informar sucesso separadamente",
+  );
+  assert.match(
+    loader,
+    /chartEntries\.map\(\(entry\) => \[entry\.id, entry\.state\]\)/,
+    "agregados concluídos devem ser publicados mesmo se outra fonte falhar",
+  );
+  assert.match(loader, /alertsAt: alertResult\.succeeded \? completedAt/);
+  assert.match(loader, /historyAt: historyResult\.succeeded/);
+  assert.match(
+    loader,
+    /chartEntries\.forEach\(\(entry\) => \{[\s\S]*?if \(!entry\.succeeded\) return;[\s\S]*?nextFreshness\.chartAt/,
+    "somente a granularidade concluída pode avançar seu TTL",
+  );
+});
+
+test("catálogo do Ao Vivo deduplica metadados e só tenta novamente após erro", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const loader = source.slice(
+    source.indexOf("  const loadScenarios = React.useCallback"),
+    source.indexOf("  const loadCharts = React.useCallback"),
+  );
+  const loaderDependencies = loader.slice(loader.lastIndexOf("  }, ["));
+  const autoRefresh = source.slice(
+    source.indexOf("  useResourceAutoRefresh(\n    () => loadScenarios"),
+    source.indexOf("  React.useEffect(() => {\n    function syncCameraGroups"),
+  );
+
+  assert.match(source, /metadataRequestKeyRef = React\.useRef\(""\)/);
+  assert.match(source, /metadataLoadedKeyRef = React\.useRef\(""\)/);
+  assert.match(
+    loader,
+    /metadataRequestKeyRef\.current === metadataKey \|\|[\s\S]*?metadataLoadedKeyRef\.current === metadataKey[\s\S]*?return;/,
+    "Strict Mode e renders equivalentes devem compartilhar o catálogo",
+  );
+  assert.doesNotMatch(loaderDependencies, /\bcameraGroups\b/);
+  assert.doesNotMatch(loaderDependencies, /\bworkerLocationAssignments\b/);
+  assert.match(loader, /cameraGroupsRef\.current/);
+  assert.match(loader, /workerLocationAssignmentsRef\.current/);
+  assert.match(
+    autoRefresh,
+    /enabled:[\s\S]*?Boolean\(metadataError\)/,
+    "catálogo saudável não deve manter polling em repouso",
+  );
+});
+
+test("catálogo da Ocupação deduplica replay e preserva seleção ao trocar somente o fuso", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const loader = source.slice(
+    source.indexOf("  const loadScenarios = React.useCallback"),
+    source.indexOf("  const loadScenarioData = React.useCallback"),
+  );
+  const resetStart = source.indexOf(
+    "  React.useEffect(() => {\n    requestRef.current?.abort();",
+  );
+  const companyReset = source.slice(
+    resetStart,
+    source.indexOf("  React.useEffect(() => {\n    if (", resetStart),
+  );
+
+  assert.match(loader, /metadataRequestKeyRef\.current === metadataKey/);
+  assert.match(loader, /metadataLoadedKeyRef\.current === metadataKey/);
+  assert.match(loader, /signal: controller\.signal/);
+  assert.match(loader, /metadataLoadedKeyRef\.current = metadataKey/);
+  assert.match(companyReset, /\}, \[companyScopeId\]\);/);
+  assert.doesNotMatch(
+    companyReset.slice(companyReset.lastIndexOf("  }, [")),
+    /companyTimeZone/,
+    "o fuso invalida dados temporais, não o catálogo tenant-scoped",
+  );
+});
+
+test("análise por período aguarda configuração, deduplica e não faz polling", () => {
   const source = readFileSync(
     resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
     "utf8",
   );
 
+  assert.match(source, /configurationReadyKey !== configurationScopeKey/);
+  assert.match(source, /loadingScenarios/);
+  assert.match(source, /setQueryVersion\(\(value\) => value \+ 1\)/);
   assert.match(
     source,
-    /const refreshWhenIdle = \(\) => \{[\s\S]*?requestRef\.current !== null[\s\S]*?return;[\s\S]*?setQueryVersion/,
-    "o timer deve pular o tick enquanto a consulta anterior estiver ativa",
+    /completedRequestKeyRef\.current === requestKey[\s\S]*?completedRequestKeyRef\.current = requestKey/,
+    "um evento semanticamente idêntico não deve repetir uma análise já concluída",
+  );
+  assert.doesNotMatch(source, /setInterval|refreshWhenIdle|visibilitychange/);
+});
+
+test("análises compartilham datasets e ignoram alterações puramente visuais", () => {
+  const countingSource = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancySource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const requirementsSource = countingSource.slice(
+    countingSource.indexOf("  const dataRequirementsKey"),
+    countingSource.indexOf("  const hourlyDetailRequested"),
+  );
+
+  assert.match(
+    countingSource,
+    /const queryWidgets = React\.useMemo\([\s\S]*?orderByCardPreferences\(widgets, preferences\)/,
   );
   assert.match(
-    source,
-    /setInterval\([\s\S]*?refreshWhenIdle[\s\S]*?analysisRangePlan\.refreshIntervalMs/,
+    countingSource,
+    /const canonicalHourPromise =[\s\S]*?const contextHourPromise = requirements\.contextHour\s*\? canonicalHourPromise[\s\S]*?const hourPromise = requirements\.hour\s*\? canonicalHourPromise/,
+    "widgets horários devem compartilhar uma única promessa de consulta",
+  );
+  assert.match(
+    countingSource,
+    /pendingAnalysisDayRequestsForCache[\s\S]*?pending\.promise/,
+    "consultas diárias equivalentes em voo devem ser compartilhadas",
+  );
+  assert.match(
+    countingSource,
+    /pendingAnalysisDatasetsBySignal[\s\S]*?const existing = pending\.get\(key\);[\s\S]*?if \(existing\) return existing/,
+    "a mesma faixa agregada não deve ser disparada duas vezes na mesma análise",
+  );
+  assert.match(
+    countingSource,
+    /const reconciliationMinutePromise = currentMinuteRange[\s\S]*?requirements\.minute[\s\S]*?\? minutePromise/,
+    "o detalhe minuto já carregado deve reconciliar a hora sem uma chamada sobreposta",
+  );
+  assert.match(
+    requirementsSource,
+    /periodAnalysisEffectiveGranularity\([\s\S]*?Math\.max\(1, scenarioCatalogSize\)/,
+  );
+  assert.doesNotMatch(
+    requirementsSource,
+    /Array\.from\(\{ length: catalogSize \}/,
+    "cada widget deve solicitar somente a resolução que realmente renderiza",
+  );
+  assert.doesNotMatch(
+    requirementsSource,
+    /scenarioIds|selectionMode|scopeMode|widgetColorById|widgetTitleById/,
+    "composição, cor e título usam a resposta agregada já carregada",
+  );
+  assert.match(
+    occupancySource,
+    /requestedDefinitionIdsKey[\s\S]*?preferenceById\.get\(id\)\?\.visible !== false/,
+  );
+  assert.match(
+    occupancySource,
+    /buildOccupancyReportDefinitions\([\s\S]*?\.filter\(\(definition\) => requiredDefinitionIds\.has\(definition\.id\)\)/,
+    "Ocupação deve consultar somente definições exigidas pelos widgets visíveis",
   );
 });
 
-test("visão embutida separa metadados do polling ao vivo e aborta escopos antigos", () => {
+test("visão embutida limita polling aos dados ao vivo e aborta escopos antigos", () => {
   const source = readFileSync(
     resolve(projectRoot, "components/app/embedded-live-view.tsx"),
     "utf8",
@@ -1860,20 +2544,55 @@ test("visão embutida separa metadados do polling ao vivo e aborta escopos antig
     metadataLoader,
     /viewIdentityKeyRef\.current !== requestedIdentityKey/,
   );
-  assert.match(
+  assert.doesNotMatch(
     source,
     /setInterval\([\s\S]*?refreshMetadataWhenVisible[\s\S]*?RESOURCE_METADATA_REFRESH_INTERVAL_MS/,
+    "metadados devem atualizar por foco/retorno, sem polling periódico",
   );
+  assert.match(source, /addEventListener\("focus", refreshMetadataWhenVisible\)/);
   assert.match(
     source,
     /setInterval\([\s\S]*?refreshDataWhenVisible[\s\S]*?REFRESH_SECONDS \* 1000/,
   );
   assert.match(source, /metadataRequestControllerRef\.current\?\.abort\(\)/);
   assert.match(source, /dataRequestControllerRef\.current\?\.abort\(\)/);
+  assert.match(source, /metadataRequestIdentityKeyRef = React\.useRef\(""\)/);
+  assert.match(
+    metadataLoader,
+    /metadataRequestRunningRef\.current &&[\s\S]*?metadataRequestIdentityKeyRef\.current === viewIdentityKey[\s\S]*?return;/,
+    "o replay do Strict Mode deve reutilizar a requisição semântica em voo",
+  );
+  assert.match(source, /void loadMetadata\(\);/);
+  assert.doesNotMatch(source, /void loadMetadata\(\{ force: true \}\);/);
   assert.match(
     dataLoader,
-    /fetchHourlyAggregateRanges\([\s\S]*?signal: controller\.signal/,
+    /fetchBoundedHourlyAggregateRanges\([\s\S]*?signal: controller\.signal/,
     "o cache horário mais novo deve continuar abortável",
+  );
+  assert.match(
+    dataLoader,
+    /const pendingRequests = new Map[\s\S]*?pendingRequests\.get\(path\)/,
+    "requisições diretas idênticas da mesma rodada devem compartilhar a promise",
+  );
+  assert.match(
+    dataLoader,
+    /const liveSourceRequired = queryableConfigs\.some[\s\S]*?liveSourceRequired[\s\S]*?fetchBoundedHourlyAggregateRanges/,
+    "a base ao vivo deve existir somente para widgets que realmente a consomem",
+  );
+  assert.match(
+    dataLoader,
+    /scenarioRequests\.get\(queryKey\)[\s\S]*?scenarioRequests\.set\(queryKey, pending\)/,
+    "comparativos com a mesma janela devem compartilhar o mesmo dataset",
+  );
+  assert.match(
+    dataLoader,
+    /scenarioDatasetCacheRef\.current\.get\(queryKey\)[\s\S]*?definition\.to <= now[\s\S]*?cacheEmbeddedScenarioDataset/,
+    "um comparativo histórico fechado deve continuar em cache durante o polling de outros widgets",
+  );
+  assert.match(
+    metadataLoader,
+    /const liveDataStale =[\s\S]*?!dataRequestRunningRef\.current[\s\S]*?MIN_DATA_REFRESH_INTERVAL_MS[\s\S]*?metadataChanged \|\|[\s\S]*?liveDataStale/,
+    "a atualização de metadados não deve duplicar uma rodada de dados ainda fresca ou em voo",
   );
   assert.match(
     source,
@@ -1885,10 +2604,231 @@ test("visão embutida separa metadados do polling ao vivo e aborta escopos antig
     /companyScopeCertification\.timeZone[\s\S]*?widgetConfigs/,
     "a identidade embutida deve mudar quando o fuso certificado mudar",
   );
+  assert.match(
+    source,
+    /widgetConfigs\.map\(embeddedWidgetQueryConfig\)[\s\S]*?companyScopeCertification\.timeZone,[\s\S]*?widgetQueryIdentityKey/,
+    "a identidade de consulta deve ignorar a apresentação do widget",
+  );
+  assert.match(
+    source,
+    /currentConfigById[\s\S]*?config: currentConfigById\.get\(state\.config\.id\)/,
+    "o título atual deve ser reaplicado ao dataset sem refazer a consulta",
+  );
 });
 
-test("workers e cenários estrangeiros não derrubam metadados válidos do Ao vivo", () => {
+test("visão embutida não atualiza períodos históricos fechados a cada 5 segundos", () => {
+  const needsLiveRefresh = loadStandaloneFunction(
+    "components/app/embedded-live-view.tsx",
+    "embeddedViewNeedsLiveRefresh",
+  );
+  const now = new Date("2026-09-02T18:00:00.000Z");
+  const scenarioWidget = {
+    chart: "scenario-hour",
+    period: "yesterday",
+  };
+
+  assert.equal(needsLiveRefresh([scenarioWidget], now), false);
+  assert.equal(
+    needsLiveRefresh(
+      [
+        {
+          ...scenarioWidget,
+          period: "custom",
+          to: "2026-09-01T23:59:59.000Z",
+        },
+      ],
+      now,
+    ),
+    false,
+  );
+  assert.equal(
+    needsLiveRefresh(
+      [
+        {
+          ...scenarioWidget,
+          period: "custom",
+          to: "2026-09-03T00:00:00.000Z",
+        },
+      ],
+      now,
+    ),
+    true,
+  );
+  assert.equal(
+    needsLiveRefresh([{ chart: "today-location" }], now),
+    true,
+  );
+});
+
+test("título da visão embutida não participa da identidade de consulta", () => {
+  const queryConfig = loadStandaloneFunction(
+    "components/app/embedded-live-view.tsx",
+    "embeddedWidgetQueryConfig",
+  );
+  const base = {
+    chart: "scenario-hour",
+    from: "2026-08-01T00:00:00.000Z",
+    granularity: "day",
+    id: "single",
+    period: "custom",
+    scenarioIds: ["scenario-b", "scenario-a"],
+    scopeId: "",
+    to: "2026-09-01T00:00:00.000Z",
+  };
+
+  assert.deepEqual(
+    queryConfig({ ...base, title: "Título A" }),
+    queryConfig({ ...base, title: "Título B" }),
+  );
+  assert.deepEqual(
+    queryConfig({ ...base, title: "Título A" }).scenarioIds,
+    ["scenario-a", "scenario-b"],
+  );
+});
+
+test("comparação de cenários separa consulta de apresentação e filtra localmente", () => {
+  const dataKey = loadStandaloneFunction(
+    "components/app/scenario-comparison-card.tsx",
+    "scenarioComparisonSettingsDataKey",
+  );
+  const presentationKey = loadStandaloneFunction(
+    "components/app/scenario-comparison-card.tsx",
+    "scenarioComparisonSettingsPresentationKey",
+  );
+  const base = {
+    accumulated: false,
+    customFrom: "2026-08-01T00:00",
+    customTo: "2026-09-01T00:00",
+    granularity: "hour",
+    period: "last_30d",
+    selectedScenarioIds: [],
+    selectionMode: "all",
+    view: "period",
+  };
+  const presentationOnly = {
+    ...base,
+    accumulated: true,
+    selectedScenarioIds: ["scenario-b", "scenario-a", "scenario-b"],
+    selectionMode: "custom",
+  };
+
+  assert.equal(
+    dataKey(base),
+    dataKey(presentationOnly),
+    "acumulado e cenários são transformações locais da mesma resposta global",
+  );
+  assert.notEqual(presentationKey(base), presentationKey(presentationOnly));
+  assert.equal(
+    presentationKey(presentationOnly),
+    presentationKey({
+      ...presentationOnly,
+      selectedScenarioIds: ["scenario-a", "scenario-b"],
+    }),
+    "ordem e duplicatas da seleção não devem mudar sua identidade visual",
+  );
+  assert.equal(
+    dataKey(base),
+    dataKey({
+      ...base,
+      customFrom: "2019-01-01T00:00",
+      customTo: "2020-01-01T00:00",
+    }),
+    "datas personalizadas inativas não podem invalidar a consulta",
+  );
+  assert.notEqual(
+    dataKey(base),
+    dataKey({ ...base, granularity: "day" }),
+  );
+  assert.equal(
+    dataKey({ ...base, granularity: "hour", view: "days_month" }),
+    dataKey({ ...base, granularity: "month", view: "days_month" }),
+    "comparativos civis usam fonte diária independentemente do seletor oculto",
+  );
+  assert.equal(
+    dataKey(base, true),
+    dataKey(
+      {
+        ...base,
+        customFrom: "2019-01-01T00:00",
+        customTo: "2019-02-01T00:00",
+        period: "custom",
+      },
+      true,
+    ),
+    "um período imposto pelo relatório deve ignorar o período salvo no widget",
+  );
+
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+  const dataIdentity = source.slice(
+    source.indexOf("  const dataRequestKey ="),
+    source.indexOf("  const hasScenarioSelection ="),
+  );
+  assert.doesNotMatch(
+    dataIdentity,
+    /settings\.accumulated|selectedScenarioIds|selectionMode|resolvedTitle|widgetColor/,
+  );
+  assert.match(source, /hourlySourceRef\.current/);
+  assert.match(source, /aggregateSourceRef\.current/);
+  assert.match(
+    source,
+    /const definition = React\.useMemo\([\s\S]*?accumulated: settings\.accumulated/,
+  );
+});
+
+test("catálogo multiempresa do Master é particionado antes da validação", () => {
   const selectedCompanyId = "company-selected";
+  assert.equal(
+    masterCompanyScope.usesMasterCrossCompanyScope(
+      { company_id: "company-jwt", id: "master", is_master: true },
+      selectedCompanyId,
+    ),
+    true,
+  );
+  assert.equal(
+    masterCompanyScope.usesMasterCrossCompanyScope(
+      { company_id: selectedCompanyId, id: "master", is_master: true },
+      selectedCompanyId,
+    ),
+    false,
+  );
+  const mixedScenarios = [
+    {
+      ...scenario("scenario-jwt", "Cenário do JWT", "line-jwt", 1),
+      company_id: "company-jwt",
+    },
+    {
+      ...scenario("scenario-selected", "Cenário selecionado", "line-selected", 1),
+      company_id: selectedCompanyId,
+    },
+  ];
+  const selectedScenarios = tenantScopeValidation.selectExplicitCompanyScopedRows(
+    mixedScenarios,
+    selectedCompanyId,
+    { label: "cenários de Contagem" },
+  );
+
+  assert.equal(selectedScenarios.foreignCount, 1);
+  assert.deepEqual(selectedScenarios.foreignCompanyIds, ["company-jwt"]);
+  assert.deepEqual(
+    scenarioValidation
+      .requireScenarioRows(selectedScenarios.rows, selectedCompanyId)
+      .map((row) => row.id),
+    ["scenario-selected"],
+  );
+  assert.throws(
+    () =>
+      tenantScopeValidation.selectExplicitCompanyScopedRows(
+        [{ ...mixedScenarios[0], company_id: undefined }],
+        selectedCompanyId,
+        { label: "cenários de Contagem" },
+      ),
+    /company_id.*inválido/,
+    "Master nunca pode atribuir uma linha sem company_id ao tenant selecionado",
+  );
+
   const rows = metadataValidation.requireWorkerRows({
     workers: [
       {
@@ -1919,16 +2859,7 @@ test("workers e cenários estrangeiros não derrubam metadados válidos do Ao vi
     ["worker-jwt"],
   );
 
-  const scenarioRows = scenarioValidation.requireScenarioRows([
-    {
-      ...scenario("scenario-selected", "Cenário selecionado", "line-selected", 1),
-      company_id: selectedCompanyId,
-    },
-    {
-      ...scenario("scenario-jwt", "Cenário do JWT", "line-jwt", 1),
-      company_id: "company-jwt",
-    },
-  ]);
+  const scenarioRows = scenarioValidation.requireScenarioRows(mixedScenarios);
   const scopedScenarioRows = masterCompanyScope.filterScopedApiRows(
     scenarioRows,
     selectedCompanyId,
@@ -1979,7 +2910,7 @@ test("workers e cenários estrangeiros não derrubam metadados válidos do Ao vi
   );
   assert.match(
     realtimeWorkerHelper,
-    /requireExplicitCompanyId \? undefined : companyScopeId/,
+    /selectExplicitCompanyScopedRows\(value, companyScopeId!.*?[\s\S]*?requireWorkerRows/,
   );
   assert.match(
     realtimeWorkerHelper,
@@ -2024,7 +2955,7 @@ test("workers e cenários estrangeiros não derrubam metadados válidos do Ao vi
   assert.match(embeddedLoader, /setMetadataWarning\(workerMetadata\.warning\)/);
   assert.match(
     embeddedWorkerHelper,
-    /requireExplicitCompanyId \? undefined : companyId/,
+    /selectExplicitCompanyScopedRows\(value, companyId!.*?[\s\S]*?requireWorkerRows/,
   );
   assert.match(
     embeddedWorkerHelper,
@@ -2108,6 +3039,10 @@ test("análise por período envia empresa e abort signal em toda consulta", () =
     resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
     "utf8",
   );
+  const aggregateSource = readFileSync(
+    resolve(projectRoot, "lib/aggregate-range-query.ts"),
+    "utf8",
+  );
 
   for (const path of ["scenarios", "cameras", "locations"]) {
     assert.match(
@@ -2125,14 +3060,16 @@ test("análise por período envia empresa e abort signal em toda consulta", () =
   );
   assert.equal(
     source.match(/`\/analytics\/aggregate\?/g)?.length,
-    1,
+    undefined,
     "todas as agregações da análise devem passar pelo helper certificado",
   );
   assert.match(
     source,
-    /function fetchAnalysisAggregate\([\s\S]*?companyScopeId\?: string \| null,[\s\S]*?signal\?: AbortSignal[\s\S]*?`\/analytics\/aggregate\?\$\{params\.toString\(\)\}`,[\s\S]*?companyScopeId: companyScopeId\?\.trim\(\) \|\| undefined,[\s\S]*?signal/,
+    /fetchCompleteAggregateRange\(\{[\s\S]*?companyScopeId: companyScopeId\?\.trim\(\) \|\| undefined,[\s\S]*?signal/,
     "o helper agregado deve preservar simultaneamente escopo e abort signal",
   );
+  assert.match(aggregateSource, /rows\.length < AGGREGATE_RESPONSE_ROW_CEILING/);
+  assert.match(aggregateSource, /splitCompleteAggregateRange/);
   assert.ok(
     source.match(/companyScopeId,\s*controller\.signal/g)?.length >= 3,
     "cada dataset agregado deve receber o escopo efetivo",
@@ -2216,20 +3153,28 @@ test("Análises e Relatórios segmentam a base horária e validam a cobertura", 
   );
   assert.match(
     reportsSource,
-    /definition\.id === COUNTING_HOUR_HISTORY_ID[\s\S]*?fetchHourlyAggregateRanges/,
+    /definition\.granularity === "hour"[\s\S]*?fetchBoundedHourlyAggregateRanges/,
   );
   assert.match(
     reportsSource,
-    /requireAggregateRowsInRange\([\s\S]*?definition\.from,[\s\S]*?definition\.to/,
+    /fetchCompleteAggregateRange\(\{[\s\S]*?from: definition\.from,[\s\S]*?to: definition\.to/,
   );
   assert.match(
     comparisonSource,
-    /definition\.granularity === "hour"[\s\S]*?fetchHourlyAggregateRanges/,
+    /definition\.granularity !== "hour"[\s\S]*?fetchConsolidatedScenarioComparisonRangeRows/,
   );
   assert.match(
     comparisonSource,
-    /requireAggregateRowsInRange\([\s\S]*?definition\.from,[\s\S]*?definition\.to/,
+    /fetchCompleteAggregateRange\(\{[\s\S]*?granularity: definition\.granularity/,
   );
+  assert.match(
+    comparisonSource,
+    /const fullTo = lastBoundaryPartial \? lastBoundaryStart : definition\.to/,
+    "o bucket civil aberto deve vir apenas da borda horária, nunca de uma consulta day/month redundante",
+  );
+  assert.match(comparisonSource, /completeSourceCoverage/);
+  assert.match(reportsSource, /aggregateSource=\{reportComparisonAggregateSource\}/);
+  assert.match(reportsSource, /const requestAggregate: CompleteAggregateRequest/);
   assert.match(
     reportsSource,
     /while \(cursor < end && guard < 500\)[\s\S]*?if \(cursor < end\) \{[\s\S]*?throw new RangeError/,
@@ -2308,6 +3253,14 @@ test("base parcial sobreposta ganha série própria no comparativo anual", () =>
 
   assert.equal(selected2025?.months[6], 310);
   assert.equal(comparable2025?.months[6], 200);
+  const rowKeys = comparison.rows.map(
+    (row) => `${row.year}:${row.baselineOnly ? "comparison-baseline" : "selected-period"}`,
+  );
+  assert.equal(
+    new Set(rowKeys).size,
+    rowKeys.length,
+    "ano observado e base comparável precisam de identidades distintas",
+  );
 });
 
 test("mês civil sem eventos permanece zero certificado", () => {
@@ -2783,11 +3736,15 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
     /Atualização automática|Atualização ao vivo|Mapas e comparativos|liveRefreshSelectId|comparisonRefreshSelectId/,
   );
   assert.match(dashboardSource, /const OCCUPANCY_REFRESH_SECONDS = 5/);
+  assert.match(
+    dashboardSource,
+    /aggregateRefreshMs: OCCUPANCY_COMPARISON_AGGREGATE_REFRESH_MS/,
+  );
   assert.match(dashboardSource, /aggregateRefreshMs: OCCUPANCY_REFRESH_MS/);
   assert.match(dashboardSource, /aria-label="Cenário de ocupação em foco"/);
   assert.match(
     comparisonSource,
-    /return \{ cards, reportAssets, settings, updateSettings \}/,
+    /return \{ cards, refresh, reportAssets, settings, updateSettings \}/,
     "o painel superior precisa atualizar a mesma preferência persistida dos widgets",
   );
   assert.equal(
@@ -2894,7 +3851,7 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     analysisToolbar,
-    /aria-label="Metadados da análise de Contagem"[\s\S]*?Última atualização às/,
+    /aria-label="Informações da análise de Contagem"[\s\S]*?Última atualização às/,
   );
   assert.match(
     analysisToolbar,
@@ -2971,7 +3928,7 @@ test("contador civil compartilhado preserva intervalos longos sem depender de DS
   );
 });
 
-test("exportação da Ocupação Ao Vivo inclui os oito comparativos configurados", () => {
+test("exportação da Ocupação Ao Vivo inclui comparativos e duração configurados", () => {
   const dashboardSource = readFileSync(
     resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
     "utf8",
@@ -2980,11 +3937,15 @@ test("exportação da Ocupação Ao Vivo inclui os oito comparativos configurado
     resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
     "utf8",
   );
+  const durationSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-duration-widgets.tsx"),
+    "utf8",
+  );
   const reportBuilderSource = comparisonSource.slice(
     comparisonSource.indexOf("function buildOccupancyComparisonReportAssets"),
     comparisonSource.indexOf("function OccupancyHalfDonutCard"),
   );
-  const expectedCardIds = [
+  const comparisonCardIds = [
     "occupancy_scenario_half_donut",
     "occupancy_scenario_bar_race",
     "occupancy_scenario_max_hour",
@@ -2995,13 +3956,48 @@ test("exportação da Ocupação Ao Vivo inclui os oito comparativos configurado
     "occupancy_scenario_hour_heatmap",
   ];
 
-  for (const cardId of expectedCardIds) {
+  for (const cardId of comparisonCardIds) {
     assert.match(
       reportBuilderSource,
       new RegExp(`cardId: "${cardId}"`),
       `${cardId} precisa gerar um asset de relatório`,
     );
   }
+  for (const cardId of [
+    "occupancy_duration_timeline",
+    "occupancy_duration_by_scenario",
+  ]) {
+    assert.match(
+      durationSource,
+      new RegExp(`cardId: "${cardId}"`),
+      `${cardId} precisa gerar um asset de relatório`,
+    );
+  }
+  assert.match(
+    durationSource,
+    /response\.data\.length\s*>=\s*AGGREGATE_RESPONSE_ROW_CEILING/,
+    "a duração precisa detectar o teto silencioso de linhas da API",
+  );
+  assert.match(
+    durationSource,
+    /fetchDurationAggregatePartition\([\s\S]*?buckets:\s*buckets\.slice\(0, midpoint\)[\s\S]*?fetchDurationAggregatePartition\([\s\S]*?buckets:\s*buckets\.slice\(midpoint\)/,
+    "a duração precisa dividir recursivamente respostas possivelmente truncadas",
+  );
+  assert.match(
+    durationSource,
+    /DURATION_RECONCILIATION_MINUTES[\s\S]*?reconcileOccupancyDurationMetrics\(/,
+    "a atualização minuto a minuto deve reconciliar uma janela curta em vez de baixar o dia inteiro",
+  );
+  assert.match(
+    durationSource,
+    /chunkDurationSeries\([\s\S]*?interactive:\s*false/,
+    "a exportação deve dividir muitos cenários e remover o zoom interativo do arquivo estático",
+  );
+  assert.match(
+    durationSource,
+    /scenario\.company_id === companyScopeId/,
+    "a duração deve particionar os cenários pela empresa antes de consultar a API",
+  );
   assert.match(reportBuilderSource, /theme = "light" as const/);
   assert.doesNotMatch(
     reportBuilderSource,
@@ -3010,7 +4006,7 @@ test("exportação da Ocupação Ao Vivo inclui os oito comparativos configurado
   );
   assert.match(
     reportBuilderSource,
-    /cell\.value === null \? "Sem bucket certificado" : "Certificado"/,
+    /cell\.value === null \? "Sem dados" : "Disponível"/,
   );
   assert.match(
     comparisonSource,
@@ -3021,6 +4017,139 @@ test("exportação da Ocupação Ao Vivo inclui os oito comparativos configurado
     dashboardSource,
     /reportAssets: occupancyComparisonReportAssets[\s\S]*?occupancyComparisonReportAssets\.forEach\(\(\{ cardId, chart \}\) =>/,
     "o relatório deve incorporar os assets usando as preferências de ordem, visibilidade e título",
+  );
+  assert.match(
+    dashboardSource,
+    /occupancyDurationReportAssets[\s\S]*?occupancyDurationReportAssets\.forEach\([\s\S]*?titleSuffix/,
+    "o relatório deve incorporar a linha do tempo e o comparativo de duração",
+  );
+  assert.match(
+    dashboardSource,
+    /occupancyDurationReportMetrics[\s\S]*?occupancyDurationReportMetrics\.forEach\(\(\{ cardId, metric \}\) =>/,
+    "o relatório deve incorporar os indicadores de duração",
+  );
+  assert.match(
+    dashboardSource,
+    /occupancyReportDataCompleteUntil\([\s\S]*?occupancyDurationDataCompleteUntil/,
+    "o corte certificado deve considerar também os agregados de duração",
+  );
+});
+
+test("widgets de duração preservam composição, acessibilidade e resumo numérico limitado", () => {
+  const durationPath = "components/app/occupancy-duration-widgets.tsx";
+  const durationSource = readFileSync(resolve(projectRoot, durationPath), "utf8");
+  const dashboardSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const describeComposition = loadStandaloneFunction(
+    durationPath,
+    "describeDurationScenarioComposition",
+  );
+  const buildSummaryTable = loadStandaloneFunction(
+    durationPath,
+    "buildDurationSummaryReportTable",
+    { HOUR_SECONDS: 3_600 },
+  );
+  const compactOption = loadStandaloneFunction(
+    durationPath,
+    "compactDurationChartOption",
+  );
+
+  assert.deepEqual(
+    describeComposition([
+      { id: "a", name: "Entrada Norte" },
+      { id: "b", name: "Praça de alimentação" },
+    ]),
+    {
+      fullLabel: "Entrada Norte + Praça de alimentação",
+      shortLabel: "Entrada Norte + Praça de alimentação",
+    },
+  );
+
+  const scenarioSeries = ["a", "b"].map((scenarioId, index) => ({
+    name: index ? "Praça de alimentação" : "Entrada Norte",
+    scenarioId,
+    summary: {
+      confirmedFreeSeconds: 180 + index * 60,
+      confirmedOccupiedSeconds: 120 + index * 60,
+      expectedSeconds: 600,
+      loadUnitSeconds: 7_200 + index * 3_600,
+      longestConfirmedOccupiedSeconds: 120,
+      observedSeconds: 540,
+      segments: Array.from({ length: 500 }, () => ({ state: "occupied" })),
+      transitionSeconds: 240 - index * 60,
+      unknownSeconds: 60,
+    },
+  }));
+  const table = buildSummaryTable(
+    scenarioSeries,
+    "Resumo",
+    "Todos os intervalos permanecem no gráfico.",
+  );
+  assert.equal(table.rows.length, 2, "a tabela deve crescer por cenário, não por segmento");
+  assert.match(table.description, /1\.000 intervalo\(s\).*sem truncar os totais/);
+  for (const column of table.columns.slice(1)) {
+    assert.equal(column.numeric, true, `${column.key} precisa ser quantitativa`);
+    assert.equal(typeof table.rows[0][column.key], "number");
+  }
+  assert.equal(table.rows[0].occupied, 2);
+  assert.equal(table.rows[0].load, 2);
+
+  const compact = compactOption(
+    {
+      grid: { bottom: 56, left: 12, right: 26, top: 46 },
+      legend: { itemHeight: 8, textStyle: { fontSize: 10 }, top: 4 },
+      xAxis: { axisLabel: { fontSize: 9 }, name: "Tempo" },
+      yAxis: { axisLabel: { width: 112 } },
+    },
+    "timeline",
+  );
+  assert.equal(compact.grid.top, 24);
+  assert.equal(compact.grid.bottom, 30);
+  assert.equal(compact.legend.textStyle.fontSize, 8);
+
+  assert.match(
+    durationSource,
+    /requestedScenarioKey[\s\S]*?React\.useMemo\([\s\S]*?\[requestedScenarioKey, scenarioOptions\]/,
+    "edições visuais devem preservar a identidade da lista consultada",
+  );
+  assert.match(
+    durationSource,
+    /enabled = true[\s\S]*?if \(!enabled\) return "";[\s\S]*?React\.useEffect\(\(\) => \{\s*if \(!enabled\) \{[\s\S]*?scopeKey: ""[\s\S]*?return;/,
+    "a duração deve zerar a fonte e sair antes de criar consulta ou timer enquanto a visão hidrata",
+  );
+  assert.match(
+    dashboardSource,
+    /useOccupancyDurationCards\(\{[\s\S]*?enabled: occupancyPreferencesReady/,
+    "o dashboard deve habilitar a duração apenas depois de hidratar o escopo atual",
+  );
+  assert.match(durationSource, /new ResizeObserver\(update\)/);
+  assert.match(durationSource, /data-duration-chart-density=/);
+  assert.match(durationSource, /aria-live=\{tone === "error" \? "assertive" : "polite"\}/);
+  assert.match(
+    durationSource,
+    /<table className="sr-only">[\s\S]*?Ocupado confirmado[\s\S]*?Sem dados/,
+  );
+  assert.match(durationSource, /Consultar os \{rows\.length\} cenários em texto/);
+  assert.match(
+    durationSource,
+    /definition\.description,[\s\S]*?composition\.shortLabel[\s\S]*?contextualMessage/,
+    "o aviso não pode substituir a semântica conceitual do KPI",
+  );
+  assert.match(
+    durationSource,
+    /reportContext[\s\S]*?buildDurationReportContext/,
+  );
+  assert.match(
+    durationSource,
+    /const reportWarnings =[\s\S]*?timeZoneWarning,[\s\S]*?currentDataset\.error/,
+    "o aviso de fuso deve acompanhar PDF e IA mesmo com a timeline oculta",
+  );
+  assert.match(
+    dashboardSource,
+    /\.\.\.occupancyDurationReportContext/,
+    "a composição própria dos widgets deve chegar ao relatório e à IA",
   );
 });
 
@@ -3147,13 +4276,96 @@ test("Relatórios de Contagem não duplica o controle do mês aberto", () => {
   );
 
   assert.equal(
-    (periodSource.match(/id="counting-report-open-period"/g) ?? []).length,
+    (periodSource.match(/role="switch"/g) ?? []).length,
     1,
+  );
+  assert.match(periodSource, /<DialogTrigger asChild>/);
+  assert.match(
+    periodSource,
+    /className="h-8 w-8[^"]*@sm:w-full[^"]*@sm:justify-start/,
   );
   assert.match(
     reportsSource,
-    /aria-label="Ações dos relatórios de Contagem"\s+className="col-start-4 row-start-1 flex w-\[248px\][^"]*flex-nowrap/,
+    /aria-label="Ações dos relatórios de Contagem"\s+className="col-start-5 row-start-1 flex w-\[248px\][^"]*flex-nowrap/,
   );
+});
+
+test("Relatórios de Contagem limita consultas e preferências antigas a quatro anos civis", () => {
+  const now = new Date(2026, 8, 3, 10, 30);
+  const periodSource = readFileSync(
+    resolve(projectRoot, "components/app/counting-report-period-control.tsx"),
+    "utf8",
+  );
+  const reportsSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.equal(countingReportPeriod.COUNTING_REPORT_HISTORY_YEARS, 4);
+  assert.equal(countingReportPeriod.minimumCountingReportMonth(now), "2023-01");
+  assert.deepEqual(
+    localDateParts(countingReportPeriod.countingReportHistoryFrom(now)),
+    [2023, 1, 1],
+  );
+  assert.deepEqual(countingReportPeriod.defaultCountingReportPeriod(now), {
+    from: "2023-01",
+    to: "2026-09",
+  });
+  assert.deepEqual(
+    countingReportPeriod.normalizeCountingReportPeriod(
+      { from: "2020-01", to: "2026-09" },
+      now,
+    ),
+    { from: "2023-01", to: "2026-09" },
+  );
+  assert.match(
+    periodSource,
+    /Últimos \$\{COUNTING_REPORT_HISTORY_YEARS\} anos/,
+  );
+  assert.match(
+    reportsSource,
+    /from: addYears\(currentYearStart, -\(COUNTING_REPORT_HISTORY_YEARS - 1\)\)/,
+  );
+  const monthlyHistoryDefinition = reportsSource.slice(
+    reportsSource.indexOf("function buildCountingMonthHistoryDefinition"),
+    reportsSource.indexOf("function buildCountingOpenComparisonDefinitions"),
+  );
+  assert.match(monthlyHistoryDefinition, /countingReportHistoryFrom\(now\)/);
+  assert.match(monthlyHistoryDefinition, /Math\.max\(/);
+  assert.match(
+    reportsSource,
+    /buildComparisonDefinition\([\s\S]*?countingReportHistoryFrom\(now\)/,
+  );
+  const previousDefinition = reportsSource.slice(
+    reportsSource.indexOf("function buildComparisonDefinition"),
+    reportsSource.indexOf("function previousId"),
+  );
+  assert.match(previousDefinition, /minimumFrom: Date/);
+  assert.match(previousDefinition, /Math\.max\(comparisonFrom\.getTime\(\), minimumFrom\.getTime\(\)\)/);
+  assert.doesNotMatch(reportsSource, /Últimos 5 anos|currentYearStart, -4/);
+
+  const entry = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    comparisonDataFrom: new Date(2023, 0, 1),
+    hourlyRows: [],
+    includeOpenPeriod: false,
+    monthlyRows: [
+      aggregateRow("2023-01-01", "line-entry", 100),
+      aggregateRow("2024-01-01", "line-entry", 200),
+      aggregateRow("2025-01-01", "line-entry", 300),
+    ],
+    now,
+    period: {
+      from: new Date(2023, 0, 1),
+      to: new Date(2026, 0, 1),
+    },
+    scenarios: [entry],
+    scope: { cameraIds: [], name: "Entrada", scenario: entry },
+  });
+  assert.equal(model.periodValue, 600);
+  assert.equal(model.periodComparisonLimited, true);
+  assert.equal(model.periodComparisonMonthCount, 24);
+  assert.ok(Math.abs(model.periodDelta - 2 / 3) < 1e-12);
 });
 
 test("calendário de ocupação expõe uma grade ARIA de sete colunas", () => {
@@ -3355,6 +4567,81 @@ test("intervalo civil preserva DST e bloqueia runtime diferente da empresa", () 
     if (originalTimeZone === undefined) delete process.env.TZ;
     else process.env.TZ = originalTimeZone;
   }
+});
+
+test("seletor de Análises ordena dia, mês fechado e período personalizado", () => {
+  const pickerSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-date-range-picker.tsx"),
+    "utf8",
+  );
+  const maximumInput = "2026-09-03";
+
+  assert.equal(
+    analysisPeriodSelection.previousClosedCivilDayInput(maximumInput),
+    "2026-09-02",
+  );
+  assert.equal(
+    analysisPeriodSelection.previousClosedCivilDayInput("2026-01-01"),
+    "2025-12-31",
+  );
+  assert.deepEqual(
+    periodAnalysisWidgets.createDefaultPeriodAnalysisSettings(
+      new Date(2026, 8, 3, 12),
+    ),
+    { from: "2026-09-02", mode: "day", to: "2026-09-02" },
+  );
+  assert.deepEqual(
+    analysisPeriodSelection.lastClosedMonthRange(maximumInput),
+    { endInput: "2026-08-31", startInput: "2026-08-01" },
+  );
+  assert.deepEqual(
+    analysisPeriodSelection.lastClosedMonthRange("2026-01-01"),
+    { endInput: "2025-12-31", startInput: "2025-12-01" },
+  );
+  assert.deepEqual(
+    analysisPeriodSelection.closedMonthRange(2024, 1),
+    { endInput: "2024-02-29", startInput: "2024-02-01" },
+  );
+  assert.equal(
+    analysisPeriodSelection.isClosedMonthAvailable(2026, 7, maximumInput),
+    true,
+  );
+  assert.equal(
+    analysisPeriodSelection.isClosedMonthAvailable(2026, 8, maximumInput),
+    false,
+  );
+  assert.equal(
+    analysisPeriodSelection.inferAnalysisPeriodSelectionMode(
+      { endInput: "2026-09-02", startInput: "2026-09-02" },
+      maximumInput,
+    ),
+    "day",
+  );
+  assert.equal(
+    analysisPeriodSelection.inferAnalysisPeriodSelectionMode(
+      { endInput: "2026-08-31", startInput: "2026-08-01" },
+      maximumInput,
+    ),
+    "closed_month",
+  );
+  assert.equal(
+    analysisPeriodSelection.inferAnalysisPeriodSelectionMode(
+      { endInput: "2026-08-20", startInput: "2026-08-03" },
+      maximumInput,
+    ),
+    "custom",
+  );
+
+  const dayIndex = pickerSource.indexOf('label: "Diário"');
+  const monthIndex = pickerSource.indexOf('label: "Mês fechado"');
+  const customIndex = pickerSource.indexOf('label: "Personalizado"');
+  assert.ok(dayIndex >= 0 && dayIndex < monthIndex);
+  assert.ok(monthIndex < customIndex);
+  assert.match(pickerSource, /MONTH_LABELS\.map\(\(label, monthIndex\)/);
+  assert.match(pickerSource, /grid-cols-3[^"]*sm:grid-cols-4/);
+  assert.match(pickerSource, /max=\{closedMaximumInput\}/);
+  assert.match(pickerSource, /max=\{safeMaximumInput\}/);
+  assert.match(pickerSource, /Analisar dia[\s\S]*?Analisar mês[\s\S]*?Aplicar período/);
 });
 
 test("buckets grossos nunca incluem a semana ou o mês corrente de hoje", () => {
@@ -4397,6 +5684,125 @@ test("Visões recupera presets e video walls de namespaces anteriores", () => {
   }
 });
 
+test("links de visões publicam somente referência opaca e resolvem a configuração pessoal", () => {
+  const storage = memoryStorage();
+  const previousWindow = globalThis.window;
+  const previousCustomEvent = globalThis.CustomEvent;
+  globalThis.CustomEvent = class CustomEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  };
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+    location: { origin: "https://painel.example" },
+  };
+
+  try {
+    const target =
+      "/views/live?company_id=company-secret&scenario_ids=scenario-a%2Cscenario-b&widgets=%5B%7B%22scope_id%22%3A%22scenario-a%22%7D%5D";
+    const reference = viewLinkReference.saveViewLinkTarget(
+      target,
+      "user-a",
+    );
+    assert.match(reference, /^[A-Za-z0-9_-]{16,128}$/);
+    assert.equal(reference.length, 24);
+    assert.doesNotMatch(
+      reference,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+
+    const publicUrl = viewLinkReference.buildOpaqueViewUrl(
+      "/views/live",
+      reference,
+      window.location.origin,
+    );
+    const parsedPublicUrl = new URL(publicUrl);
+    assert.deepEqual([...parsedPublicUrl.searchParams.keys()], ["view"]);
+    assert.equal(parsedPublicUrl.searchParams.get("view"), reference);
+    assert.doesNotMatch(
+      publicUrl,
+      /company-secret|scenario-a|company_id|scenario_ids|scope_id|widgets/,
+    );
+
+    const resolved = viewLinkReference.loadViewLinkTarget(
+      reference,
+      "user-a",
+      "/views/live",
+    );
+    assert.equal(resolved.pathname, "/views/live");
+    const resolvedParams = new URLSearchParams(resolved.search);
+    assert.equal(resolvedParams.get("company_id"), "company-secret");
+    assert.equal(
+      resolvedParams.get("scenario_ids"),
+      "scenario-a,scenario-b",
+    );
+    assert.equal(
+      viewLinkReference.loadViewLinkTarget(
+        reference,
+        "user-b",
+        "/views/live",
+      ),
+      null,
+      "a referência não pode atravessar o usuário autenticado",
+    );
+    assert.equal(
+      viewLinkReference.loadViewLinkTarget(
+        reference,
+        "user-a",
+        "/views/dashboard/live",
+      ),
+      null,
+      "a referência não pode ser reutilizada em outra superfície",
+    );
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    if (previousCustomEvent === undefined) delete globalThis.CustomEvent;
+    else globalThis.CustomEvent = previousCustomEvent;
+  }
+});
+
+test("visões salvas legadas migram para links opacos sem perder os parâmetros", () => {
+  const storage = memoryStorage();
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+    location: { origin: "https://painel.example" },
+  };
+
+  try {
+    const opaquePath = viewLinkReference.ensureOpaqueViewPath(
+      "/views/dashboard/live?company_id=company-a&scope_mode=scenario&scope_id=scenario-a",
+      "user-a",
+    );
+    const publicUrl = new URL(opaquePath, window.location.origin);
+    assert.equal(publicUrl.pathname, "/views/dashboard/live");
+    assert.deepEqual([...publicUrl.searchParams.keys()], ["view"]);
+    assert.equal(
+      viewLinkReference.ensureOpaqueViewPath(opaquePath, "user-a"),
+      opaquePath,
+      "carregar novamente uma visão opaca não pode trocar sua referência",
+    );
+
+    const resolved = viewLinkReference.loadViewLinkTarget(
+      publicUrl.searchParams.get("view"),
+      "user-a",
+      "/views/dashboard/live",
+    );
+    const resolvedParams = new URLSearchParams(resolved.search);
+    assert.equal(resolvedParams.get("company_id"), "company-a");
+    assert.equal(resolvedParams.get("scope_mode"), "scenario");
+    assert.equal(resolvedParams.get("scope_id"), "scenario-a");
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
 test("visão salva remapeia capacidades junto com o cenário de destino", () => {
   const storage = memoryStorage();
   const previousWindow = globalThis.window;
@@ -5383,8 +6789,335 @@ test("payload agregado rejeita identidades duplicadas no mesmo bucket", () => {
   );
 });
 
+test("range de duração usa somente minutos fechados do dia civil IANA", () => {
+  const range = occupancyDuration.buildOccupancyClosedDayMinuteRange(
+    new Date("2026-09-02T13:42:37.845Z"),
+    "America/Sao_Paulo",
+  );
+
+  assert.equal(range.timeZone, "America/Sao_Paulo");
+  assert.equal(range.from.toISOString(), "2026-09-02T03:00:00.000Z");
+  assert.equal(range.dayEnd.toISOString(), "2026-09-03T03:00:00.000Z");
+  assert.equal(range.to.toISOString(), "2026-09-02T13:42:00.000Z");
+  assert.equal(range.requestedAt.toISOString(), "2026-09-02T13:42:37.845Z");
+  assert.equal(range.buckets.length, 642);
+  assert.equal(range.buckets[0].toISOString(), range.from.toISOString());
+  assert.equal(
+    range.buckets.at(-1).toISOString(),
+    "2026-09-02T13:41:00.000Z",
+  );
+
+  const midnight = occupancyDuration.buildOccupancyClosedDayMinuteRange(
+    new Date("2026-09-02T03:00:31Z"),
+    "America/Sao_Paulo",
+  );
+  assert.equal(midnight.buckets.length, 0);
+  assert.equal(midnight.from.getTime(), midnight.to.getTime());
+});
+
+test("range de duração respeita saltos e repetições do horário civil", () => {
+  const springForward = occupancyDuration.buildOccupancyClosedDayMinuteRange(
+    new Date("2026-03-08T07:10:45Z"),
+    "America/New_York",
+  );
+  assert.equal(springForward.from.toISOString(), "2026-03-08T05:00:00.000Z");
+  assert.equal(springForward.dayEnd.toISOString(), "2026-03-09T04:00:00.000Z");
+  assert.equal(springForward.to.toISOString(), "2026-03-08T07:10:00.000Z");
+  assert.equal(springForward.buckets.length, 130);
+
+  const fallBack = occupancyDuration.buildOccupancyClosedDayMinuteRange(
+    new Date("2026-11-01T07:10:45Z"),
+    "America/New_York",
+  );
+  assert.equal(fallBack.from.toISOString(), "2026-11-01T04:00:00.000Z");
+  assert.equal(fallBack.dayEnd.toISOString(), "2026-11-02T05:00:00.000Z");
+  assert.equal(fallBack.to.toISOString(), "2026-11-01T07:10:00.000Z");
+  assert.equal(fallBack.buckets.length, 190);
+
+  const springNearClose = occupancyDuration.buildOccupancyClosedDayMinuteRange(
+    new Date("2026-03-09T03:59:59Z"),
+    "America/New_York",
+  );
+  assert.equal(
+    springNearClose.dayEnd.getTime() - springNearClose.from.getTime(),
+    23 * 60 * 60_000,
+  );
+  assert.equal(springNearClose.buckets.length, 23 * 60 - 1);
+
+  const fallNearClose = occupancyDuration.buildOccupancyClosedDayMinuteRange(
+    new Date("2026-11-02T04:59:59Z"),
+    "America/New_York",
+  );
+  assert.equal(
+    fallNearClose.dayEnd.getTime() - fallNearClose.from.getTime(),
+    25 * 60 * 60_000,
+  );
+  assert.equal(fallNearClose.buckets.length, 25 * 60 - 1);
+
+  assert.throws(
+    () =>
+      occupancyDuration.buildOccupancyClosedDayMinuteRange(
+        new Date("invalid"),
+        "America/Sao_Paulo",
+      ),
+    /instante de referência.*inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyDuration.buildOccupancyClosedDayMinuteRange(
+        new Date(),
+        "Fuso/Inexistente",
+      ),
+    /fuso horário da empresa é inválido/,
+  );
+});
+
+test("duração de ocupação classifica buckets conservadoramente e une segmentos", () => {
+  const from = Date.parse("2026-09-02T10:00:00Z");
+  const buckets = Array.from(
+    { length: 5 },
+    (_, index) => new Date(from + index * 60_000),
+  );
+  const metrics = new Map([
+    [from, { average: 2, minimum: 1, peak: 3 }],
+    [from + 60_000, { average: 1, minimum: 1, peak: 1 }],
+    [from + 2 * 60_000, { average: 1, minimum: 0, peak: 2 }],
+    [from + 3 * 60_000, { average: 0, minimum: 0, peak: 0 }],
+  ]);
+
+  const summary = occupancyDuration.buildOccupancyDurationSummary(
+    buckets,
+    metrics,
+  );
+
+  assert.equal(summary.bucketCount, 5);
+  assert.equal(summary.observedBucketCount, 4);
+  assert.equal(summary.expectedSeconds, 300);
+  assert.equal(summary.observedSeconds, 240);
+  assert.equal(summary.confirmedOccupiedSeconds, 120);
+  assert.equal(summary.possibleOccupiedSeconds, 180);
+  assert.equal(summary.confirmedFreeSeconds, 60);
+  assert.equal(summary.transitionSeconds, 60);
+  assert.equal(summary.unknownSeconds, 60);
+  assert.equal(summary.longestConfirmedOccupiedSeconds, 120);
+  assert.equal(summary.loadUnitSeconds, 240);
+  assert.deepEqual(
+    summary.segments.map((segment) => ({
+      buckets: segment.bucketCount,
+      from: segment.from.toISOString(),
+      load: segment.loadUnitSeconds,
+      seconds: segment.seconds,
+      state: segment.state,
+      to: segment.to.toISOString(),
+    })),
+    [
+      {
+        buckets: 2,
+        from: "2026-09-02T10:00:00.000Z",
+        load: 180,
+        seconds: 120,
+        state: "occupied",
+        to: "2026-09-02T10:02:00.000Z",
+      },
+      {
+        buckets: 1,
+        from: "2026-09-02T10:02:00.000Z",
+        load: 60,
+        seconds: 60,
+        state: "transition",
+        to: "2026-09-02T10:03:00.000Z",
+      },
+      {
+        buckets: 1,
+        from: "2026-09-02T10:03:00.000Z",
+        load: 0,
+        seconds: 60,
+        state: "free",
+        to: "2026-09-02T10:04:00.000Z",
+      },
+      {
+        buckets: 1,
+        from: "2026-09-02T10:04:00.000Z",
+        load: 0,
+        seconds: 60,
+        state: "unknown",
+        to: "2026-09-02T10:05:00.000Z",
+      },
+    ],
+  );
+});
+
+test("duração não inventa precisão em buckets de transição ou ausentes", () => {
+  const from = Date.parse("2026-09-02T10:00:00Z");
+  const buckets = [new Date(from), new Date(from + 60_000)];
+  const summary = occupancyDuration.buildOccupancyDurationSummary(
+    buckets,
+    new Map([
+      [from, { average: 0.01, minimum: 0, peak: 1 }],
+    ]),
+  );
+
+  assert.equal(summary.confirmedOccupiedSeconds, 0);
+  assert.equal(summary.transitionSeconds, 60);
+  assert.equal(summary.possibleOccupiedSeconds, 60);
+  assert.equal(summary.unknownSeconds, 60);
+  assert.equal(summary.loadUnitSeconds, 0.6);
+  assert.deepEqual(
+    summary.segments.map((segment) => segment.state),
+    ["transition", "unknown"],
+  );
+});
+
+test("reconciliação da duração substitui a sobreposição e preserva lacunas", () => {
+  const from = Date.parse("2026-09-02T10:00:00Z");
+  const occupied = { average: 1, minimum: 1, peak: 1 };
+  const free = { average: 0, minimum: 0, peak: 0 };
+  const current = new Map([
+    [from, occupied],
+    [from + 60_000, occupied],
+    [from + 120_000, occupied],
+  ]);
+  const incoming = new Map([[from + 120_000, free]]);
+
+  const reconciled = occupancyDuration.reconcileOccupancyDurationMetrics(
+    current,
+    incoming,
+    from + 60_000,
+    from + 180_000,
+  );
+
+  assert.deepEqual(Array.from(reconciled.keys()), [from, from + 120_000]);
+  assert.equal(reconciled.get(from + 120_000).peak, 0);
+  assert.equal(reconciled.has(from + 60_000), false);
+  assert.throws(
+    () =>
+      occupancyDuration.reconcileOccupancyDurationMetrics(
+        current,
+        new Map([[from + 180_000, free]]),
+        from + 60_000,
+        from + 180_000,
+      ),
+    /fora da janela solicitada/,
+  );
+});
+
+test("duração rejeita eixo descontínuo e métricas inconsistentes", () => {
+  const from = Date.parse("2026-09-02T10:00:00Z");
+  assert.throws(
+    () =>
+      occupancyDuration.buildOccupancyDurationSummary(
+        [new Date(from), new Date(from + 2 * 60_000)],
+        new Map(),
+      ),
+    /contínuo e crescente/,
+  );
+  assert.throws(
+    () =>
+      occupancyDuration.buildOccupancyDurationSummary(
+        [new Date(from + 1)],
+        new Map(),
+      ),
+    /não inicia em um minuto/,
+  );
+  assert.throws(
+    () =>
+      occupancyDuration.buildOccupancyDurationSummary(
+        [new Date(from)],
+        new Map([
+          [from, { average: 2, minimum: 0, peak: 1 }],
+        ]),
+      ),
+    /métrica de duração de ocupação é inconsistente/,
+  );
+  assert.throws(
+    () =>
+      occupancyDuration.buildOccupancyDurationSummary(
+        [new Date(from)],
+        new Map([
+          [from, { average: Number.POSITIVE_INFINITY, minimum: 0, peak: 1 }],
+        ]),
+      ),
+    /média de ocupação é inválida/,
+  );
+});
+
+test("resumos temporais unem sequência confirmada entre consultas", () => {
+  const from = Date.parse("2026-09-02T10:00:00Z");
+  const occupied = { average: 1, minimum: 1, peak: 1 };
+  const free = { average: 0, minimum: 0, peak: 0 };
+  const first = occupancyDuration.buildOccupancyDurationSummary(
+    [new Date(from), new Date(from + 60_000)],
+    new Map([
+      [from, occupied],
+      [from + 60_000, occupied],
+    ]),
+  );
+  const second = occupancyDuration.buildOccupancyDurationSummary(
+    [new Date(from + 2 * 60_000), new Date(from + 3 * 60_000)],
+    new Map([
+      [from + 2 * 60_000, occupied],
+      [from + 3 * 60_000, free],
+    ]),
+  );
+
+  const combined = occupancyDuration.combineOccupancyDurationSummaries([
+    second,
+    first,
+  ]);
+  assert.equal(combined.bucketCount, 4);
+  assert.equal(combined.expectedSeconds, 240);
+  assert.equal(combined.confirmedOccupiedSeconds, 180);
+  assert.equal(combined.confirmedFreeSeconds, 60);
+  assert.equal(combined.longestConfirmedOccupiedSeconds, 180);
+  assert.equal(combined.loadUnitSeconds, 180);
+  assert.deepEqual(
+    combined.segments.map((segment) => [segment.state, segment.seconds]),
+    [
+      ["occupied", 180],
+      ["free", 60],
+    ],
+  );
+  assert.equal(first.segments[0].seconds, 120);
+
+  assert.throws(
+    () =>
+      occupancyDuration.combineOccupancyDurationSummaries([first, first]),
+    /períodos sobrepostos/,
+  );
+  assert.deepEqual(
+    occupancyDuration.combineOccupancyDurationSummaries([]),
+    {
+      bucketCount: 0,
+      confirmedFreeSeconds: 0,
+      confirmedOccupiedSeconds: 0,
+      expectedSeconds: 0,
+      loadUnitSeconds: 0,
+      longestConfirmedOccupiedSeconds: 0,
+      observedBucketCount: 0,
+      observedSeconds: 0,
+      possibleOccupiedSeconds: 0,
+      segments: [],
+      transitionSeconds: 0,
+      unknownSeconds: 0,
+    },
+  );
+});
+
+test("formatador de duração mantém dias, horas, minutos e segundos", () => {
+  assert.equal(occupancyDuration.formatOccupancyDuration(0), "0s");
+  assert.equal(occupancyDuration.formatOccupancyDuration(59.6), "1min");
+  assert.equal(
+    occupancyDuration.formatOccupancyDuration(90_061),
+    "1d 1h 1min 1s",
+  );
+  assert.throws(
+    () => occupancyDuration.formatOccupancyDuration(-1),
+    /duração de ocupação é inválida/,
+  );
+});
+
 test("agregado de ocupação exige tuplas completas, ordenadas e não negativas", () => {
-  const bucket = "2026-07-22T10:00:00";
+  const bucket = "2026-07-22T10:00:00-03:00";
   const validRows = [
     {
       area_avg: 5,
@@ -5654,6 +7387,126 @@ test("agregado de ocupação exige tuplas completas, ordenadas e não negativas"
   );
 });
 
+test("bucket civil de ocupação usa o fuso IANA esperado sem depender do navegador", () => {
+  const originalTimeZone = process.env.TZ;
+  const sourceRow = {
+    bucket: "2026-07-22T10:00:00",
+    scenario_total_avg: 4,
+    scenario_total_max: 7,
+    scenario_total_min: 1,
+  };
+  const response = {
+    data: [sourceRow],
+    granularity: "hour",
+    scenario_id: "scenario-a",
+  };
+
+  try {
+    const normalizedBuckets = ["UTC", "Pacific/Honolulu"].map(
+      (browserTimeZone) => {
+        process.env.TZ = browserTimeZone;
+        return occupancyAggregateValidation.requireOccupancyAggregateRows(
+          response,
+          "hour",
+          "scenario-a",
+          "America/Sao_Paulo",
+        )[0].bucket;
+      },
+    );
+
+    assert.deepEqual(normalizedBuckets, [
+      "2026-07-22T10:00:00-03:00",
+      "2026-07-22T10:00:00-03:00",
+    ]);
+    assert.equal(sourceRow.bucket, "2026-07-22T10:00:00");
+
+    const normalizedRows =
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        response,
+        "hour",
+        "scenario-a",
+        "America/Sao_Paulo",
+      );
+    const requestedBucket = new Date("2026-07-22T13:00:00Z");
+    const coverage =
+      occupancyAggregateValidation.aggregateOccupancyRowsForRequestedBuckets(
+        normalizedRows,
+        "hour",
+        [requestedBucket],
+      );
+    assert.equal(coverage.missingBuckets.length, 0);
+    assert.equal(coverage.totals.get(requestedBucket.getTime()).average, 4);
+  } finally {
+    if (originalTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimeZone;
+  }
+});
+
+test("normalização IANA preserva offset fracionário e bloqueia horas DST incertas", () => {
+  assert.equal(
+    occupancyBucketTime.normalizeOccupancyInstantBucketInTimeZone(
+      "2026-07-22T10:00:00",
+      "hour",
+      "Asia/Kolkata",
+    ),
+    "2026-07-22T10:00:00+05:30",
+  );
+  assert.equal(
+    aggregateTime.isAggregateBucketAligned(
+      "2026-07-22T10:00:00+05:30",
+      "hour",
+    ),
+    true,
+  );
+  assert.equal(
+    new Date("2026-07-22T10:00:00+05:30").toISOString(),
+    "2026-07-22T04:30:00.000Z",
+  );
+  assert.equal(
+    occupancyBucketTime.normalizeOccupancyInstantBucketInTimeZone(
+      "2026-11-01T03:00:00",
+      "hour",
+      "America/New_York",
+    ),
+    "2026-11-01T03:00:00-05:00",
+  );
+  assert.throws(
+    () =>
+      occupancyBucketTime.normalizeOccupancyInstantBucketInTimeZone(
+        "2026-11-01T01:00:00",
+        "hour",
+        "America/New_York",
+      ),
+    /bucket local.*ambíguo.*offset RFC3339 explícito/,
+  );
+  assert.throws(
+    () =>
+      occupancyBucketTime.normalizeOccupancyInstantBucketInTimeZone(
+        "2026-03-08T02:00:00",
+        "hour",
+        "America/New_York",
+      ),
+    /bucket local.*não existe.*instante RFC3339 explícito/,
+  );
+  assert.throws(
+    () =>
+      occupancyBucketTime.normalizeOccupancyInstantBucketInTimeZone(
+        "2026-07-22T10:00:00",
+        "hour",
+      ),
+    /timezone IANA esperado é obrigatório/,
+  );
+  assert.equal(
+    occupancyBucketTime.normalizeOccupancyInstantBucketInTimeZone(
+      "2026-11-01T01:00:00-04:00",
+      "hour",
+      "America/New_York",
+    ),
+    "2026-11-01T01:00:00-04:00",
+    "offset explícito identifica de forma inequívoca a primeira hora repetida",
+  );
+});
+
 test("compatibilidade legada só relaxa certificação de buckets instantâneos RFC3339", () => {
   const legacyRows = [
     {
@@ -5702,7 +7555,7 @@ test("compatibilidade legada só relaxa certificação de buckets instantâneos 
     occupancyAggregateValidation.occupancyAggregateMetadataWarning(
       legacyResponse,
       "hour",
-    )?.includes("provisório"),
+    )?.includes("em atualização"),
     true,
   );
 
@@ -5786,7 +7639,7 @@ test("compatibilidade legada só relaxa certificação de buckets instantâneos 
         "hour",
         compatibility,
       ),
-    /linha agregada de ocupação inválida/,
+    /timezone IANA esperado é obrigatório/,
   );
   assert.throws(
     () =>
@@ -5823,7 +7676,7 @@ test("falha de uma série de ocupação não derruba o snapshot ao vivo nem libe
 });
 
 test("totais de cenário repetidos precisam ser idênticos no mesmo bucket", () => {
-  const bucket = "2026-07-22T10:00:00";
+  const bucket = "2026-07-22T10:00:00-03:00";
   const scenarioTotal = {
     bucket,
     scenario_total_avg: 10,
@@ -5930,7 +7783,7 @@ test("agregado preserva zero certificado em cenários com várias áreas", () =>
 });
 
 test("total do cenário prevalece sobre áreas independentemente da ordem", () => {
-  const bucket = "2026-07-22T10:00:00";
+  const bucket = "2026-07-22T10:00:00-03:00";
   const areaA = {
     area_avg: 2,
     area_id: "area-a",
@@ -6017,7 +7870,7 @@ test("total do cenário prevalece sobre áreas independentemente da ordem", () =
 test("agregado aceita parcial somente no bucket aberto explicitamente solicitado", () => {
   const openBucket = new Date(2026, 6, 22, 10, 0, 0, 0);
   const openRow = {
-    bucket: "2026-07-22T10:00:00",
+    bucket: openBucket.toISOString(),
     complete: false,
     scenario_total_avg: 4,
     scenario_total_max: 7,
@@ -6078,7 +7931,7 @@ test("agregado aceita parcial somente no bucket aberto explicitamente solicitado
           data: [
             {
               ...openRow,
-              bucket: "2026-07-22T09:00:00",
+              bucket: new Date(openBucket.getTime() - 60 * 60_000).toISOString(),
             },
             openRow,
           ],
@@ -6099,7 +7952,7 @@ test("as_of do bucket aberto fica entre o início e o instante solicitado", () =
   const certifiedAt = new Date(openBucket.getTime() + 35 * 60_000);
   const runtimeTimeZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
   const partialRow = {
-    bucket: "2026-07-22T10:00:00",
+    bucket: openBucket.toISOString(),
     complete: false,
     scenario_total_avg: 4,
     scenario_total_final: 5,
@@ -6274,7 +8127,7 @@ test("agregado diário mantém buckets certificados e sinaliza lacunas sem inven
       coverage.missingBuckets.length,
       requestedBuckets.length,
     ),
-    /5 de 7 períodos.*sem valor.*não é ocupação zero/,
+    /5 de 7 períodos.*sem dados.*não representa ocupação zero/,
   );
   assert.equal(
     occupancyAggregateValidation.occupancyAggregateCoverageWarning(0, 7),
@@ -6292,7 +8145,7 @@ test("agregado sem metadados é explicitamente provisório em qualquer granulari
       },
       "day",
     ),
-    /provisório.*timezone.*complete.*status.*as_of.*não podem ser certificados/,
+    /Dados do período em atualização.*valores mais recentes ainda podem mudar/,
   );
   assert.equal(
     occupancyAggregateValidation.occupancyAggregateMetadataWarning(
@@ -6314,7 +8167,7 @@ test("agregado sem metadados é explicitamente provisório em qualquer granulari
       { data: [], granularity: "hour", scenario_id: "scenario-a" },
       "hour",
     ),
-    /intradiário provisório.*timezone.*complete.*status.*as_of/,
+    /Dados recentes em atualização.*valores mais recentes ainda podem mudar/,
   );
 });
 
@@ -6772,7 +8625,6 @@ test("catálogo de ocupação usa somente rotas autorizadas ao usuário", async 
     {
       area_id: areaId,
       camera_id: "camera-a",
-      detail: `${areaId} / camera-a`,
       key: JSON.stringify(["camera-a", areaId]),
       label: "Ocupação principal / Câmera A",
       object_class: "person",
@@ -6949,7 +8801,6 @@ test("fallback de ocupação não perde snapshots quando linhas aninhadas retorn
     {
       area_id: areaId,
       camera_id: "camera-a",
-      detail: `${areaId} / camera-a`,
       key: JSON.stringify(["camera-a", areaId]),
       label: "ocupacao1 / Câmera A",
       object_class: "person",
@@ -8367,6 +10218,275 @@ test("preferência do widget preserva título personalizado com limite seguro", 
   assert.equal(invalidZoom.zoom, undefined);
 });
 
+test("preferências de widget isolam payloads inválidos e consolidam ids duplicados", () => {
+  const cardIds = ["widget-a", "widget-b", "widget-c"];
+
+  for (const invalidPayload of [null, "inválido", 42, { widget: true }]) {
+    const normalized = viewPreferences.normalizeCardPreferences(
+      "occupancy",
+      invalidPayload,
+      cardIds,
+    );
+    assert.deepEqual(
+      normalized.map(({ id, visible }) => ({ id, visible })),
+      cardIds.map((id) => ({ id, visible: true })),
+      "um payload não-array deve cair nos padrões sem lançar",
+    );
+  }
+
+  const normalized = viewPreferences.normalizeCardPreferences(
+    "occupancy",
+    [
+      null,
+      [],
+      "inválido",
+      { visible: false },
+      { id: "widget-b", title: "Primeiro título", visible: true },
+      { id: "fora-do-catálogo", visible: false },
+      { id: "widget-a", visible: true },
+      {
+        id: "widget-b",
+        scenarioIds: ["scenario-b", "scenario-b"],
+        scenarioSelectionMode: "custom",
+        title: "Último título",
+        visible: false,
+      },
+    ],
+    cardIds,
+  );
+
+  assert.deepEqual(
+    normalized.map(({ id }) => id),
+    ["widget-b", "widget-a", "widget-c"],
+    "a primeira ocorrência define a posição e cada id aparece uma única vez",
+  );
+  assert.equal(normalized[0].title, "Último título");
+  assert.equal(normalized[0].visible, false);
+  assert.deepEqual(normalized[0].scenarioIds, ["scenario-b"]);
+  assert.equal(normalized[0].scenarioSelectionMode, "custom");
+});
+
+
+test("preferência por widget normaliza legado, todos e seleção personalizada", () => {
+  const preferences = viewPreferences.normalizeCardPreferences(
+    "live",
+    [
+      { id: "widget-legacy", visible: true },
+      {
+        id: "widget-all",
+        scenarioIds: ["scenario-ignored"],
+        scenarioSelectionMode: "all",
+        visible: true,
+      },
+      {
+        id: "widget-custom",
+        scenarioIds: [" scenario-a ", "scenario-a", "", "scenario-b"],
+        scenarioSelectionMode: "custom",
+        visible: true,
+      },
+      {
+        id: "widget-invalid",
+        scenarioIds: ["scenario-a"],
+        scenarioSelectionMode: "unknown",
+        visible: true,
+      },
+    ],
+    ["widget-legacy", "widget-all", "widget-custom", "widget-invalid"],
+  );
+  const byId = new Map(preferences.map((preference) => [preference.id, preference]));
+
+  assert.equal(byId.get("widget-legacy").scenarioSelectionMode, undefined);
+  assert.equal(byId.get("widget-all").scenarioSelectionMode, "all");
+  assert.equal(byId.get("widget-all").scenarioIds, undefined);
+  assert.deepEqual(byId.get("widget-custom").scenarioIds, [
+    "scenario-a",
+    "scenario-b",
+  ]);
+  assert.equal(byId.get("widget-custom").scenarioSelectionMode, "custom");
+  assert.equal(byId.get("widget-invalid").scenarioSelectionMode, undefined);
+  assert.equal(byId.get("widget-invalid").scenarioIds, undefined);
+});
+
+test("resolver de cenários por widget mantém inherit/all/custom fail-closed", () => {
+  const scenarios = [
+    scenarioFixture("scenario-a", "Cenário A"),
+    scenarioFixture("scenario-b", "Cenário B"),
+    scenarioFixture("scenario-c", "Cenário C"),
+  ];
+
+  assert.deepEqual(
+    widgetScenarioSelection
+      .resolveWidgetScenarios(
+        scenarios,
+        { mode: "inherit", scenarioIds: [] },
+        [scenarios[1]],
+      )
+      .map(({ id }) => id),
+    ["scenario-b"],
+  );
+  assert.deepEqual(
+    widgetScenarioSelection
+      .resolveWidgetScenarios(scenarios, { mode: "all", scenarioIds: [] })
+      .map(({ id }) => id),
+    ["scenario-a", "scenario-b", "scenario-c"],
+  );
+  assert.deepEqual(
+    widgetScenarioSelection
+      .resolveWidgetScenarios(scenarios, {
+        mode: "custom",
+        scenarioIds: ["scenario-c", "scenario-foreign", "scenario-a"],
+      })
+      .map(({ id }) => id),
+    ["scenario-a", "scenario-c"],
+  );
+  assert.deepEqual(
+    widgetScenarioSelection.resolveWidgetScenarios(scenarios, {
+      mode: "custom",
+      scenarioIds: [],
+    }),
+    [],
+  );
+  assert.equal(
+    widgetScenarioSelection.widgetScenarioSelectionLabel(
+      [scenarios[0], scenarios[2]],
+      { mode: "custom", scenarioIds: ["scenario-a", "scenario-c"] },
+    ),
+    "Cenário A + Cenário C",
+  );
+  assert.equal(
+    widgetScenarioSelection.widgetScenarioSelectionLabel(scenarios, {
+      mode: "all",
+      scenarioIds: [],
+    }),
+    "Todos os cenários (3)",
+  );
+});
+
+test("preset faz round-trip da composição de cenários por widget", () => {
+  const storage = memoryStorage();
+  const previousWindow = globalThis.window;
+  const previousCustomEvent = globalThis.CustomEvent;
+  globalThis.CustomEvent = class CustomEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  };
+  globalThis.window = { dispatchEvent() {}, localStorage: storage };
+
+  try {
+    const cardIds = ["widget-legacy", "widget-all", "widget-custom"];
+    const snapshot = widgetViewPresets.captureWidgetViewSnapshot({
+      cardIds,
+      companyId: "company-a",
+      menuKey: "live",
+      preferences: [
+        { id: "widget-legacy", visible: true },
+        { id: "widget-all", scenarioSelectionMode: "all", visible: true },
+        {
+          id: "widget-custom",
+          scenarioIds: ["scenario-b", "scenario-a", "scenario-b"],
+          scenarioSelectionMode: "custom",
+          visible: true,
+        },
+      ],
+      userId: "user-a",
+    });
+    const preset = {
+      createdAt: "2026-09-01T10:00:00.000Z",
+      id: "preset-scenarios",
+      isDefault: false,
+      name: "Composição operacional",
+      snapshot,
+      updatedAt: "2026-09-01T10:00:00.000Z",
+    };
+    widgetViewPresets.saveWidgetViewPresets("live", [preset], "company-a", "user-a");
+    const [storedPreset] = widgetViewPresets.loadWidgetViewPresets(
+      "live",
+      "company-a",
+      "user-a",
+    );
+    const storedById = new Map(
+      storedPreset.snapshot.preferences.map((preference) => [
+        preference.id,
+        preference,
+      ]),
+    );
+    assert.equal(storedById.get("widget-legacy").scenarioSelectionMode, undefined);
+    assert.equal(storedById.get("widget-all").scenarioSelectionMode, "all");
+    assert.deepEqual(storedById.get("widget-custom").scenarioIds, [
+      "scenario-b",
+      "scenario-a",
+    ]);
+    assert.equal(
+      widgetViewPresets.applyWidgetViewPreset(storedPreset, {
+        companyId: "company-a",
+        targetScope: { id: "target-view", name: "Destino" },
+        userId: "user-a",
+      }),
+      true,
+    );
+    const applied = viewPreferences.loadScopedCardPreferences(
+      "live",
+      cardIds,
+      "company-a",
+      "user-a",
+      "target-view",
+    );
+    assert.deepEqual(
+      applied.find(({ id }) => id === "widget-custom").scenarioIds,
+      ["scenario-b", "scenario-a"],
+    );
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    if (previousCustomEvent === undefined) delete globalThis.CustomEvent;
+    else globalThis.CustomEvent = previousCustomEvent;
+  }
+});
+
+test("totais e comparativos fixos de Contagem usam composição por widget", () => {
+  const liveSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const reportSource = readFileSync(
+    resolve(projectRoot, "components/app/counting-intelligence-report.tsx"),
+    "utf8",
+  );
+  const reportDashboardSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const importSource = readFileSync(
+    resolve(projectRoot, "lib/live-analysis-import.ts"),
+    "utf8",
+  );
+
+  for (const cardId of [
+    "live_intraday_comparison",
+    "live_target_progress",
+    "live_month_previous_comparison",
+    "live_month_year_comparison",
+    "live_chart_minute_day",
+    "live_chart_hour",
+    "live_moving_average_trend",
+    "live_current_year_monthly",
+    "live_current_year_accumulated",
+    "live_operational_month_comparison",
+    "live_operational_month_cumulative",
+  ]) {
+    assert.equal(liveSource.includes(cardId), true);
+  }
+  assert.match(liveSource, /renderWithRealtimeWidgetModel/);
+  assert.match(liveSource, /scenarioConfigurableCardDefaults/);
+  assert.match(liveSource, /intradayReportModel/);
+  assert.match(liveSource, /annualAccumulatedReportModel/);
+  assert.match(reportSource, /scenarioConfigurable: true as const/);
+  assert.match(reportDashboardSource, /reportScenarioSelectionByCardId/);
+  assert.match(reportDashboardSource, /countingIntelligenceAssets/);
+  assert.match(importSource, /sourcePreference\.scenarioSelectionMode === "all"/);
+});
 
 test("grade Bento preserva seis níveis e oferece KPI mínimo compacto", () => {
   assert.deepEqual(cardLayoutSizing.CARD_LAYOUT_LEVELS, [1, 2, 3, 4, 5, 6]);
@@ -8694,14 +10814,15 @@ test("visões legadas 4x3 migram por armazenamento, preset e API sem mudar o lay
   }
 });
 
-test("resolver Bento preserva os breakpoints e as proporções históricas", () => {
+test("resolver Bento preserva proporções e expõe seis larguras no desktop útil", () => {
   const expectedSpans = new Map([
     [639, [1, 1, 1, 1, 1, 1]],
     [640, [6, 6, 12, 12, 12, 12]],
     [959, [6, 6, 12, 12, 12, 12]],
     [960, [4, 4, 8, 8, 12, 12]],
-    [1079, [4, 4, 8, 8, 12, 12]],
-    [1199, [4, 4, 8, 8, 12, 12]],
+    [1039, [4, 4, 8, 8, 12, 12]],
+    [1040, [3, 4, 6, 8, 9, 12]],
+    [1079, [3, 4, 6, 8, 9, 12]],
     [1200, [3, 4, 6, 8, 9, 12]],
   ]);
 
@@ -8823,13 +10944,13 @@ test("todos os widgets oferecem livremente as 36 combinações de dimensão", ()
   assert.match(globalSource, /@container \(min-width: 640px\)/);
   assert.match(
     globalSource,
-    /@container \(min-width: 960px\) and \(max-width: 1199px\)/,
+    /@container \(min-width: 960px\) and \(max-width: 1039px\)/,
   );
-  assert.match(globalSource, /@container \(min-width: 1200px\)/);
+  assert.match(globalSource, /@container \(min-width: 1040px\)/);
   assert.doesNotMatch(globalSource, /@container \(min-width: 1080px\)/);
   assert.match(
     cardLayoutSource,
-    /function layoutPreviewLabel[\s\S]*?layoutWidth < 960[\s\S]*?layoutWidth < 1_200[\s\S]*?Intermediário · 3 faixas[\s\S]*?Desktop · 4 faixas/,
+    /function layoutPreviewLabel[\s\S]*?layoutWidth < 960[\s\S]*?layoutWidth < 1_040[\s\S]*?Intermediário · 3 faixas[\s\S]*?Desktop · 6 níveis de largura/,
   );
 
   for (const relativePath of [
@@ -8894,6 +11015,11 @@ test("organizador separa ativos e ocultos e usa a mesma resolução da grade rea
   assert.match(source, /sourceWidth=\{layoutWidth\}/);
   assert.match(source, /columnSpan: dimensions\.columnSpan/);
   assert.match(source, /rowSpan: dimensions\.rowSpan/);
+  assert.match(source, /packCardsForEveryTier\(orderedCards, preferences\)/);
+  assert.match(source, /placementSetForCard\(packedLayouts, placement\.id\)/);
+  assert.match(source, /\{packedCards\.map\(\(\{ card, placements \}\) => \(/);
+  assert.match(source, /data-layout-card-column-start=\{activePlacement\.columnStart\}/);
+  assert.match(source, /data-layout-card-row-start=\{activePlacement\.rowStart\}/);
   assert.match(
     source,
     /const previewColumnCount = resolveCardLayoutDimensions\([\s\S]*?containerWidth: layoutWidth[\s\S]*?\)\.columnCount/,
@@ -8903,10 +11029,19 @@ test("organizador separa ativos e ocultos e usa a mesma resolução da grade rea
     /grid-flow-row-dense/,
     "a ordem visual do Bento precisa coincidir com a ordem persistida e de teclado",
   );
-  assert.match(previewSource, /gridColumn: `span \$\{columnSpan\}/);
-  assert.match(previewSource, /gridRow: `span \$\{rowSpan\}/);
+  assert.match(previewSource, /packCardLayout\(/);
+  assert.match(
+    previewSource,
+    /gridColumn: `\$\{placement\.columnStart\} \/ span \$\{columnSpan\}`/,
+  );
+  assert.match(
+    previewSource,
+    /gridRow: `\$\{placement\.rowStart\} \/ span \$\{rowSpan\}`/,
+  );
   assert.match(globalSource, /repeat\(12, minmax\(0, 1fr\)\)/);
+  assert.match(globalSource, /--widget-column-start-desktop/);
   assert.match(globalSource, /--widget-column-span-desktop/);
+  assert.match(globalSource, /--widget-row-start-desktop/);
   assert.match(globalSource, /--widget-row-span-multi/);
 });
 
@@ -9043,7 +11178,7 @@ test("miniatura Bento representa a configuração visual efetiva de cada widget"
   assert.match(previewSource, /chartType === "rose"/);
   assert.match(previewSource, /chartType === "treemap"/);
   assert.match(previewSource, /data-widget-bento-miniature="bar"/);
-  assert.match(source, /label: preference\?\.title \?\? card\.label \?\? card\.id/);
+  assert.match(source, /label: preference\?\.title \?\? card\.label \?\? "Widget"/);
   assert.match(
     realtimeSource,
     /id: LIVE_DAY_MINUTES_ID[\s\S]*?previewChartType: "line"/,
@@ -9383,6 +11518,56 @@ test("ocupação detecta linhas compartilhadas entre entrada e saída", () => {
   );
 });
 
+test("composição de Contagem isola A, B, A+B e seleção vazia por widget", () => {
+  const first = {
+    ...scenario("scenario-a", "Entrada A", "line-a", 1),
+    lines: [
+      { action_multiplier: 1, line_count_id: "line-a" },
+      { action_multiplier: 1, line_count_id: "shared-line" },
+    ],
+  };
+  const second = {
+    ...scenario("scenario-b", "Entrada B", "line-b", 1),
+    lines: [
+      { action_multiplier: 1, line_count_id: "line-b" },
+      { action_multiplier: 1, line_count_id: "shared-line" },
+    ],
+  };
+  const monthlyRows = [
+    aggregateRow("2026-01-01", "line-a", 10),
+    aggregateRow("2026-01-01", "line-b", 20),
+    aggregateRow("2026-01-01", "shared-line", 5),
+  ];
+  const buildModel = (selectedScenarios) =>
+    countingIntelligence.buildCountingIntelligenceModel({
+      hourlyRows: [],
+      includeOpenPeriod: false,
+      monthlyRows,
+      now: new Date(2026, 2, 1),
+      period: { from: new Date(2026, 0, 1), to: new Date(2026, 1, 1) },
+      scenarios: selectedScenarios,
+      scope: {
+        cameraIds: [],
+        name: "Composição do widget",
+        scenarios: selectedScenarios,
+      },
+    });
+  const onlyA = buildModel([first]);
+  const onlyB = buildModel([second]);
+  const combined = buildModel([first, second]);
+
+  assert.equal(onlyA.periodValue, 15);
+  assert.equal(onlyB.periodValue, 25);
+  assert.equal(combined.periodValue, onlyA.periodValue + onlyB.periodValue);
+  assert.equal(buildModel([]).periodValue, 0);
+  assert.equal(
+    scenarioAnalytics.buildCombinedScenarioMultiplierMap([first, second]).get(
+      "shared-line",
+    ),
+    2,
+  );
+});
+
 test("granularidades minuto, semana e mês preservam o recorte configurado", () => {
   const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
   const minuteFrom = new Date(2026, 6, 22, 10, 0);
@@ -9501,6 +11686,366 @@ test("heatmap de Contagem preserva toda linha selecionada nos dias 1 a 3", () =>
     8,
     "direções opostas dentro do mesmo cenário representam fluxo, não cancelamento",
   );
+});
+
+test("heatmap de Contagem em Análises aplica contorno suave e paleta por tema", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-07-20",
+    "2026-07-22",
+  );
+  assert.ok(period);
+
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const widgetColor = "#7C3AED";
+  const data = analysisData({
+    hourRows: [
+      aggregateRow("2026-07-20T10:00:00", "line-entry", 4),
+      aggregateRow("2026-07-21T11:00:00", "line-entry", 7),
+    ],
+  });
+  const expectations = {
+    dark: {
+      activeBorder: "rgba(248, 250, 252, 0.24)",
+      border: "rgba(226, 232, 240, 0.12)",
+      shadow: "rgba(248, 250, 252, 0.12)",
+    },
+    light: {
+      activeBorder: "rgba(15, 23, 42, 0.20)",
+      border: "rgba(15, 23, 42, 0.09)",
+      shadow: "rgba(15, 23, 42, 0.14)",
+    },
+  };
+
+  for (const theme of ["light", "dark"]) {
+    const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+      color: widgetColor,
+      data,
+      period,
+      scenarios: [entryScenario],
+      theme,
+      widget: analysisWidget("heatmap", {
+        granularity: "hour",
+        scenarioIds: [entryScenario.id],
+        selectionMode: "custom",
+      }),
+    });
+    const series = Array.isArray(model.option?.series)
+      ? model.option.series[0]
+      : model.option?.series;
+
+    assert.equal(model.hasData, true, `${theme}: deve materializar o heatmap`);
+    assert.equal(series?.type, "heatmap");
+    assert.equal(series?.itemStyle?.borderWidth, 1);
+    assert.equal(series?.itemStyle?.borderColor, expectations[theme].border);
+    assert.equal(series?.emphasis?.itemStyle?.borderWidth, 1);
+    assert.equal(
+      series?.emphasis?.itemStyle?.borderColor,
+      expectations[theme].activeBorder,
+    );
+    assert.equal(series?.emphasis?.itemStyle?.shadowBlur, 4);
+    assert.equal(
+      series?.emphasis?.itemStyle?.shadowColor,
+      expectations[theme].shadow,
+    );
+    assert.deepEqual(
+      model.option?.visualMap?.inRange?.color,
+      chartPalette.monochromeHeatmapPalette(widgetColor, theme),
+      `${theme}: a escala deve usar a paleta adequada ao tema`,
+    );
+  }
+});
+
+test("runtime de Análises passa o tema ao heatmap e a exportação mantém light", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const runtimeStart = source.indexOf("function PeriodAnalysisCardRuntime");
+  const runtimeEnd = source.indexOf("function PeriodAnalysisCard", runtimeStart + 1);
+  const runtimeSection = source.slice(runtimeStart, runtimeEnd);
+  const exportStart = source.indexOf("function buildPeriodAnalysisReportPayload");
+  const exportEnd = source.indexOf("async function buildAiPeriodAnalysisPayload", exportStart);
+  const exportSection = source.slice(exportStart, exportEnd);
+
+  assert.notEqual(runtimeStart, -1);
+  assert.notEqual(runtimeEnd, -1);
+  assert.match(runtimeSection, /const \{ effectiveTheme \} = useTheme\(\)/);
+  assert.match(
+    runtimeSection,
+    /buildPeriodAnalysisWidgetModel\(\{[\s\S]*?theme: effectiveTheme,/,
+  );
+  assert.notEqual(exportStart, -1);
+  assert.notEqual(exportEnd, -1);
+  assert.match(exportSection, /buildPeriodAnalysisWidgetModel\(\{/);
+  assert.doesNotMatch(
+    exportSection,
+    /theme:\s*effectiveTheme/,
+    "o PDF deve conservar o tema light padrão para impressão",
+  );
+});
+
+test("heatmap de Contagem no Ao Vivo usa tema da tela e light na exportação", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const buildOperationalHeatmapOption = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "buildOperationalHeatmapOption",
+    {
+      DAY_OF_MONTH_AXIS_LABELS: chartCalendarAxis.DAY_OF_MONTH_AXIS_LABELS,
+      HOUR_AXIS_LABELS: Array.from(
+        { length: 24 },
+        (_, hour) =>
+          hour === 23 ? "23h–24h" : `${String(hour).padStart(2, "0")}h`,
+      ),
+      buildCalendarAxisLabel: chartCalendarAxis.buildCalendarAxisLabel,
+      buildCalendarMarkAreaForMonth:
+        chartCalendarAxis.buildCalendarMarkAreaForMonth,
+      formatNumber: (value) => String(value),
+      holidayCategoryIndexesForMonth:
+        chartCalendarAxis.holidayCategoryIndexesForMonth,
+      hourRangeLabel: (hour) => `${hour}h–${hour + 1}h`,
+      monochromeHeatmapPalette: chartPalette.monochromeHeatmapPalette,
+      saturdayCategoryIndexesForMonth:
+        chartCalendarAxis.saturdayCategoryIndexesForMonth,
+      sundayCategoryIndexesForMonth:
+        chartCalendarAxis.sundayCategoryIndexesForMonth,
+    },
+  );
+  const expectations = {
+    dark: {
+      activeBorder: "rgba(248, 250, 252, 0.24)",
+      border: "rgba(226, 232, 240, 0.12)",
+      shadow: "rgba(248, 250, 252, 0.12)",
+    },
+    light: {
+      activeBorder: "rgba(15, 23, 42, 0.20)",
+      border: "rgba(15, 23, 42, 0.09)",
+      shadow: "rgba(15, 23, 42, 0.14)",
+    },
+  };
+  const widgetColor = "#7C3AED";
+
+  for (const theme of ["light", "dark"]) {
+    const option = buildOperationalHeatmapOption(
+      [{ day: 1, hour: 10, total: 7 }],
+      new Date(2026, 6, 1),
+      widgetColor,
+      theme,
+    );
+    const series = option.series[0];
+
+    assert.equal(series.type, "heatmap");
+    assert.equal(series.itemStyle.borderWidth, 1);
+    assert.equal(series.itemStyle.borderColor, expectations[theme].border);
+    assert.equal(series.emphasis.itemStyle.borderWidth, 1);
+    assert.equal(
+      series.emphasis.itemStyle.borderColor,
+      expectations[theme].activeBorder,
+    );
+    assert.equal(series.emphasis.itemStyle.shadowBlur, 4);
+    assert.equal(
+      series.emphasis.itemStyle.shadowColor,
+      expectations[theme].shadow,
+    );
+    assert.deepEqual(
+      option.visualMap.inRange.color,
+      chartPalette.monochromeHeatmapPalette(widgetColor, theme),
+    );
+  }
+
+  const cardStart = source.indexOf("function OperationalHeatmapCard");
+  const cardEnd = source.indexOf("function HourlyOccupancyCard", cardStart);
+  const cardSection = source.slice(cardStart, cardEnd);
+  const reportStart = source.indexOf(
+    "function buildOperationalHeatmapReportChart",
+  );
+  const reportEnd = source.indexOf(
+    "function buildHourlyOccupancyReportChart",
+    reportStart,
+  );
+  const reportSection = source.slice(reportStart, reportEnd);
+
+  assert.notEqual(cardStart, -1);
+  assert.notEqual(cardEnd, -1);
+  assert.match(cardSection, /const \{ effectiveTheme \} = useTheme\(\)/);
+  assert.match(
+    cardSection,
+    /buildOperationalHeatmapOption\([\s\S]*?widgetColor,[\s\S]*?effectiveTheme,[\s\S]*?\)/,
+  );
+  assert.notEqual(reportStart, -1);
+  assert.notEqual(reportEnd, -1);
+  assert.match(
+    reportSection,
+    /option:\s*buildOperationalHeatmapOption\(points, month, widgetColor\),/,
+    "a exportação deve omitir o tema e conservar o padrão light",
+  );
+  assert.doesNotMatch(reportSection, /effectiveTheme/);
+});
+
+test("heatmaps de Ocupação usam contorno suave nas séries presente e ausente", () => {
+  const buildHeatmapOption = loadStandaloneFunction(
+    "components/app/occupancy-comparison-widgets.tsx",
+    "buildHeatmapOption",
+    {
+      buildOccupancyHeatmapVisualMaps:
+        occupancyHeatmapVisual.buildOccupancyHeatmapVisualMaps,
+      escapeTooltip: (value) => String(value),
+      formatChartNumber: (value) => String(value),
+      getOccupancyChartPalette:
+        occupancyChartPalette.getOccupancyChartPalette,
+      metricLabel: () => "Ocupação",
+      truncateLabel: (value) => String(value),
+    },
+  );
+  const expectations = {
+    dark: {
+      activeBorder: "rgba(248, 250, 252, 0.24)",
+      border: "rgba(226, 232, 240, 0.12)",
+      shadow: "rgba(248, 250, 252, 0.12)",
+    },
+    light: {
+      activeBorder: "rgba(15, 23, 42, 0.20)",
+      border: "rgba(15, 23, 42, 0.09)",
+      shadow: "rgba(15, 23, 42, 0.14)",
+    },
+  };
+  const widgetColor = "#0F766E";
+
+  for (const theme of ["light", "dark"]) {
+    const option = buildHeatmapOption({
+      cells: [
+        { value: null, x: 0, y: 0 },
+        { value: 37, x: 1, y: 0 },
+      ],
+      maximum: 37,
+      metric: "current",
+      theme,
+      widgetColor,
+      xLabels: ["Cenário A", "Cenário B"],
+      yLabels: ["10h"],
+    });
+
+    assert.equal(option.series.length, 2);
+    for (const series of option.series) {
+      assert.equal(series.type, "heatmap");
+      assert.equal(series.itemStyle.borderWidth, 1);
+      assert.equal(series.itemStyle.borderColor, expectations[theme].border);
+      assert.equal(series.emphasis.itemStyle.borderWidth, 1);
+      assert.equal(
+        series.emphasis.itemStyle.borderColor,
+        expectations[theme].activeBorder,
+      );
+      assert.equal(series.emphasis.itemStyle.shadowBlur, 4);
+      assert.equal(
+        series.emphasis.itemStyle.shadowColor,
+        expectations[theme].shadow,
+      );
+    }
+    assert.deepEqual(
+      option.visualMap[1].inRange.color,
+      occupancyHeatmapVisual.occupancyHeatmapPalette(widgetColor, theme),
+      `${theme}: a escala certificada deve acompanhar o tema`,
+    );
+  }
+});
+
+test("heatmap de Demographics usa tema da tela e light na exportação", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/demographics-dashboard.tsx"),
+    "utf8",
+  );
+  const heatmapColors = [
+    "#EFF6FF",
+    "#BFDBFE",
+    "#60A5FA",
+    "#2563EB",
+    "#172554",
+  ];
+  const buildAgeEmotionHeatmapOption = loadStandaloneFunction(
+    "components/app/demographics-dashboard.tsx",
+    "buildAgeEmotionHeatmapOption",
+    {
+      HEATMAP_COLORS: heatmapColors,
+      heatmapPercentageLabel: () => "",
+      heatmapTooltip: () => "",
+    },
+  );
+  const summary = {
+    crossings: {
+      ageByEmotion: {
+        columns: [{ key: "happy", label: "Feliz" }],
+        rows: [
+          {
+            cells: [{ count: 3, percentage: 75 }],
+            key: "20-29",
+            label: "20–29",
+          },
+        ],
+      },
+    },
+  };
+  const expectations = {
+    dark: {
+      activeBorder: "rgba(248, 250, 252, 0.24)",
+      border: "rgba(226, 232, 240, 0.12)",
+      shadow: "rgba(248, 250, 252, 0.12)",
+    },
+    light: {
+      activeBorder: "rgba(15, 23, 42, 0.20)",
+      border: "rgba(15, 23, 42, 0.09)",
+      shadow: "rgba(15, 23, 42, 0.14)",
+    },
+  };
+
+  for (const theme of ["light", "dark"]) {
+    const option = buildAgeEmotionHeatmapOption(summary, theme);
+    const series = option.series[0];
+
+    assert.equal(series.type, "heatmap");
+    assert.equal(series.itemStyle.borderWidth, 1);
+    assert.equal(series.itemStyle.borderColor, expectations[theme].border);
+    assert.equal(series.emphasis.itemStyle.borderWidth, 1);
+    assert.equal(
+      series.emphasis.itemStyle.borderColor,
+      expectations[theme].activeBorder,
+    );
+    assert.equal(series.emphasis.itemStyle.shadowBlur, 4);
+    assert.equal(
+      series.emphasis.itemStyle.shadowColor,
+      expectations[theme].shadow,
+    );
+    assert.deepEqual(option.visualMap.inRange.color, heatmapColors);
+  }
+  assert.equal(
+    buildAgeEmotionHeatmapOption(summary).series[0].itemStyle.borderColor,
+    expectations.light.border,
+    "sem tema explícito, o gráfico exportável deve permanecer light",
+  );
+
+  const cardStart = source.indexOf("function AgeEmotionHeatmapCard");
+  const cardEnd = source.indexOf("function DemographicChartCard", cardStart);
+  const cardSection = source.slice(cardStart, cardEnd);
+  const reportStart = source.indexOf("function buildDemographicsReport({");
+  const reportEnd = source.indexOf("function distributionReportTable", reportStart);
+  const reportSection = source.slice(reportStart, reportEnd);
+
+  assert.notEqual(cardStart, -1);
+  assert.notEqual(cardEnd, -1);
+  assert.match(cardSection, /const \{ effectiveTheme \} = useTheme\(\)/);
+  assert.match(
+    cardSection,
+    /buildAgeEmotionHeatmapOption\(summary, effectiveTheme\)/,
+  );
+  assert.notEqual(reportStart, -1);
+  assert.notEqual(reportEnd, -1);
+  assert.match(
+    reportSection,
+    /option:\s*buildAgeEmotionHeatmapOption\(summary\),/,
+    "a exportação deve omitir o tema e conservar o padrão light",
+  );
+  assert.doesNotMatch(reportSection, /buildAgeEmotionHeatmapOption\(summary,\s*effectiveTheme/);
 });
 
 test("heatmap consolida as duas ocorrências da hora repetida em uma célula", () => {
@@ -9739,7 +12284,7 @@ test("Análises consulta e publica uma base comparável com bordas reconciliadas
   assert.match(source, /const baselineComparableRanges = new Map/);
   assert.match(
     source,
-    /fetchAnalysisConsolidatedDayDataset\(\s*comparableRange/,
+    /requestedConsolidatedDayRanges[\s\S]*?baselineRange, comparableRange[\s\S]*?fetchAnalysisConsolidatedDayDatasets/,
   );
   assert.match(source, /splitAnalysisRangeAtDayBoundaries/);
   assert.match(source, /analysisPartialHourRanges\(range\)/);
@@ -11039,7 +13584,7 @@ test("contagem bloqueia fuso divergente com mensagem compacta", () => {
     (error) =>
       error instanceof Error &&
       error.message ===
-        `Fuso incompatível: navegador ${runtimeTimeZone}; empresa ${differentTimeZone}. Ajuste o navegador.`,
+        "O horário deste Worker não corresponde ao da empresa. Atualize a configuração de data e hora.",
   );
 });
 
@@ -11063,7 +13608,7 @@ test("dashboard bloqueia timezone padrão quando a empresa não o certificou", (
         source: "fallback",
         timeZone: runtimeTimeZone,
       }),
-    /Fuso da empresa não certificado/,
+    /Fuso horário da empresa indisponível/,
   );
 });
 
@@ -11095,8 +13640,8 @@ test("Ao Vivo, Análises, Relatórios e comparativos certificam o fuso antes da 
     );
     assert.match(
       sources[surface],
-      /Consulta bloqueada: \{[a-zA-Z]+CertificationError\}/,
-      `${surface} deve exibir uma mensagem compacta`,
+      /Não foi possível carregar (?:a análise|os dados|o relatório): \{[a-zA-Z]+CertificationError\}/,
+      `${surface} deve exibir uma mensagem compacta em linguagem de negócio`,
     );
   }
 
@@ -11116,8 +13661,8 @@ test("Ao Vivo, Análises, Relatórios e comparativos certificam o fuso antes da 
   assert.ok(
     sources.reports.match(
       /requireCertifiedCountingRuntimeTimeZone\(companyTimeZoneResolution\)/g,
-    )?.length >= 2,
-    "relatórios devem certificar carga inicial e atualização do período aberto",
+    )?.length >= 1,
+    "relatórios devem certificar a carga explícita antes de consultar",
   );
   assert.match(
     sources.comparison,
@@ -11170,9 +13715,7 @@ test("Análises escolhe consolidação e janela horária por dias civis", () => 
   });
 
   assert.equal(detailed.hourlyDetail, true);
-  assert.equal(detailed.refreshIntervalMs, 5_000);
   assert.equal(consolidated.hourlyDetail, false);
-  assert.equal(consolidated.refreshIntervalMs, 60_000);
   assert.equal(detail.limited, true);
   assert.deepEqual(localDateParts(detail.from), [2025, 12, 1]);
   assert.deepEqual(localDateParts(detail.to), [2026, 1, 1]);
@@ -11316,7 +13859,7 @@ test("comparação extrema agrupa séries excedentes em Outros sem perder total"
   );
 });
 
-test("comparação adapta resolução à seleção efetiva, não ao catálogo inteiro", () => {
+test("comparação adapta resolução ao volume real retornado pela fonte", () => {
   const period = periodAnalysisModel.resolvePeriodAnalysisRange(
     "2026-07-22",
     "2026-07-22",
@@ -11333,7 +13876,7 @@ test("comparação adapta resolução à seleção efetiva, não ao catálogo in
   const selected = scenarios[0];
   const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
     data: analysisData({
-      minuteRows: [
+      hourRows: [
         aggregateRow("2026-07-22T10:00:00", "line-0", 3),
       ],
     }),
@@ -11346,17 +13889,22 @@ test("comparação adapta resolução à seleção efetiva, não ao catálogo in
     }),
   });
 
-  assert.equal(model.appliedGranularity, "minute");
+  assert.equal(model.appliedGranularity, "hour");
   assert.equal(Array.isArray(model.option?.series), true);
 
   const source = readFileSync(
     resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
     "utf8",
   );
-  assert.match(source, /periodAnalysisComparisonSeriesCount\(widget, scenarios\)/);
   assert.match(
     source,
-    /modelByWidgetId\.get\(widget\.id\)\?\.appliedGranularity/,
+    /periodAnalysisEffectiveGranularity\([\s\S]*?Math\.max\(1, scenarioCatalogSize\)/,
+    "a resolução deve considerar as séries que a fonte retorna antes do filtro do widget",
+  );
+  assert.doesNotMatch(source, /Array\.from\(\{ length: catalogSize \}/);
+  assert.match(
+    source,
+    /model\.appliedGranularity \?\?[\s\S]*?periodAnalysisEffectiveGranularity/,
   );
 });
 
@@ -11578,23 +14126,32 @@ test("Análises longas consultam dia integral e limitam o detalhe horário", () 
     "utf8",
   );
 
-  assert.match(source, /fetchAnalysisConsolidatedDayDataset\(\s*dayRange/);
+  assert.match(
+    source,
+    /requestedConsolidatedDayRanges[\s\S]*?requirements\.day \? \[dayRange\][\s\S]*?fetchAnalysisConsolidatedDayDatasets/,
+  );
   assert.match(
     source,
     /const boundedHourlyRange = \{[\s\S]*?hourlyDetailRange\.from[\s\S]*?requiredHourRanges =[\s\S]*?\[boundedHourlyRange\]/,
   );
+  assert.doesNotMatch(source, /setInterval|refreshWhenIdle|visibilitychange/);
+  assert.match(source, /day: needsDay/);
+  assert.match(source, /trendHistory: queryWidgets\.some/);
   assert.match(
     source,
-    /window\.setInterval\(\s*refreshWhenIdle,\s*analysisRangePlan\.refreshIntervalMs/,
+    /const consolidatedDayDatasetsPromise =[\s\S]*?fetchAnalysisConsolidatedDayDatasets/,
   );
   assert.match(
     source,
     /const queryWidgets = React\.useMemo\(\s*\(\) => orderByCardPreferences\(widgets, preferences\)/,
   );
-  assert.match(source, /queryWidgets\.map\(\(widget\) => \[/);
+  assert.match(source, /node: \(\) => \(\s*<PeriodAnalysisCardRuntime/);
   assert.match(source, /models: queryWidgets\.flatMap\(\(widget\) => \{/);
-  assert.match(source, /const model = modelByWidgetId\.get\(widget\.id\)/);
-  assert.doesNotMatch(source, /modelByWidgetId\.get\(widget\.id\)!/);
+  assert.match(
+    source,
+    /function buildPeriodAnalysisReportPayload\(\)[\s\S]*?const model = buildPeriodAnalysisWidgetModel/,
+  );
+  assert.doesNotMatch(source, /const modelByWidgetId = React\.useMemo/);
   assert.match(source, /const MAX_ANALYSIS_DAY_CACHE_ENTRIES = 64/);
   assert.match(
     source,
@@ -11682,6 +14239,104 @@ test("cache minuto a minuto baixa o dia uma vez e reconcilia a janela móvel", a
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("bootstrap minuto evita cauda duplicada e subdivide respostas no teto", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (input) => {
+    requests.push(String(input));
+    const rows = requests.length === 1
+      ? Array.from({ length: 1_000 }, (_, index) =>
+          aggregateRow(
+            "2026-08-24T03:00:00.000Z",
+            `line-${index}`,
+            1,
+          ),
+        )
+      : [];
+    return new Response(
+      JSON.stringify({ data: rows, granularity: "minute" }),
+      { headers: { "content-type": "application/json" }, status: 200 },
+    );
+  };
+
+  try {
+    const cache = new Map();
+    const from = new Date("2026-08-24T03:00:00.000Z");
+    const rows = await aggregateMinuteDayQuery.fetchMinuteDayAggregateBootstrap({
+      cache,
+      cacheScope: "company-a:America/Sao_Paulo:ceiling",
+      from,
+      now: new Date("2026-08-24T03:04:30.000Z"),
+      to: new Date("2026-08-24T03:04:00.000Z"),
+    });
+    assert.deepEqual(rows, []);
+    assert.equal(
+      requests.length,
+      3,
+      "uma resposta no teto deve ser reconsultada em duas metades certificáveis",
+    );
+
+    const requestCount = requests.length;
+    const empty = await aggregateMinuteDayQuery.fetchMinuteDayAggregateBootstrap({
+      cache: new Map(),
+      cacheScope: "company-a:America/Sao_Paulo:empty",
+      from,
+      now: from,
+      to: from,
+    });
+    assert.deepEqual(empty, []);
+    assert.equal(
+      requests.length,
+      requestCount,
+      "a faixa vazia entre o bootstrap e a janela móvel não chama a API",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("loader agregado certifica o teto em qualquer granularidade", async () => {
+  const requests = [];
+  const from = new Date(2026, 7, 1);
+  const to = new Date(2026, 7, 3);
+  const rows = await aggregateRangeQuery.fetchCompleteAggregateRange({
+    from,
+    granularity: "day",
+    request: async (path) => {
+      requests.push(path);
+      if (requests.length === 1) {
+        return {
+          data: Array.from({ length: 1_000 }, (_, index) => ({
+            bucket: "2026-08-01",
+            camera_id: `camera-${index}`,
+            metric_type: "count",
+            total: 1,
+          })),
+          granularity: "day",
+        };
+      }
+
+      const queryFrom = new URL(`http://local${path}`).searchParams.get("from");
+      const secondDay = queryFrom?.startsWith("2026-08-02");
+      return {
+        data: [
+          {
+            bucket: secondDay ? "2026-08-02" : "2026-08-01",
+            camera_id: secondDay ? "camera-day-2" : "camera-day-1",
+            metric_type: "count",
+            total: secondDay ? 2 : 1,
+          },
+        ],
+        granularity: "day",
+      };
+    },
+    to,
+  });
+
+  assert.equal(requests.length, 3);
+  assert.deepEqual(rows.map((row) => row.total), [1, 2]);
 });
 
 test("loader horário limitado recorta os meses de borda na própria API", async () => {
@@ -11952,10 +14607,20 @@ test("loader horário recupera o início do mês quando a API limita cada respos
   }
 });
 
-test("comparativo anual ao vivo divide histórico e janela recente sem lacuna ou sobreposição", () => {
+test("comparativo anual ao vivo limita a consulta a quatro anos civis e divide a janela recente", () => {
   const now = new Date(2026, 6, 22, 10, 35);
   const range = liveAnnualComparison.resolveLiveAnnualComparisonRanges(now);
 
+  assert.equal(liveAnnualComparison.LIVE_ANNUAL_HISTORY_YEARS, 4);
+  assert.deepEqual(
+    [
+      range.historyFrom.getFullYear(),
+      range.historyFrom.getMonth(),
+      range.historyFrom.getDate(),
+    ],
+    [2023, 0, 1],
+  );
+  assert.equal(range.periodFrom.getTime(), range.historyFrom.getTime());
   assert.deepEqual(
     [range.recentFrom.getFullYear(), range.recentFrom.getMonth()],
     [2025, 6],
@@ -11967,6 +14632,587 @@ test("comparativo anual ao vivo divide histórico e janela recente sem lacuna ou
   );
   assert.ok(range.historyFrom < range.historyTo);
   assert.ok(range.periodFrom < range.periodTo);
+});
+
+test("comparativo anual substitui somente o mês aberto pelas horas fechadas", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const monthlyRows = [
+    aggregateRow("2025-07-01", "line-entry", 400),
+    aggregateRow("2026-07-01", "line-entry", 999),
+  ];
+  const model = liveAnnualComparison.buildLiveAnnualComparisonModel({
+    historicalMonthRows: monthlyRows,
+    hourlyRows: [
+      aggregateRow("2025-07-01T10:00:00", "line-entry", 40),
+      aggregateRow("2026-07-01T10:00:00", "line-entry", 100),
+      aggregateRow("2026-07-22T14:00:00", "line-entry", 50),
+      aggregateRow("2026-07-22T15:00:00", "line-entry", 800),
+    ],
+    now: new Date(2026, 6, 22, 15, 30),
+    recentMonthRows: monthlyRows,
+    scenarios: [entryScenario],
+    scope: { cameraIds: [], name: "Entrada", scenario: entryScenario },
+  });
+
+  assert.equal(
+    model.currentMonthValue,
+    150,
+    "o monthly diário obsoleto e a hora ainda aberta não podem congelar/inflar julho",
+  );
+  assert.equal(
+    model.yearRows.find((row) => row.year === 2025)?.months[6],
+    400,
+    "meses históricos devem permanecer na fonte mensal consolidada",
+  );
+});
+
+test("histórico anual ao vivo só consulta cards visíveis, uma vez por dia e em meses completos", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const annualRequestSection = source.slice(
+    source.indexOf("  const annualHistoryRequested ="),
+    source.indexOf("  const liveWidgetScenarioContexts ="),
+  );
+  const annualFetchSection = source.slice(
+    source.indexOf("async function fetchLiveAnnualMonthlyHistory"),
+    source.indexOf("function hydrateRealtimeOpenBuckets"),
+  );
+  const recursivePartitionSection = source.slice(
+    source.indexOf("async function fetchLiveAnnualMonthlyPartition"),
+    source.indexOf("function splitAnnualHistoryMonthPartition"),
+  );
+
+  assert.match(
+    source,
+    /const annualHistoryAttemptDayRef = React\.useRef\(""\)/,
+  );
+  assert.doesNotMatch(
+    source,
+    /annualHistoryAttemptMinuteRef|annualHistoryRetryMinuteKey/,
+    "falha histórica não pode ser tentada novamente a cada minuto",
+  );
+  assert.match(
+    source,
+    /const livePreferencesReady =\s*livePreferencesReadyKey === livePreferencesScopeKey/,
+  );
+  assert.match(
+    source,
+    /if \(!livePreferencesReady\) return \[\]/,
+    "preferências de outro escopo não podem liberar a consulta anual",
+  );
+  assert.match(
+    annualRequestSection,
+    /visibleLiveCardIds\.some\([\s\S]*?live_current_year_monthly[\s\S]*?live_current_year_accumulated/,
+  );
+  assert.match(
+    annualRequestSection,
+    /if \(!annualHistoryRequested \|\| !hasLoadedCharts\) return/,
+  );
+  assert.match(
+    annualRequestSection,
+    /annualHistoryAttemptDayRef\.current === annualHistoryDayKey/,
+  );
+  assert.doesNotMatch(annualRequestSection, /getMinutes|getHours|MinuteKey/);
+
+  assert.match(
+    annualFetchSection,
+    /granularity: "month"/,
+    "o histórico longo não deve voltar à granularidade horária",
+  );
+  assert.match(
+    source.slice(
+      source.indexOf("  const loadAnnualHistory = React.useCallback"),
+      source.indexOf("  const annualHistoryDayKey ="),
+    ),
+    /to: range\.periodTo/,
+    "a fonte mensal deve cobrir também os meses recentes e o mês aberto",
+  );
+  assert.doesNotMatch(
+    source,
+    /LIVE_ANNUAL_RECENT_MONTHS_ID|buildLiveAnnualRecentMonthsDefinition/,
+    "cards anuais não podem manter uma segunda janela recente",
+  );
+  assert.match(
+    source,
+    /if \(annualComparisonSource\)[\s\S]*?currentDayFrom = startOfDay\(now\)[\s\S]*?comparableTo = startOfHour\(now\)[\s\S]*?shiftRealtimeYearClamped/,
+    "o detalhe horário anual deve conter somente as bordas diárias equivalentes",
+  );
+  assert.match(
+    source,
+    /definitionIds\.add\(CURRENT_MONTH_DAYS_ID\)[\s\S]*?definitionIds\.add\(OPERATIONAL_LAST_YEAR_MONTH_ID\)/,
+    "dias fechados do comparativo anual devem permanecer consolidados",
+  );
+  assert.match(
+    annualFetchSection,
+    /rows\.length < AGGREGATE_RESPONSE_ROW_CEILING/,
+  );
+  assert.match(
+    recursivePartitionSection,
+    /fetchLiveAnnualMonthlyPartition\([\s\S]*?fetchLiveAnnualMonthlyPartition\(/,
+    "uma resposta no teto deve ser repartida até ficar comprovadamente completa",
+  );
+  assert.doesNotMatch(
+    recursivePartitionSection,
+    /Promise\.all/,
+    "a recursão deve respeitar o limite do pool externo",
+  );
+
+  const partitionYears = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "buildAnnualHistoryYearPartitions",
+  );
+  const partitions = partitionYears(
+    new Date(2018, 0, 1),
+    new Date(2021, 6, 1),
+  );
+  assert.equal(partitions.length, 4);
+  assert.equal(partitions[0].from.getTime(), new Date(2018, 0, 1).getTime());
+  assert.equal(partitions.at(-1).to.getTime(), new Date(2021, 6, 1).getTime());
+  partitions.slice(1).forEach((partition, index) => {
+    assert.equal(
+      partition.from.getTime(),
+      partitions[index].to.getTime(),
+      "partições anuais devem ser contíguas e sem sobreposição",
+    );
+  });
+});
+
+test("hora atual reutiliza exclusivamente a janela móvel de minutos", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const loadChartsSection = source.slice(
+    source.indexOf("  const loadCharts = React.useCallback"),
+    source.indexOf("  const loadAnnualHistory = React.useCallback"),
+  );
+  const hydrationSection = source.slice(
+    source.indexOf("function hydrateRealtimeOpenBuckets"),
+    source.indexOf("function buildRealtimeScopeModes"),
+  );
+
+  assert.match(
+    loadChartsSection,
+    /CANONICAL_HOUR_DERIVED_IDS\.has\(definition\.id\) \|\|\s*definition\.id === OPERATIONAL_CURRENT_HOUR_MINUTES_ID/,
+    "a definição auxiliar da hora atual não deve disparar uma segunda consulta",
+  );
+  assert.match(
+    hydrationSection,
+    /const visibleMinuteState = next\.live_chart_minute/,
+  );
+  assert.match(
+    hydrationSection,
+    /minuteState\.rows = visibleMinuteState\.rows\.filter/,
+  );
+  assert.match(
+    hydrationSection,
+    /aggregateBucketInRange\([\s\S]*?currentHourStart,[\s\S]*?currentMinuteEnd/,
+  );
+});
+
+test("planejador do Ao Vivo consulta somente fontes dos widgets visíveis", () => {
+  const ids = {
+    CURRENT_MONTH_DAYS_ID: "live_current_month_days",
+    DAY_REFRESH_MS: 5 * 60_000,
+    LIVE_DAY_MINUTES_ID: "live_chart_minute_day",
+    MONTH_REFRESH_MS: 60 * 60_000,
+    OCCUPANCY_HOURS_ID: "live_hourly_occupancy_data",
+    OPERATIONAL_COMPARISON_HOURS_ID:
+      "live_operational_comparison_hours",
+    OPERATIONAL_LAST_YEAR_MONTH_ID: "live_operational_last_year_month",
+    OPERATIONAL_PREVIOUS_MONTH_ID: "live_operational_previous_month",
+    OPERATIONAL_TREND_DAYS_ID: "live_operational_trend_days",
+    REFRESH_MS: 5_000,
+  };
+  const buildPlanKey = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "buildRealtimeDataPlanKey",
+    ids,
+  );
+  const build = ({
+    customWidgets = [],
+    monthComparison = "previous_month",
+    openScenarioComparisonWidgetIds = [],
+    visibleCardIds = [],
+  } = {}) => {
+    const key = buildPlanKey({
+      customWidgets,
+      monthComparison,
+      openScenarioComparisonWidgetIds,
+      visibleCardIds,
+    });
+    return key ? JSON.parse(key) : null;
+  };
+
+  assert.equal(buildPlanKey({
+    customWidgets: [],
+    monthComparison: "previous_month",
+    visibleCardIds: [],
+  }), "");
+  assert.deepEqual(
+    build({ visibleCardIds: ["live_month_access_ranking"] }),
+    {
+      annualComparisonSource: false,
+      comparisonSource: false,
+      definitionIds: [ids.CURRENT_MONTH_DAYS_ID],
+      heatmapSource: false,
+      minuteDay: false,
+      refreshIntervalMs: ids.DAY_REFRESH_MS,
+      rollingMinute: false,
+    },
+  );
+  assert.deepEqual(
+    build({
+      monthComparison: "last_year",
+      visibleCardIds: ["live_target_progress"],
+    }).definitionIds,
+    [
+      "live_chart_hour",
+      ids.CURRENT_MONTH_DAYS_ID,
+      ids.OPERATIONAL_LAST_YEAR_MONTH_ID,
+    ].sort(),
+  );
+  assert.deepEqual(
+    build({ visibleCardIds: [ids.LIVE_DAY_MINUTES_ID] }),
+    {
+      annualComparisonSource: false,
+      comparisonSource: false,
+      definitionIds: ["live_chart_minute"],
+      heatmapSource: false,
+      minuteDay: true,
+      refreshIntervalMs: ids.REFRESH_MS,
+      rollingMinute: true,
+    },
+  );
+
+  const customWidgets = [
+    {
+      created_at: "2026-09-02T00:00:00.000Z",
+      granularity: "minute",
+      id: "visible",
+      kind: "scope",
+      scopeId: "scenario-a",
+      scopeMode: "scenario",
+      scopeName: "Cenário A",
+      title: "Título original",
+      updated_at: "2026-09-02T00:00:00.000Z",
+    },
+    {
+      created_at: "2026-09-02T00:00:00.000Z",
+      granularity: "month",
+      id: "hidden",
+      kind: "scope",
+      scopeId: "scenario-b",
+      scopeMode: "scenario",
+      scopeName: "Cenário B",
+      title: "Oculto",
+      updated_at: "2026-09-02T00:00:00.000Z",
+    },
+  ];
+  const originalKey = buildPlanKey({
+    customWidgets,
+    monthComparison: "previous_month",
+    visibleCardIds: ["live_custom_visible", "live_month_access_ranking"],
+  });
+  const visualOnlyKey = buildPlanKey({
+    customWidgets: [
+      { ...customWidgets[0], title: "Título, cor e tamanho alterados" },
+      customWidgets[1],
+    ],
+    monthComparison: "previous_month",
+    visibleCardIds: ["live_month_access_ranking", "live_custom_visible"],
+  });
+  assert.equal(
+    visualOnlyKey,
+    originalKey,
+    "título e ordem visual não podem alterar o plano de rede",
+  );
+  assert.deepEqual(JSON.parse(originalKey).definitionIds, [
+    "live_chart_minute",
+    ids.CURRENT_MONTH_DAYS_ID,
+  ]);
+  assert.equal(JSON.parse(originalKey).rollingMinute, true);
+  assert.equal(JSON.parse(originalKey).refreshIntervalMs, ids.REFRESH_MS);
+
+  const comparisonWidget = {
+    created_at: "2026-09-02T00:00:00.000Z",
+    id: "comparison",
+    kind: "scenario_comparison",
+    title: "Comparação",
+    updated_at: "2026-09-02T00:00:00.000Z",
+  };
+  const closedComparison = build({
+    customWidgets: [comparisonWidget],
+    visibleCardIds: ["live_custom_comparison"],
+  });
+  assert.equal(
+    closedComparison,
+    null,
+    "comparação histórica fechada não deve criar polling no Ao Vivo",
+  );
+
+  const comparison = build({
+    customWidgets: [
+      comparisonWidget,
+    ],
+    openScenarioComparisonWidgetIds: ["comparison"],
+    visibleCardIds: ["live_custom_comparison"],
+  });
+  assert.equal(comparison.comparisonSource, true);
+  assert.deepEqual(comparison.definitionIds, []);
+  assert.equal(comparison.rollingMinute, true);
+
+  const annual = build({
+    visibleCardIds: ["live_current_year_monthly"],
+  });
+  assert.equal(annual.annualComparisonSource, true);
+  assert.deepEqual(annual.definitionIds, [
+    ids.CURRENT_MONTH_DAYS_ID,
+    ids.OPERATIONAL_LAST_YEAR_MONTH_ID,
+  ].sort());
+  assert.equal(annual.rollingMinute, false);
+  assert.equal(annual.refreshIntervalMs, ids.MONTH_REFRESH_MS);
+
+  const trend = build({ visibleCardIds: ["live_moving_average_trend"] });
+  assert.equal(trend.rollingMinute, false);
+  assert.equal(trend.refreshIntervalMs, ids.DAY_REFRESH_MS);
+  assert.doesNotMatch(JSON.stringify(trend), /live_chart_minute/);
+});
+
+test("Ao Vivo aguarda preferências e aplica o plano semântico ao polling", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const loadSection = source.slice(
+    source.indexOf("  const loadCharts = React.useCallback"),
+    source.indexOf("  const loadAnnualHistory = React.useCallback"),
+  );
+  const pollingSection = source.slice(
+    source.indexOf("  React.useEffect(() => {\n    if (!realtimeDataPlanKey)"),
+    source.indexOf("  const initialLoading =", source.indexOf("  React.useEffect(() => {\n    if (!realtimeDataPlanKey)")),
+  );
+  const planCallSection = source.slice(
+    source.indexOf("  const requestedRealtimeDataPlanKey ="),
+    source.indexOf("  const annualHistoryRequested ="),
+  );
+
+  assert.match(
+    source,
+    /realtimeDataPlanState\.scopeKey === realtimeDataPlanScopeKey[\s\S]*?realtimeDataPlanState\.key[\s\S]*?: ""/,
+    "um plano pertencente à empresa anterior deve ficar inativo imediatamente",
+  );
+  assert.match(source, /if \(!livePreferencesReady\) return \[\]/);
+  assert.match(
+    planCallSection,
+    /livePreferencesReady && selectedScope\s*\? buildRealtimeDataPlanKey/,
+    "nenhuma consulta pode começar antes da visão e preferências estarem prontas",
+  );
+  assert.match(
+    planCallSection,
+    /customWidgets,[\s\S]*?monthComparison: operationalSettings\.monthComparison,[\s\S]*?visibleCardIds: visibleLiveCardIds/,
+  );
+  assert.doesNotMatch(planCallSection, /liveColorByCardId|liveTitleByCardId|chartType|size/);
+  assert.match(loadSection, /if \(!realtimeDataPlanKey\) return/);
+  assert.match(
+    loadSection,
+    /requestedDefinitionIds\.has\(definition\.id\)/,
+  );
+  assert.match(
+    loadSection,
+    /realtimeDataPlan\.minuteDay\s*\? fetchMinuteDayAggregateBootstrap/,
+  );
+  assert.match(
+    loadSection,
+    /const minuteDayBootstrapTo = rollingMinuteDefinition[\s\S]*?rollingMinuteDefinition\.from\.getTime\(\)[\s\S]*?to: minuteDayBootstrapTo/,
+    "o bootstrap do dia deve terminar onde começa a fonte móvel já solicitada",
+  );
+  assert.match(
+    loadSection,
+    /refreshMinuteDayAggregateCache\([\s\S]*?sourceFrom: new Date\([\s\S]*?rollingMinuteDefinition\.from\.getTime\(\)/,
+    "a cauda do dia deve ser reconciliada com a única fonte móvel",
+  );
+  assert.match(
+    loadSection,
+    /ranges: canonicalHourRanges/,
+  );
+  assert.match(
+    loadSection,
+    /definition\.id === OPERATIONAL_MONTH_HOURS_ID[\s\S]*?fetchIncrementalRealtimeHourlyRanges\(\{[\s\S]*?ranges: canonicalHourRanges/,
+    "a janela canônica deve consultar incrementalmente somente os trechos horários ausentes",
+  );
+  assert.match(
+    loadSection,
+    /definition\.granularity === "minute"[\s\S]*?fetchIncrementalRealtimeMinuteWindow/,
+    "a janela móvel não pode baixar novamente os 60 minutos completos a cada ciclo",
+  );
+  assert.match(
+    source,
+    /function fetchIncrementalRealtimeHourlyRanges[\s\S]*?subtractRealtimeQueryRanges[\s\S]*?includeOpenHour/,
+    "horas fechadas devem permanecer cobertas no cache sem nova consulta",
+  );
+  assert.match(pollingSection, /if \(!realtimeDataPlanKey\)/);
+  assert.match(pollingSection, /window\.setInterval/);
+  assert.match(
+    pollingSection,
+    /realtimeDataPlan\.refreshIntervalMs/,
+    "a cadência deve seguir o dataset mais urgente do plano visível",
+  );
+  assert.match(
+    loadSection,
+    /const needsRollingMinute = realtimeDataPlan\.rollingMinute/,
+  );
+  assert.doesNotMatch(
+    loadSection,
+    /canonicalDefinition\s*&&\s*canonicalDefinition\.from[\s\S]*?needsRollingMinute/,
+    "uma janela que apenas cruza a hora atual não deve ativar minutos",
+  );
+  const liveComparisonSource = source.slice(
+    source.indexOf("function buildOperationalMonthHoursDefinition"),
+    source.indexOf("function buildOperationalCurrentHourMinutesDefinition"),
+  );
+  assert.match(liveComparisonSource, /from: startOfDay\(now\)/);
+  assert.match(
+    liveComparisonSource,
+    /to: endOfAggregateBucket\(startOfHour\(now\), "hour"\)/,
+  );
+  assert.doesNotMatch(
+    liveComparisonSource,
+    /addMonths|startOfMonth/,
+    "a fonte compartilhada com comparativos personalizados não pode baixar 13 meses",
+  );
+});
+
+test("Ao Vivo recorta respostas compartilhadas antes de certificar cada widget", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const filterRows = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "filterRealtimeRowsToRanges",
+    { aggregateBucketInRange: aggregateTime.aggregateBucketInRange },
+  );
+  const selectRows = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "selectRealtimeNativeDefinitionRows",
+    {
+      DEFAULT_METRIC_TYPE: "count",
+      filterRealtimeRowsToRanges: filterRows,
+      requireAggregateRowsInRange: aggregateTime.requireAggregateRowsInRange,
+    },
+  );
+  const sharedRows = [
+    aggregateRow("2026-08-31", "line-entry", 10),
+    aggregateRow("2026-09-01", "line-entry", 20),
+    aggregateRow("2026-09-02", "line-entry", 30),
+  ];
+  const definition = {
+    from: new Date(2026, 8, 1),
+    granularity: "day",
+    id: "current-month",
+    to: new Date(2026, 8, 3),
+  };
+
+  assert.throws(
+    () =>
+      aggregateTime.requireAggregateRowsInRange(
+        sharedRows,
+        "day",
+        definition.from,
+        definition.to,
+        "count",
+      ),
+    /fora do intervalo/,
+    "a resposta mesclada reproduz a falha anterior",
+  );
+  assert.deepEqual(
+    selectRows(sharedRows, definition, definition.to).map((row) => row.total),
+    [20, 30],
+  );
+
+  const errorSection = source.slice(
+    source.indexOf("  const liveDataCertificationError ="),
+    source.indexOf("  const comparisonScopeCertificationError ="),
+  );
+  assert.doesNotMatch(
+    errorSection.slice(
+      0,
+      errorSection.indexOf("  const liveReportCertificationError ="),
+    ),
+    /Object\.entries\(chartData\)/,
+    "uma falha isolada deve permanecer no card, sem ocultar todo o Ao Vivo",
+  );
+  assert.match(errorSection, /const liveReportCertificationError/);
+});
+
+test("cards comparativos existem antes dos dados e não criam ciclo no plano", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const cardsSection = source.slice(
+    source.indexOf("  const comparisonCards ="),
+    source.indexOf("  const customWidgetCards ="),
+  );
+
+  assert.match(cardsSection, /scenarios\.length > 1/);
+  assert.match(cardsSection, /locationTodayComparisonScopes\.length > 1/);
+  assert.match(cardsSection, /subLocationTodayComparisonScopes\.length > 1/);
+  assert.doesNotMatch(
+    cardsSection,
+    /some\(\(point\) => point\.total > 0\)/,
+    "a existência do card não pode depender da própria resposta horária",
+  );
+});
+
+test("Ao Vivo materializa modelos pesados somente quando o card entra na janela", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const derivedSection = source.slice(
+    source.indexOf("  const initialLoading ="),
+    source.indexOf("  function getScopeOptionsForMode"),
+  );
+  const modelSection = source.slice(
+    source.indexOf("  const createRealtimeWidgetModel ="),
+    source.indexOf("  const scenarioConfigurableCardDefaults ="),
+  );
+  const cardsSection = source.slice(
+    source.indexOf("  const operationalCards ="),
+    source.indexOf("  const customWidgetCards ="),
+  );
+  const customScenarioWidgetSection = source.slice(
+    source.indexOf("function CustomScenarioWidgetCard"),
+    source.indexOf("function CustomWidgetActions"),
+  );
+
+  assert.match(derivedSection, /getOperationalHeatmapPoints = createRenderLazyValue/);
+  assert.match(derivedSection, /getHourlyOccupancyPoints = createRenderLazyValue/);
+  assert.match(derivedSection, /getScenarioTableRows = createRenderLazyValue/);
+  assert.doesNotMatch(derivedSection, /const operationalHeatmapPoints = React\.useMemo/);
+  assert.doesNotMatch(derivedSection, /const hourlyOccupancyPoints = React\.useMemo/);
+  assert.match(modelSection, /get liveAnnualComparisonModel\(\)/);
+  assert.match(modelSection, /get monthComparisonPoints\(\)/);
+  assert.match(modelSection, /get operationalTrendPoints\(\)/);
+  assert.match(cardsSection, /node: \(\) => \{/);
+  assert.match(customScenarioWidgetSection, /const widgetData = React\.useMemo/);
+  assert.doesNotMatch(customScenarioWidgetSection, /const rankingPoints = React\.useMemo/);
+  assert.doesNotMatch(customScenarioWidgetSection, /const heatmapPoints = React\.useMemo/);
+});
+
+test("comparação por cenário não mantém um segundo auto refresh", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /\bautoRefresh\b/);
+  assert.doesNotMatch(source, /\bREFRESH_MS\b/);
+  assert.doesNotMatch(source, /setInterval|visibilityState|visibilitychange/);
 });
 
 test("Ao Vivo usa histórico multi-ano, cache por empresa e fuso e hora aberta canônica", () => {
@@ -12167,6 +15413,16 @@ function analysisWidget(kind, overrides = {}) {
   };
 }
 
+function scenarioFixture(id, name) {
+  return {
+    active: true,
+    company_id: "company-a",
+    id,
+    lines: [],
+    name,
+  };
+}
+
 function memoryStorage() {
   const values = new Map();
   return {
@@ -12298,6 +15554,64 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
       valueLabelGrid,
     },
   );
+  const cumulativePeriod = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-08-01",
+    "2026-08-31",
+  );
+  assert.ok(cumulativePeriod);
+  const cumulativeScenario = scenario(
+    "cumulative-entry",
+    "Entrada acumulada",
+    "line-cumulative-entry",
+    1,
+  );
+  const cumulativeModel = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data: analysisData({
+      baseline: {
+        previous_period: {
+          granularity: "day",
+          rows: Array.from({ length: 31 }, (_, index) =>
+            aggregateRow(
+              `2026-07-${String(index + 1).padStart(2, "0")}`,
+              "line-cumulative-entry",
+              index + 10,
+            ),
+          ),
+        },
+      },
+      dayRows: Array.from({ length: 31 }, (_, index) =>
+        aggregateRow(
+          `2026-08-${String(index + 1).padStart(2, "0")}`,
+          "line-cumulative-entry",
+          index + 20,
+        ),
+      ),
+    }),
+    period: cumulativePeriod,
+    scenarios: [cumulativeScenario],
+    widget: analysisWidget("cumulative"),
+  });
+  assert.equal(cumulativeModel.hasData, true);
+  assert.ok(cumulativeModel.option);
+  const cumulativeInteractiveOption = enhanceInteractiveChartOption(
+    cumulativeModel.option,
+    false,
+    "always",
+  );
+  const cumulativeValueSeries = cumulativeInteractiveOption.series.filter(
+    (series) => series.type === "bar" && series.silent !== true,
+  );
+  assert.equal(cumulativeValueSeries.length, 2);
+  for (const series of cumulativeValueSeries) {
+    assert.equal(series.data.length, 31);
+    assert.equal(series.label.show, true);
+    assert.equal(typeof series.label.formatter, "function");
+    assert.notEqual(
+      series.label.formatter({ value: series.data.at(-1) }),
+      "",
+      `${series.name}: o último acumulado deve nascer visível, sem hover`,
+    );
+  }
   const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
   const model = countingIntelligence.buildCountingIntelligenceModel({
     hourlyRows: [],
@@ -12513,6 +15827,11 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
     resolve(projectRoot, "components/app/echart.tsx"),
     "utf8",
   );
+  assert.match(
+    chartSource,
+    /valueLabels\s*=\s*"always"/,
+    "o modo público padrão deve renderizar valores sem depender de hover",
+  );
   assert.match(chartSource, /hideOverlap: !showEveryLinePoint/);
   assert.match(
     chartSource,
@@ -12684,10 +16003,19 @@ test("exportação executiva separa gráficos e dados sem reduzir tabelas extens
     resolve(projectRoot, "lib/report-export.ts"),
     "utf8",
   );
+  const actionsSource = readFileSync(
+    resolve(projectRoot, "components/app/report-export-actions.tsx"),
+    "utf8",
+  );
 
   assert.match(source, /fitToHeight: 0/);
   assert.match(source, /fitToWidth: 0/);
   assert.match(source, /safeSheetName\(`Gráfico \$\{index \+ 1\}/);
+  assert.match(source, /signal\?: AbortSignal/);
+  assert.match(source, /options\.signal\?\.throwIfAborted\(\)/);
+  assert.match(source, /signal: options\.signal/);
+  assert.match(actionsSource, /signal: controller\.signal/);
+  assert.match(actionsSource, /if \(isExportAbort\(error, controller\.signal\)\) return;/);
   assert.match(source, /safeSheetName\(`Dados \$\{index \+ 1\}/);
   assert.match(source, /fitToHeight: 1/);
   assert.match(source, /pageSetup\.printTitlesRow/);
@@ -12854,6 +16182,14 @@ test("gráficos e modo monitor preservam navegação por teclado", () => {
 });
 
 test("ações individuais dos widgets permanecem no topo direito em qualquer largura", () => {
+  const cardLayoutSource = readFileSync(
+    resolve(projectRoot, "components/app/card-layout.tsx"),
+    "utf8",
+  );
+  const compactMetricSource = readFileSync(
+    resolve(projectRoot, "components/app/compact-metric-card.tsx"),
+    "utf8",
+  );
   const actionSource = readFileSync(
     resolve(projectRoot, "components/app/widget-card-actions.tsx"),
     "utf8",
@@ -12901,6 +16237,27 @@ test("ações individuais dos widgets permanecem no topo direito em qualquer lar
   );
   assert.match(comparisonSource, /col-span-full flex min-w-0 flex-wrap/);
   assert.match(reportsSource, /<WidgetCardActions label=\{`Ações do widget/);
+  assert.match(cardLayoutSource, /data-layout-card-configure/);
+  assert.match(
+    cardLayoutSource,
+    /configureEnabled && !reorderEnabled[\s\S]*?title="Configurar widget"/,
+  );
+  assert.match(
+    cardLayoutSource,
+    /setOrganizerSelectedCardId\(card\.id\);[\s\S]*?setOrganizerOpen\(true\)/,
+    "a engrenagem deve abrir diretamente o inspetor do próprio widget",
+  );
+  assert.match(
+    cardLayoutSource,
+    /selectedCardId=\{organizerSelectedCardId\}/,
+  );
+  assert.match(
+    compactMetricSource,
+    /data-compact-metric-header/,
+    "o KPI compacto deve reservar o canto superior direito para a configuração",
+  );
+  assert.match(realtimeSource, /<CardLayout[\s\S]*?showCardConfigurationActions/);
+  assert.match(occupancySource, /<CardLayout[\s\S]*?showCardConfigurationActions/);
 });
 
 test("Resumo do período permanece legível com 37 cenários e valores extensos", () => {
@@ -13211,6 +16568,188 @@ test("widgets ECharts se adaptam ao card sem barras de rolagem permanentes", () 
   assert.doesNotMatch(hex, /max-h-\[520px\] overflow-auto|minWidth:/);
 });
 
+test("widgets de Ocupação ao vivo respeitam os seis níveis de altura do Bento", () => {
+  const occupancySource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const section = (source, from, to) => {
+    const start = source.indexOf(from);
+    assert.notEqual(start, -1, `seção ${from} deve existir`);
+    const end = source.indexOf(to, start);
+    assert.notEqual(end, -1, `limite ${to} deve existir`);
+    return source.slice(start, end);
+  };
+
+  const occupancyChart = section(
+    occupancySource,
+    "function OccupancyChartCard",
+    "function MetricVisibilityControls",
+  );
+  const occupancyEmpty = section(
+    occupancySource,
+    "function EmptyChartState",
+    "function buildOccupancyLiveDataPlan",
+  );
+  const comparisonCharts = section(
+    comparisonSource,
+    "function OccupancyBarRaceCard",
+    "function OccupancyHexLayoutCard",
+  );
+  const comparisonHeatmaps = section(
+    comparisonSource,
+    "function OccupancyDayHourHeatmapCard",
+    "function ScenarioScopeDialog",
+  );
+  const comparisonStates = section(
+    comparisonSource,
+    "function ChartSkeleton",
+    "function buildHalfDonutOption",
+  );
+
+  assert.match(
+    occupancyChart,
+    /CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden"/,
+  );
+  assert.match(
+    occupancyChart,
+    /className="h-full min-h-0 min-w-0 flex-1 overflow-hidden"/,
+  );
+  assert.match(occupancyEmpty, /h-full min-h-0 min-w-0 flex-1/);
+  assert.match(comparisonCharts, /h-full min-h-0 w-full flex-1/);
+  assert.match(
+    comparisonHeatmaps,
+    /h-full min-h-0 min-w-0 flex-1 overflow-hidden/,
+  );
+  assert.match(
+    comparisonStates,
+    /Skeleton className="h-full min-h-0 w-full flex-1 self-stretch"/,
+  );
+  assert.match(comparisonStates, /h-full min-h-0 min-w-0 flex-1 self-stretch/);
+
+  for (const responsiveSection of [
+    occupancyChart,
+    occupancyEmpty,
+    comparisonCharts,
+    comparisonHeatmaps,
+    comparisonStates,
+  ]) {
+    assert.doesNotMatch(
+      responsiveSection,
+      /(?:min-)?h-\[(?:150|180|190|210|225|230|260|330|390)px\]/,
+    );
+  }
+});
+
+test("widgets de Contagem preenchem os seis níveis de altura do Bento", () => {
+  const periodSource = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const realtimeSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+  const intelligenceSource = readFileSync(
+    resolve(projectRoot, "components/app/counting-intelligence-report.tsx"),
+    "utf8",
+  );
+  const section = (source, from, to) => {
+    const start = source.indexOf(from);
+    assert.notEqual(start, -1, `seção ${from} deve existir`);
+    const end = source.indexOf(to, start);
+    assert.notEqual(end, -1, `limite ${to} deve existir`);
+    return source.slice(start, end);
+  };
+
+  const periodCard = section(
+    periodSource,
+    "function PeriodAnalysisCard",
+    "function WidgetDialog",
+  );
+  const periodState = section(
+    periodSource,
+    "function EmptyState",
+    "function emptyWidgetForm",
+  );
+  const realtimeCards = section(
+    realtimeSource,
+    "function MinuteDayChartCard",
+    "function buildRealtimeChartDefinitions",
+  );
+  const scenarioCard = section(
+    comparisonSource,
+    "export function ScenarioComparisonCard",
+    "export function ScenarioComparisonConfigurator",
+  );
+  const scenarioState = section(
+    comparisonSource,
+    "function ChartState",
+    "export async function fetchScenarioComparisonRows",
+  );
+  const reportCards = section(
+    intelligenceSource,
+    "function ExecutiveChartCard",
+    "function YearComparisonValueRow",
+  );
+
+  assert.match(periodCard, /flex h-full min-h-0 min-w-0 flex-col overflow-hidden/);
+  assert.match(
+    periodCard,
+    /flex min-h-0 min-w-0 flex-col flex-1 !overflow-hidden/,
+  );
+  assert.match(periodCard, /h-full min-h-0 w-full flex-1 self-stretch/);
+  assert.match(periodState, /h-full min-h-0 min-w-0 flex-1 self-stretch/);
+
+  assert.match(realtimeCards, /flex h-full min-h-0 min-w-0 flex-col overflow-hidden/);
+  assert.match(
+    realtimeCards,
+    /flex min-h-0 min-w-0 flex-1 flex-col (?:gap-3 )?overflow-hidden/,
+  );
+  assert.match(realtimeCards, /h-full min-h-0 w-full flex-1 self-stretch/);
+  assert.match(
+    realtimeCards,
+    /min-h-0 min-w-0 flex-1 overflow-auto rounded-md border/,
+  );
+
+  assert.match(scenarioCard, /flex h-full min-h-0 flex-col/);
+  assert.match(
+    scenarioCard,
+    /flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden/,
+  );
+  assert.match(scenarioCard, /h-full min-h-0 w-full flex-1 self-stretch/);
+  assert.match(scenarioState, /h-full min-h-0 min-w-0 w-full flex-1 self-stretch/);
+
+  assert.match(reportCards, /flex h-full min-h-0 min-w-0 flex-col overflow-hidden/);
+  assert.match(
+    reportCards,
+    /flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden/,
+  );
+  assert.match(reportCards, /h-full min-h-0 w-full flex-1 self-stretch/);
+
+  for (const responsiveSection of [
+    periodCard,
+    periodState,
+    realtimeCards,
+    scenarioCard,
+    scenarioState,
+    reportCards,
+  ]) {
+    assert.doesNotMatch(
+      responsiveSection,
+      /(?:min-)?h-\[(?:150|160|180|190|200|220|240|250|260|310|320|360)px\]/,
+    );
+  }
+});
+
 test("widgets de Relatórios preservam títulos, métricas e contexto dentro do card", () => {
   const compactMetricSource = readFileSync(
     resolve(projectRoot, "components/app/compact-metric-card.tsx"),
@@ -13420,4 +16959,710 @@ test("operador carrega Contagem por cenário sem consultar catálogos administra
     sources[0],
     /Promise\.resolve<OptionalWorkerMetadata>\(\{\s*rows: \[\],\s*warning: "",/,
   );
+});
+
+test("Relatórios de Contagem usam mês consolidado e somente bordas do mês aberto", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    comparableDailyRows: [
+      aggregateRow("2025-07-01", "line-entry", 300),
+      aggregateRow("2026-07-01", "line-entry", 400),
+    ],
+    comparableHourlyRows: [
+      aggregateRow("2025-07-22T10:00:00", "line-entry", 40),
+      aggregateRow("2026-07-22T10:00:00", "line-entry", 60),
+    ],
+    hourlyRows: [],
+    includeOpenPeriod: true,
+    monthlyRows: [
+      aggregateRow("2025-07-01", "line-entry", 900),
+      aggregateRow("2026-07-01", "line-entry", 1_000),
+    ],
+    now: new Date(2026, 6, 22, 15, 30),
+    period: {
+      from: new Date(2026, 0, 1),
+      to: new Date(2026, 7, 1),
+    },
+    scenarios: [entryScenario],
+    scope: {
+      cameraIds: [],
+      name: "Entrada",
+      scenario: entryScenario,
+    },
+  });
+
+  assert.equal(model.currentMonthValue, 1_000);
+  assert.ok(Math.abs(model.currentMonthDelta - (460 / 340 - 1)) < 1e-12);
+  assert.ok(Math.abs(model.periodDelta - (460 / 340 - 1)) < 1e-12);
+
+  const directionalModel = countingIntelligence.buildCountingIntelligenceModel({
+    hourlyRows: [
+      aggregateRow("2026-01-10T10:00:00", "line-entry", 900),
+      aggregateRow("2026-07-20T10:00:00", "line-entry", 25),
+    ],
+    hourlyPeriod: {
+      from: new Date(2026, 6, 16),
+      to: new Date(2026, 6, 23),
+    },
+    monthlyRows: [],
+    now: new Date(2026, 6, 22, 15, 30),
+    period: {
+      from: new Date(2026, 0, 1),
+      to: new Date(2026, 7, 1),
+    },
+    scenarios: [entryScenario],
+    scope: { cameraIds: [], name: "Entrada", scenario: entryScenario },
+  });
+  assert.equal(directionalModel.directionalHours[10].total, 25);
+  assert.deepEqual(
+    [
+      directionalModel.directionalPeriodFrom.getTime(),
+      directionalModel.directionalPeriodTo.getTime(),
+    ],
+    [new Date(2026, 6, 16).getTime(), new Date(2026, 6, 23).getTime()],
+  );
+
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /COUNTING_INTELLIGENCE_HOUR_CARD_ID_SET[\s\S]*?directionalFlow/,
+  );
+  const hourlyCardSet = source.slice(
+    source.indexOf("const COUNTING_INTELLIGENCE_HOUR_CARD_ID_SET"),
+    source.indexOf("const COUNTING_INTELLIGENCE_OPEN_COMPARISON_CARD_ID_SET"),
+  );
+  assert.doesNotMatch(hourlyCardSet, /accessRanking/);
+  assert.match(source, /buildCountingMonthHistoryDefinition/);
+  assert.match(source, /buildCountingOpenComparisonDefinitions/);
+  const directionalDefinition = source.slice(
+    source.indexOf("function buildCountingHourHistoryDefinition"),
+    source.indexOf("function buildCountingMonthHistoryDefinition"),
+  );
+  assert.match(directionalDefinition, /COUNTING_DIRECTIONAL_PROFILE_DAYS/);
+  assert.match(directionalDefinition, /Math\.max\(period\.from\.getTime\(\), rollingFrom\.getTime\(\)\)/);
+  assert.doesNotMatch(directionalDefinition, /startOfYear|includePreviousYear/);
+  assert.match(source, /fetchBoundedHourlyAggregateRanges/);
+  assert.match(source, /fetchCompleteAggregateRange/);
+  assert.match(
+    source,
+    /cacheScope: `reports:\$\{companyScopeId \?\? "jwt-company"\}:\$\{companyTimeZone\}`/,
+  );
+});
+
+test("heatmap dias x meses preserva grade civil, zero e escopo do cenário", () => {
+  const selectedScenario = scenario(
+    "selected",
+    "Entrada selecionada",
+    "line-selected",
+    2,
+  );
+  const foreignScenario = scenario(
+    "foreign",
+    "Entrada fora do widget",
+    "line-foreign",
+    5,
+  );
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    dailyRows: [
+      aggregateRow("2024-01-31", "line-selected", 0),
+      aggregateRow("2024-02-29", "line-selected", 5),
+      aggregateRow("2024-02-29", "line-foreign", 100),
+      aggregateRow("2024-03-01", "line-selected", 900),
+    ],
+    hourlyRows: [],
+    includeOpenPeriod: true,
+    monthlyRows: [],
+    now: new Date(2024, 2, 1, 10, 30),
+    period: {
+      from: new Date(2024, 0, 1),
+      to: new Date(2024, 3, 1),
+    },
+    scenarios: [selectedScenario, foreignScenario],
+    scope: {
+      cameraIds: [],
+      name: "Entrada selecionada",
+      scenario: selectedScenario,
+    },
+  });
+  const cell = (month, day) =>
+    model.dayMonthHeatmapCells.find(
+      (item) => item.month === month && item.day === day,
+    );
+
+  assert.equal(model.dayMonthHeatmapCells.length, 12 * 31);
+  assert.deepEqual(localDateParts(model.dayMonthHeatmapFrom), [2024, 1, 1]);
+  assert.deepEqual(localDateParts(model.dayMonthHeatmapTo), [2024, 3, 1]);
+  assert.equal(cell(0, 31)?.total, 0, "zero medido deve continuar certificado");
+  assert.deepEqual(localDateParts(cell(1, 29)?.date), [2024, 2, 29]);
+  assert.equal(
+    cell(1, 29)?.total,
+    10,
+    "29/02 deve aplicar o multiplicador e ignorar cenário fora do escopo",
+  );
+  assert.equal(cell(1, 30)?.date, null, "30/02 deve ser indisponível");
+  assert.equal(cell(1, 30)?.total, null);
+  assert.equal(
+    cell(2, 1)?.total,
+    null,
+    "o dia civil ainda em andamento não pode ser publicado como zero",
+  );
+
+  const option =
+    countingIntelligence.buildCountingDayMonthHeatmapChartOption(model);
+  const unavailableSeries = option.series.find(
+    (series) => series.name === "Sem dia civil fechado",
+  );
+  const certifiedSeries = option.series.find(
+    (series) => series.name === "Fluxo certificado",
+  );
+  assert.ok(unavailableSeries);
+  assert.ok(certifiedSeries);
+  assert.equal(unavailableSeries.itemStyle.borderWidth, 1);
+  assert.equal(certifiedSeries.itemStyle.borderWidth, 1);
+  assert.equal(certifiedSeries.emphasis.itemStyle.borderWidth, 1);
+  assert.equal(
+    certifiedSeries.itemStyle.borderColor,
+    "rgba(15, 23, 42, 0.09)",
+  );
+  assert.ok(
+    certifiedSeries.data.some(
+      ([dayIndex, month, total]) =>
+        dayIndex === 30 && month === 0 && total === 0,
+    ),
+  );
+  assert.ok(
+    certifiedSeries.data.some(
+      ([dayIndex, month, total]) =>
+        dayIndex === 28 && month === 1 && total === 10,
+    ),
+  );
+  assert.ok(
+    unavailableSeries.data.some(
+      ([dayIndex, month, total]) =>
+        dayIndex === 29 && month === 1 && total === -1,
+    ),
+  );
+  assert.deepEqual(
+    option.visualMap.map(({ seriesIndex }) => seriesIndex),
+    [0, 1],
+    "ausência e valores certificados precisam de escalas visuais distintas",
+  );
+  assert.equal(option.xAxis.axisLabel.hideOverlap, true);
+  assert.equal(option.yAxis.axisLabel.hideOverlap, true);
+  assert.ok(option.visualMap[1].itemHeight <= 120);
+  const darkOption =
+    countingIntelligence.buildCountingDayMonthHeatmapChartOption(
+      model,
+      "#1267C4",
+      "dark",
+    );
+  const darkCertifiedSeries = darkOption.series.find(
+    (series) => series.name === "Fluxo certificado",
+  );
+  assert.ok(darkCertifiedSeries);
+  assert.equal(
+    darkCertifiedSeries.itemStyle.borderColor,
+    "rgba(226, 232, 240, 0.12)",
+  );
+  assert.equal(
+    darkCertifiedSeries.emphasis.itemStyle.borderColor,
+    "rgba(248, 250, 252, 0.24)",
+  );
+});
+
+test("heatmap meses x anos limita quatro anos e exporta cobertura legível", () => {
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    dailyRows: [],
+    hourlyRows: [],
+    includeOpenPeriod: false,
+    monthlyRows: [
+      aggregateRow("2022-01-01", "line-entry", 22),
+      aggregateRow("2023-01-01", "line-entry", 23),
+      aggregateRow("2024-01-01", "line-entry", 24),
+      aggregateRow("2025-01-01", "line-entry", 25),
+      aggregateRow("2026-01-01", "line-entry", 26),
+      aggregateRow("2026-02-01", "line-entry", 0),
+    ],
+    now: new Date(2026, 8, 2, 12),
+    period: {
+      from: new Date(2022, 0, 1),
+      to: new Date(2026, 8, 1),
+    },
+    scenarios: [entryScenario],
+    scope: { cameraIds: [], name: "Entrada", scenario: entryScenario },
+  });
+  const option =
+    countingIntelligence.buildCountingMonthYearHeatmapChartOption(model);
+  const unavailableSeries = option.series.find(
+    (series) => series.name === "Mês fora do período",
+  );
+  const certifiedSeries = option.series.find(
+    (series) => series.name === "Fluxo mensal certificado",
+  );
+
+  assert.deepEqual(option.yAxis.data, ["2026", "2025", "2024", "2023"]);
+  assert.equal(option.yAxis.inverse, true);
+  assert.equal(option.yAxis.data.length, 4);
+  assert.equal(unavailableSeries.itemStyle.borderWidth, 1);
+  assert.equal(certifiedSeries.itemStyle.borderWidth, 1);
+  assert.equal(certifiedSeries.emphasis.itemStyle.borderWidth, 1);
+  assert.equal(
+    certifiedSeries.itemStyle.borderColor,
+    "rgba(15, 23, 42, 0.09)",
+  );
+  assert.equal(option.xAxis.axisLabel.hideOverlap, true);
+  assert.equal(option.yAxis.axisLabel.hideOverlap, true);
+  assert.equal(certifiedSeries.labelLayout.hideOverlap, true);
+  assert.equal(
+    certifiedSeries.data.some(
+      ([month, yearIndex, total]) =>
+        month === 0 && yearIndex === 0 && total === 26,
+    ),
+    true,
+  );
+  assert.equal(
+    certifiedSeries.data.some(
+      ([month, yearIndex, total]) =>
+        month === 1 && yearIndex === 0 && total === 0,
+    ),
+    true,
+    "mês certificado sem fluxo não pode desaparecer",
+  );
+  assert.equal(
+    unavailableSeries.data.some(
+      ([month, yearIndex, total]) =>
+        month === 8 && yearIndex === 0 && total === -1,
+    ),
+    true,
+  );
+  assert.equal(
+    [...certifiedSeries.data, ...unavailableSeries.data].some(
+      ([, yearIndex]) => yearIndex > 3,
+    ),
+    false,
+  );
+
+  const assets =
+    countingIntelligence.buildCountingIntelligenceReportAssets(model);
+  const dayMonth = assets.charts.find(
+    ({ cardId }) =>
+      cardId === countingIntelligence.COUNTING_INTELLIGENCE_CARD_IDS.dayMonthHeatmap,
+  );
+  const monthYear = assets.charts.find(
+    ({ cardId }) =>
+      cardId === countingIntelligence.COUNTING_INTELLIGENCE_CARD_IDS.monthYearHeatmap,
+  );
+  assert.ok(dayMonth?.value.table);
+  assert.ok(monthYear?.value.table);
+  assert.equal(
+    dayMonth.value.table.rows.length,
+    243,
+    "a tabela deve listar somente os dias civis do período, sem células estruturais vazias",
+  );
+  assert.equal(
+    dayMonth.value.table.rows.some(({ date }) => date === "-"),
+    false,
+  );
+  assert.equal(monthYear.value.table.rows.length, 4 * 12);
+  assert.deepEqual(
+    monthYear.value.table.rows.slice(0, 2).map(({ year, month, total, coverage }) => ({
+      coverage,
+      month,
+      total,
+      year,
+    })),
+    [
+      { coverage: "Mês certificado", month: "Jan", total: 26, year: 2026 },
+      { coverage: "Mês certificado", month: "Fev", total: 0, year: 2026 },
+    ],
+  );
+  assert.deepEqual(
+    monthYear.value.table.rows.find(
+      ({ month, year }) => month === "Set" && year === 2026,
+    ),
+    {
+      coverage: "Fora do período",
+      month: "Set",
+      total: "",
+      year: 2026,
+    },
+  );
+});
+
+test("fonte diária dos heatmaps de Relatórios é condicional e limitada a um ano", () => {
+  const reportsSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const cardsSource = readFileSync(
+    resolve(projectRoot, "components/app/counting-intelligence-report.tsx"),
+    "utf8",
+  );
+  const preferencesSource = readFileSync(
+    resolve(projectRoot, "lib/view-preferences.ts"),
+    "utf8",
+  );
+
+  assert.equal(
+    countingIntelligence.COUNTING_INTELLIGENCE_CARD_IDS.dayMonthHeatmap,
+    "report_counting_day_month_heatmap",
+  );
+  assert.equal(
+    countingIntelligence.COUNTING_INTELLIGENCE_CARD_IDS.monthYearHeatmap,
+    "report_counting_month_year_heatmap",
+  );
+  assert.match(
+    reportsSource,
+    /const countingIntelligenceDayRequired = React\.useMemo\([\s\S]*?visibleReportCardIds\.includes\([\s\S]*?COUNTING_INTELLIGENCE_CARD_IDS\.dayMonthHeatmap/,
+  );
+  assert.match(
+    reportsSource,
+    /const countingDayHeatmapDefinition = countingIntelligenceDayRequired[\s\S]*?\? buildCountingDayHeatmapDefinition\([\s\S]*?effectivePeriodDates,[\s\S]*?now,[\s\S]*?companyTimeZone,[\s\S]*?\)[\s\S]*?: null/,
+  );
+  assert.match(
+    reportsSource,
+    /countingDayHeatmapDefinition && !visibleDayHeatmapSource[\s\S]*?\? \[countingDayHeatmapDefinition\]/,
+    "a fonte própria só deve ser consultada quando não houver uma diária visível reutilizável",
+  );
+  assert.equal(
+    (reportsSource.match(/dailyRows: chartData\[COUNTING_DAY_HEATMAP_ID\]\?\.rows \?\? \[\]/g) ?? [])
+      .length,
+    2,
+    "modelo global e composição customizada precisam receber a mesma fonte diária",
+  );
+  assert.match(
+    reportsSource,
+    /COUNTING_INTELLIGENCE_MONTH_CARD_ID_SET[\s\S]*?COUNTING_INTELLIGENCE_CARD_IDS\.monthYearHeatmap/,
+  );
+
+  const countingDayHeatmapYear = loadStandaloneFunction(
+    "components/app/scenario-reports-dashboard.tsx",
+    "countingDayHeatmapYear",
+  );
+  const startOfDay = loadStandaloneFunction(
+    "components/app/scenario-reports-dashboard.tsx",
+    "startOfDay",
+  );
+  const buildCountingDayHeatmapDefinition = loadStandaloneFunction(
+    "components/app/scenario-reports-dashboard.tsx",
+    "buildCountingDayHeatmapDefinition",
+    {
+      COUNTING_DAY_HEATMAP_ID: "report_counting_day_heatmap_source",
+      companyCalendarDate: companyTimeZone.companyCalendarDate,
+      countingDayHeatmapYear,
+      startOfDay,
+    },
+  );
+  const leapYearDefinition = buildCountingDayHeatmapDefinition(
+    {
+      from: new Date(2024, 0, 1),
+      to: new Date(2025, 0, 1),
+    },
+    new Date(2026, 8, 4, 14),
+  );
+  assert.equal(leapYearDefinition.granularity, "day");
+  assert.equal(
+    (leapYearDefinition.to.getTime() - leapYearDefinition.from.getTime()) /
+      (24 * 60 * 60 * 1_000),
+    366,
+  );
+  const openDefinition = buildCountingDayHeatmapDefinition(
+    {
+      from: new Date(2026, 0, 1),
+      to: new Date(2026, 9, 1),
+    },
+    new Date(2026, 8, 4, 14, 45),
+  );
+  assert.deepEqual(localDateParts(openDefinition.to), [2026, 9, 4]);
+  const companyCivilDefinition = buildCountingDayHeatmapDefinition(
+    {
+      from: new Date(2026, 0, 1),
+      to: new Date(2026, 9, 1),
+    },
+    new Date("2026-09-04T16:30:00.000Z"),
+    "Pacific/Kiritimati",
+  );
+  assert.deepEqual(
+    localDateParts(companyCivilDefinition.to),
+    [2026, 9, 5],
+    "o corte precisa seguir o dia civil IANA da empresa, não o navegador",
+  );
+  assert.equal(
+    (reportsSource.match(/dayMonthHeatmapPeriod: countingDayHeatmapPeriod/g) ?? [])
+      .length,
+    2,
+    "o modelo global e a composição customizada devem usar o intervalo diário realmente consultado",
+  );
+
+  for (const key of ["dayMonthHeatmap", "monthYearHeatmap"]) {
+    const start = cardsSource.indexOf(
+      `id: COUNTING_INTELLIGENCE_CARD_IDS.${key}`,
+    );
+    const end = cardsSource.indexOf("    {", start + 8);
+    const definition = cardsSource.slice(start, end);
+    assert.ok(start >= 0, `${key} deve existir na composição dos cards`);
+    assert.match(definition, /colorPreview: "gradient"/);
+    assert.match(definition, /previewKind: "heatmap"/);
+    assert.match(definition, /defaultHeight: "tall"/);
+    assert.match(definition, /defaultSize: "full"/);
+    assert.doesNotMatch(definition, /chartTypeEnabled/);
+  }
+  const comparisonTableSource = cardsSource.slice(
+    cardsSource.indexOf("function YearOverYearMatrixCard"),
+    cardsSource.indexOf("function YearComparisonValueRow"),
+  );
+  assert.doesNotMatch(comparisonTableSource, /key=\{row\.year\}/);
+  assert.match(
+    comparisonTableSource,
+    /key=\{`\$\{row\.year\}:\$\{[\s\S]*?row\.baselineOnly[\s\S]*?comparison-baseline[\s\S]*?selected-period/,
+  );
+  assert.match(preferencesSource, /card\("report_counting_day_month_heatmap"/);
+  assert.match(preferencesSource, /card\("report_counting_month_year_heatmap"/);
+});
+
+test("card anual usa janeiro até o corte aplicado, não apenas os dias selecionados", () => {
+  const period = periodAnalysisModel.resolvePeriodAnalysisRange(
+    "2026-07-16",
+    "2026-07-31",
+  );
+  assert.ok(period);
+  const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
+  const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+    data: analysisData({
+      dayRows: [aggregateRow("2026-07-16", "line-entry", 25)],
+      monthRows: [
+        aggregateRow("2026-01-01", "line-entry", 100),
+        aggregateRow("2026-07-01", "line-entry", 700),
+      ],
+    }),
+    period,
+    scenarios: [entryScenario],
+    widget: analysisWidget("year_monthly", {
+      scenarioIds: [entryScenario.id],
+      selectionMode: "custom",
+    }),
+  });
+
+  assert.equal(model.table?.rows.find((row) => row.month === "Jan")?.value, 100);
+  assert.equal(model.table?.rows.find((row) => row.month === "Jul")?.value, 700);
+
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(source, /fetchAnalysisConsolidatedDayDatasets/);
+  assert.match(source, /mergeAnalysisRanges/);
+  assert.match(
+    source,
+    /widget\.kind === "year_monthly" \|\|[\s\S]*?widget\.kind === "year_accumulated"[\s\S]*?return false/,
+  );
+  assert.doesNotMatch(source, /window\.setInterval/);
+});
+
+test("consultas de relatórios abortam no unmount e deduplicam replay do StrictMode", () => {
+  const counting = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancy = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const embedded = readFileSync(
+    resolve(projectRoot, "components/app/embedded-live-view.tsx"),
+    "utf8",
+  );
+  const comparison = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+
+  for (const source of [counting, occupancy]) {
+    assert.match(source, /activeMetadataRequestKeyRef/);
+    assert.match(source, /completedMetadataRequestKeyRef/);
+    assert.match(source, /metadataAbortControllerRef|metadataRequestControllerRef/);
+    assert.match(source, /metadataAbortTimerRef/);
+  }
+  assert.match(counting, /chartRequestSequenceRef\.current \+= 1[\s\S]*?abortRequest\([\s\S]*?chartRequestControllerRef\.current/);
+  assert.match(occupancy, /signal: controller\.signal/);
+  assert.match(embedded, /fetchBoundedHourlyAggregateRanges/);
+  assert.doesNotMatch(embedded, /fetchHourlyAggregateRanges/);
+  assert.match(comparison, /missingHourlyRanges/);
+  assert.match(comparison, /sharedAggregateRequests/);
+  assert.match(comparison, /subscribers: new Set/);
+  assert.match(comparison, /fetchCompleteAggregateRange/);
+});
+
+test("Análises iniciam ontem uma vez e históricos preservam deduplicação", () => {
+  const countingAnalysis = readFileSync(
+    resolve(projectRoot, "components/app/period-analysis-dashboard.tsx"),
+    "utf8",
+  );
+  const countingReports = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const occupancyHistorical = readFileSync(
+    resolve(projectRoot, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const demographics = readFileSync(
+    resolve(projectRoot, "components/app/demographics-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    countingAnalysis,
+    /if \(!analysisRequested\) \{[\s\S]*?setLoadingData\(false\);[\s\S]*?return;/,
+  );
+  assert.match(
+    countingAnalysis,
+    /const previousDayInput = shiftOccupancyAnalysisDateInput\([\s\S]*?companyTodayInput,[\s\S]*?-1,[\s\S]*?\);[\s\S]*?setAnalysisRequested\(true\);/,
+    "Contagem deve preparar ontem no calendário civil da empresa e liberar uma única consulta inicial",
+  );
+  assert.match(countingAnalysis, /setAnalysisRequested\(true\);[\s\S]*?setQueryVersion/);
+
+  assert.match(countingReports, /if \(!reportRequested\) return;[\s\S]*?void loadCharts/);
+  assert.match(countingReports, /pending=\{!reportRequested \|\| countingPeriodPending\}/);
+  assert.match(
+    countingReports,
+    /setSettingsReadyScopeKey\(reportSettingsScopeKey\);[\s\S]{0,360}?setReportRequested\(true\)/,
+    "Relatórios de Contagem deve consultar automaticamente o período restaurado, que usa quatro anos na primeira visita",
+  );
+  assert.match(
+    countingReports,
+    /function applyCountingPeriod\([\s\S]{0,120}?setReportRequested\(true\)/,
+  );
+  assert.match(
+    countingReports,
+    /const reportDataPending =[\s\S]*?!reportRequested \|\| countingPeriodPending \|\| loadingCharts;/,
+    "os widgets não podem apresentar zeros como resultado antes da primeira consulta",
+  );
+  assert.match(countingReports, /loading: reportDataPending/);
+  const primaryCountingModelSection = countingReports.slice(
+    countingReports.indexOf("  const countingIntelligenceModel ="),
+    countingReports.indexOf("  const reportScenarioSelectionByCardId ="),
+  );
+  assert.match(
+    primaryCountingModelSection,
+    /reportRequested && selectedScope && !reportCertificationError[\s\S]*?buildCountingIntelligenceModel\(/,
+    "o modelo consolidado não pode ser materializado antes de Aplicar",
+  );
+  assert.match(
+    countingReports,
+    /const pendingCountingIntelligenceModel = React\.useMemo\([\s\S]*?!reportRequested && selectedScope[\s\S]*?createPendingCountingIntelligenceModel/,
+    "a pré-consulta deve manter os cards em loading com um modelo leve",
+  );
+  assert.match(
+    countingReports,
+    /const displayedCountingIntelligenceModel =[\s\S]*?reportRequested[\s\S]*?countingIntelligenceModel[\s\S]*?pendingCountingIntelligenceModel;[\s\S]*?model: displayedCountingIntelligenceModel/,
+    "o layout e as configurações dos widgets devem continuar disponíveis antes de Aplicar",
+  );
+  const selectedCountingModelSection = countingReports.slice(
+    countingReports.indexOf("  const buildSelectedCountingIntelligenceModel ="),
+    countingReports.indexOf("  const resolveCountingIntelligenceModel ="),
+  );
+  assert.match(
+    selectedCountingModelSection,
+    /if \(!countingIntelligenceModel\) \{[\s\S]*?return pendingCountingIntelligenceModel;[\s\S]*?\}[\s\S]*?buildCountingIntelligenceModel\(/,
+    "seleções individuais também devem usar o shell leve antes da consulta",
+  );
+  assert.match(
+    countingReports,
+    /const resolveCountingIntelligenceModel = React\.useMemo\([\s\S]*?const models = new Map[\s\S]*?const cached = models\.get\(key\)[\s\S]*?models\.set\(key, model\)/,
+    "seleções customizadas devem ser materializadas apenas pelo card e reutilizadas por revisão",
+  );
+
+  assert.match(occupancyHistorical, /if \(!reportRequested\) return;[\s\S]*?loadCharts\(selectedScope\)/);
+  assert.match(
+    occupancyHistorical,
+    /const previousDayInput = shiftOccupancyAnalysisDateInput\([\s\S]*?companyTodayInput,[\s\S]*?-1,[\s\S]*?\);[\s\S]*?setAnalysisRangeInput\(initialRange\);[\s\S]*?setReportRequested\(analysis\);/,
+    "Ocupação deve consultar automaticamente somente na superfície Análises",
+  );
+  assert.match(
+    occupancyHistorical,
+    /nextValue\.endInput === analysisRangeInput\.endInput[\s\S]*?setReportRequested\(true\);[\s\S]*?return;/,
+  );
+
+  assert.match(demographics, /surface === "live" \|\|[\s\S]*?historicalQueryScopeKey === historicalQueryIdentityKey/);
+  assert.match(demographics, /if \(!queryRequested\) \{[\s\S]*?setLoading\(false\);[\s\S]*?return;/);
+  assert.match(
+    demographics,
+    /if \(surface === "analysis"\) \{[\s\S]*?publishRange\(fallbackRange\);[\s\S]*?setHistoricalQueryScopeKey\(historicalQueryIdentityKey\)/,
+    "Demographics deve iniciar automaticamente apenas Análises, mantendo Relatórios sob demanda",
+  );
+  assert.match(
+    demographics,
+    /surface === "analysis"[\s\S]*?const previousDayInput = shiftCivilDateKey\(todayInput, -1\)/,
+  );
+});
+
+test("navegação carrega somente o módulo ativo sem ocultar a nova página", () => {
+  const wrappers = [
+    "live-dashboard-tabs.tsx",
+    "analysis-dashboard.tsx",
+    "reports-dashboard.tsx",
+  ].map((file) =>
+    readFileSync(resolve(projectRoot, "components/app", file), "utf8"),
+  );
+  const shell = readFileSync(
+    resolve(projectRoot, "components/app/app-shell.tsx"),
+    "utf8",
+  );
+  const motion = readFileSync(
+    resolve(projectRoot, "components/app/use-premium-motion.ts"),
+    "utf8",
+  );
+  const routePreload = readFileSync(
+    resolve(projectRoot, "lib/app-route-preload.ts"),
+    "utf8",
+  );
+  const moduleTabs = readFileSync(
+    resolve(projectRoot, "components/app/dashboard-module-tabs.tsx"),
+    "utf8",
+  );
+  const cardLayout = readFileSync(
+    resolve(projectRoot, "components/app/card-layout.tsx"),
+    "utf8",
+  );
+
+  for (const wrapper of wrappers) {
+    assert.match(wrapper, /import dynamic from "next\/dynamic"/);
+    assert.match(wrapper, /loading: DashboardPanelLoading/);
+    assert.doesNotMatch(
+      wrapper,
+      /import \{ (?:RealtimeDashboard|PeriodAnalysisDashboard|ScenarioReportsDashboard|OccupancyScenarioDashboard|OccupancyReportsDashboard|DemographicsDashboard) \} from/,
+    );
+  }
+  assert.match(shell, /useLinkStatus/);
+  assert.match(shell, /<NavigationPendingIndicator \/>/);
+  assert.equal(
+    (shell.match(/prefetch=\{false\}/g) ?? []).length,
+    2,
+    "o menu deve evitar o prefetch automático de todas as rotas e aquecer apenas a intenção ativa",
+  );
+  assert.match(
+    shell,
+    /scheduleAppRoutePreload\([\s\S]*?item\.href,[\s\S]*?fallbackDashboardModule,[\s\S]*?\(\) => router\.prefetch\(item\.href\)/,
+  );
+  assert.match(
+    shell,
+    /onPointerDown=\{\(\) => \{[\s\S]*?router\.prefetch\(item\.href\);[\s\S]*?preloadAppRoute\(item\.href, fallbackDashboardModule\)/,
+  );
+  assert.match(routePreload, /const dashboardPanelLoaders:/);
+  assert.match(routePreload, /activeDashboardModule\(\) \?\? fallbackDashboardModule/);
+  assert.match(routePreload, /setTimeout\(\(\) => \{[\s\S]*?preloadAppRoute/);
+  assert.match(moduleTabs, /scheduleDashboardPanelPreload\(pathname, targetModule\)/);
+  assert.match(moduleTabs, /preloadDashboardPanel\(pathname, targetModule\)/);
+  assert.match(
+    cardLayout,
+    /scheduleCardMaterialization[\s\S]*?requestAnimationFrame\([\s\S]*?React\.startTransition/,
+    "widgets pesados devem ser materializados progressivamente sem bloquear um único frame",
+  );
+  assert.match(motion, /\[data-premium-content\]/);
+  assert.doesNotMatch(motion, /autoAlpha|filter: "blur|stagger:/);
 });

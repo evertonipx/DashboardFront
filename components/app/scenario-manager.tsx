@@ -34,6 +34,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -58,12 +59,15 @@ import { OccupancyScenarioManager } from "@/components/app/occupancy-scenario-ma
 import { apiFetch } from "@/lib/api";
 import {
   filterScopedApiRows,
+  usesMasterCrossCompanyScope,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
+import { requireCameraRows } from "@/lib/metadata-validation";
 import { isOccupancyAreaLineCount } from "@/lib/occupancy-area-options";
 import { canManageOccupancy, canManageScenarios } from "@/lib/permissions";
+import { requireScenarioRows } from "@/lib/scenario-validation";
+import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type {
-  Camera,
   CameraLineCount,
   Scenario,
   ScenarioLine,
@@ -73,6 +77,24 @@ import type {
 import { cn, formatDateTime, formatNumber } from "@/lib/utils";
 
 type ResultMap = Record<string, ScenarioResult | null>;
+
+type CachedScenarioResult = {
+  expiresAt: number;
+  value: ScenarioResult | null;
+};
+
+const SCENARIO_RESULT_CACHE_TTL_MS = 30_000;
+const SCENARIO_RESULT_BATCH_SIZE = 4;
+const SCENARIO_RESULT_CACHE_MAX_ENTRIES = 256;
+const scenarioResultCache = new Map<string, CachedScenarioResult>();
+
+function trimScenarioResultCache() {
+  while (scenarioResultCache.size > SCENARIO_RESULT_CACHE_MAX_ENTRIES) {
+    const oldestKey = scenarioResultCache.keys().next().value;
+    if (typeof oldestKey !== "string") return;
+    scenarioResultCache.delete(oldestKey);
+  }
+}
 
 type LineOption = CameraLineCount & {
   cameraName: string;
@@ -90,6 +112,10 @@ export function ScenarioManager() {
   const canEditScenarios = canManageScenarios(user);
   const canEditOccupancy = canManageOccupancy(user);
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const masterCrossCompanyScope = usesMasterCrossCompanyScope(
+    user,
+    companyScopeId,
+  );
   const [activeTab, setActiveTab] = React.useState<"flow" | "occupancy">(
     canEditScenarios ? "flow" : "occupancy",
   );
@@ -98,11 +124,30 @@ export function ScenarioManager() {
   const [loading, setLoading] = React.useState(true);
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [bulkDialogOpen, setBulkDialogOpen] = React.useState(false);
+  const [bulkDeleteDialogOpen, setBulkDeleteDialogOpen] = React.useState(false);
+  const [bulkDeleting, setBulkDeleting] = React.useState(false);
+  const [bulkDeactivateDialogOpen, setBulkDeactivateDialogOpen] =
+    React.useState(false);
+  const [bulkUpdatingStatus, setBulkUpdatingStatus] = React.useState<
+    boolean | null
+  >(null);
+  const [scenarioSearch, setScenarioSearch] = React.useState("");
+  const [scenarioStatus, setScenarioStatus] = React.useState<
+    "all" | "active" | "inactive"
+  >("all");
+  const [selectedScenarioIds, setSelectedScenarioIds] = React.useState<
+    string[]
+  >([]);
   const [editingScenario, setEditingScenario] = React.useState<Scenario | null>(
     null,
   );
+  const [scenarioCatalogCompanyId, setScenarioCatalogCompanyId] =
+    React.useState("");
   const companyScopeIdRef = React.useRef(companyScopeId);
   const scenarioRequestSequenceRef = React.useRef(0);
+  const scenarioRequestControllerRef = React.useRef<AbortController | null>(
+    null,
+  );
   const resolvedActiveTab =
     (activeTab === "flow" && canEditScenarios) ||
     (activeTab === "occupancy" && canEditOccupancy)
@@ -110,8 +155,50 @@ export function ScenarioManager() {
       : canEditScenarios
         ? "flow"
         : "occupancy";
+  const selectedScenarioIdSet = React.useMemo(
+    () => new Set(selectedScenarioIds),
+    [selectedScenarioIds],
+  );
+  const filteredScenarios = React.useMemo(() => {
+    const search = scenarioSearch.trim().toLocaleLowerCase("pt-BR");
+    return scenarios.filter((scenario) => {
+      if (scenarioStatus === "active" && !scenario.active) return false;
+      if (scenarioStatus === "inactive" && scenario.active) return false;
+      if (!search) return true;
+      return [scenario.name, scenario.description]
+        .filter((value): value is string => Boolean(value))
+        .some((value) => value.toLocaleLowerCase("pt-BR").includes(search));
+    });
+  }, [scenarioSearch, scenarioStatus, scenarios]);
+  const selectedScenarios = React.useMemo(
+    () =>
+      scenarios.filter((scenario) => selectedScenarioIdSet.has(scenario.id)),
+    [scenarios, selectedScenarioIdSet],
+  );
+  const selectedVisibleScenarioCount = filteredScenarios.filter((scenario) =>
+    selectedScenarioIdSet.has(scenario.id),
+  ).length;
+  const allVisibleScenariosSelected =
+    filteredScenarios.length > 0 &&
+    selectedVisibleScenarioCount === filteredScenarios.length;
+  const scenarioSelectionState = allVisibleScenariosSelected
+    ? true
+    : selectedVisibleScenarioCount
+      ? "indeterminate"
+      : false;
+  const bulkMutating = bulkDeleting || bulkUpdatingStatus !== null;
+  const scenarioCatalogCertified =
+    Boolean(companyScopeId.trim()) &&
+    scenarioCatalogCompanyId === companyScopeId.trim();
+  const activeSelectedScenarioCount = selectedScenarios.filter(
+    (scenario) => scenario.active,
+  ).length;
+  const inactiveSelectedScenarioCount =
+    selectedScenarios.length - activeSelectedScenarioCount;
 
-  const loadScenarios = React.useCallback(async () => {
+  const loadScenarios = React.useCallback(async (
+    { forceResults = false }: { forceResults?: boolean } = {},
+  ) => {
     const requestedCompanyScopeId = companyScopeId.trim();
     const requestSequence = ++scenarioRequestSequenceRef.current;
     const isCurrentRequest = () =>
@@ -119,57 +206,140 @@ export function ScenarioManager() {
       companyScopeIdRef.current.trim() === requestedCompanyScopeId;
 
     if (!canEditScenarios || !requestedCompanyScopeId) {
+      scenarioRequestControllerRef.current?.abort(
+        new DOMException("A consulta de cenários foi encerrada.", "AbortError"),
+      );
+      scenarioRequestControllerRef.current = null;
       setScenarios([]);
       setResults({});
+      setScenarioCatalogCompanyId("");
       setLoading(false);
       return;
     }
 
+    scenarioRequestControllerRef.current?.abort(
+      new DOMException("A consulta de cenários foi atualizada.", "AbortError"),
+    );
+    const controller = new AbortController();
+    scenarioRequestControllerRef.current = controller;
     setLoading(true);
     try {
-      const data = await apiFetch<Scenario[]>("/scenarios", {
+      const response = await apiFetch<unknown>("/scenarios", {
         companyScopeId: requestedCompanyScopeId,
+        signal: controller.signal,
       });
+      const payload = masterCrossCompanyScope
+        ? selectExplicitCompanyScopedRows(
+            response,
+            requestedCompanyScopeId,
+            { label: "cenários de Contagem" },
+          ).rows
+        : response;
+      const data = requireScenarioRows(payload, requestedCompanyScopeId);
       const scopedScenarios = filterScopedApiRows(
         data,
         requestedCompanyScopeId,
       );
 
-      const entries = await Promise.all(
-        scopedScenarios.map(async (scenario) => {
-          try {
-            const result = await apiFetch<ScenarioResult>(
-              `/scenarios/${scenario.id}/result`,
-              { companyScopeId: requestedCompanyScopeId },
-            );
-            return [scenario.id, result] as const;
-          } catch {
-            return [scenario.id, null] as const;
-          }
-        }),
-      );
       if (!isCurrentRequest()) return;
 
       setScenarios(scopedScenarios);
-      setResults(Object.fromEntries(entries));
-    } catch (error) {
+      setScenarioCatalogCompanyId(requestedCompanyScopeId);
+      const availableScenarioIds = new Set(
+        scopedScenarios.map((scenario) => scenario.id),
+      );
+      setSelectedScenarioIds((current) =>
+        current.filter((scenarioId) => availableScenarioIds.has(scenarioId)),
+      );
+      setLoading(false);
+
+      const now = Date.now();
+      const cachedEntries: Array<readonly [string, ScenarioResult | null]> = [];
+      const scenariosToHydrate: Scenario[] = [];
+      scopedScenarios.forEach((scenario) => {
+        const cacheKey = `${requestedCompanyScopeId}:${scenario.id}`;
+        const cached = scenarioResultCache.get(cacheKey);
+        if (cached) {
+          cachedEntries.push([scenario.id, cached.value] as const);
+        }
+        if (forceResults || !cached || cached.expiresAt <= now) {
+          scenariosToHydrate.push(scenario);
+        }
+      });
+      setResults(Object.fromEntries(cachedEntries));
+
+      // The list itself is useful immediately. Totals are intentionally
+      // hydrated in small batches so dozens of scenarios do not block the
+      // table or saturate the browser connection pool.
+      void (async () => {
+        for (
+          let index = 0;
+          index < scenariosToHydrate.length;
+          index += SCENARIO_RESULT_BATCH_SIZE
+        ) {
+          if (!isCurrentRequest()) return;
+          const batch = scenariosToHydrate.slice(
+            index,
+            index + SCENARIO_RESULT_BATCH_SIZE,
+          );
+          const entries = await Promise.all(
+            batch.map(async (scenario) => {
+              try {
+                const result = await apiFetch<ScenarioResult>(
+                  `/scenarios/${scenario.id}/result`,
+                  {
+                    companyScopeId: requestedCompanyScopeId,
+                    signal: controller.signal,
+                  },
+                );
+                return [scenario.id, result] as const;
+              } catch {
+                return [scenario.id, null] as const;
+              }
+            }),
+          );
+          if (!isCurrentRequest()) return;
+
+          const expiresAt = Date.now() + SCENARIO_RESULT_CACHE_TTL_MS;
+          entries.forEach(([scenarioId, result]) => {
+            scenarioResultCache.set(
+              `${requestedCompanyScopeId}:${scenarioId}`,
+              { expiresAt, value: result },
+            );
+          });
+          trimScenarioResultCache();
+          setResults((current) => ({
+            ...current,
+            ...Object.fromEntries(entries),
+          }));
+        }
+      })();
+    } catch {
       if (!isCurrentRequest()) return;
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar os cenários.";
       setScenarios([]);
       setResults({});
-      toast.error(message);
+      setScenarioCatalogCompanyId("");
+      toast.error("Não foi possível carregar os cenários.");
     } finally {
       if (isCurrentRequest()) setLoading(false);
     }
-  }, [canEditScenarios, companyScopeId]);
+  }, [canEditScenarios, companyScopeId, masterCrossCompanyScope]);
+
+  React.useLayoutEffect(() => {
+    companyScopeIdRef.current = companyScopeId;
+  }, [companyScopeId]);
 
   React.useEffect(() => {
-    companyScopeIdRef.current = companyScopeId;
+    setScenarios([]);
+    setResults({});
+    setScenarioCatalogCompanyId("");
     setDialogOpen(false);
     setBulkDialogOpen(false);
+    setBulkDeleteDialogOpen(false);
+    setBulkDeactivateDialogOpen(false);
+    setSelectedScenarioIds([]);
+    setScenarioSearch("");
+    setScenarioStatus("all");
     setEditingScenario(null);
   }, [companyScopeId]);
 
@@ -187,17 +357,31 @@ export function ScenarioManager() {
     if (!canEditScenarios) {
       setDialogOpen(false);
       setBulkDialogOpen(false);
+      setBulkDeleteDialogOpen(false);
+      setBulkDeactivateDialogOpen(false);
+      setSelectedScenarioIds([]);
       setEditingScenario(null);
     }
   }, [activeTab, canEditOccupancy, canEditScenarios]);
 
   React.useEffect(() => {
     void loadScenarios();
+    return () => {
+      scenarioRequestControllerRef.current?.abort(
+        new DOMException("A tela de cenários foi fechada.", "AbortError"),
+      );
+      scenarioRequestControllerRef.current = null;
+      scenarioRequestSequenceRef.current += 1;
+    };
   }, [loadScenarios]);
 
   function openCreateDialog() {
     if (!canEditScenarios) {
       toast.error("Seu usuário não pode alterar cenários.");
+      return;
+    }
+    if (!scenarioCatalogCertified) {
+      toast.error("Os cenários ainda estão sendo carregados.");
       return;
     }
 
@@ -208,6 +392,13 @@ export function ScenarioManager() {
   function openEditDialog(scenario: Scenario) {
     if (!canEditScenarios) {
       toast.error("Seu usuário não pode alterar cenários.");
+      return;
+    }
+    if (
+      !scenarioCatalogCertified ||
+      scenario.company_id !== companyScopeId.trim()
+    ) {
+      toast.error("Este cenário não pertence à empresa selecionada.");
       return;
     }
 
@@ -221,13 +412,17 @@ export function ScenarioManager() {
       return;
     }
 
-    if (!window.confirm(`Excluir o cenário "${scenario.name}"?`)) return;
-
     const requestedCompanyScopeId = companyScopeId.trim();
-    if (!requestedCompanyScopeId) {
-      toast.error("Selecione uma empresa antes de excluir o cenário.");
+    if (
+      !scenarioCatalogCertified ||
+      !requestedCompanyScopeId ||
+      scenario.company_id !== requestedCompanyScopeId
+    ) {
+      toast.error("Este cenário não pertence à empresa selecionada.");
       return;
     }
+
+    if (!window.confirm(`Excluir o cenário "${scenario.name}"?`)) return;
 
     try {
       await apiFetch(`/scenarios/${scenario.id}`, {
@@ -237,18 +432,177 @@ export function ScenarioManager() {
       if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
 
       toast.success("Cenário excluído");
-      await loadScenarios();
-    } catch (error) {
+      scenarioResultCache.delete(
+        `${requestedCompanyScopeId}:${scenario.id}`,
+      );
+      await loadScenarios({ forceResults: true });
+    } catch {
       if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
-      const message =
-        error instanceof Error ? error.message : "Não foi possível excluir.";
-      toast.error(message);
+      toast.error("Não foi possível excluir o cenário.");
+    }
+  }
+
+  function toggleScenarioSelection(scenarioId: string, checked: boolean) {
+    setSelectedScenarioIds((current) => {
+      if (checked) return [...new Set([...current, scenarioId])];
+      return current.filter((candidateId) => candidateId !== scenarioId);
+    });
+  }
+
+  function toggleAllScenarioSelection(checked: boolean) {
+    const visibleIds = new Set(
+      filteredScenarios.map((scenario) => scenario.id),
+    );
+    setSelectedScenarioIds((current) =>
+      checked
+        ? [...new Set([...current, ...visibleIds])]
+        : current.filter((scenarioId) => !visibleIds.has(scenarioId)),
+    );
+  }
+
+  async function updateSelectedScenarioStatus(active: boolean) {
+    if (!canEditScenarios || bulkMutating) return;
+
+    const requestedCompanyScopeId = companyScopeId.trim();
+    if (!requestedCompanyScopeId || !scenarioCatalogCertified) {
+      toast.error("Selecione uma empresa antes de alterar os cenários.");
+      return;
+    }
+
+    const candidates = selectedScenarios.filter(
+      (scenario) =>
+        scenario.company_id === requestedCompanyScopeId &&
+        scenario.active !== active,
+    );
+    if (!candidates.length) return;
+
+    setBulkUpdatingStatus(active);
+    const updatedIds: string[] = [];
+    const failedIds: string[] = [];
+    let companyChanged = false;
+
+    try {
+      for (const scenario of candidates) {
+        if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) {
+          companyChanged = true;
+          break;
+        }
+
+        try {
+          const response = await apiFetch<unknown>(
+            `/scenarios/${scenario.id}`,
+            {
+            body: { active },
+            companyScopeId: requestedCompanyScopeId,
+            method: "PUT",
+            },
+          );
+          requireOptionalScenarioMutationResponse(response, {
+            active,
+            companyId: requestedCompanyScopeId,
+            expectedId: scenario.id,
+          });
+          updatedIds.push(scenario.id);
+        } catch {
+          failedIds.push(scenario.id);
+        }
+      }
+
+      if (companyChanged) return;
+
+      setSelectedScenarioIds(failedIds);
+      setBulkDeactivateDialogOpen(false);
+      if (updatedIds.length) await loadScenarios({ forceResults: true });
+
+      const action = active ? "ativado(s)" : "desativado(s)";
+      if (!failedIds.length) {
+        toast.success(`${updatedIds.length} cenário(s) ${action}.`);
+      } else if (updatedIds.length) {
+        toast.warning(
+          `${updatedIds.length} cenário(s) ${action}; ${failedIds.length} não puderam ser alterados.`,
+        );
+      } else {
+        toast.error("Não foi possível alterar os cenários selecionados.");
+      }
+    } finally {
+      setBulkUpdatingStatus(null);
+    }
+  }
+
+  async function deleteSelectedScenarios() {
+    if (!canEditScenarios || bulkMutating) return;
+
+    const requestedCompanyScopeId = companyScopeId.trim();
+    if (!requestedCompanyScopeId || !scenarioCatalogCertified) {
+      toast.error("Selecione uma empresa antes de excluir os cenários.");
+      return;
+    }
+
+    const candidates = selectedScenarios.filter(
+      (scenario) => scenario.company_id === requestedCompanyScopeId,
+    );
+    if (!candidates.length) {
+      toast.error("Selecione pelo menos um cenário válido.");
+      setBulkDeleteDialogOpen(false);
+      return;
+    }
+
+    setBulkDeleting(true);
+    const deletedIds: string[] = [];
+    const failedIds: string[] = [];
+    let companyChanged = false;
+
+    try {
+      for (const scenario of candidates) {
+        if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) {
+          companyChanged = true;
+          break;
+        }
+
+        try {
+          await apiFetch(`/scenarios/${scenario.id}`, {
+            companyScopeId: requestedCompanyScopeId,
+            method: "DELETE",
+          });
+          deletedIds.push(scenario.id);
+          scenarioResultCache.delete(
+            `${requestedCompanyScopeId}:${scenario.id}`,
+          );
+        } catch {
+          failedIds.push(scenario.id);
+        }
+      }
+
+      if (companyChanged) return;
+
+      setSelectedScenarioIds(failedIds);
+      setBulkDeleteDialogOpen(false);
+
+      if (deletedIds.length) {
+        await loadScenarios({ forceResults: true });
+      }
+
+      if (!failedIds.length) {
+        toast.success(
+          deletedIds.length === 1
+            ? "Cenário excluído."
+            : `${deletedIds.length} cenários excluídos.`,
+        );
+      } else if (deletedIds.length) {
+        toast.warning(
+          `${deletedIds.length} cenário(s) excluído(s); ${failedIds.length} não puderam ser excluídos.`,
+        );
+      } else {
+        toast.error("Não foi possível excluir os cenários selecionados.");
+      }
+    } finally {
+      setBulkDeleting(false);
     }
   }
 
   async function handleSaved() {
     setDialogOpen(false);
-    await loadScenarios();
+    await loadScenarios({ forceResults: true });
   }
 
   if (!canEditScenarios && !canEditOccupancy) {
@@ -299,8 +653,8 @@ export function ScenarioManager() {
                   type="button"
                   variant="outline"
                   className="w-full sm:w-auto"
-                  onClick={loadScenarios}
-                  disabled={loading}
+                  onClick={() => void loadScenarios({ forceResults: true })}
+                  disabled={loading || bulkMutating}
                 >
                   <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
                   Atualizar
@@ -312,6 +666,7 @@ export function ScenarioManager() {
                       variant="outline"
                       className="w-full sm:w-auto"
                       onClick={() => setBulkDialogOpen(true)}
+                      disabled={bulkMutating || !scenarioCatalogCertified}
                     >
                       <ListPlus className="h-4 w-4" />
                       Criar por linha
@@ -320,6 +675,7 @@ export function ScenarioManager() {
                       type="button"
                       className="w-full sm:w-auto"
                       onClick={openCreateDialog}
+                      disabled={bulkMutating || !scenarioCatalogCertified}
                     >
                       <Plus className="h-4 w-4" />
                       Novo cenário
@@ -328,7 +684,7 @@ export function ScenarioManager() {
                 ) : null}
               </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-3">
               {loading ? (
                 <div className="space-y-2">
                   {Array.from({ length: 4 }).map((_, index) => (
@@ -336,9 +692,123 @@ export function ScenarioManager() {
                   ))}
                 </div>
               ) : scenarios.length ? (
-                <Table>
+                <>
+                  <div className="grid gap-2 sm:grid-cols-[minmax(220px,1fr)_180px_auto] sm:items-center">
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        value={scenarioSearch}
+                        onChange={(event) => setScenarioSearch(event.target.value)}
+                        placeholder="Buscar cenário"
+                        className="pl-9"
+                        aria-label="Buscar cenários de contagem"
+                      />
+                    </div>
+                    <Select
+                      value={scenarioStatus}
+                      onValueChange={(value) =>
+                        setScenarioStatus(
+                          value as "all" | "active" | "inactive",
+                        )
+                      }
+                    >
+                      <SelectTrigger aria-label="Filtrar cenários por status">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Todos os status</SelectItem>
+                        <SelectItem value="active">Ativos</SelectItem>
+                        <SelectItem value="inactive">Inativos</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Badge variant="outline" className="justify-center whitespace-nowrap">
+                      {filteredScenarios.length} de {scenarios.length}
+                    </Badge>
+                  </div>
+                  {selectedScenarios.length ? (
+                    <div
+                      className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-3 sm:flex-row sm:items-center sm:justify-between"
+                      role="region"
+                      aria-label="Ações para cenários selecionados"
+                      aria-busy={bulkMutating}
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium">
+                          {selectedScenarios.length} cenário(s) selecionado(s)
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          Edite um item ou aplique uma ação à seleção.
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setSelectedScenarioIds([])}
+                          disabled={bulkMutating}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                          Limpar seleção
+                        </Button>
+                        {selectedScenarios.length === 1 ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => openEditDialog(selectedScenarios[0])}
+                            disabled={bulkMutating}
+                          >
+                            <Edit className="h-3.5 w-3.5" />
+                            Editar
+                          </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void updateSelectedScenarioStatus(true)}
+                          disabled={bulkMutating || !inactiveSelectedScenarioCount}
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                          {bulkUpdatingStatus === true ? "Ativando..." : "Ativar"}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setBulkDeactivateDialogOpen(true)}
+                          disabled={bulkMutating || !activeSelectedScenarioCount}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                          Desativar
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => setBulkDeleteDialogOpen(true)}
+                          disabled={bulkMutating}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Excluir selecionados
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                  <Table scrollRegionLabel="Cenários de contagem cadastrados">
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="w-12">
+                        <Checkbox
+                          aria-label="Selecionar todos os cenários de contagem"
+                          checked={scenarioSelectionState}
+                          onCheckedChange={(checked) =>
+                            toggleAllScenarioSelection(checked === true)
+                          }
+                          disabled={bulkMutating || !filteredScenarios.length}
+                        />
+                      </TableHead>
                       <TableHead>Nome</TableHead>
                       <TableHead>Linhas</TableHead>
                       <TableHead>Status</TableHead>
@@ -350,12 +820,31 @@ export function ScenarioManager() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {scenarios.map((scenario) => (
-                      <TableRow key={scenario.id}>
+                    {filteredScenarios.map((scenario) => {
+                      const selected = selectedScenarioIdSet.has(scenario.id);
+                      return (
+                      <TableRow
+                        key={scenario.id}
+                        aria-selected={selected}
+                        data-state={selected ? "selected" : undefined}
+                      >
+                        <TableCell>
+                          <Checkbox
+                            aria-label={`Selecionar cenário ${scenario.name}`}
+                            checked={selected}
+                            onCheckedChange={(checked) =>
+                              toggleScenarioSelection(
+                                scenario.id,
+                                checked === true,
+                              )
+                            }
+                            disabled={bulkMutating}
+                          />
+                        </TableCell>
                         <TableCell>
                           <div className="font-medium">{scenario.name}</div>
                           <div className="mt-1 max-w-[420px] truncate text-xs text-muted-foreground">
-                            {scenario.description || scenario.id}
+                            {scenario.description || "Sem descrição"}
                           </div>
                         </TableCell>
                         <TableCell>{scenario.lines?.length ?? 0}</TableCell>
@@ -384,6 +873,7 @@ export function ScenarioManager() {
                                 variant="outline"
                                 size="sm"
                                 onClick={() => openEditDialog(scenario)}
+                                disabled={bulkMutating}
                               >
                                 <Edit className="h-3.5 w-3.5" />
                                 Editar
@@ -393,6 +883,7 @@ export function ScenarioManager() {
                                 variant="destructive"
                                 size="sm"
                                 onClick={() => deleteScenario(scenario)}
+                                disabled={bulkMutating}
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
                                 Excluir
@@ -401,9 +892,21 @@ export function ScenarioManager() {
                           </TableCell>
                         ) : null}
                       </TableRow>
-                    ))}
+                      );
+                    })}
+                    {!filteredScenarios.length ? (
+                      <TableRow>
+                        <TableCell
+                          colSpan={7}
+                          className="py-10 text-center text-muted-foreground"
+                        >
+                          Nenhum cenário corresponde aos filtros selecionados.
+                        </TableCell>
+                      </TableRow>
+                    ) : null}
                   </TableBody>
-                </Table>
+                  </Table>
+                </>
               ) : (
                 <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
                   {canEditScenarios
@@ -427,17 +930,111 @@ export function ScenarioManager() {
             open={dialogOpen}
             scenario={editingScenario}
             companyScopeId={companyScopeId}
+            requireExplicitCompanyId={masterCrossCompanyScope}
             onOpenChange={setDialogOpen}
             onSaved={handleSaved}
           />
           <BulkScenarioDialog
             canEdit={canEditScenarios}
             companyScopeId={companyScopeId}
+            requireExplicitCompanyId={masterCrossCompanyScope}
             onOpenChange={setBulkDialogOpen}
-            onSaved={loadScenarios}
+            onSaved={() => loadScenarios({ forceResults: true })}
             open={bulkDialogOpen}
             scenarios={scenarios}
           />
+          <Dialog
+            open={bulkDeactivateDialogOpen}
+            onOpenChange={(open) => {
+              if (!bulkMutating) setBulkDeactivateDialogOpen(open);
+            }}
+          >
+            <DialogContent className="sm:max-w-lg">
+              <DialogHeader>
+                <DialogTitle>Desativar cenários selecionados?</DialogTitle>
+                <DialogDescription>
+                  {activeSelectedScenarioCount} cenário(s) deixarão de ser
+                  considerados nas seleções operacionais até serem reativados.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="max-h-52 overflow-y-auto rounded-md border bg-muted/20 p-3">
+                <ul className="space-y-1 text-sm">
+                  {selectedScenarios
+                    .filter((scenario) => scenario.active)
+                    .map((scenario) => (
+                      <li key={scenario.id} className="truncate">
+                        {scenario.name}
+                      </li>
+                    ))}
+                </ul>
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setBulkDeactivateDialogOpen(false)}
+                  disabled={bulkMutating}
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => void updateSelectedScenarioStatus(false)}
+                  disabled={bulkMutating || !activeSelectedScenarioCount}
+                >
+                  {bulkUpdatingStatus === false
+                    ? "Desativando..."
+                    : `Desativar ${activeSelectedScenarioCount} cenário(s)`}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+          <Dialog
+            open={bulkDeleteDialogOpen}
+            onOpenChange={(open) => {
+              if (!bulkMutating) setBulkDeleteDialogOpen(open);
+            }}
+          >
+            <DialogContent className="sm:max-w-lg">
+              <DialogHeader>
+                <DialogTitle>Excluir cenários selecionados?</DialogTitle>
+                <DialogDescription>
+                  Esta ação excluirá {selectedScenarios.length} cenário(s) de
+                  contagem e não poderá ser desfeita.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="max-h-52 overflow-y-auto rounded-md border bg-muted/20 p-3">
+                <ul className="space-y-1 text-sm">
+                  {selectedScenarios.map((scenario) => (
+                    <li key={scenario.id} className="truncate">
+                      {scenario.name}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setBulkDeleteDialogOpen(false)}
+                  disabled={bulkMutating}
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={() => void deleteSelectedScenarios()}
+                  disabled={bulkMutating || !selectedScenarios.length}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  {bulkDeleting
+                    ? "Excluindo..."
+                    : `Excluir ${selectedScenarios.length} cenário(s)`}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </>
       ) : null}
     </section>
@@ -449,6 +1046,7 @@ function ScenarioDialog({
   open,
   scenario,
   companyScopeId,
+  requireExplicitCompanyId,
   onOpenChange,
   onSaved,
 }: {
@@ -456,6 +1054,7 @@ function ScenarioDialog({
   open: boolean;
   scenario: Scenario | null;
   companyScopeId: string;
+  requireExplicitCompanyId: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => Promise<void>;
 }) {
@@ -469,7 +1068,7 @@ function ScenarioDialog({
   const [saving, setSaving] = React.useState(false);
   const companyScopeIdRef = React.useRef(companyScopeId);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     companyScopeIdRef.current = companyScopeId;
   }, [companyScopeId]);
 
@@ -500,14 +1099,13 @@ function ScenarioDialog({
     async function loadLineOptions() {
       setLoadingOptions(true);
       try {
-        const options = await loadCountingLineOptions(companyScopeId);
+        const options = await loadCountingLineOptions(
+          companyScopeId,
+          requireExplicitCompanyId,
+        );
         if (mounted) setLineOptions(options);
-      } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Não foi possível carregar as linhas.";
-        toast.error(message);
+      } catch {
+        toast.error("Não foi possível carregar as linhas de contagem.");
       } finally {
         if (mounted) setLoadingOptions(false);
       }
@@ -518,7 +1116,7 @@ function ScenarioDialog({
     return () => {
       mounted = false;
     };
-  }, [companyScopeId, open]);
+  }, [companyScopeId, open, requireExplicitCompanyId]);
 
   const filteredLineOptions = React.useMemo(
     () => filterLineOptions(lineOptions, lineSearch),
@@ -565,6 +1163,13 @@ function ScenarioDialog({
       toast.error("Selecione uma empresa antes de salvar o cenário.");
       return;
     }
+    if (
+      scenario &&
+      scenario.company_id !== requestedCompanyScopeId
+    ) {
+      toast.error("Este cenário não pertence à empresa selecionada.");
+      return;
+    }
 
     const cleanName = name.trim();
     const cleanLines = lines
@@ -599,29 +1204,35 @@ function ScenarioDialog({
     setSaving(true);
     try {
       if (scenario) {
-        await apiFetch(`/scenarios/${scenario.id}`, {
+        const response = await apiFetch<unknown>(`/scenarios/${scenario.id}`, {
           body: payload,
           companyScopeId: requestedCompanyScopeId,
           method: "PUT",
         });
         if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
+        requireOptionalScenarioMutationResponse(response, {
+          active: payload.active,
+          companyId: requestedCompanyScopeId,
+          expectedId: scenario.id,
+        });
         toast.success("Cenário atualizado");
       } else {
-        await apiFetch("/scenarios", {
+        const response = await apiFetch<unknown>("/scenarios", {
           body: payload,
           companyScopeId: requestedCompanyScopeId,
           method: "POST",
         });
         if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
+        requireOptionalScenarioMutationResponse(response, {
+          companyId: requestedCompanyScopeId,
+        });
         toast.success("Cenário criado");
       }
 
       await onSaved();
-    } catch (error) {
+    } catch {
       if (companyScopeIdRef.current.trim() !== requestedCompanyScopeId) return;
-      const message =
-        error instanceof Error ? error.message : "Não foi possível salvar.";
-      toast.error(message);
+      toast.error("Não foi possível salvar o cenário.");
     } finally {
       setSaving(false);
     }
@@ -705,7 +1316,7 @@ function ScenarioDialog({
                 <Input
                   value={lineSearch}
                   onChange={(event) => setLineSearch(event.target.value)}
-                  placeholder="Filtrar por linha, câmera ou código"
+                  placeholder="Filtrar por linha ou câmera"
                   className="pl-9"
                 />
               </div>
@@ -774,7 +1385,7 @@ function ScenarioDialog({
                       <SelectContent>
                         {lineOptions.map((option) => (
                           <SelectItem key={option.id} value={option.id}>
-                            {option.cameraName} / {option.name} ({option.line_code})
+                            {option.cameraName} / {option.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -829,7 +1440,7 @@ function ScenarioDialog({
             </div>
           ) : (
             <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-              Nenhuma linha ativa encontrada. Cadastre line counts nas câmeras
+              Nenhuma linha ativa encontrada. Cadastre linhas de contagem nas câmeras
               antes de criar cenários.
             </div>
           )}
@@ -857,6 +1468,7 @@ function ScenarioDialog({
 function BulkScenarioDialog({
   canEdit,
   companyScopeId,
+  requireExplicitCompanyId,
   onOpenChange,
   onSaved,
   open,
@@ -864,6 +1476,7 @@ function BulkScenarioDialog({
 }: {
   canEdit: boolean;
   companyScopeId: string;
+  requireExplicitCompanyId: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => Promise<void>;
   open: boolean;
@@ -902,7 +1515,7 @@ function BulkScenarioDialog({
     (option) => !individualScenarioLineIds.has(option.id),
   );
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     companyScopeIdRef.current = companyScopeId;
   }, [companyScopeId]);
 
@@ -915,17 +1528,13 @@ function BulkScenarioDialog({
     setSelectedIds([]);
     setCreatedCount(0);
     setLoading(true);
-    loadCountingLineOptions(companyScopeId)
+    loadCountingLineOptions(companyScopeId, requireExplicitCompanyId)
       .then((options) => {
         if (mounted) setLineOptions(options);
       })
-      .catch((error) => {
+      .catch(() => {
         if (!mounted) return;
-        toast.error(
-          error instanceof Error
-            ? error.message
-            : "Não foi possível carregar as linhas de contagem.",
-        );
+        toast.error("Não foi possível carregar as linhas de contagem.");
       })
       .finally(() => {
         if (mounted) setLoading(false);
@@ -934,7 +1543,7 @@ function BulkScenarioDialog({
     return () => {
       mounted = false;
     };
-  }, [companyScopeId, open]);
+  }, [companyScopeId, open, requireExplicitCompanyId]);
 
   function toggleLine(lineId: string) {
     setSelectedIds((current) =>
@@ -1005,10 +1614,14 @@ function BulkScenarioDialog({
               ),
               scenario_type: "custom",
             };
-            return apiFetch("/scenarios", {
+            return apiFetch<unknown>("/scenarios", {
               body: payload,
               companyScopeId: requestedCompanyScopeId,
               method: "POST",
+            }).then((response) => {
+              requireOptionalScenarioMutationResponse(response, {
+                companyId: requestedCompanyScopeId,
+              });
             });
           }),
         );
@@ -1087,7 +1700,7 @@ function BulkScenarioDialog({
               <Input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Filtrar por entrada, saída, câmera ou código"
+                placeholder="Filtrar por entrada, saída ou câmera"
                 className="pl-9"
               />
             </div>
@@ -1164,7 +1777,7 @@ function BulkScenarioDialog({
                         {option.name}
                       </span>
                       <span className="block truncate text-xs text-muted-foreground">
-                        {option.cameraName} · {option.line_code}
+                        {option.cameraName}
                       </span>
                     </span>
                     {alreadyCreated ? (
@@ -1206,16 +1819,27 @@ function BulkScenarioDialog({
   );
 }
 
-async function loadCountingLineOptions(companyScopeId: string) {
+async function loadCountingLineOptions(
+  companyScopeId: string,
+  requireExplicitCompanyId: boolean,
+) {
   const requestedCompanyScopeId = companyScopeId.trim();
   if (!requestedCompanyScopeId) {
     throw new Error("Selecione uma empresa antes de carregar as linhas.");
   }
 
-  const cameras = filterScopedApiRows(
-    await apiFetch<Camera[]>("/cameras", {
+  const cameraResponse = await apiFetch<unknown>("/cameras", {
       companyScopeId: requestedCompanyScopeId,
-    }),
+    });
+  const cameraPayload = requireExplicitCompanyId
+    ? selectExplicitCompanyScopedRows(
+        cameraResponse,
+        requestedCompanyScopeId,
+        { label: "câmeras" },
+      ).rows
+    : cameraResponse;
+  const cameras = filterScopedApiRows(
+    requireCameraRows(cameraPayload, requestedCompanyScopeId),
     requestedCompanyScopeId,
   );
   const lineGroups = await Promise.all(
@@ -1290,6 +1914,29 @@ function normalizeSearchText(value: string) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+}
+
+function requireOptionalScenarioMutationResponse(
+  value: unknown,
+  {
+    active,
+    companyId,
+    expectedId,
+  }: {
+    active?: boolean;
+    companyId: string;
+    expectedId?: string;
+  },
+) {
+  if (value === undefined || value === null || value === "") return;
+
+  const [scenario] = requireScenarioRows([value], companyId);
+  if (expectedId && scenario.id !== expectedId) {
+    throw new Error("A atualização retornou outro cenário.");
+  }
+  if (active !== undefined && scenario.active !== active) {
+    throw new Error("O status retornado não corresponde ao solicitado.");
+  }
 }
 
 function formLineFromOption(option: LineOption): FormLine {

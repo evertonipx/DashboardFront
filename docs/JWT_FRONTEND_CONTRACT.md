@@ -85,10 +85,19 @@ escrita quando ele próprio declara uma ação mutável conhecida; `*_view` nunc
   escrita não transformam um `role: operator` em administrador e os dashboards
   não consultam `workers`, `cameras` ou `locations` para esse papel.
 
-Além dos grants, a sessão consulta `GET /company/modules`. Uma associação
-preservada para um módulo desabilitado não monta Contagem/Ocupação nem libera
-suas rotas administrativas. Falha nessa certificação fecha o acesso ao módulo;
-não assume que uma configuração antiga continua válida.
+Além dos grants, a sessão consulta `GET /company/modules`. Quando o JWT declara
+`company_modules`, essa lista assinada é a fonte de atribuições da sessão e o
+endpoint apenas enriquece os registros correspondentes; uma negativa explícita
+em qualquer uma das fontes sempre prevalece. Se o JWT omitir a lista, uma falha
+na consulta fecha o acesso. Em nenhum caso o catálogo pode criar uma atribuição
+ou manter uma configuração de outra empresa.
+
+`GET /modules` é o catálogo global pré-cadastrado pelo backend. Contagem,
+Ocupação e Demographics (`demographics`) são famílias de produto; os endpoints
+`/company/modules` e `/companies/{id}/modules` apenas habilitam uma dessas
+famílias para uma empresa. Essa habilitação não substitui o grant do usuário:
+Admin e Operador ainda precisam da permissão do módulo presente no JWT ou na
+rota oficial de permissões.
 
 ## Empresa efetiva
 
@@ -137,12 +146,16 @@ se uma etapa posterior falhar. Respostas `401`, `403`, falhas de rede e erros
 
 ## Limitação confirmada do backend
 
-No contrato vivo atual, `X-Company-ID` seleciona corretamente câmeras, locais e
-cenários de Ocupação. Ele ainda é ignorado por `/workers`, `/workers/{id}`,
-`/scenarios` de Contagem e `/users`. Não há rota alternativa
-`/companies/{id}/workers` ou `/companies/{id}/scenarios`.
+O contrato vivo não documenta `X-Company-ID` nem oferece rotas alternativas
+`/companies/{id}/workers` ou `/companies/{id}/scenarios`. Há versões do backend
+que retornam ao Master um catálogo multiempresa mesmo quando a seleção foi
+enviada. Nesse caso, o frontend exige `company_id` explícito em cada registro,
+particiona a resposta antes da validação e publica somente o subconjunto da
+empresa selecionada.
 
 O frontend mantém filtragem fail-closed: registros devolvidos para outra
-empresa não são mostrados. Para o superadmin enxergar workers e cenários da
-empresa selecionada, o backend precisa aplicar o tenant efetivo derivado do JWT
-master + `X-Company-ID` nessas rotas. Não é seguro contornar isso no frontend.
+empresa não são mostrados e registros sem `company_id` não são associados por
+inferência em uma consulta cross-company. Se a API devolver somente a
+empresa-base do JWT e nenhum registro do tenant selecionado, não existe dado
+que o navegador possa recuperar com segurança; o handler ainda precisa aplicar
+o tenant efetivo derivado do JWT master + `X-Company-ID`.

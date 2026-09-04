@@ -89,6 +89,15 @@ export function buildLiveAnalysisImport({
   ) => {
     const now = new Date().toISOString();
     const id = createImportId();
+    const cardSelection =
+      sourcePreference.scenarioSelectionMode === "all" ||
+      sourcePreference.scenarioSelectionMode === "custom"
+        ? selectionFromSettings(
+            sourcePreference.scenarioSelectionMode,
+            sourcePreference.scenarioIds ?? [],
+            scenarios,
+          )
+        : null;
     widgets.push({
       baseline: input.baseline ?? "previous_period",
       createdAt: now,
@@ -98,11 +107,17 @@ export function buildLiveAnalysisImport({
       id,
       kind: input.kind,
       scenarioIds:
-        input.scenarioIds ?? sourceSelection.selection.scenarioIds,
+        cardSelection?.scenarioIds ??
+        input.scenarioIds ??
+        sourceSelection.selection.scenarioIds,
       selectionMode:
-        input.selectionMode ?? sourceSelection.selection.selectionMode,
+        cardSelection?.selectionMode ??
+        input.selectionMode ??
+        sourceSelection.selection.selectionMode,
       scopeMode:
-        input.scopeMode ?? sourceSelection.selection.scopeMode,
+        cardSelection?.scopeMode ??
+        input.scopeMode ??
+        sourceSelection.selection.scopeMode,
       startHour: input.startHour ?? 0,
       title: sourcePreference.title ?? input.title,
       updatedAt: now,

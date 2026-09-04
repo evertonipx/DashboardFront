@@ -92,6 +92,22 @@ type Snapshot = {
   total: number | null;
 };
 
+export type OccupancyHexLayoutEditorProps = {
+  capacities: Record<string, number>;
+  defaultScenarioIds: string[];
+  displayMode?: OccupancyHexDisplayMode;
+  fallbackColor?: string;
+  legacyColumns: number;
+  legacyPreset: OccupancyLayoutPreset;
+  layout: OccupancyHexLayout | null;
+  onOpenChange?: (open: boolean) => void;
+  onSave: (patch: Partial<OccupancyWidgetSettings>) => boolean;
+  open?: boolean;
+  scenarios: OccupancyScenario[];
+  semanticColors?: OccupancyHexSemanticColors;
+  snapshots: Snapshot[];
+};
+
 export function OccupancyHexLayoutEditor({
   capacities,
   defaultScenarioIds,
@@ -100,30 +116,21 @@ export function OccupancyHexLayoutEditor({
   legacyColumns,
   legacyPreset,
   layout,
+  onOpenChange,
   onSave,
+  open: controlledOpen,
   scenarios,
   semanticColors,
   snapshots,
-}: {
-  capacities: Record<string, number>;
-  defaultScenarioIds: string[];
-  displayMode?: OccupancyHexDisplayMode;
-  fallbackColor?: string;
-  legacyColumns: number;
-  legacyPreset: OccupancyLayoutPreset;
-  layout: OccupancyHexLayout | null;
-  onSave: (patch: Partial<OccupancyWidgetSettings>) => boolean;
-  scenarios: OccupancyScenario[];
-  semanticColors?: OccupancyHexSemanticColors;
-  snapshots: Snapshot[];
-}) {
+}: OccupancyHexLayoutEditorProps) {
   const widgetColor = useWidgetColor(fallbackColor);
   const { effectiveTheme } = useTheme();
   const hexPalette = React.useMemo(
     () => getOccupancyHexPalette(effectiveTheme, widgetColor, semanticColors),
     [effectiveTheme, semanticColors, widgetColor],
   );
-  const [open, setOpen] = React.useState(false);
+  const [internalOpen, setInternalOpen] = React.useState(false);
+  const open = controlledOpen ?? internalOpen;
   const initialLayout = React.useMemo(
     () =>
       resolveEditorLayout(
@@ -282,7 +289,8 @@ export function OccupancyHexLayoutEditor({
     ) {
       return;
     }
-    setOpen(nextOpen);
+    if (controlledOpen === undefined) setInternalOpen(nextOpen);
+    onOpenChange?.(nextOpen);
   }
 
   function updateDimensions(columns: number, rows: number) {
@@ -643,15 +651,25 @@ export function OccupancyHexLayoutEditor({
       hexLayout: draft,
       hexPreset: draft.preset,
     });
-    if (saved) setOpen(false);
+    if (saved) {
+      if (controlledOpen === undefined) setInternalOpen(false);
+      onOpenChange?.(false);
+    }
   }
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button type="button" variant="outline" size="sm" className="h-8 gap-1.5">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 w-8 shrink-0 gap-1.5 px-0 @sm:w-auto @sm:px-3"
+          aria-label="Configurar layout do simulador operacional"
+          title="Configurar layout"
+        >
           <Settings2 className="h-3.5 w-3.5" />
-          Configurar layout
+          <span className="sr-only @sm:not-sr-only">Configurar layout</span>
         </Button>
       </DialogTrigger>
       <DialogContent className="grid max-h-[92dvh] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-6xl">
@@ -940,7 +958,7 @@ export function OccupancyHexLayoutEditor({
                 {displayMode === "actual" ? (
                   <>
                     <span>
-                      Tamanho = ocupação certificada · escala comum 0–
+                      Tamanho = ocupação disponível · escala comum 0–
                       {formatNumber(visualScale.domainMaximum)}
                     </span>
                     <span>Cor = intensidade gradual do valor real</span>
@@ -1563,7 +1581,7 @@ function ScenarioPalette({
                   </span>
                   <span className="block text-[11px] text-muted-foreground">
                     {total === null
-                      ? "Sem snapshot certificado"
+                      ? "Leitura atual indisponível"
                       : `Ocupação atual: ${formatNumber(total)}`}
                   </span>
                 </span>
@@ -1678,7 +1696,7 @@ function CellInspector({
             onCommit={(value) => onCapacityChange(cell.scenarioId!, value)}
           />
           <p className="text-xs text-muted-foreground">
-            Ocupação atual: {total === null ? "sem dados certificados" : formatNumber(total)}.
+            Ocupação atual: {total === null ? "sem dados" : formatNumber(total)}.
             {capacity === null
               ? " Capacidade ainda não configurada; nenhum percentual será inferido."
               : ""}
@@ -1878,8 +1896,8 @@ function editorCellStatus(
 ) {
   if (state === "unlinked") return "sem vínculo";
   if (state === "unavailable") return "cenário indisponível";
-  if (state === "unknown") return "sem dados certificados";
-  if (state === "unoccupied") return "desocupado certificado";
+  if (state === "unknown") return "sem dados";
+  if (state === "unoccupied") return "desocupado";
   return `ocupação ${formatNumber(total ?? 0)}`;
 }
 

@@ -1,26 +1,17 @@
 import { z } from "zod";
 
-export const AI_INSIGHTS_LIMITS = {
-  bodyBytes: 384 * 1024,
-  contextItems: 24,
-  datasets: 24,
-  datasetColumns: 12,
-  dailyDatasetRows: 2_000,
-  datasetRows: 2_000,
-  datasetStatistics: 16,
-  metrics: 40,
-  sampledDatasetRows: 120,
-  totalCells: 12_000,
-  totalRows: 3_920,
-} as const;
+import {
+  AI_INSIGHTS_CONFIGURATION_LIMITS,
+  AI_INSIGHTS_LIMITS,
+} from "@/lib/ai-insights-limits";
 
-export const AI_INSIGHTS_CONFIGURATION_LIMITS = {
-  constraints: 24_000,
-  prompt: 4_000,
-} as const;
+export {
+  AI_INSIGHTS_CONFIGURATION_LIMITS,
+  AI_INSIGHTS_LIMITS,
+} from "@/lib/ai-insights-limits";
 
 export const DEFAULT_AI_INSIGHTS_PROMPT =
-  "Transforme os dados certificados em uma tese de resultado e em poucas iniciativas futuras, concretas e mensuráveis. Cruze período, dia e horário, quantifique cada oportunidade contra uma base comparável e priorize alavancas repetíveis. Não descreva gráficos nem produza uma auditoria de qualidade; conecte mudança, oportunidade, próxima ação, meta e regra de validação sem inventar causas ou eventos.";
+  "Transforme os dados apresentados no relatório em uma tese de resultado e em poucas iniciativas futuras, concretas e mensuráveis. Cruze período, dia e horário, quantifique cada oportunidade contra uma base comparável e priorize alavancas repetíveis. Não descreva gráficos nem produza uma auditoria de qualidade; conecte mudança, oportunidade, próxima ação, meta e regra de validação sem inventar causas ou eventos.";
 
 export const AI_INSIGHTS_CANONICAL_DAILY_NOTE_PREFIX =
   "Série diária canônica:";
@@ -328,7 +319,7 @@ function validateCanonicalDatasetAgainstPeriod(
   ) {
     context.addIssue({
       code: "custom",
-      message: "A série canônica exige período civil certificado e dimensão de data.",
+      message: "O período da análise está inconsistente.",
       path: [...path, "coverage", "canonical"],
     });
     return;

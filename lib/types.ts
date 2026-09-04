@@ -136,6 +136,42 @@ export type DailyEventsResponse = {
   data: AnalyticsEventRow[];
 };
 
+export type DemographicGender = "Woman" | "Man" | "unknown";
+
+export type DemographicAgeBucket =
+  | "0-2"
+  | "3-9"
+  | "10-19"
+  | "20-29"
+  | "30-39"
+  | "40-49"
+  | "50-59"
+  | "60-69"
+  | "70+";
+
+export type DemographicEmotion =
+  | "neutral"
+  | "happy"
+  | "surprise"
+  | "sad"
+  | "angry"
+  | "disgust"
+  | "fear"
+  | "contempt";
+
+export type DemographicBucketRow = {
+  age_bucket: DemographicAgeBucket;
+  bucket: string;
+  camera_id: string;
+  count: number;
+  emotion: DemographicEmotion;
+  gender: DemographicGender;
+};
+
+export type DemographicBucketsResponse = {
+  data?: DemographicBucketRow[];
+};
+
 export type ScenarioLine = {
   line_count_id: string;
   action_multiplier: -1 | 0 | 1;

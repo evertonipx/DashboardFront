@@ -191,7 +191,7 @@ test("dashboard consulta segmentos por granularidade e só cacheia cobertura fec
   );
   assert.match(
     source,
-    /if \(forceClosedRefresh\) closedSegmentCacheRef\.current\.clear\(\)/,
+    /if \(forceClosedRefresh\) \{[\s\S]*?closedSegmentCacheRef\.current\.clear\(\)/,
     "a atualização manual deve invalidar deliberadamente o cache histórico",
   );
   assert.match(

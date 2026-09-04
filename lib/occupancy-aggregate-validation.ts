@@ -4,6 +4,9 @@ import {
   parseAggregateBucket,
   requireAggregateGranularity,
 } from "@/lib/aggregate-time";
+import {
+  normalizeOccupancyInstantBucketInTimeZone,
+} from "@/lib/occupancy-bucket-time";
 import type {
   AggregateGranularity,
   OccupancyScenarioAggregateResponse,
@@ -30,6 +33,7 @@ export type OccupancyCertifiedCutoffSource = {
 
 export type OccupancyAggregateValidationOptions = {
   allowLegacyUncertifiedInstantBuckets?: boolean;
+  expectedTimezone?: string;
   openBucket?: Date;
   requestedAt?: Date;
   requireCertification?: boolean;
@@ -104,6 +108,10 @@ export function requireOccupancyAggregateRows(
     response.timezone,
     validationOptions.requireCertification,
   );
+  const canonicalExpectedTimezone =
+    expectedTimezone === undefined
+      ? undefined
+      : requireTimeZone(expectedTimezone, "esperado");
   if (validationOptions.requireCertification && !expectedTimezone) {
     throw new Error(
       "O timezone esperado é obrigatório para certificar o agregado de ocupação.",
@@ -111,8 +119,8 @@ export function requireOccupancyAggregateRows(
   }
   if (
     returnedTimezone &&
-    expectedTimezone &&
-    returnedTimezone !== requireTimeZone(expectedTimezone, "esperado")
+    canonicalExpectedTimezone &&
+    returnedTimezone !== canonicalExpectedTimezone
   ) {
     throw new Error(
       `A API agregou a ocupação no fuso "${returnedTimezone}", mas o Dashboard está operando em "${expectedTimezone}".`,
@@ -143,14 +151,22 @@ export function requireOccupancyAggregateRows(
     );
   }
 
-  const rows = validateOccupancyRows(
+  const normalizedRows = normalizeOccupancyInstantBucketRows(
     response.data,
     requestedGranularity,
-    validationOptions,
+    canonicalExpectedTimezone,
+  );
+  const rows = validateOccupancyRows(
+    normalizedRows,
+    requestedGranularity,
+    {
+      ...validationOptions,
+      expectedTimezone: canonicalExpectedTimezone,
+    },
   );
   requireScenarioTotalsForAreaBuckets(rows, requestedGranularity);
   rejectIndependentlySummedAreaAggregates(rows, requestedGranularity);
-  return response.data;
+  return normalizedRows;
 }
 
 export function aggregateOccupancyRowsByBucket(
@@ -162,10 +178,20 @@ export function aggregateOccupancyRowsByBucket(
     throw new Error("As linhas agregadas de ocupação são inválidas.");
   }
 
-  const validatedRows = validateOccupancyRows(
+  const validationOptions = resolveRowValidationOptions(
     rows,
     granularity,
-    resolveRowValidationOptions(rows, granularity, options),
+    options,
+  );
+  const normalizedRows = normalizeOccupancyInstantBucketRows(
+    rows,
+    granularity,
+    validationOptions.expectedTimezone,
+  );
+  const validatedRows = validateOccupancyRows(
+    normalizedRows,
+    granularity,
+    validationOptions,
   );
   requireScenarioTotalsForAreaBuckets(validatedRows, granularity);
   const accumulators = new Map<number, OccupancyBucketAccumulator>();
@@ -271,28 +297,26 @@ export function occupancyAggregateCoverageWarning(
   if (missingBucketCount === 0) return undefined;
 
   const periodLabel = requestedBucketCount === 1 ? "período" : "períodos";
-  const missingLabel = missingBucketCount === 1 ? "não foi retornado" : "não foram retornados";
-  const displayLabel = missingBucketCount === 1 ? "aparece" : "aparecem";
-  return `${missingBucketCount} de ${requestedBucketCount} ${periodLabel} ${missingLabel} pela API e ${displayLabel} sem valor; ausência de dados não é ocupação zero.`;
+  const missingLabel = missingBucketCount === 1 ? "está sem dados" : "estão sem dados";
+  return `${missingBucketCount} de ${requestedBucketCount} ${periodLabel} ${missingLabel}; ausência de dados não representa ocupação zero.`;
 }
 
 export function occupancyAggregateMetadataWarning(
   response: OccupancyScenarioAggregateResponse,
   granularity: AggregateGranularity,
 ) {
-  const missing = [
-    response.timezone === undefined ? "timezone" : null,
-    response.complete === undefined ? "complete" : null,
-    response.status === undefined ? "status" : null,
-    response.as_of === undefined ? "as_of" : null,
-  ].filter((field): field is string => field !== null);
-  if (!missing.length) return undefined;
+  const metadataComplete =
+    response.timezone !== undefined &&
+    response.complete !== undefined &&
+    response.status !== undefined &&
+    response.as_of !== undefined;
+  if (metadataComplete) return undefined;
 
   const kind =
     granularity === "minute" || granularity === "hour"
-      ? "Agregado intradiário provisório"
-      : "Agregado civil provisório";
-  return `${kind}: a API não informou ${missing.join(", ")}; o fuso e o corte temporal ainda não podem ser certificados.`;
+      ? "Dados recentes em atualização"
+      : "Dados do período em atualização";
+  return `${kind}: os valores mais recentes ainda podem mudar.`;
 }
 
 /**
@@ -417,6 +441,31 @@ function isExplicitRfc3339Bucket(value: unknown) {
   return Boolean(
     match && isRealRfc3339Date(match) && !Number.isNaN(Date.parse(value)),
   );
+}
+
+function normalizeOccupancyInstantBucketRows(
+  rows: OccupancyScenarioBucketRow[],
+  granularity: AggregateGranularity,
+  expectedTimezone?: string,
+) {
+  if (granularity !== "minute" && granularity !== "hour") return rows;
+
+  let changed = false;
+  const normalizedRows = rows.map((row) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+    if (typeof row.bucket !== "string") return row;
+
+    const bucket = normalizeOccupancyInstantBucketInTimeZone(
+      row.bucket,
+      granularity,
+      expectedTimezone,
+    );
+    if (bucket === null || bucket === row.bucket) return row;
+    changed = true;
+    return { ...row, bucket };
+  });
+
+  return changed ? normalizedRows : rows;
 }
 
 function validateOccupancyRows(

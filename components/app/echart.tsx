@@ -2,32 +2,11 @@
 
 import * as React from "react";
 import {
-  BarChart,
-  CustomChart,
-  EffectScatterChart,
-  HeatmapChart,
-  LineChart,
-  PieChart,
-  ScatterChart,
-  TreemapChart,
-} from "echarts/charts";
-import {
-  AriaComponent,
-  DataZoomComponent,
-  GridComponent,
-  LegendComponent,
-  MarkAreaComponent,
-  MarkLineComponent,
-  TooltipComponent,
-  VisualMapComponent,
   type GridComponentOption,
   type LegendComponentOption,
   type TooltipComponentOption,
 } from "echarts/components";
-import * as echarts from "echarts/core";
 import type { EChartsCoreOption, EChartsType } from "echarts/core";
-import { LabelLayout, LegacyGridContainLabel } from "echarts/features";
-import { CanvasRenderer } from "echarts/renderers";
 
 import { useTheme } from "@/components/app/theme-provider";
 import {
@@ -44,35 +23,13 @@ import { synchronizeLineSeriesVisualColors } from "@/lib/chart-series-colors";
 import type { CardChartType } from "@/lib/view-preferences";
 import { cn } from "@/lib/utils";
 
-echarts.use([
-  BarChart,
-  CustomChart,
-  EffectScatterChart,
-  HeatmapChart,
-  LineChart,
-  PieChart,
-  ScatterChart,
-  TreemapChart,
-  AriaComponent,
-  DataZoomComponent,
-  GridComponent,
-  LegendComponent,
-  MarkAreaComponent,
-  MarkLineComponent,
-  TooltipComponent,
-  VisualMapComponent,
-  LabelLayout,
-  LegacyGridContainLabel,
-  CanvasRenderer,
-]);
-
 export type EnterpriseChartOption = EChartsCoreOption & {
   grid?: GridComponentOption;
   legend?: LegendComponentOption;
   tooltip?: TooltipComponentOption;
 };
 
-type EChartProps = {
+export type EChartProps = {
   option: EnterpriseChartOption;
   ariaDescription?: string;
   ariaLabel?: string;
@@ -82,6 +39,67 @@ type EChartProps = {
   valueLabels?: "auto" | "always" | "none";
 };
 
+type ChartMountTask = {
+  cancelled: boolean;
+  run: () => void;
+};
+
+type EChartRuntime = typeof import("@/components/app/echarts-runtime/core");
+
+let echartRuntimePromise: Promise<EChartRuntime> | null = null;
+
+function loadEChartRuntime() {
+  echartRuntimePromise ??= import("@/components/app/echarts-runtime/core").catch(
+    (error: unknown) => {
+      echartRuntimePromise = null;
+      throw error;
+    },
+  );
+  return echartRuntimePromise;
+}
+
+const chartMountQueue: ChartMountTask[] = [];
+let chartMountHandle: number | null = null;
+
+type IdleWindow = Window & {
+  cancelIdleCallback?: (handle: number) => void;
+  requestIdleCallback?: (
+    callback: () => void,
+    options?: { timeout: number },
+  ) => number;
+};
+
+function scheduleChartMount(run: () => void) {
+  const task: ChartMountTask = { cancelled: false, run };
+  chartMountQueue.push(task);
+  scheduleChartMountFlush();
+
+  return () => {
+    task.cancelled = true;
+  };
+}
+
+function scheduleChartMountFlush() {
+  if (chartMountHandle !== null) return;
+  const idleWindow = window as IdleWindow;
+  chartMountHandle = idleWindow.requestIdleCallback
+    ? idleWindow.requestIdleCallback(flushChartMountQueue, { timeout: 180 })
+    : window.requestAnimationFrame(flushChartMountQueue);
+}
+
+function flushChartMountQueue() {
+  chartMountHandle = null;
+
+  while (chartMountQueue.length) {
+    const task = chartMountQueue.shift();
+    if (!task || task.cancelled) continue;
+    task.run();
+    break;
+  }
+
+  if (chartMountQueue.length) scheduleChartMountFlush();
+}
+
 export function EChart({
   option,
   ariaDescription,
@@ -89,16 +107,29 @@ export function EChart({
   className,
   mergeUpdates = false,
   themeMode = "auto",
-  valueLabels = "auto",
+  // Business charts must expose their values without requiring a pointer.
+  // Exceptionally dense minute series opt out explicitly with `none`.
+  valueLabels = "always",
 }: EChartProps) {
   const { effectiveTheme } = useTheme();
   const chartType = useWidgetChartType();
   const zoom = useWidgetZoom();
   const prefersReducedMotion = usePrefersReducedMotion();
   const descriptionId = React.useId();
+  const viewportRef = React.useRef<HTMLDivElement | null>(null);
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const chartRef = React.useRef<EChartsType | null>(null);
-  const themedOption = React.useMemo(() => {
+  const runtimeRef = React.useRef<EChartRuntime | null>(null);
+  const [chartVersion, setChartVersion] = React.useState(0);
+  const [mountedChartKey, setMountedChartKey] = React.useState("");
+  const [paintedChartKey, setPaintedChartKey] = React.useState("");
+  const [nearViewport, setNearViewport] = React.useState(false);
+  const [renderReady, setRenderReady] = React.useState(false);
+  const themedOption = React.useMemo<EnterpriseChartOption | null>(() => {
+    // Large reports may contain dozens of complex options. Keep their
+    // normalization out of the initial React render and do it only when the
+    // corresponding chart is close enough to be mounted.
+    if (!renderReady) return null;
     const interactiveOption = enhanceInteractiveChartOption(
       synchronizeLineSeriesVisualColors(
         applyChartTypePreference(option, chartType),
@@ -117,6 +148,7 @@ export function EChart({
     effectiveTheme,
     option,
     prefersReducedMotion,
+    renderReady,
     themeMode,
     valueLabels,
   ]);
@@ -124,45 +156,133 @@ export function EChart({
     () => resolveChartAccessibility(option, ariaLabel, ariaDescription),
     [ariaDescription, ariaLabel, option],
   );
+  const runtimeCapabilities = React.useMemo(
+    () => resolveEChartRuntimeCapabilities(themedOption),
+    [themedOption],
+  );
+  const runtimeCapabilityKey = runtimeCapabilities.join("|");
+  const chartKey = `${chartType ?? "default"}:${prefersReducedMotion ? "reduced" : "motion"}:${runtimeCapabilityKey}`;
+  const chartMounted = mountedChartKey === chartKey && chartVersion > 0;
+  const chartPainted = chartMounted && paintedChartKey === chartKey;
 
   React.useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setNearViewport(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        setNearViewport(true);
+        observer.disconnect();
+      },
+      { rootMargin: "640px 0px", threshold: 0.01 },
+    );
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  React.useEffect(() => {
+    if (!nearViewport || renderReady) return;
+    return scheduleChartMount(() => setRenderReady(true));
+  }, [nearViewport, renderReady]);
+
+  React.useEffect(() => {
+    if (!renderReady) return;
     const container = containerRef.current;
     if (!container) return;
+    let active = true;
+    let chart: EChartsType | null = null;
+    let observer: ResizeObserver | null = null;
 
-    const chart = echarts.init(container, null, {
-      renderer: "canvas",
-    });
-    chartRef.current = chart;
+    void loadEChartRuntime()
+      .then(async (runtime) => {
+        await runtime.ensureEChartCapabilities(
+          runtimeCapabilityKey ? runtimeCapabilityKey.split("|") : [],
+        );
+        if (!active) return;
 
-    const observer = new ResizeObserver(() => chart.resize());
-    observer.observe(container);
+        chart = runtime.initEChart(container, {
+          devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+          renderer: "canvas",
+          // ECharts 6.1 can leave canvas series pending or partially painted
+          // with dirty rectangles until the first pointer interaction. Charts
+          // are already mounted progressively, so a complete repaint is the
+          // safer optimization boundary here.
+          useDirtyRect: false,
+        });
+        runtimeRef.current = runtime;
+        chartRef.current = chart;
+        observer = new ResizeObserver(() => chart?.resize());
+        observer.observe(container);
+        setMountedChartKey(chartKey);
+        setChartVersion((version) => version + 1);
+      })
+      .catch((error: unknown) => {
+        if (active) console.error("Não foi possível iniciar o gráfico.", error);
+      });
 
     return () => {
-      observer.disconnect();
-      chart.dispose();
+      active = false;
+      observer?.disconnect();
+      chart?.dispose();
       chartRef.current = null;
+      runtimeRef.current = null;
     };
-  }, [chartType, prefersReducedMotion]);
+  }, [chartKey, renderReady, runtimeCapabilityKey]);
 
   React.useEffect(() => {
+    if (!renderReady || !themedOption || !chartMounted) return;
     const chart = chartRef.current;
-    chart?.setOption(themedOption, {
-      lazyUpdate: false,
-      notMerge: !mergeUpdates,
-    });
-  }, [mergeUpdates, themedOption]);
+    const runtime = runtimeRef.current;
+    if (!chart || !runtime) return;
+    let active = true;
+
+    void runtime
+      .ensureEChartCapabilities(
+        runtimeCapabilityKey ? runtimeCapabilityKey.split("|") : [],
+      )
+      .then(() => {
+        if (!active || chartRef.current !== chart) return;
+        chart.setOption(themedOption, {
+          // The first visual frame must be committed without depending on a
+          // hover/click to wake the renderer. Mounting remains lazy by viewport;
+          // only the paint itself is synchronous once the chart is mounted.
+          lazyUpdate: false,
+          notMerge: !mergeUpdates,
+        });
+        setPaintedChartKey(chartKey);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    chartMounted,
+    chartKey,
+    mergeUpdates,
+    renderReady,
+    runtimeCapabilityKey,
+    themedOption,
+  ]);
 
   React.useEffect(() => {
+    if (!renderReady || !chartMounted) return;
     const frame = window.requestAnimationFrame(() => {
       chartRef.current?.resize();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [zoom]);
+  }, [chartMounted, renderReady, zoom]);
 
   return (
     <div
+      ref={viewportRef}
       aria-describedby={descriptionId}
       aria-label={accessibility.label}
+      aria-busy={!chartPainted}
       className={cn(
         "relative h-full w-full overflow-hidden rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
         className,
@@ -179,6 +299,13 @@ export function EChart({
       <span id={descriptionId} className="sr-only">
         {accessibility.description}
       </span>
+      {!chartPainted ? (
+        <div
+          aria-hidden="true"
+          className="absolute inset-0 animate-pulse rounded-sm bg-muted/20"
+          data-echart-runtime-loading
+        />
+      ) : null}
       <div
         ref={containerRef}
         className="absolute left-1/2 top-1/2"
@@ -191,6 +318,37 @@ export function EChart({
       />
     </div>
   );
+}
+
+const ECHART_SERIES_CAPABILITIES = new Set([
+  "bar",
+  "custom",
+  "effectScatter",
+  "heatmap",
+  "line",
+  "pie",
+  "scatter",
+  "treemap",
+]);
+
+function resolveEChartRuntimeCapabilities(
+  option: EnterpriseChartOption | null,
+) {
+  if (!option) return [];
+  const capabilities = new Set<string>();
+  const series = chartSeriesRecords(option);
+
+  for (const item of series) {
+    const type = typeof item.type === "string" ? item.type : "";
+    if (ECHART_SERIES_CAPABILITIES.has(type)) capabilities.add(type);
+    if (item.markArea) capabilities.add("markArea");
+    if (item.markLine) capabilities.add("markLine");
+  }
+  if (option.aria) capabilities.add("aria");
+  if (option.dataZoom) capabilities.add("dataZoom");
+  if (option.visualMap) capabilities.add("visualMap");
+
+  return [...capabilities].sort();
 }
 
 function resolveChartAccessibility(
@@ -508,7 +666,7 @@ function resolveLineValueLabelPresentation(
 function enhanceInteractiveChartOption(
   option: EnterpriseChartOption,
   dark = false,
-  valueLabels: "auto" | "always" | "none" = "auto",
+  valueLabels: "auto" | "always" | "none" = "always",
 ): EnterpriseChartOption {
   const rawSeries = option.series;
   const series = Array.isArray(rawSeries)
@@ -899,11 +1057,14 @@ export async function renderEChartToDataUrl(
   {
     width = 980,
     height = 360,
+    signal,
   }: {
     width?: number;
     height?: number;
+    signal?: AbortSignal;
   } = {},
 ) {
+  signal?.throwIfAborted();
   const container = document.createElement("div");
   container.style.position = "fixed";
   container.style.left = "-10000px";
@@ -916,13 +1077,19 @@ export async function renderEChartToDataUrl(
   let chart: EChartsType | null = null;
 
   try {
-    chart = echarts.init(container, null, {
+    const runtime = await loadEChartRuntime();
+    signal?.throwIfAborted();
+    const synchronizedOption = synchronizeLineSeriesVisualColors(option);
+    await runtime.ensureEChartCapabilities(
+      resolveEChartRuntimeCapabilities(synchronizedOption),
+    );
+    signal?.throwIfAborted();
+    chart = runtime.initEChart(container, {
       height,
       renderer: "canvas",
       width,
     });
 
-    const synchronizedOption = synchronizeLineSeriesVisualColors(option);
     chart.setOption(
       {
         ...synchronizedOption,
@@ -933,8 +1100,10 @@ export async function renderEChartToDataUrl(
       true,
     );
     chart.resize({ height, width });
-    await waitForChartRender(chart);
+    await waitForChartRender(chart, signal);
+    signal?.throwIfAborted();
     flushChartRenderer(chart);
+    signal?.throwIfAborted();
 
     return chart.getDataURL({
       backgroundColor: "#ffffff",
@@ -947,21 +1116,45 @@ export async function renderEChartToDataUrl(
   }
 }
 
-async function waitForChartRender(chart: EChartsType) {
-  await new Promise<void>((resolve) => {
+async function waitForChartRender(chart: EChartsType, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
     let settled = false;
+    let firstFrame = 0;
+    let secondFrame = 0;
     const timeout = window.setTimeout(finish, 300);
+
+    function cleanup() {
+      window.clearTimeout(timeout);
+      if (firstFrame) window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+      chart.off("finished", finish);
+      signal?.removeEventListener("abort", abort);
+    }
 
     function finish() {
       if (settled) return;
       settled = true;
-      window.clearTimeout(timeout);
-      chart.off("finished", finish);
+      cleanup();
       resolve();
     }
 
+    function abort() {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(
+        signal?.reason instanceof Error
+          ? signal.reason
+          : new DOMException("A exportação foi cancelada.", "AbortError"),
+      );
+    }
+
     chart.on("finished", finish);
-    window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+    signal?.addEventListener("abort", abort, { once: true });
+    firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(finish);
+    });
   });
 }
 

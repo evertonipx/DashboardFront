@@ -23,7 +23,7 @@ export function requireScenarioComparisonScope({
 }) {
   const cleanCompanyScopeId = companyScopeId?.trim() ?? "";
   if (!cleanCompanyScopeId) {
-    throw new Error("Empresa não certificada para esta comparação.");
+    throw new Error("Empresa indisponível para esta comparação.");
   }
 
   const canonicalTimeZone = requireCompanyTimeZone(companyTimeZone);
@@ -32,7 +32,7 @@ export function requireScenarioComparisonScope({
   );
   if (foreignScenario) {
     throw new Error(
-      `Comparativo bloqueado: o cenário "${foreignScenario.id}" pertence a outra empresa.`,
+      "Comparativo indisponível: a seleção contém um cenário de outra empresa.",
     );
   }
 

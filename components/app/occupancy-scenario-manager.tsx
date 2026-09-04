@@ -2,12 +2,15 @@
 
 import * as React from "react";
 import {
+  Check,
   Edit,
   MapPinned,
   Plus,
   RefreshCw,
   Save,
+  Search,
   Trash2,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -15,6 +18,7 @@ import { useAuth } from "@/components/app/auth-provider";
 import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Card,
   CardContent,
@@ -51,6 +55,7 @@ import {
 import { apiFetch } from "@/lib/api";
 import {
   filterScopedApiRows,
+  usesMasterCrossCompanyScope,
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
 import {
@@ -65,6 +70,7 @@ import {
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
 import { canManageOccupancy } from "@/lib/permissions";
 import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
+import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type {
   OccupancyScenario,
   OccupancyScenarioArea,
@@ -91,6 +97,10 @@ export function OccupancyScenarioManager() {
   const { user } = useAuth();
   const canEdit = canManageOccupancy(user);
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const masterCrossCompanyScope = usesMasterCrossCompanyScope(
+    user,
+    companyScopeId,
+  );
   const [scenarios, setScenarios] = React.useState<OccupancyScenario[]>([]);
   const [areaOptions, setAreaOptions] = React.useState<AreaOption[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -106,6 +116,20 @@ export function OccupancyScenarioManager() {
     React.useState("");
   const [areaCatalogCompanyId, setAreaCatalogCompanyId] = React.useState("");
   const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [bulkDeleteDialogOpen, setBulkDeleteDialogOpen] = React.useState(false);
+  const [bulkDeleting, setBulkDeleting] = React.useState(false);
+  const [bulkDeactivateDialogOpen, setBulkDeactivateDialogOpen] =
+    React.useState(false);
+  const [bulkUpdatingStatus, setBulkUpdatingStatus] = React.useState<
+    boolean | null
+  >(null);
+  const [scenarioSearch, setScenarioSearch] = React.useState("");
+  const [scenarioStatus, setScenarioStatus] = React.useState<
+    "all" | "active" | "inactive"
+  >("all");
+  const [selectedScenarioIds, setSelectedScenarioIds] = React.useState<
+    string[]
+  >([]);
   const [editingScenario, setEditingScenario] =
     React.useState<OccupancyScenario | null>(null);
   const scenarioRequestSequenceRef = React.useRef(0);
@@ -121,11 +145,50 @@ export function OccupancyScenarioManager() {
     areaCatalogCompanyId === companyScopeId;
   const catalogsReady =
     scenarioCatalogCertified && areaCatalogCertified;
+  const selectedScenarioIdSet = React.useMemo(
+    () => new Set(selectedScenarioIds),
+    [selectedScenarioIds],
+  );
+  const filteredScenarios = React.useMemo(() => {
+    const search = scenarioSearch.trim().toLocaleLowerCase("pt-BR");
+    return scenarios.filter((scenario) => {
+      if (scenarioStatus === "active" && !scenario.active) return false;
+      if (scenarioStatus === "inactive" && scenario.active) return false;
+      if (!search) return true;
+      return scenario.name.toLocaleLowerCase("pt-BR").includes(search);
+    });
+  }, [scenarioSearch, scenarioStatus, scenarios]);
+  const selectedScenarios = React.useMemo(
+    () =>
+      scenarios.filter((scenario) => selectedScenarioIdSet.has(scenario.id)),
+    [scenarios, selectedScenarioIdSet],
+  );
+  const selectedVisibleScenarioCount = filteredScenarios.filter((scenario) =>
+    selectedScenarioIdSet.has(scenario.id),
+  ).length;
+  const allVisibleScenariosSelected =
+    filteredScenarios.length > 0 &&
+    selectedVisibleScenarioCount === filteredScenarios.length;
+  const scenarioSelectionState = allVisibleScenariosSelected
+    ? true
+    : selectedVisibleScenarioCount
+      ? "indeterminate"
+      : false;
+  const bulkMutating = bulkDeleting || bulkUpdatingStatus !== null;
+  const activeSelectedScenarioCount = selectedScenarios.filter(
+    (scenario) => scenario.active,
+  ).length;
+  const inactiveSelectedScenarioCount =
+    selectedScenarios.length - activeSelectedScenarioCount;
 
   const loadScenarios = React.useCallback(async (
     { silent = false }: { silent?: boolean } = {},
   ) => {
     const requestSequence = ++scenarioRequestSequenceRef.current;
+    const requestedCompanyId = companyScopeId;
+    const isCurrentRequest = () =>
+      requestSequence === scenarioRequestSequenceRef.current &&
+      companyScopeIdRef.current === requestedCompanyId;
     if (!silent) {
       setLoading(true);
       setScenarioCatalogReady(false);
@@ -133,29 +196,38 @@ export function OccupancyScenarioManager() {
       setScenarioCatalogError("");
     }
     try {
-      if (!companyScopeId) {
+      if (!requestedCompanyId) {
         throw new Error(
           "Empresa ativa não definida para carregar cenários de ocupação.",
         );
       }
       const response = await apiFetch<unknown>("/occupancy/scenarios", {
-        companyScopeId,
+        companyScopeId: requestedCompanyId,
       });
+      const payload = masterCrossCompanyScope
+        ? selectExplicitCompanyScopedRows(response, requestedCompanyId, {
+            collectionKeys: ["data"],
+            label: "cenários de Ocupação",
+          }).rows
+        : response;
       const rows = filterScopedApiRows(
-        requireOccupancyScenarioRows(response, companyScopeId),
-        companyScopeId,
+        requireOccupancyScenarioRows(payload, requestedCompanyId),
+        requestedCompanyId,
       );
-      if (requestSequence !== scenarioRequestSequenceRef.current) return;
+      if (!isCurrentRequest()) return;
       setScenarios(rows);
+      const availableScenarioIds = new Set(
+        rows.map((scenario) => scenario.id),
+      );
+      setSelectedScenarioIds((current) =>
+        current.filter((scenarioId) => availableScenarioIds.has(scenarioId)),
+      );
       setScenarioCatalogError("");
-      setScenarioCatalogCompanyId(companyScopeId);
+      setScenarioCatalogCompanyId(requestedCompanyId);
       setScenarioCatalogReady(true);
-    } catch (error) {
-      if (requestSequence !== scenarioRequestSequenceRef.current) return;
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível carregar cenários de ocupação.";
+    } catch {
+      if (!isCurrentRequest()) return;
+      const message = "Não foi possível carregar os cenários de ocupação.";
       if (!silent) {
         setScenarios([]);
         setScenarioCatalogCompanyId("");
@@ -164,11 +236,11 @@ export function OccupancyScenarioManager() {
         toast.error(message);
       }
     } finally {
-      if (!silent && requestSequence === scenarioRequestSequenceRef.current) {
+      if (!silent && isCurrentRequest()) {
         setLoading(false);
       }
     }
-  }, [companyScopeId]);
+  }, [companyScopeId, masterCrossCompanyScope]);
 
   const loadAreaOptions = React.useCallback(async (
     { silent = false }: { silent?: boolean } = {},
@@ -204,16 +276,13 @@ export function OccupancyScenarioManager() {
       setAreaCatalogWarning(
         catalog.authoritative
           ? ""
-          : "A API ainda não publicou o catálogo definitivo de regiões. A lista abaixo usa snapshots recentes e pode omitir uma área estável; o cadastro manual continua disponível.",
+          : "A lista de áreas está sendo atualizada e pode não mostrar todas as opções neste momento.",
       );
       setAreaCatalogCompanyId(companyScopeId);
       setAreaCatalogReady(true);
-    } catch (error) {
+    } catch {
       if (requestSequence !== areaRequestSequenceRef.current) return;
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Não foi possível certificar o catálogo de áreas de ocupação.";
+      const message = "Não foi possível carregar as áreas de ocupação.";
       if (!silent) {
         setAreaOptions([]);
         setAreaCatalogCompanyId("");
@@ -230,12 +299,20 @@ export function OccupancyScenarioManager() {
     }
   }, [companyScopeId]);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     companyScopeIdRef.current = companyScopeId;
   }, [companyScopeId]);
 
   React.useEffect(() => {
+    setScenarios([]);
+    setScenarioCatalogReady(false);
+    setScenarioCatalogCompanyId("");
     setDialogOpen(false);
+    setBulkDeleteDialogOpen(false);
+    setBulkDeactivateDialogOpen(false);
+    setSelectedScenarioIds([]);
+    setScenarioSearch("");
+    setScenarioStatus("all");
     setEditingScenario(null);
     void loadScenarios();
     void loadAreaOptions();
@@ -249,7 +326,8 @@ export function OccupancyScenarioManager() {
       ]);
     },
     {
-      enabled: Boolean(companyScopeId) && !loading && !loadingAreas,
+      enabled:
+        Boolean(companyScopeId) && !loading && !loadingAreas && !bulkMutating,
       intervalMs: RESOURCE_METADATA_REFRESH_INTERVAL_MS,
     },
   );
@@ -263,7 +341,7 @@ export function OccupancyScenarioManager() {
       toast.error(
         areaCatalogError ||
           scenarioCatalogError ||
-          "Os catálogos de ocupação ainda não foram certificados.",
+          "As opções de ocupação ainda estão sendo carregadas.",
       );
       return;
     }
@@ -281,8 +359,12 @@ export function OccupancyScenarioManager() {
       toast.error(
         areaCatalogError ||
           scenarioCatalogError ||
-          "Os catálogos de ocupação ainda não foram certificados.",
+          "As opções de ocupação ainda estão sendo carregadas.",
       );
+      return;
+    }
+    if (scenario.company_id !== companyScopeId) {
+      toast.error("Este cenário não pertence à empresa selecionada.");
       return;
     }
 
@@ -298,14 +380,12 @@ export function OccupancyScenarioManager() {
     if (!scenarioCatalogCertified) {
       toast.error(
         scenarioCatalogError ||
-          "O catálogo de cenários de ocupação não está certificado.",
+          "Os cenários de ocupação ainda não estão disponíveis.",
       );
       return;
     }
     if (scenario.company_id !== companyScopeId) {
-      toast.error(
-        `O cenário pertence à empresa "${scenario.company_id}", não à empresa ativa "${companyScopeId}".`,
-      );
+      toast.error("Este cenário não pertence à empresa selecionada.");
       return;
     }
 
@@ -319,14 +399,169 @@ export function OccupancyScenarioManager() {
         companyScopeId: requestedCompanyId,
         method: "DELETE",
       });
-      requireUnchangedCompanyScope(
-        requestedCompanyId,
-        companyScopeIdRef.current,
-      );
+      if (requestedCompanyId !== companyScopeIdRef.current) return;
       toast.success("Cenário de ocupação excluído.");
       await loadScenarios();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Não foi possível excluir.");
+    } catch {
+      if (requestedCompanyId !== companyScopeIdRef.current) return;
+      toast.error("Não foi possível excluir o cenário de ocupação.");
+    }
+  }
+
+  function toggleScenarioSelection(scenarioId: string, checked: boolean) {
+    setSelectedScenarioIds((current) => {
+      if (checked) return [...new Set([...current, scenarioId])];
+      return current.filter((candidateId) => candidateId !== scenarioId);
+    });
+  }
+
+  function toggleAllScenarioSelection(checked: boolean) {
+    const visibleIds = new Set(
+      filteredScenarios.map((scenario) => scenario.id),
+    );
+    setSelectedScenarioIds((current) =>
+      checked
+        ? [...new Set([...current, ...visibleIds])]
+        : current.filter((scenarioId) => !visibleIds.has(scenarioId)),
+    );
+  }
+
+  async function updateSelectedScenarioStatus(active: boolean) {
+    if (!canEdit || bulkMutating) return;
+    if (!scenarioCatalogCertified) {
+      toast.error(
+        scenarioCatalogError ||
+          "Os cenários de ocupação ainda não estão disponíveis.",
+      );
+      return;
+    }
+
+    const requestedCompanyId = companyScopeId;
+    const candidates = selectedScenarios.filter(
+      (scenario) =>
+        scenario.company_id === requestedCompanyId &&
+        scenario.active !== active,
+    );
+    if (!requestedCompanyId || !candidates.length) return;
+
+    setBulkUpdatingStatus(active);
+    const updatedIds: string[] = [];
+    const failedIds: string[] = [];
+    let companyChanged = false;
+
+    try {
+      for (const scenario of candidates) {
+        if (companyScopeIdRef.current !== requestedCompanyId) {
+          companyChanged = true;
+          break;
+        }
+
+        try {
+          const response = await apiFetch<unknown>(
+            `/occupancy/scenarios/${scenario.id}`,
+            {
+              body: { active },
+              companyScopeId: requestedCompanyId,
+              method: "PUT",
+            },
+          );
+          requireOptionalOccupancyStatusResponse(response, {
+            active,
+            companyId: requestedCompanyId,
+            expectedId: scenario.id,
+          });
+          updatedIds.push(scenario.id);
+        } catch {
+          failedIds.push(scenario.id);
+        }
+      }
+
+      if (companyChanged) return;
+
+      setSelectedScenarioIds(failedIds);
+      setBulkDeactivateDialogOpen(false);
+      if (updatedIds.length) await loadScenarios();
+
+      const action = active ? "ativado(s)" : "desativado(s)";
+      if (!failedIds.length) {
+        toast.success(`${updatedIds.length} cenário(s) ${action}.`);
+      } else if (updatedIds.length) {
+        toast.warning(
+          `${updatedIds.length} cenário(s) ${action}; ${failedIds.length} não puderam ser alterados.`,
+        );
+      } else {
+        toast.error("Não foi possível alterar os cenários selecionados.");
+      }
+    } finally {
+      setBulkUpdatingStatus(null);
+    }
+  }
+
+  async function deleteSelectedScenarios() {
+    if (!canEdit || bulkMutating) return;
+    if (!scenarioCatalogCertified) {
+      toast.error(
+        scenarioCatalogError ||
+          "Os cenários de ocupação ainda não estão disponíveis.",
+      );
+      return;
+    }
+
+    const requestedCompanyId = companyScopeId;
+    const candidates = selectedScenarios.filter(
+      (scenario) => scenario.company_id === requestedCompanyId,
+    );
+    if (!requestedCompanyId || !candidates.length) {
+      toast.error("Selecione pelo menos um cenário válido.");
+      setBulkDeleteDialogOpen(false);
+      return;
+    }
+
+    setBulkDeleting(true);
+    const deletedIds: string[] = [];
+    const failedIds: string[] = [];
+    let companyChanged = false;
+
+    try {
+      for (const scenario of candidates) {
+        if (companyScopeIdRef.current !== requestedCompanyId) {
+          companyChanged = true;
+          break;
+        }
+
+        try {
+          await apiFetch(`/occupancy/scenarios/${scenario.id}`, {
+            companyScopeId: requestedCompanyId,
+            method: "DELETE",
+          });
+          deletedIds.push(scenario.id);
+        } catch {
+          failedIds.push(scenario.id);
+        }
+      }
+
+      if (companyChanged) return;
+
+      setSelectedScenarioIds(failedIds);
+      setBulkDeleteDialogOpen(false);
+
+      if (deletedIds.length) await loadScenarios();
+
+      if (!failedIds.length) {
+        toast.success(
+          deletedIds.length === 1
+            ? "Cenário de ocupação excluído."
+            : `${deletedIds.length} cenários de ocupação excluídos.`,
+        );
+      } else if (deletedIds.length) {
+        toast.warning(
+          `${deletedIds.length} cenário(s) excluído(s); ${failedIds.length} não puderam ser excluídos.`,
+        );
+      } else {
+        toast.error("Não foi possível excluir os cenários selecionados.");
+      }
+    } finally {
+      setBulkDeleting(false);
     }
   }
 
@@ -358,7 +593,7 @@ export function OccupancyScenarioManager() {
                 void loadScenarios();
                 void loadAreaOptions();
               }}
-              disabled={loading || loadingAreas}
+              disabled={loading || loadingAreas || bulkMutating}
             >
               <RefreshCw
                 className={cn(
@@ -373,7 +608,7 @@ export function OccupancyScenarioManager() {
                 type="button"
                 className="w-full sm:w-auto"
                 onClick={openCreateDialog}
-                disabled={!catalogsReady}
+                disabled={!catalogsReady || bulkMutating}
               >
                 <Plus className="h-4 w-4" />
                 Novo cenário
@@ -384,11 +619,11 @@ export function OccupancyScenarioManager() {
         <CardContent className="space-y-3">
           {areaCatalogError ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-              Catálogo de áreas bloqueado: {areaCatalogError}
+              Áreas indisponíveis: {areaCatalogError}
             </div>
           ) : loadingAreas ? (
             <div className="rounded-md border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
-              Carregando câmeras, catálogo e snapshots de ocupação...
+              Carregando câmeras e áreas de ocupação...
             </div>
           ) : areaCatalogWarning ? (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
@@ -399,73 +634,223 @@ export function OccupancyScenarioManager() {
             <TableSkeleton />
           ) : scenarioCatalogError ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-8 text-center text-sm text-destructive">
-              Catálogo de cenários bloqueado: {scenarioCatalogError}
+              Cenários indisponíveis: {scenarioCatalogError}
             </div>
           ) : scenarios.length ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Nome</TableHead>
-                  <TableHead>Áreas</TableHead>
-                  <TableHead>Objeto</TableHead>
-                  <TableHead>Alertas</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Atualizado</TableHead>
-                  {canEdit ? <TableHead className="text-right">Ações</TableHead> : null}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {scenarios.map((scenario) => (
-                  <TableRow key={scenario.id}>
-                    <TableCell>
-                      <div className="font-medium">{scenario.name}</div>
-                      <div className="mt-1 max-w-[420px] truncate text-xs text-muted-foreground">
-                        {scenario.id}
-                      </div>
-                    </TableCell>
-                    <TableCell>{formatNumber(scenario.areas?.length ?? 0)}</TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {scenario.object_class || "person"}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {thresholdSummary(scenario)}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge active={scenario.active} />
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatDateTime(scenario.updated_at ?? scenario.created_at)}
-                    </TableCell>
+            <>
+              <div className="grid gap-2 sm:grid-cols-[minmax(220px,1fr)_180px_auto] sm:items-center">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={scenarioSearch}
+                    onChange={(event) => setScenarioSearch(event.target.value)}
+                    placeholder="Buscar cenário"
+                    className="pl-9"
+                    aria-label="Buscar cenários de ocupação"
+                  />
+                </div>
+                <Select
+                  value={scenarioStatus}
+                  onValueChange={(value) =>
+                    setScenarioStatus(
+                      value as "all" | "active" | "inactive",
+                    )
+                  }
+                >
+                  <SelectTrigger aria-label="Filtrar cenários por status">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Todos os status</SelectItem>
+                    <SelectItem value="active">Ativos</SelectItem>
+                    <SelectItem value="inactive">Inativos</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Badge variant="outline" className="justify-center whitespace-nowrap">
+                  {filteredScenarios.length} de {scenarios.length}
+                </Badge>
+              </div>
+              {selectedScenarios.length ? (
+                <div
+                  className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-3 sm:flex-row sm:items-center sm:justify-between"
+                  role="region"
+                  aria-label="Ações para cenários de ocupação selecionados"
+                  aria-busy={bulkMutating}
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">
+                      {selectedScenarios.length} cenário(s) selecionado(s)
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Edite um item ou aplique uma ação à seleção.
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setSelectedScenarioIds([])}
+                      disabled={bulkMutating}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      Limpar seleção
+                    </Button>
+                    {selectedScenarios.length === 1 ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openEditDialog(selectedScenarios[0])}
+                        disabled={bulkMutating || !catalogsReady}
+                      >
+                        <Edit className="h-3.5 w-3.5" />
+                        Editar
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void updateSelectedScenarioStatus(true)}
+                      disabled={bulkMutating || !inactiveSelectedScenarioCount}
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                      {bulkUpdatingStatus === true ? "Ativando..." : "Ativar"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setBulkDeactivateDialogOpen(true)}
+                      disabled={bulkMutating || !activeSelectedScenarioCount}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      Desativar
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => setBulkDeleteDialogOpen(true)}
+                      disabled={bulkMutating || !scenarioCatalogCertified}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Excluir selecionados
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              <Table scrollRegionLabel="Cenários de ocupação cadastrados">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-12">
+                      <Checkbox
+                        aria-label="Selecionar todos os cenários de ocupação"
+                        checked={scenarioSelectionState}
+                        onCheckedChange={(checked) =>
+                          toggleAllScenarioSelection(checked === true)
+                        }
+                        disabled={bulkMutating || !filteredScenarios.length}
+                      />
+                    </TableHead>
+                    <TableHead>Nome</TableHead>
+                    <TableHead>Áreas</TableHead>
+                    <TableHead>Objeto</TableHead>
+                    <TableHead>Alertas</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Atualizado</TableHead>
                     {canEdit ? (
-                      <TableCell>
-                        <div className="flex flex-wrap justify-end gap-2">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => openEditDialog(scenario)}
-                            disabled={!catalogsReady}
-                          >
-                            <Edit className="h-3.5 w-3.5" />
-                            Editar
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="destructive"
-                            size="sm"
-                            onClick={() => deleteScenario(scenario)}
-                            disabled={!scenarioCatalogCertified}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            Excluir
-                          </Button>
-                        </div>
-                      </TableCell>
+                      <TableHead className="text-right">Ações</TableHead>
                     ) : null}
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {filteredScenarios.map((scenario) => {
+                    const selected = selectedScenarioIdSet.has(scenario.id);
+                    return (
+                      <TableRow
+                        key={scenario.id}
+                        aria-selected={selected}
+                        data-state={selected ? "selected" : undefined}
+                      >
+                        <TableCell>
+                          <Checkbox
+                            aria-label={`Selecionar cenário ${scenario.name}`}
+                            checked={selected}
+                            onCheckedChange={(checked) =>
+                              toggleScenarioSelection(
+                                scenario.id,
+                                checked === true,
+                              )
+                            }
+                            disabled={bulkMutating}
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <div className="font-medium">{scenario.name}</div>
+                        </TableCell>
+                        <TableCell>
+                          {formatNumber(scenario.areas?.length ?? 0)}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {occupancyObjectLabel(scenario.object_class)}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {thresholdSummary(scenario)}
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge active={scenario.active} />
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {formatDateTime(
+                            scenario.updated_at ?? scenario.created_at,
+                          )}
+                        </TableCell>
+                        {canEdit ? (
+                          <TableCell>
+                            <div className="flex flex-wrap justify-end gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => openEditDialog(scenario)}
+                                disabled={bulkMutating || !catalogsReady}
+                              >
+                                <Edit className="h-3.5 w-3.5" />
+                                Editar
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="destructive"
+                                size="sm"
+                                onClick={() => deleteScenario(scenario)}
+                                disabled={
+                                  bulkMutating || !scenarioCatalogCertified
+                                }
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                Excluir
+                              </Button>
+                            </div>
+                          </TableCell>
+                        ) : null}
+                      </TableRow>
+                    );
+                  })}
+                  {!filteredScenarios.length ? (
+                    <TableRow>
+                      <TableCell
+                        colSpan={8}
+                        className="py-10 text-center text-muted-foreground"
+                      >
+                        Nenhum cenário corresponde aos filtros selecionados.
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
+                </TableBody>
+              </Table>
+            </>
           ) : (
             <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
               Nenhum cenário de ocupação cadastrado.
@@ -498,6 +883,98 @@ export function OccupancyScenarioManager() {
         open={dialogOpen}
         scenario={editingScenario}
       />
+      <Dialog
+        open={bulkDeactivateDialogOpen}
+        onOpenChange={(open) => {
+          if (!bulkMutating) setBulkDeactivateDialogOpen(open);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Desativar cenários selecionados?</DialogTitle>
+            <DialogDescription>
+              {activeSelectedScenarioCount} cenário(s) deixarão de ser
+              considerados nas seleções operacionais até serem reativados.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-52 overflow-y-auto rounded-md border bg-muted/20 p-3">
+            <ul className="space-y-1 text-sm">
+              {selectedScenarios
+                .filter((scenario) => scenario.active)
+                .map((scenario) => (
+                  <li key={scenario.id} className="truncate">
+                    {scenario.name}
+                  </li>
+                ))}
+            </ul>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setBulkDeactivateDialogOpen(false)}
+              disabled={bulkMutating}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void updateSelectedScenarioStatus(false)}
+              disabled={bulkMutating || !activeSelectedScenarioCount}
+            >
+              {bulkUpdatingStatus === false
+                ? "Desativando..."
+                : `Desativar ${activeSelectedScenarioCount} cenário(s)`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={bulkDeleteDialogOpen}
+        onOpenChange={(open) => {
+          if (!bulkMutating) setBulkDeleteDialogOpen(open);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Excluir cenários selecionados?</DialogTitle>
+            <DialogDescription>
+              Esta ação excluirá {selectedScenarios.length} cenário(s) de
+              ocupação e não poderá ser desfeita.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-52 overflow-y-auto rounded-md border bg-muted/20 p-3">
+            <ul className="space-y-1 text-sm">
+              {selectedScenarios.map((scenario) => (
+                <li key={scenario.id} className="truncate">
+                  {scenario.name}
+                </li>
+              ))}
+            </ul>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setBulkDeleteDialogOpen(false)}
+              disabled={bulkMutating}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void deleteSelectedScenarios()}
+              disabled={bulkMutating || !selectedScenarios.length}
+            >
+              <Trash2 className="h-4 w-4" />
+              {bulkDeleting
+                ? "Excluindo..."
+                : `Excluir ${selectedScenarios.length} cenário(s)`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
@@ -536,7 +1013,7 @@ function OccupancyScenarioDialog({
     );
   }, [areaOptions, draft.object_class]);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     companyIdRef.current = companyId;
   }, [companyId]);
 
@@ -559,11 +1036,11 @@ function OccupancyScenarioDialog({
     const option = compatibleAreaOptions.find(
       (item) => !used.has(areaKey(item)),
     );
-    if (!option && areaCatalogAuthoritative) {
+    if (!option) {
       toast.error(
         compatibleAreaOptions.length
           ? "Todas as áreas disponíveis desta classe já foram incluídas."
-          : "Não há outra área ativa desta classe no catálogo de ocupação.",
+          : "Não há outra área disponível para este tipo de detecção.",
       );
       return;
     }
@@ -572,17 +1049,11 @@ function OccupancyScenarioDialog({
       ...current,
       areas: [
         ...current.areas,
-        option
-          ? {
-              area_id: option.area_id,
-              camera_id: option.camera_id,
-              label: option.label,
-            }
-          : {
-              area_id: "",
-              camera_id: "",
-              label: "",
-            },
+        {
+          area_id: option.area_id,
+          camera_id: option.camera_id,
+          label: option.label,
+        },
       ],
     }));
   }
@@ -603,8 +1074,17 @@ function OccupancyScenarioDialog({
     if (!areaCatalogReady || !companyId) {
       toast.error(
         areaCatalogError ||
-          "O catálogo de áreas não está certificado para salvar o cenário.",
+          "As áreas ainda não estão disponíveis para salvar o cenário.",
       );
+      return;
+    }
+    if (
+      draft.id &&
+      (!scenario ||
+        scenario.id !== draft.id ||
+        scenario.company_id !== companyId)
+    ) {
+      toast.error("Este cenário não pertence à empresa selecionada.");
       return;
     }
 
@@ -617,12 +1097,8 @@ function OccupancyScenarioDialog({
         objectClass: payload.object_class,
         options: areaOptions,
       });
-    } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "A configuração do cenário é inválida.",
-      );
+    } catch {
+      toast.error("Revise o nome, os limites e as áreas selecionadas.");
       return;
     }
 
@@ -640,7 +1116,7 @@ function OccupancyScenarioDialog({
             companyScopeId: companyId,
           },
         );
-        requireUnchangedCompanyScope(companyId, companyIdRef.current);
+        if (companyId !== companyIdRef.current) return;
         requireSavedScenario(response, {
           active: draft.active,
           companyId,
@@ -654,14 +1130,15 @@ function OccupancyScenarioDialog({
           body: payload,
           companyScopeId: companyId,
         });
-        requireUnchangedCompanyScope(companyId, companyIdRef.current);
+        if (companyId !== companyIdRef.current) return;
         requireSavedScenario(response, { companyId, payload });
         toast.success("Cenário de ocupação criado.");
       }
 
       await onSaved(companyId);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Não foi possível salvar.");
+    } catch {
+      if (companyId !== companyIdRef.current) return;
+      toast.error("Não foi possível salvar o cenário de ocupação.");
     } finally {
       setSaving(false);
     }
@@ -675,16 +1152,16 @@ function OccupancyScenarioDialog({
             {draft.id ? "Editar cenário de ocupação" : "Novo cenário de ocupação"}
           </DialogTitle>
           <DialogDescription>
-            Configure as áreas por câmera conforme /occupancy/scenarios.
+            Selecione as áreas que farão parte deste cenário.
           </DialogDescription>
         </DialogHeader>
 
         <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
           {!areaCatalogReady ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-              Salvamento bloqueado:{" "}
+              Salvamento indisponível:{" "}
               {areaCatalogError ||
-                "o catálogo de áreas ainda não foi certificado."}
+                "as áreas ainda estão sendo carregadas."}
             </div>
           ) : null}
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_150px_150px_150px]">
@@ -697,17 +1174,21 @@ function OccupancyScenarioDialog({
                 placeholder="Ex.: Postos de trabalho"
               />
             </FormField>
-            <FormField label="Objeto">
-              <Input
+            <FormField label="Tipo de detecção">
+              <Select
                 value={draft.object_class}
-                onChange={(event) =>
+                onValueChange={(objectClass) =>
                   setDraft((current) => ({
                     ...current,
-                    object_class: event.target.value,
+                    object_class: objectClass,
                   }))
                 }
-                placeholder="person"
-              />
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="person">Pessoas</SelectItem>
+                </SelectContent>
+              </Select>
             </FormField>
             <FormField label="Mínimo">
               <Input
@@ -803,7 +1284,6 @@ function OccupancyScenarioDialog({
                 {draft.areas.map((area, index) => (
                   <ScenarioAreaEditor
                     key={`${area.camera_id}-${area.area_id}-${index}`}
-                    allowManual={!areaCatalogAuthoritative}
                     area={area}
                     areaOptions={compatibleAreaOptions}
                     onPatch={(patch) => updateArea(index, patch)}
@@ -843,13 +1323,11 @@ function OccupancyScenarioDialog({
 }
 
 function ScenarioAreaEditor({
-  allowManual,
   area,
   areaOptions,
   onPatch,
   onRemove,
 }: {
-  allowManual: boolean;
   area: OccupancyScenarioArea;
   areaOptions: AreaOption[];
   onPatch: (patch: Partial<OccupancyScenarioArea>) => void;
@@ -862,7 +1340,7 @@ function ScenarioAreaEditor({
   const selectedOptionKey = selectedOption?.key ?? MANUAL_AREA_OPTION;
 
   return (
-    <div className="grid gap-3 rounded-md border bg-card p-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
+    <div className="grid gap-3 rounded-md border bg-card p-3 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_auto]">
       <FormField label="Área detectada">
         <Select
           value={selectedOptionKey}
@@ -886,8 +1364,8 @@ function ScenarioAreaEditor({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={MANUAL_AREA_OPTION} disabled={!allowManual}>
-              {allowManual ? "Manual" : "Indisponível no catálogo ativo"}
+            <SelectItem value={MANUAL_AREA_OPTION} disabled>
+              Área já configurada
             </SelectItem>
             {areaOptions.map((option) => (
               <SelectItem key={option.key} value={option.key}>
@@ -896,22 +1374,6 @@ function ScenarioAreaEditor({
             ))}
           </SelectContent>
         </Select>
-      </FormField>
-      <FormField label="Câmera">
-        <Input
-          value={area.camera_id}
-          onChange={(event) => onPatch({ camera_id: event.target.value })}
-          placeholder="camera_id"
-          readOnly={!allowManual}
-        />
-      </FormField>
-      <FormField label="Área">
-        <Input
-          value={area.area_id}
-          onChange={(event) => onPatch({ area_id: event.target.value })}
-          placeholder="area-1"
-          readOnly={!allowManual}
-        />
       </FormField>
       <FormField label="Rótulo">
         <Input
@@ -989,13 +1451,13 @@ function buildScenarioPayload(draft: Draft) {
     const cameraId = area.camera_id.trim();
     if (!cameraId || !areaId) {
       throw new Error(
-        `Preencha camera_id e area_id da área na posição ${index + 1}.`,
+        `Selecione uma área válida na posição ${index + 1}.`,
       );
     }
     const identity = areaOptionKey(cameraId, areaId);
     if (identities.has(identity)) {
       throw new Error(
-        `A área "${areaId}" da câmera "${cameraId}" está duplicada.`,
+        "A mesma área foi adicionada mais de uma vez.",
       );
     }
     identities.add(identity);
@@ -1025,17 +1487,6 @@ function buildScenarioPayload(draft: Draft) {
   };
 }
 
-function requireUnchangedCompanyScope(
-  requestedCompanyId: string,
-  currentCompanyId: string,
-) {
-  if (requestedCompanyId !== currentCompanyId) {
-    throw new Error(
-      "A empresa ativa mudou durante o salvamento; a resposta foi descartada.",
-    );
-  }
-}
-
 function requireSavedScenario(
   value: unknown,
   {
@@ -1050,15 +1501,17 @@ function requireSavedScenario(
     payload: ReturnType<typeof buildScenarioPayload>;
   },
 ) {
+  if (isEmptyMutationResponse(value)) return;
+
   const [scenario] = requireOccupancyScenarioRows([value], companyId);
   if (scenario.company_id !== companyId) {
     throw new Error(
-      `A API salvou o cenário na empresa "${scenario.company_id}", não na empresa ativa "${companyId}".`,
+      "O cenário não pôde ser vinculado à empresa selecionada.",
     );
   }
   if (expectedId && scenario.id !== expectedId) {
     throw new Error(
-      `A API retornou o cenário "${scenario.id}" ao atualizar "${expectedId}".`,
+      "A atualização não pôde ser confirmada para o cenário selecionado.",
     );
   }
   if (
@@ -1069,7 +1522,7 @@ function requireSavedScenario(
     (active !== undefined && scenario.active !== active)
   ) {
     throw new Error(
-      "A API retornou um cenário diferente da configuração salva.",
+      "A configuração salva não corresponde aos valores informados.",
     );
   }
 
@@ -1078,19 +1531,46 @@ function requireSavedScenario(
   );
   if (savedAreas.size !== payload.areas.length) {
     throw new Error(
-      "A API retornou uma quantidade de áreas diferente da configuração salva.",
+      "Nem todas as áreas selecionadas puderam ser confirmadas.",
     );
   }
   payload.areas.forEach((area) => {
     const saved = savedAreas.get(areaOptionKey(area.camera_id, area.area_id));
     if (!saved || (saved.label ?? undefined) !== area.label) {
       throw new Error(
-        `A API não confirmou a área "${area.area_id}" da câmera "${area.camera_id}".`,
+        "Uma das áreas selecionadas não pôde ser confirmada.",
       );
     }
   });
 
   return scenario;
+}
+
+function requireOptionalOccupancyStatusResponse(
+  value: unknown,
+  {
+    active,
+    companyId,
+    expectedId,
+  }: {
+    active: boolean;
+    companyId: string;
+    expectedId: string;
+  },
+) {
+  if (isEmptyMutationResponse(value)) return;
+
+  const [scenario] = requireOccupancyScenarioRows([value], companyId);
+  if (scenario.id !== expectedId) {
+    throw new Error("A atualização retornou outro cenário de ocupação.");
+  }
+  if (scenario.active !== active) {
+    throw new Error("O status retornado não corresponde ao solicitado.");
+  }
+}
+
+function isEmptyMutationResponse(value: unknown) {
+  return value === undefined || value === null || value === "";
 }
 
 function scenarioToDraft(scenario: OccupancyScenario): Draft {
@@ -1133,6 +1613,10 @@ function thresholdSummary(scenario: OccupancyScenario) {
       : `máx. ${formatNumber(scenario.max_total)}`;
 
   return `${min} / ${max}`;
+}
+
+function occupancyObjectLabel(value?: string | null) {
+  return value?.trim().toLowerCase() === "person" ? "Pessoas" : "Outro tipo";
 }
 
 function areaOptionKey(cameraId: string, areaId: string) {

@@ -72,7 +72,10 @@ export function CompactMetricCard({
       data-compact-metric-card
     >
       <CardContent className="flex h-full min-h-0 min-w-0 flex-col p-2.5">
-        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
+        <div
+          className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2"
+          data-compact-metric-header
+        >
           <h3
             className="flex min-w-0 items-start gap-2 text-[11px] font-semibold uppercase leading-4 tracking-[0.025em] text-muted-foreground"
             data-compact-metric-title
@@ -98,7 +101,10 @@ export function CompactMetricCard({
           ) : null}
         </div>
 
-        <div className="min-h-0 min-w-0" data-compact-metric-body>
+        <div
+          className="flex min-h-0 min-w-0 flex-1 flex-col justify-center"
+          data-compact-metric-body
+        >
           {loading ? (
             <Skeleton className="mt-2 h-7 w-24" />
           ) : (

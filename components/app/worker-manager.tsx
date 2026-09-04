@@ -8,8 +8,10 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Search,
   ServerCog,
   Trash2,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -24,6 +26,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -34,6 +37,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -93,8 +103,19 @@ export function WorkerManager() {
   const canEditWorkers = canManageWorkers(user);
   const [workers, setWorkers] = React.useState<Worker[]>([]);
   const [scopeWarning, setScopeWarning] = React.useState("");
+  const [workerCatalogCompanyId, setWorkerCatalogCompanyId] =
+    React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
+  const [bulkDeleting, setBulkDeleting] = React.useState(false);
+  const [deletingWorkerId, setDeletingWorkerId] = React.useState("");
+  const [workerSearch, setWorkerSearch] = React.useState("");
+  const [workerStatusFilter, setWorkerStatusFilter] = React.useState<
+    "active" | "all" | "inactive" | "offline" | "online"
+  >("all");
+  const [selectedWorkerIds, setSelectedWorkerIds] = React.useState<Set<string>>(
+    () => new Set(),
+  );
   const [workerDialog, setWorkerDialog] = React.useState(false);
   const [editingWorker, setEditingWorker] = React.useState<Worker | null>(null);
   const [workerForm, setWorkerForm] =
@@ -106,8 +127,45 @@ export function WorkerManager() {
     [workers],
   );
   const activeWorkers = workers.filter((worker) => worker.active).length;
+  const selectedWorkers = React.useMemo(
+    () => workers.filter((worker) => selectedWorkerIds.has(worker.id)),
+    [selectedWorkerIds, workers],
+  );
+  const visibleWorkers = React.useMemo(() => {
+    const search = normalizeWorkerSearchText(workerSearch);
+    return workers.filter((worker) => {
+      const online = workerIsOnline(worker);
+      const matchesStatus =
+        workerStatusFilter === "all" ||
+        (workerStatusFilter === "active" && worker.active) ||
+        (workerStatusFilter === "inactive" && !worker.active) ||
+        (workerStatusFilter === "online" && online) ||
+        (workerStatusFilter === "offline" && worker.active && !online);
+      if (!matchesStatus) return false;
+      if (!search) return true;
+      const display = getWorkerDisplayInfo(worker);
+      return normalizeWorkerSearchText(
+        `${worker.name} ${worker.description ?? ""} ${worker.hostname ?? ""} ${display.apiKeyPrefix ?? ""}`,
+      ).includes(search);
+    });
+  }, [workerSearch, workerStatusFilter, workers]);
+  const selectedVisibleWorkerCount = visibleWorkers.filter((worker) =>
+    selectedWorkerIds.has(worker.id),
+  ).length;
+  const allWorkersSelected =
+    visibleWorkers.length > 0 &&
+    selectedVisibleWorkerCount === visibleWorkers.length;
+  const someWorkersSelected =
+    selectedVisibleWorkerCount > 0 && !allWorkersSelected;
+  const workerMutationBusy =
+    saving || bulkDeleting || Boolean(deletingWorkerId);
   const effectiveCompanyId = useEffectiveCompanyScopeId(user);
   const canViewWorkers = Boolean(user && effectiveCompanyId);
+  const workerCatalogCertified =
+    Boolean(effectiveCompanyId) &&
+    workerCatalogCompanyId === effectiveCompanyId;
+  const workerExistingItemActionsDisabled =
+    workerMutationBusy || !workerCatalogCertified;
   const effectiveCompanyIdRef = React.useRef(effectiveCompanyId);
   const workerMutationSequenceRef = React.useRef(0);
   const workerLoadSequenceRef = React.useRef(0);
@@ -121,6 +179,7 @@ export function WorkerManager() {
   ) => {
     if (!canViewWorkers) {
       setWorkers([]);
+      setWorkerCatalogCompanyId("");
       setScopeWarning("");
       setLoading(false);
       return;
@@ -142,38 +201,33 @@ export function WorkerManager() {
         const { scopedRows, foreignRows, unscopedRows } =
           partitionWorkersByCompanyScope(rows, requestedCompanyId);
 
-        setWorkers(
-          sortWorkersByActivity(
-            workersFromExplicitCompanyScope({
-              foreignRows,
-              scopedRows,
-              unscopedRows,
-            }),
-          ),
+        const nextWorkers = sortWorkersByActivity(
+          workersFromExplicitCompanyScope({
+            foreignRows,
+            scopedRows,
+            unscopedRows,
+          }),
         );
-        setScopeWarning(
-          buildWorkerScopeWarning(
-            foreignRows.length,
-            unscopedRows.length,
-          ),
-        );
+        setWorkers(nextWorkers);
+        setWorkerCatalogCompanyId(requestedCompanyId);
+        retainExistingWorkerSelection(nextWorkers, setSelectedWorkerIds);
+        setScopeWarning("");
       } else {
-        setWorkers(sortWorkersByActivity(rows));
+        const nextWorkers = sortWorkersByActivity(rows);
+        setWorkers(nextWorkers);
+        setWorkerCatalogCompanyId("");
+        retainExistingWorkerSelection(nextWorkers, setSelectedWorkerIds);
         setScopeWarning(
-          "Nenhuma empresa ativa foi definida para escopar os workers.",
+          "Selecione uma empresa para consultar seus Workers.",
         );
       }
-    } catch (error) {
+    } catch {
       if (
         !silent &&
         effectiveCompanyIdRef.current === requestedCompanyId &&
         loadSequence === workerLoadSequenceRef.current
       ) {
-        toast.error(
-          error instanceof Error
-            ? error.message
-            : "Não foi possível carregar workers.",
-        );
+        toast.error("Não foi possível carregar os Workers.");
       }
     } finally {
       if (
@@ -187,31 +241,41 @@ export function WorkerManager() {
   }, [canViewWorkers, effectiveCompanyId]);
 
   React.useEffect(() => {
-    void loadWorkers();
-  }, [loadWorkers]);
-
-  React.useEffect(() => {
     workerMutationSequenceRef.current += 1;
     workerLoadSequenceRef.current += 1;
     setWorkers([]);
+    setWorkerCatalogCompanyId("");
     setScopeWarning("");
     setSaving(false);
     setWorkerDialog(false);
     setEditingWorker(null);
     setKeyNotice(null);
+    setSelectedWorkerIds(new Set());
+    setBulkDeleting(false);
+    setDeletingWorkerId("");
+    setWorkerSearch("");
+    setWorkerStatusFilter("all");
   }, [effectiveCompanyId]);
+
+  React.useEffect(() => {
+    void loadWorkers();
+  }, [loadWorkers]);
 
   useResourceAutoRefresh(
     () => loadWorkers({ silent: true }),
     {
-      enabled: canViewWorkers && !loading,
+      enabled: canViewWorkers && !loading && !bulkDeleting && !deletingWorkerId,
       intervalMs: PROVISIONED_RESOURCE_REFRESH_INTERVAL_MS,
     },
   );
 
   function openWorker(worker?: Worker) {
     if (!canEditWorkers) {
-      toast.error("Seu usuário não pode alterar workers.");
+      toast.error("Seu usuário não pode alterar Workers.");
+      return;
+    }
+    if (worker && !isWorkerCertifiedForMutation(worker, effectiveCompanyId)) {
+      toast.error("Atualize a lista antes de alterar este Worker.");
       return;
     }
 
@@ -229,7 +293,7 @@ export function WorkerManager() {
 
   async function saveWorker() {
     if (!canEditWorkers) {
-      toast.error("Seu usuário não pode alterar workers.");
+      toast.error("Seu usuário não pode alterar Workers.");
       return;
     }
     const name = workerForm.name.trim();
@@ -238,11 +302,18 @@ export function WorkerManager() {
       return;
     }
     if (!effectiveCompanyId) {
-      toast.error("Selecione uma empresa antes de salvar workers.");
+      toast.error("Selecione uma empresa antes de salvar o Worker.");
       return;
     }
 
     const requestedCompanyId = effectiveCompanyId;
+    if (
+      editingWorker &&
+      !isWorkerCertifiedForMutation(editingWorker, requestedCompanyId)
+    ) {
+      toast.error("Atualize a lista antes de salvar este Worker.");
+      return;
+    }
     const mutationSequence = ++workerMutationSequenceRef.current;
     workerLoadSequenceRef.current += 1;
 
@@ -282,9 +353,9 @@ export function WorkerManager() {
 
       setWorkerDialog(false);
       await loadWorkers();
-    } catch (error) {
+    } catch {
       if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
-      toast.error(error instanceof Error ? error.message : "Falha ao salvar worker.");
+      toast.error("Não foi possível salvar o Worker.");
     } finally {
       if (isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) {
         setSaving(false);
@@ -294,14 +365,19 @@ export function WorkerManager() {
 
   async function removeWorker(worker: Worker) {
     if (!canEditWorkers) {
-      toast.error("Seu usuário não pode excluir workers.");
+      toast.error("Seu usuário não pode excluir Workers.");
       return;
     }
-    if (!window.confirm(`Excluir o worker "${worker.name}"?`)) return;
     const requestedCompanyId = effectiveCompanyId;
     if (!requestedCompanyId) return;
+    if (!isWorkerCertifiedForMutation(worker, requestedCompanyId)) {
+      toast.error("Atualize a lista antes de excluir este Worker.");
+      return;
+    }
+    if (!window.confirm(`Excluir o Worker "${worker.name}"?`)) return;
     const mutationSequence = ++workerMutationSequenceRef.current;
     workerLoadSequenceRef.current += 1;
+    setDeletingWorkerId(worker.id);
 
     try {
       await apiFetch(`/workers/${worker.id}`, {
@@ -310,28 +386,133 @@ export function WorkerManager() {
       });
       if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
       toast.success("Worker excluído.");
+      setSelectedWorkerIds((current) => {
+        if (!current.has(worker.id)) return current;
+        const next = new Set(current);
+        next.delete(worker.id);
+        return next;
+      });
       await loadWorkers();
-    } catch (error) {
+    } catch {
       if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
-      toast.error(error instanceof Error ? error.message : "Falha ao excluir worker.");
+      toast.error("Não foi possível excluir o Worker.");
+    } finally {
+      if (isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) {
+        setDeletingWorkerId("");
+      }
     }
   }
 
-  async function rotateWorkerKey(worker: Worker) {
-    if (!canEditWorkers) {
-      toast.error("Seu usuário não pode rotacionar chaves de workers.");
+  function toggleWorkerSelection(workerId: string, selected: boolean) {
+    setSelectedWorkerIds((current) => {
+      const next = new Set(current);
+      if (selected) next.add(workerId);
+      else next.delete(workerId);
+      return next;
+    });
+  }
+
+  function toggleAllWorkers(selected: boolean) {
+    const visibleIds = new Set(visibleWorkers.map((worker) => worker.id));
+    setSelectedWorkerIds((current) => {
+      const next = new Set(current);
+      visibleIds.forEach((workerId) => {
+        if (selected) next.add(workerId);
+        else next.delete(workerId);
+      });
+      return next;
+    });
+  }
+
+  async function deleteSelectedWorkers() {
+    if (!canEditWorkers || workerMutationBusy) return;
+    const selectedTargets = workers.filter((worker) =>
+      selectedWorkerIds.has(worker.id),
+    );
+    if (!selectedTargets.length) return;
+    const requestedCompanyId = effectiveCompanyId;
+    if (
+      !requestedCompanyId ||
+      !workerCatalogCertified ||
+      selectedTargets.some(
+        (worker) =>
+          !isWorkerCertifiedForMutation(worker, requestedCompanyId),
+      )
+    ) {
+      toast.error("Atualize a lista antes de excluir os Workers selecionados.");
       return;
     }
+    const targets = selectedTargets;
     if (
       !window.confirm(
-        `Rotacionar a chave do worker "${worker.name}"? A chave anterior deixará de funcionar.`,
+        `Excluir ${targets.length} Worker${targets.length === 1 ? "" : "s"} selecionado${targets.length === 1 ? "" : "s"}? Esta ação não pode ser desfeita.`,
       )
     ) {
       return;
     }
 
+    const mutationSequence = ++workerMutationSequenceRef.current;
+    workerLoadSequenceRef.current += 1;
+    const failedIds = new Set<string>();
+    let deletedCount = 0;
+    setBulkDeleting(true);
+
+    try {
+      for (const worker of targets) {
+        if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
+        try {
+          await apiFetch(`/workers/${worker.id}`, {
+            companyScopeId: requestedCompanyId,
+            method: "DELETE",
+          });
+          deletedCount += 1;
+        } catch {
+          failedIds.add(worker.id);
+        }
+      }
+
+      if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
+      setSelectedWorkerIds(failedIds);
+      if (!failedIds.size) {
+        toast.success(
+          `${deletedCount} Worker${deletedCount === 1 ? " excluído" : "s excluídos"}.`,
+        );
+      } else if (deletedCount) {
+        toast.warning(
+          `${deletedCount} excluído${deletedCount === 1 ? "" : "s"}; ${failedIds.size} não ${failedIds.size === 1 ? "pôde" : "puderam"} ser excluído${failedIds.size === 1 ? "" : "s"}.`,
+        );
+      } else {
+        toast.error("Não foi possível excluir os Workers selecionados.");
+      }
+      await loadWorkers();
+    } finally {
+      if (isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) {
+        setBulkDeleting(false);
+      }
+    }
+  }
+
+  async function rotateWorkerKey(worker: Worker) {
+    if (!canEditWorkers) {
+      toast.error("Seu usuário não pode renovar chaves de conexão.");
+      return;
+    }
     const requestedCompanyId = effectiveCompanyId;
-    if (!requestedCompanyId) return;
+    if (
+      !requestedCompanyId ||
+      !isWorkerCertifiedForMutation(worker, requestedCompanyId)
+    ) {
+      toast.error("Atualize a lista antes de renovar a chave deste Worker.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `Renovar a chave de conexão de "${worker.name}"? A chave anterior deixará de funcionar.`,
+      )
+    ) {
+      return;
+    }
+
     const mutationSequence = ++workerMutationSequenceRef.current;
     workerLoadSequenceRef.current += 1;
 
@@ -345,18 +526,16 @@ export function WorkerManager() {
       );
       if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
       setKeyNotice({
-        title: "Chave rotacionada",
+        title: "Chave renovada",
         workerName: worker.name,
         apiKey: response.api_key,
         apiKeyPrefix: response.api_key_prefix,
       });
-      toast.success("Chave rotacionada.");
+      toast.success("Chave renovada.");
       await loadWorkers();
-    } catch (error) {
+    } catch {
       if (!isCurrentWorkerMutation(mutationSequence, requestedCompanyId)) return;
-      toast.error(
-        error instanceof Error ? error.message : "Falha ao rotacionar chave.",
-      );
+      toast.error("Não foi possível renovar a chave de conexão.");
     }
   }
 
@@ -368,6 +547,22 @@ export function WorkerManager() {
       mutationSequence === workerMutationSequenceRef.current &&
       effectiveCompanyIdRef.current === companyId
     );
+  }
+
+  function isWorkerCertifiedForMutation(
+    worker: Worker,
+    requestedCompanyId: string,
+  ) {
+    if (
+      !workerCatalogCertified ||
+      workerCatalogCompanyId !== requestedCompanyId ||
+      !workers.some((candidate) => candidate.id === worker.id)
+    ) {
+      return false;
+    }
+
+    const explicitCompanyId = resolveWorkerCompanyId(worker);
+    return !explicitCompanyId || explicitCompanyId === requestedCompanyId;
   }
 
   if (!canViewWorkers) {
@@ -394,10 +589,10 @@ export function WorkerManager() {
         <MetricCard
           label="Ativos"
           value={formatNumber(activeWorkers)}
-          detail="Liberados no backend"
+          detail="Disponíveis para operação"
         />
         <MetricCard
-          label="Com heartbeat"
+          label="Com comunicação"
           value={formatNumber(onlineWorkers)}
           detail="Últimos 5 minutos"
         />
@@ -412,8 +607,8 @@ export function WorkerManager() {
             </CardTitle>
             <CardDescription>
               {canEditWorkers
-                ? "Cadastre workers de borda e acompanhe o último heartbeat."
-                : "Acompanhe os workers de borda e o último heartbeat."}
+                ? "Cadastre Workers e acompanhe a comunicação mais recente."
+                : "Acompanhe os Workers e a comunicação mais recente."}
             </CardDescription>
           </div>
           <div className="flex w-full flex-wrap gap-2 sm:w-auto">
@@ -422,7 +617,7 @@ export function WorkerManager() {
               variant="outline"
               className="w-full sm:w-auto"
               onClick={() => void loadWorkers()}
-              disabled={loading}
+              disabled={loading || workerMutationBusy}
             >
               <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
               Atualizar
@@ -431,10 +626,10 @@ export function WorkerManager() {
               type="button"
               className="w-full sm:w-auto"
               onClick={() => openWorker()}
-              disabled={!canEditWorkers}
+              disabled={!canEditWorkers || workerMutationBusy}
             >
               <Plus className="h-4 w-4" />
-              Novo worker
+              Novo Worker
             </Button>
           </div>
         </CardHeader>
@@ -444,31 +639,163 @@ export function WorkerManager() {
               {scopeWarning}
             </div>
           ) : null}
+          {!loading && workers.length ? (
+            <div className="grid min-w-0 gap-2 rounded-lg border bg-muted/20 p-2 md:grid-cols-[minmax(0,1fr)_180px_auto] md:items-center">
+              <div className="relative min-w-0">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={workerSearch}
+                  onChange={(event) => setWorkerSearch(event.target.value)}
+                  className="h-9 pl-9"
+                  placeholder="Buscar Worker"
+                  aria-label="Buscar Worker"
+                />
+              </div>
+              <Select
+                value={workerStatusFilter}
+                onValueChange={(value) =>
+                  setWorkerStatusFilter(
+                    value as typeof workerStatusFilter,
+                  )
+                }
+              >
+                <SelectTrigger className="h-9" aria-label="Filtrar Workers por status">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Todos os status</SelectItem>
+                  <SelectItem value="online">Comunicando</SelectItem>
+                  <SelectItem value="offline">Sem comunicação</SelectItem>
+                  <SelectItem value="active">Ativos</SelectItem>
+                  <SelectItem value="inactive">Inativos</SelectItem>
+                </SelectContent>
+              </Select>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-9"
+                disabled={!workerSearch && workerStatusFilter === "all"}
+                onClick={() => {
+                  setWorkerSearch("");
+                  setWorkerStatusFilter("all");
+                }}
+              >
+                <X className="h-3.5 w-3.5" />
+                Limpar filtros
+              </Button>
+              <div className="text-xs text-muted-foreground md:col-span-3">
+                {visibleWorkers.length} de {workers.length} Workers exibidos
+              </div>
+            </div>
+          ) : null}
+          {canEditWorkers && selectedWorkers.length ? (
+            <div
+              className="flex min-w-0 flex-col gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+              role="toolbar"
+              aria-label="Ações para Workers selecionados"
+            >
+              <div className="text-sm font-medium">
+                {selectedWorkers.length} selecionado
+                {selectedWorkers.length === 1 ? "" : "s"}
+              </div>
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    selectedWorkers.length !== 1 ||
+                    workerExistingItemActionsDisabled
+                  }
+                  onClick={() => openWorker(selectedWorkers[0])}
+                >
+                  <Edit className="h-3.5 w-3.5" />
+                  Editar
+                </Button>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  disabled={workerExistingItemActionsDisabled}
+                  onClick={() => void deleteSelectedWorkers()}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  {bulkDeleting ? "Excluindo..." : "Excluir selecionados"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={workerMutationBusy}
+                  onClick={() => setSelectedWorkerIds(new Set())}
+                >
+                  Limpar seleção
+                </Button>
+              </div>
+            </div>
+          ) : null}
           {loading ? (
             <TableSkeleton />
           ) : workers.length ? (
             <Table>
               <TableHeader>
                 <TableRow>
+                  {canEditWorkers ? (
+                    <TableHead className="w-10 px-3">
+                      <Checkbox
+                        checked={
+                          allWorkersSelected
+                            ? true
+                            : someWorkersSelected
+                              ? "indeterminate"
+                              : false
+                        }
+                        disabled={workerExistingItemActionsDisabled}
+                        onCheckedChange={(checked) =>
+                          toggleAllWorkers(checked === true)
+                        }
+                        aria-label="Selecionar todos os Workers"
+                      />
+                    </TableHead>
+                  ) : null}
                   <TableHead>Worker</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Último heartbeat</TableHead>
-                  <TableHead>Ambiente</TableHead>
+                  <TableHead>Última comunicação</TableHead>
                   <TableHead>Vínculo</TableHead>
                   <TableHead>Chave</TableHead>
                   <TableHead className="text-right">Ações</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {workers.map((worker) => {
+                {visibleWorkers.map((worker) => {
                   const display = getWorkerDisplayInfo(worker);
 
                   return (
-                    <TableRow key={worker.id}>
+                    <TableRow
+                      key={worker.id}
+                      data-state={
+                        selectedWorkerIds.has(worker.id)
+                          ? "selected"
+                          : undefined
+                      }
+                    >
+                      {canEditWorkers ? (
+                        <TableCell className="w-10 px-3">
+                          <Checkbox
+                            checked={selectedWorkerIds.has(worker.id)}
+                            disabled={workerExistingItemActionsDisabled}
+                            onCheckedChange={(checked) =>
+                              toggleWorkerSelection(worker.id, checked === true)
+                            }
+                            aria-label={`Selecionar Worker ${worker.name}`}
+                          />
+                        </TableCell>
+                      ) : null}
                       <TableCell>
                         <div className="font-medium">{worker.name}</div>
                         <div className="mt-1 text-xs text-muted-foreground">
-                          {worker.description || display.identifier || worker.id}
+                          {worker.description || "Sem descrição"}
                         </div>
                       </TableCell>
                       <TableCell>
@@ -478,23 +805,13 @@ export function WorkerManager() {
                         {formatDateTime(display.lastSeenAt)}
                       </TableCell>
                       <TableCell>
-                        <div className="text-sm">
-                          {display.environment || "-"}
-                        </div>
-                        {display.version ? (
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {display.version}
-                          </div>
-                        ) : null}
-                      </TableCell>
-                      <TableCell>
                         <WorkerScopeBadge
                           worker={worker as WorkerRow}
                           companyId={effectiveCompanyId}
                         />
                       </TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">
-                        {display.apiKeyPrefix || "-"}
+                      <TableCell className="text-xs text-muted-foreground">
+                        {display.apiKeyPrefix ? "Configurada" : "Não informada"}
                       </TableCell>
                       <TableCell>
                         {canEditWorkers ? (
@@ -504,6 +821,7 @@ export function WorkerManager() {
                               variant="outline"
                               size="sm"
                               onClick={() => openWorker(worker)}
+                              disabled={workerExistingItemActionsDisabled}
                             >
                               <Edit className="h-3.5 w-3.5" />
                               Editar
@@ -513,6 +831,7 @@ export function WorkerManager() {
                               variant="outline"
                               size="sm"
                               onClick={() => rotateWorkerKey(worker)}
+                              disabled={workerExistingItemActionsDisabled}
                             >
                               <KeyRound className="h-3.5 w-3.5" />
                               Chave
@@ -522,6 +841,7 @@ export function WorkerManager() {
                               variant="destructive"
                               size="sm"
                               onClick={() => removeWorker(worker)}
+                              disabled={workerExistingItemActionsDisabled}
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                               Excluir
@@ -536,10 +856,20 @@ export function WorkerManager() {
                     </TableRow>
                   );
                 })}
+                {!visibleWorkers.length ? (
+                  <TableRow>
+                    <TableCell
+                      colSpan={canEditWorkers ? 7 : 6}
+                      className="h-24 text-center text-sm text-muted-foreground"
+                    >
+                      Nenhum Worker corresponde aos filtros aplicados.
+                    </TableCell>
+                  </TableRow>
+                ) : null}
               </TableBody>
             </Table>
           ) : (
-            <EmptyState text="Nenhum worker cadastrado para esta empresa." />
+            <EmptyState text="Nenhum Worker cadastrado para esta empresa." />
           )}
         </CardContent>
       </Card>
@@ -548,10 +878,10 @@ export function WorkerManager() {
         <DialogContent className="sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>
-              {editingWorker ? "Editar worker" : "Novo worker"}
+              {editingWorker ? "Editar Worker" : "Novo Worker"}
             </DialogTitle>
             <DialogDescription>
-              O worker usa a API key para buscar configuração e enviar eventos.
+              Identifique o equipamento responsável por coletar e transmitir os dados.
             </DialogDescription>
           </DialogHeader>
 
@@ -561,7 +891,7 @@ export function WorkerManager() {
               onChange={(event) =>
                 setWorkerForm((form) => ({ ...form, name: event.target.value }))
               }
-              placeholder="Worker Entrada"
+              placeholder="Ex.: Entrada principal"
             />
           </FormField>
           <FormField label="Descrição">
@@ -573,7 +903,7 @@ export function WorkerManager() {
                   description: event.target.value,
                 }))
               }
-              placeholder="Worker de contagem"
+              placeholder="Ex.: Worker de contagem da entrada"
             />
           </FormField>
 
@@ -599,16 +929,43 @@ export function WorkerManager() {
   );
 }
 
+function retainExistingWorkerSelection(
+  workers: Worker[],
+  setSelection: React.Dispatch<React.SetStateAction<Set<string>>>,
+) {
+  const availableIds = new Set(workers.map((worker) => worker.id));
+  setSelection((current) => {
+    const retained = new Set(
+      [...current].filter((workerId) => availableIds.has(workerId)),
+    );
+    if (
+      retained.size === current.size &&
+      [...retained].every((workerId) => current.has(workerId))
+    ) {
+      return current;
+    }
+    return retained;
+  });
+}
+
+function normalizeWorkerSearchText(value: string) {
+  return value
+    .trim()
+    .toLocaleLowerCase("pt-BR")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
 function WorkerStatusBadge({ worker }: { worker: Worker }) {
   if (!worker.active) {
     return <Badge variant="secondary">Inativo</Badge>;
   }
 
   if (workerIsOnline(worker)) {
-    return <Badge variant="success">Online</Badge>;
+    return <Badge variant="success">Comunicando</Badge>;
   }
 
-  return <Badge variant="warning">Sem heartbeat</Badge>;
+  return <Badge variant="warning">Sem comunicação</Badge>;
 }
 
 function WorkerScopeBadge({
@@ -622,12 +979,13 @@ function WorkerScopeBadge({
 
   return (
     <div className="space-y-1">
-      <Badge variant={scope.variant}>{scope.label}</Badge>
-      {scope.detail ? (
-        <div className="max-w-[180px] truncate font-mono text-[11px] text-muted-foreground">
-          {scope.detail}
-        </div>
-      ) : null}
+      <Badge variant={scope.variant}>
+        {scope.label === "Vinculado"
+          ? "Vínculo confirmado"
+          : scope.label === "Outra empresa"
+            ? "Vínculo divergente"
+            : "Vínculo pendente"}
+      </Badge>
     </div>
   );
 }
@@ -651,7 +1009,7 @@ async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId:
   const workerCompanyId = resolveWorkerCompanyId(worker);
   if (workerCompanyId && workerCompanyId !== companyId) {
     throw new Error(
-      `A API criou o worker vinculado a outra empresa (${workerCompanyId}), não à empresa ativa (${companyId}).`,
+      "O Worker não pôde ser vinculado à empresa selecionada.",
     );
   }
 
@@ -677,7 +1035,7 @@ async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId:
   const foreignWorker = foreignRows.find(matchesWorker);
   if (foreignWorker) {
     throw new Error(
-      `A API retornou o worker criado em outra empresa (${resolveWorkerCompanyId(foreignWorker) || "sem company_id"}).`,
+      "O Worker foi associado a outra empresa e não pode ser usado neste contexto.",
     );
   }
 
@@ -687,34 +1045,13 @@ async function ensureCreatedWorkerScope(worker: CreateWorkerResponse, companyId:
 
   if (unscopedRows.some(matchesWorker)) {
     throw new Error(
-      "A API criou o worker sem company_id em uma resposta que também contém outra empresa; o vínculo não pode ser comprovado.",
+      "Não foi possível confirmar a empresa responsável por este Worker.",
     );
   }
 
   throw new Error(
-    "A API criou o worker, mas ele não foi retornado para a empresa ativa. A chave não foi exibida para evitar registrar o worker na empresa errada.",
+    "Não foi possível confirmar o novo Worker nesta empresa. A chave de conexão não foi exibida por segurança.",
   );
-}
-
-function buildWorkerScopeWarning(
-  foreignCount: number,
-  unscopedCount: number,
-) {
-  const messages = [];
-  if (foreignCount) {
-    messages.push(
-      `${formatNumber(foreignCount)} worker(s) de outras empresas foram ocultados.`,
-    );
-  }
-  if (unscopedCount) {
-    messages.push(
-      foreignCount
-        ? `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram ocultados porque a resposta também contém outra empresa.`
-        : `${formatNumber(unscopedCount)} worker(s) vieram sem company_id e foram mantidos no escopo autenticado solicitado.`,
-    );
-  }
-
-  return messages.join(" ");
 }
 
 function workerIsOnline(worker: Worker) {
@@ -751,20 +1088,15 @@ function ApiKeyDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <KeyRound className="h-4 w-4 text-primary" />
-            {notice?.title ?? "Chave do worker"}
+            {notice?.title ?? "Chave de conexão"}
           </DialogTitle>
           <DialogDescription>
-            Salve esta chave agora. O backend não mostra a API key completa depois.
+            Guarde esta chave agora. Por segurança, ela não será exibida novamente.
           </DialogDescription>
         </DialogHeader>
 
         <div className="rounded-md border border-primary/20 bg-primary/10 p-3">
           <div className="text-sm font-medium">{notice?.workerName}</div>
-          {notice?.apiKeyPrefix ? (
-            <div className="mt-1 text-xs text-muted-foreground">
-              Prefixo: {notice.apiKeyPrefix}
-            </div>
-          ) : null}
           <div className="mt-3 break-all rounded-md border bg-card p-3 font-mono text-xs">
             {notice?.apiKey}
           </div>

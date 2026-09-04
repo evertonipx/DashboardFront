@@ -4,12 +4,16 @@ import {
   parseAggregateBucket,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
-import { pastelBarColor } from "@/lib/chart-palette";
+import {
+  monochromeHeatmapPalette,
+  pastelBarColor,
+} from "@/lib/chart-palette";
 import { CHART_VALUE_LABEL_ANGLE } from "@/lib/chart-value-labels";
 import {
   inferDirectionFromText,
   type ScenarioDirection,
 } from "@/lib/scenario-direction";
+import { buildCombinedScenarioMultiplierMap } from "@/lib/scenario-analytics";
 import type {
   ReportChart,
   ReportMetric,
@@ -54,6 +58,8 @@ export const COUNTING_INTELLIGENCE_CARD_IDS = {
   annualComparison: "report_counting_annual_comparison",
   annualAccumulatedComparison:
     "report_counting_annual_accumulated_comparison",
+  dayMonthHeatmap: "report_counting_day_month_heatmap",
+  monthYearHeatmap: "report_counting_month_year_heatmap",
   directionalFlow: "report_counting_directional_flow",
   accessRanking: "report_counting_access_ranking",
 } as const;
@@ -80,6 +86,7 @@ export type CountingIntelligenceScope = {
   cameraIds: string[];
   name: string;
   scenario?: Scenario;
+  scenarios?: Scenario[];
 };
 
 export type CountingYearRow = {
@@ -126,6 +133,13 @@ export type CountingYearOverYearMonth = {
   previous: number | null;
 };
 
+export type CountingDayMonthHeatmapCell = {
+  date: Date | null;
+  day: number;
+  month: number;
+  total: number | null;
+};
+
 export type CountingMonthlyComparisonYearRow = {
   accumulated: number;
   average: number;
@@ -159,8 +173,16 @@ export type CountingIntelligenceModel = {
   currentMonthDelta: number | null;
   currentMonthValue: number;
   currentYear: number;
+  dayMonthHeatmapCells: CountingDayMonthHeatmapCell[];
+  dayMonthHeatmapFrom: Date;
+  dayMonthHeatmapTo: Date;
+  dayMonthHeatmapYear: number;
+  directionalPeriodFrom: Date;
+  directionalPeriodTo: Date;
   directionalHours: CountingDirectionalHour[];
   periodAverage: number;
+  periodComparisonLimited: boolean;
+  periodComparisonMonthCount: number;
   periodDelta: number | null;
   periodFrom: Date;
   periodMonthCount: number;
@@ -176,7 +198,19 @@ export type CountingIntelligenceModel = {
 };
 
 type BuildCountingIntelligenceInput = {
+  comparisonDataFrom?: Date;
+  comparableDailyRows?: AggregateEventRow[];
+  comparableHourlyRows?: AggregateEventRow[];
+  dailyRows?: AggregateEventRow[];
+  dayMonthHeatmapPeriod?: {
+    from: Date;
+    to: Date;
+  };
   hourlyRows: AggregateEventRow[];
+  hourlyPeriod?: {
+    from: Date;
+    to: Date;
+  };
   includeOpenPeriod?: boolean;
   monthlyRows: AggregateEventRow[];
   now: Date;
@@ -205,7 +239,13 @@ type ScenarioLineBinding = {
 };
 
 export function buildCountingIntelligenceModel({
+  comparisonDataFrom,
+  comparableDailyRows,
+  comparableHourlyRows,
+  dailyRows = [],
+  dayMonthHeatmapPeriod,
   hourlyRows,
+  hourlyPeriod,
   includeOpenPeriod = true,
   monthlyRows,
   now,
@@ -219,11 +259,50 @@ export function buildCountingIntelligenceModel({
   const normalizedPeriod = normalizeModelPeriod(period, now, includeOpenPeriod);
   const periodFrom = normalizedPeriod.from;
   const periodTo = normalizedPeriod.to;
+  const directionalPeriodFrom = new Date(
+    Math.max(periodFrom.getTime(), hourlyPeriod?.from.getTime() ?? periodFrom.getTime()),
+  );
+  const directionalPeriodTo = new Date(
+    Math.min(periodTo.getTime(), hourlyPeriod?.to.getTime() ?? periodTo.getTime()),
+  );
   const periodEnd = new Date(
     periodTo > periodFrom ? periodTo.getTime() - 1 : periodFrom.getTime(),
   );
   const currentYear = periodEnd.getFullYear();
   const currentMonth = periodEnd.getMonth();
+  const dayMonthHeatmapYear = currentYear;
+  const requestedDayMonthFrom =
+    dayMonthHeatmapPeriod && isValidDate(dayMonthHeatmapPeriod.from)
+      ? dayMonthHeatmapPeriod.from
+      : periodFrom;
+  const requestedDayMonthTo =
+    dayMonthHeatmapPeriod && isValidDate(dayMonthHeatmapPeriod.to)
+      ? dayMonthHeatmapPeriod.to
+      : startOfCalendarDay(now);
+  const dayMonthHeatmapFrom = new Date(
+    Math.max(
+      periodFrom.getTime(),
+      new Date(dayMonthHeatmapYear, 0, 1).getTime(),
+      requestedDayMonthFrom.getTime(),
+    ),
+  );
+  const dayMonthHeatmapTo = new Date(
+    Math.max(
+      dayMonthHeatmapFrom.getTime(),
+      Math.min(
+        periodTo.getTime(),
+        new Date(dayMonthHeatmapYear + 1, 0, 1).getTime(),
+        requestedDayMonthTo.getTime(),
+      ),
+    ),
+  );
+  const dayMonthHeatmapCells = buildDayMonthHeatmapCells({
+    from: dayMonthHeatmapFrom,
+    rows: dailyRows,
+    scope,
+    to: dayMonthHeatmapTo,
+    year: dayMonthHeatmapYear,
+  });
   const selectedMonthTotals = aggregateScopeMonths(monthlyRows, scope);
   const comparableCurrentMonthTotals = new Map(selectedMonthTotals);
   const comparablePreviousMonthTotals = new Map(selectedMonthTotals);
@@ -242,26 +321,44 @@ export function buildCountingIntelligenceModel({
       comparableCurrentTo,
       -1,
     );
+    const hasConsolidatedComparableRows =
+      comparableDailyRows !== undefined || comparableHourlyRows !== undefined;
     comparableCurrentMonthTotals.set(
       monthKey(openMonthStart.getFullYear(), openMonthStart.getMonth()),
-      sumScopeHourlyRange(
-        hourlyRows,
-        scope,
-        openMonthStart,
-        comparableCurrentTo,
-      ),
+      hasConsolidatedComparableRows
+        ? sumScopeComparableRange(
+            comparableDailyRows ?? [],
+            comparableHourlyRows ?? [],
+            scope,
+            openMonthStart,
+            comparableCurrentTo,
+          )
+        : sumScopeHourlyRange(
+            hourlyRows,
+            scope,
+            openMonthStart,
+            comparableCurrentTo,
+          ),
     );
     comparablePreviousMonthTotals.set(
       monthKey(
         comparablePreviousFrom.getFullYear(),
         comparablePreviousFrom.getMonth(),
       ),
-      sumScopeHourlyRange(
-        hourlyRows,
-        scope,
-        comparablePreviousFrom,
-        comparablePreviousTo,
-      ),
+      hasConsolidatedComparableRows
+        ? sumScopeComparableRange(
+            comparableDailyRows ?? [],
+            comparableHourlyRows ?? [],
+            scope,
+            comparablePreviousFrom,
+            comparablePreviousTo,
+          )
+        : sumScopeHourlyRange(
+            hourlyRows,
+            scope,
+            comparablePreviousFrom,
+            comparablePreviousTo,
+          ),
     );
   }
   const firstYear = periodFrom.getFullYear();
@@ -344,8 +441,19 @@ export function buildCountingIntelligenceModel({
     periodFrom,
     periodTo,
   );
-  const previousPeriodFrom = addCalendarYears(periodFrom, -1);
+  const requestedPreviousPeriodFrom = addCalendarYears(periodFrom, -1);
   const previousPeriodTo = addCalendarYears(periodTo, -1);
+  const certifiedComparisonFrom =
+    comparisonDataFrom && isValidDate(comparisonDataFrom)
+      ? startOfCalendarMonth(comparisonDataFrom)
+      : requestedPreviousPeriodFrom;
+  const previousPeriodFrom = new Date(
+    Math.max(
+      requestedPreviousPeriodFrom.getTime(),
+      certifiedComparisonFrom.getTime(),
+    ),
+  );
+  const comparablePeriodFrom = addCalendarYears(previousPeriodFrom, 1);
   const previousPeriodValue = sumMonthRange(
     comparablePreviousMonthTotals,
     previousPeriodFrom,
@@ -353,7 +461,7 @@ export function buildCountingIntelligenceModel({
   );
   const comparablePeriodValue = sumMonthRange(
     comparableCurrentMonthTotals,
-    periodFrom,
+    comparablePeriodFrom,
     periodTo,
   );
   const periodMonthCount = countCalendarMonths(periodFrom, periodTo);
@@ -382,8 +490,8 @@ export function buildCountingIntelligenceModel({
       aggregateBucketInRange(
         row.bucket,
         "hour",
-        periodFrom,
-        periodTo,
+        directionalPeriodFrom,
+        directionalPeriodTo,
       ),
     ),
     scenarios,
@@ -438,8 +546,17 @@ export function buildCountingIntelligenceModel({
     ),
     currentMonthValue,
     currentYear,
+    dayMonthHeatmapCells,
+    dayMonthHeatmapFrom,
+    dayMonthHeatmapTo,
+    dayMonthHeatmapYear,
+    directionalPeriodFrom,
+    directionalPeriodTo,
     directionalHours,
     periodAverage: periodMonthCount ? periodValue / periodMonthCount : 0,
+    periodComparisonLimited:
+      previousPeriodFrom > requestedPreviousPeriodFrom,
+    periodComparisonMonthCount: previousPeriodMonthCount,
     periodDelta: percentageDelta(
       comparablePeriodValue,
       previousPeriodValue,
@@ -486,9 +603,12 @@ export function buildCountingIntelligenceReportAssets(
   const leader = model.accesses[0];
   const monthlyComparisonTable = buildMonthlyComparisonReportTable(model);
   const annualAccumulatedTable = buildAnnualAccumulatedReportTable(model);
+  const dayMonthHeatmapTable = buildDayMonthHeatmapReportTable(model);
+  const monthYearHeatmapTable = buildMonthYearHeatmapReportTable(model);
   const accessTable = buildAccessRankingReportTable(model);
   const directionalTable = buildDirectionalHourlyReportTable(model);
   const periodLabel = formatCountingIntelligencePeriod(model);
+  const directionalPeriodLabel = formatCountingDirectionalPeriod(model);
   const charts: Array<{
     cardId: CountingIntelligenceCardId;
     value: ReportChart;
@@ -519,6 +639,30 @@ export function buildCountingIntelligenceReportAssets(
         title: "Comparativo acumulado por ano",
       },
     },
+    {
+      cardId: COUNTING_INTELLIGENCE_CARD_IDS.dayMonthHeatmap,
+      value: {
+        description: `Distribuição dos dias civis fechados de ${model.dayMonthHeatmapYear}, com zero preservado e ausência explicitamente separada.`,
+        option: buildCountingDayMonthHeatmapChartOption(
+          model,
+          colors[COUNTING_INTELLIGENCE_CARD_IDS.dayMonthHeatmap],
+        ),
+        table: dayMonthHeatmapTable,
+        title: "Mapa de calor · dias x meses",
+      },
+    },
+    {
+      cardId: COUNTING_INTELLIGENCE_CARD_IDS.monthYearHeatmap,
+      value: {
+        description: `Distribuição mensal por ano em ${periodLabel}, com o ano mais recente no topo.`,
+        option: buildCountingMonthYearHeatmapChartOption(
+          model,
+          colors[COUNTING_INTELLIGENCE_CARD_IDS.monthYearHeatmap],
+        ),
+        table: monthYearHeatmapTable,
+        title: "Mapa de calor · meses x anos",
+      },
+    },
   ];
 
   if (model.accesses.length) {
@@ -540,13 +684,13 @@ export function buildCountingIntelligenceReportAssets(
     charts.push({
       cardId: COUNTING_INTELLIGENCE_CARD_IDS.directionalFlow,
       value: {
-        description: `Entradas e saídas consolidadas por hora nos cenários de acesso em ${periodLabel}.`,
+        description: `Perfil horário dos cenários de acesso em uma janela de até 7 dias: ${directionalPeriodLabel}.`,
         option: buildDirectionalHourlyChartOption(
           model,
           colors[COUNTING_INTELLIGENCE_CARD_IDS.directionalFlow],
         ),
         table: directionalTable,
-        title: "Fluxo direcional por hora",
+        title: "Fluxo direcional · últimos 7 dias",
       },
     });
   }
@@ -559,7 +703,9 @@ export function buildCountingIntelligenceReportAssets(
         value: {
           description: deltaDescription(
             model.periodDelta,
-            "o mesmo intervalo deslocado em um ano",
+            model.periodComparisonLimited
+              ? "os meses comparáveis deslocados em um ano"
+              : "o mesmo intervalo deslocado em um ano",
           ),
           label: "Total do período",
           value: formatNumber(model.periodValue),
@@ -579,7 +725,11 @@ export function buildCountingIntelligenceReportAssets(
       {
         cardId: COUNTING_INTELLIGENCE_CARD_IDS.monthlyAverage,
         value: {
-          description: `Base anterior: ${formatNumber(
+          description: `${
+            model.periodComparisonLimited
+              ? "Base comparável anterior"
+              : "Base anterior"
+          }: ${formatNumber(
             model.previousPeriodAverage,
           )} por mês`,
           label: "Média mensal",
@@ -610,7 +760,12 @@ export function buildCountingIntelligenceReportAssets(
         cardId: COUNTING_INTELLIGENCE_CARD_IDS.directionalFlow,
         value: buildAccessHourlyDetailReportTable(model),
       },
-    ].filter((entry) => entry.value.rows.length),
+    ].filter(
+      (entry) =>
+        entry.value.rows.length &&
+        (entry.cardId !== COUNTING_INTELLIGENCE_CARD_IDS.accessRanking ||
+          model.accessHours.some((row) => row.total > 0)),
+    ),
   };
 }
 
@@ -622,6 +777,19 @@ export function formatCountingIntelligencePeriod(
   }
   const end = new Date(model.periodTo.getTime() - 1);
   return `${formatMonthYear(model.periodFrom)} a ${formatMonthYear(end)}`;
+}
+
+export function formatCountingDirectionalPeriod(
+  model: Pick<
+    CountingIntelligenceModel,
+    "directionalPeriodFrom" | "directionalPeriodTo"
+  >,
+) {
+  if (model.directionalPeriodTo <= model.directionalPeriodFrom) {
+    return "Sem intervalo horário";
+  }
+  const end = new Date(model.directionalPeriodTo.getTime() - 1);
+  return `${formatDayMonthYear(model.directionalPeriodFrom)} a ${formatDayMonthYear(end)}`;
 }
 
 export function buildCountingMonthlyComparison(
@@ -727,6 +895,363 @@ function summarizeMonthValues(values: Array<number | null>) {
     average: recorded.length ? total / recorded.length : 0,
     count: recorded.length,
     total,
+  };
+}
+
+export function buildCountingDayMonthHeatmapChartOption(
+  model: CountingIntelligenceModel,
+  color = "#1267C4",
+  theme: "light" | "dark" = "light",
+): EnterpriseChartOption {
+  const unavailableColor = theme === "dark" ? "#1E293B" : "#EEF2F6";
+  const cellBorderColor =
+    theme === "dark"
+      ? "rgba(226, 232, 240, 0.12)"
+      : "rgba(15, 23, 42, 0.09)";
+  const activeCellBorderColor =
+    theme === "dark"
+      ? "rgba(248, 250, 252, 0.24)"
+      : "rgba(15, 23, 42, 0.20)";
+  const certifiedCells = model.dayMonthHeatmapCells.filter(
+    (cell): cell is CountingDayMonthHeatmapCell & { date: Date; total: number } =>
+      cell.date !== null && cell.total !== null,
+  );
+  const unavailableData = model.dayMonthHeatmapCells
+    .filter((cell) => cell.total === null)
+    .map((cell) => [cell.day - 1, cell.month, -1]);
+  const certifiedData = certifiedCells.map((cell) => [
+    cell.day - 1,
+    cell.month,
+    cell.total,
+  ]);
+  const certifiedMaximum = Math.max(
+    1,
+    ...certifiedCells.map((cell) => cell.total),
+  );
+  const cellsByCoordinate = new Map(
+    model.dayMonthHeatmapCells.map((cell) => [
+      `${cell.day - 1}:${cell.month}`,
+      cell,
+    ]),
+  );
+
+  return {
+    grid: {
+      bottom: 66,
+      containLabel: true,
+      left: 8,
+      right: 12,
+      top: 8,
+    },
+    series: [
+      {
+        data: unavailableData,
+        emphasis: { disabled: true },
+        itemStyle: {
+          borderColor: cellBorderColor,
+          borderWidth: 1,
+          color: unavailableColor,
+        },
+        name: "Sem dia civil fechado",
+        progressive: 1_000,
+        type: "heatmap",
+      },
+      {
+        data: certifiedData,
+        emphasis: {
+          itemStyle: {
+            borderColor: activeCellBorderColor,
+            borderWidth: 1,
+            shadowBlur: 4,
+            shadowColor:
+              theme === "dark"
+                ? "rgba(248, 250, 252, 0.12)"
+                : "rgba(15, 23, 42, 0.14)",
+          },
+        },
+        itemStyle: {
+          borderColor: cellBorderColor,
+          borderWidth: 1,
+        },
+        name: "Fluxo certificado",
+        progressive: 1_000,
+        type: "heatmap",
+      },
+    ],
+    tooltip: {
+      backgroundColor: theme === "dark" ? "#0F172A" : "#FFFFFF",
+      borderColor: theme === "dark" ? "#334155" : "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      formatter: (parameters: unknown) => {
+        const tuple = heatmapTooltipTuple(parameters);
+        if (!tuple) return "";
+        const [dayIndex, month, value] = tuple;
+        const cell = cellsByCoordinate.get(`${dayIndex}:${month}`);
+        const heading = `${String(dayIndex + 1).padStart(2, "0")} de ${
+          COUNTING_MONTH_LABELS[month] ?? "-"
+        } · ${model.dayMonthHeatmapYear}`;
+        return value < 0 || !cell?.date || cell.total === null
+          ? `<strong>${heading}</strong><br />Sem dia civil fechado no período`
+          : `<strong>${formatDayMonthYear(cell.date)}</strong><br />${formatNumber(
+              cell.total,
+            )} eventos`;
+      },
+      padding: [10, 12],
+      position: "top",
+      textStyle: {
+        color: theme === "dark" ? "#E2E8F0" : "#13233A",
+        fontSize: 12,
+      },
+      trigger: "item",
+    },
+    visualMap: [
+      {
+        pieces: [{ color: unavailableColor, value: -1 }],
+        seriesIndex: 0,
+        show: false,
+        type: "piecewise",
+      },
+      {
+        bottom: 4,
+        calculable: true,
+        inRange: { color: monochromeHeatmapPalette(color, theme) },
+        itemHeight: 120,
+        itemWidth: 10,
+        left: "center",
+        max: certifiedMaximum,
+        min: 0,
+        orient: "horizontal",
+        precision: 0,
+        seriesIndex: 1,
+        text: ["Maior fluxo", "Zero certificado"],
+        textGap: 8,
+        textStyle: {
+          color: theme === "dark" ? "#CBD5E1" : "#526477",
+          fontSize: 10,
+        },
+      },
+    ],
+    xAxis: {
+      axisLabel: {
+        color: theme === "dark" ? "#CBD5E1" : "#66758A",
+        fontSize: 9,
+        hideOverlap: true,
+      },
+      axisLine: {
+        lineStyle: { color: theme === "dark" ? "#475569" : "#D8E3F2" },
+      },
+      axisTick: { show: false },
+      data: Array.from({ length: 31 }, (_, index) => String(index + 1)),
+      name: "Dia do mês",
+      nameLocation: "middle",
+      nameGap: 24,
+      splitArea: { show: false },
+      splitLine: { show: false },
+      type: "category",
+    },
+    yAxis: {
+      axisLabel: {
+        color: theme === "dark" ? "#CBD5E1" : "#66758A",
+        fontSize: 10,
+        hideOverlap: true,
+      },
+      axisLine: {
+        lineStyle: { color: theme === "dark" ? "#475569" : "#D8E3F2" },
+      },
+      axisTick: { show: false },
+      data: [...COUNTING_MONTH_LABELS],
+      inverse: true,
+      splitArea: { show: false },
+      splitLine: { show: false },
+      type: "category",
+    },
+  };
+}
+
+export function buildCountingMonthYearHeatmapChartOption(
+  model: CountingIntelligenceModel,
+  color = "#1267C4",
+  theme: "light" | "dark" = "light",
+): EnterpriseChartOption {
+  const unavailableColor = theme === "dark" ? "#1E293B" : "#EEF2F6";
+  const cellBorderColor =
+    theme === "dark"
+      ? "rgba(226, 232, 240, 0.12)"
+      : "rgba(15, 23, 42, 0.09)";
+  const activeCellBorderColor =
+    theme === "dark"
+      ? "rgba(248, 250, 252, 0.24)"
+      : "rgba(15, 23, 42, 0.20)";
+  const rows = countingMonthYearHeatmapRows(model);
+  const years = rows.map((row) => row.year);
+  const unavailableData = rows.flatMap((row, yearIndex) =>
+    row.months.flatMap((total, month) =>
+      total === null ? [[month, yearIndex, -1]] : [],
+    ),
+  );
+  const certifiedData = rows.flatMap((row, yearIndex) =>
+    row.months.flatMap((total, month) =>
+      total === null ? [] : [[month, yearIndex, total]],
+    ),
+  );
+  const certifiedMaximum = Math.max(
+    1,
+    ...certifiedData.map((tuple) => tuple[2]),
+  );
+
+  return {
+    grid: {
+      bottom: 66,
+      containLabel: true,
+      left: 8,
+      right: 12,
+      top: 8,
+    },
+    series: [
+      {
+        data: unavailableData,
+        emphasis: { disabled: true },
+        itemStyle: {
+          borderColor: cellBorderColor,
+          borderWidth: 1,
+          color: unavailableColor,
+        },
+        name: "Mês fora do período",
+        type: "heatmap",
+      },
+      {
+        data: certifiedData,
+        emphasis: {
+          itemStyle: {
+            borderColor: activeCellBorderColor,
+            borderWidth: 1,
+            shadowBlur: 4,
+            shadowColor:
+              theme === "dark"
+                ? "rgba(248, 250, 252, 0.12)"
+                : "rgba(15, 23, 42, 0.14)",
+          },
+        },
+        itemStyle: {
+          borderColor: cellBorderColor,
+          borderWidth: 1,
+        },
+        label: {
+          fontSize: 9,
+          formatter: (parameters: { data?: unknown }) => {
+            const tuple = heatmapTuple(parameters.data);
+            if (!tuple || tuple[2] < 0) return "";
+            const tone =
+              tuple[2] >= certifiedMaximum * 0.48 ? "strong" : "soft";
+            return `{${tone}|${compactNumber(tuple[2])}}`;
+          },
+          rich: {
+            soft: {
+              color: theme === "dark" ? "#F8FAFC" : "#203247",
+              fontSize: 9,
+              fontWeight: 600,
+            },
+            strong: {
+              color: theme === "dark" ? "#0F172A" : "#FFFFFF",
+              fontSize: 9,
+              fontWeight: 600,
+              textBorderColor:
+                theme === "dark"
+                  ? "rgba(248, 250, 252, 0.35)"
+                  : "rgba(15, 23, 42, 0.28)",
+              textBorderWidth: 1,
+            },
+          },
+          show: true,
+        },
+        labelLayout: { hideOverlap: true },
+        name: "Fluxo mensal certificado",
+        type: "heatmap",
+      },
+    ],
+    tooltip: {
+      backgroundColor: theme === "dark" ? "#0F172A" : "#FFFFFF",
+      borderColor: theme === "dark" ? "#334155" : "#D8E3F2",
+      borderWidth: 1,
+      confine: true,
+      formatter: (parameters: unknown) => {
+        const tuple = heatmapTooltipTuple(parameters);
+        if (!tuple) return "";
+        const [month, yearIndex, value] = tuple;
+        const heading = `${COUNTING_MONTH_LABELS[month] ?? "-"}/${
+          years[yearIndex] ?? "-"
+        }`;
+        return value < 0
+          ? `<strong>${heading}</strong><br />Fora do período selecionado`
+          : `<strong>${heading}</strong><br />${formatNumber(value)} eventos`;
+      },
+      padding: [10, 12],
+      position: "top",
+      textStyle: {
+        color: theme === "dark" ? "#E2E8F0" : "#13233A",
+        fontSize: 12,
+      },
+      trigger: "item",
+    },
+    visualMap: [
+      {
+        pieces: [{ color: unavailableColor, value: -1 }],
+        seriesIndex: 0,
+        show: false,
+        type: "piecewise",
+      },
+      {
+        bottom: 4,
+        calculable: true,
+        inRange: { color: monochromeHeatmapPalette(color, theme) },
+        itemHeight: 120,
+        itemWidth: 10,
+        left: "center",
+        max: certifiedMaximum,
+        min: 0,
+        orient: "horizontal",
+        precision: 0,
+        seriesIndex: 1,
+        text: ["Maior fluxo", "Zero certificado"],
+        textGap: 8,
+        textStyle: {
+          color: theme === "dark" ? "#CBD5E1" : "#526477",
+          fontSize: 10,
+        },
+      },
+    ],
+    xAxis: {
+      axisLabel: {
+        color: theme === "dark" ? "#CBD5E1" : "#66758A",
+        fontSize: 10,
+        hideOverlap: true,
+      },
+      axisLine: {
+        lineStyle: { color: theme === "dark" ? "#475569" : "#D8E3F2" },
+      },
+      axisTick: { show: false },
+      data: [...COUNTING_MONTH_LABELS],
+      splitArea: { show: false },
+      splitLine: { show: false },
+      type: "category",
+    },
+    yAxis: {
+      axisLabel: {
+        color: theme === "dark" ? "#CBD5E1" : "#66758A",
+        fontSize: 10,
+        hideOverlap: true,
+      },
+      axisLine: {
+        lineStyle: { color: theme === "dark" ? "#475569" : "#D8E3F2" },
+      },
+      axisTick: { show: false },
+      data: years.map(String),
+      inverse: true,
+      splitArea: { show: false },
+      splitLine: { show: false },
+      type: "category",
+    },
   };
 }
 
@@ -1309,18 +1834,18 @@ function aggregateScopeMonths(
 ) {
   const totals = new Map<string, number>();
   const cameraIds = new Set(scope.cameraIds);
-  const multipliers = new Map(
-    scope.scenario?.lines
-      .filter((line) => line.action_multiplier !== 0)
-      .map((line) => [line.line_count_id, line.action_multiplier]) ?? [],
-  );
+  const selectedScenarios =
+    scope.scenarios ?? (scope.scenario ? [scope.scenario] : null);
+  const multipliers = selectedScenarios
+    ? buildCombinedScenarioMultiplierMap(selectedScenarios)
+    : new Map<string, number>();
 
   rows.forEach((row) => {
     const key = monthlyBucketKey(row.bucket);
     if (!key) return;
 
     let value = 0;
-    if (scope.scenario) {
+    if (selectedScenarios) {
       if (!row.line_count_id) return;
       const multiplier = multipliers.get(row.line_count_id);
       if (multiplier === undefined) return;
@@ -1336,8 +1861,147 @@ function aggregateScopeMonths(
   return totals;
 }
 
+function buildDayMonthHeatmapCells({
+  from,
+  rows,
+  scope,
+  to,
+  year,
+}: {
+  from: Date;
+  rows: AggregateEventRow[];
+  scope: CountingIntelligenceScope;
+  to: Date;
+  year: number;
+}): CountingDayMonthHeatmapCell[] {
+  const totals = aggregateScopeDays(rows, scope);
+
+  return COUNTING_MONTH_LABELS.flatMap((_, month) =>
+    Array.from({ length: 31 }, (_, index) => {
+      const day = index + 1;
+      const candidate = new Date(year, month, day);
+      const validCivilDate =
+        candidate.getFullYear() === year &&
+        candidate.getMonth() === month &&
+        candidate.getDate() === day;
+      const certified = validCivilDate && candidate >= from && candidate < to;
+
+      return {
+        date: certified ? candidate : null,
+        day,
+        month,
+        total: certified
+          ? (totals.get(dayKey(year, month, day)) ?? 0)
+          : null,
+      } satisfies CountingDayMonthHeatmapCell;
+    }),
+  );
+}
+
+function aggregateScopeDays(
+  rows: AggregateEventRow[],
+  scope: CountingIntelligenceScope,
+) {
+  const totals = new Map<string, number>();
+  const cameraIds = new Set(scope.cameraIds);
+  const selectedScenarios =
+    scope.scenarios ?? (scope.scenario ? [scope.scenario] : null);
+  const multipliers = selectedScenarios
+    ? buildCombinedScenarioMultiplierMap(selectedScenarios)
+    : new Map<string, number>();
+
+  rows.forEach((row) => {
+    const bucket = parseAggregateBucket(row.bucket, "day");
+    if (!bucket) return;
+
+    let value = 0;
+    if (selectedScenarios) {
+      if (!row.line_count_id) return;
+      const multiplier = multipliers.get(row.line_count_id);
+      if (multiplier === undefined) return;
+      value = finiteTotal(row.total) * multiplier;
+    } else {
+      if (!row.camera_id || !cameraIds.has(row.camera_id)) return;
+      value = finiteTotal(row.total);
+    }
+
+    const key = dayKey(
+      bucket.getFullYear(),
+      bucket.getMonth(),
+      bucket.getDate(),
+    );
+    totals.set(key, (totals.get(key) ?? 0) + value);
+  });
+
+  return totals;
+}
+
 function sumScopeHourlyRange(
   rows: AggregateEventRow[],
+  scope: CountingIntelligenceScope,
+  from: Date,
+  to: Date,
+) {
+  return sumScopeAggregateRange(rows, "hour", scope, from, to);
+}
+
+function sumScopeComparableRange(
+  dailyRows: AggregateEventRow[],
+  hourlyRows: AggregateEventRow[],
+  scope: CountingIntelligenceScope,
+  from: Date,
+  to: Date,
+) {
+  const firstPartialDayEnd = startOfAggregateBucket(from, "day");
+  const closedDayFrom =
+    firstPartialDayEnd.getTime() === from.getTime()
+      ? from
+      : new Date(
+          firstPartialDayEnd.getFullYear(),
+          firstPartialDayEnd.getMonth(),
+          firstPartialDayEnd.getDate() + 1,
+        );
+  const closedDayTo = startOfAggregateBucket(to, "day");
+  if (closedDayFrom >= closedDayTo) {
+    return sumScopeAggregateRange(
+      hourlyRows,
+      "hour",
+      scope,
+      from,
+      to,
+    );
+  }
+  const hourlyTotal =
+    sumScopeAggregateRange(
+      hourlyRows,
+      "hour",
+      scope,
+      from,
+      new Date(Math.min(closedDayFrom.getTime(), to.getTime())),
+    ) +
+    sumScopeAggregateRange(
+      hourlyRows,
+      "hour",
+      scope,
+      new Date(Math.max(closedDayTo.getTime(), from.getTime())),
+      to,
+    );
+
+  return (
+    hourlyTotal +
+    sumScopeAggregateRange(
+      dailyRows,
+      "day",
+      scope,
+      closedDayFrom,
+      closedDayTo,
+    )
+  );
+}
+
+function sumScopeAggregateRange(
+  rows: AggregateEventRow[],
+  granularity: "day" | "hour",
   scope: CountingIntelligenceScope,
   from: Date,
   to: Date,
@@ -1345,17 +2009,17 @@ function sumScopeHourlyRange(
   if (from >= to) return 0;
 
   const cameraIds = new Set(scope.cameraIds);
-  const multipliers = new Map(
-    scope.scenario?.lines
-      .filter((line) => line.action_multiplier !== 0)
-      .map((line) => [line.line_count_id, line.action_multiplier]) ?? [],
-  );
+  const selectedScenarios =
+    scope.scenarios ?? (scope.scenario ? [scope.scenario] : null);
+  const multipliers = selectedScenarios
+    ? buildCombinedScenarioMultiplierMap(selectedScenarios)
+    : new Map<string, number>();
 
   return rows.reduce((total, row) => {
-    if (!aggregateBucketInRange(row.bucket, "hour", from, to)) {
+    if (!aggregateBucketInRange(row.bucket, granularity, from, to)) {
       return total;
     }
-    if (scope.scenario) {
+    if (selectedScenarios) {
       if (!row.line_count_id) return total;
       const multiplier = multipliers.get(row.line_count_id);
       return multiplier === undefined
@@ -1559,6 +2223,77 @@ function buildAccessHours(
   );
 }
 
+function buildDayMonthHeatmapReportTable(
+  model: CountingIntelligenceModel,
+): ReportTable {
+  const hasClosedDays = model.dayMonthHeatmapFrom < model.dayMonthHeatmapTo;
+  const periodDescription = hasClosedDays
+    ? `${formatDayMonthYear(model.dayMonthHeatmapFrom)} a ${formatDayMonthYear(
+        new Date(model.dayMonthHeatmapTo.getTime() - 1),
+      )}`
+    : `Sem dias civis fechados em ${model.dayMonthHeatmapYear}`;
+
+  return {
+    columns: [
+      { key: "date", label: "Data civil", width: 18 },
+      { key: "month", label: "Mês", width: 14 },
+      { key: "day", label: "Dia", numeric: true, width: 10 },
+      { key: "total", label: "Fluxo", numeric: true, width: 18 },
+      { key: "coverage", label: "Cobertura", width: 24 },
+    ],
+    description: `${periodDescription}. Zeros certificados são preservados; células sem dia civil fechado não representam fluxo zero.`,
+    rows: model.dayMonthHeatmapCells.flatMap((cell) =>
+      cell.date && cell.total !== null
+        ? [
+            {
+              coverage: "Dia certificado",
+              date: formatDayMonthYear(cell.date),
+              day: cell.day,
+              month: COUNTING_MONTH_LABELS[cell.month],
+              total: Math.round(cell.total),
+            },
+          ]
+        : [],
+    ),
+    title: "Dados - Mapa de calor · dias x meses",
+  };
+}
+
+function buildMonthYearHeatmapReportTable(
+  model: CountingIntelligenceModel,
+): ReportTable {
+  const rows = countingMonthYearHeatmapRows(model);
+
+  return {
+    columns: [
+      { key: "year", label: "Ano", numeric: true, width: 14 },
+      { key: "month", label: "Mês", width: 14 },
+      { key: "total", label: "Fluxo", numeric: true, width: 18 },
+      { key: "coverage", label: "Cobertura", width: 24 },
+    ],
+    description: `${formatCountingIntelligencePeriod(model)}. Zeros certificados são preservados; meses fora do período permanecem indisponíveis.`,
+    rows: rows.flatMap((row) =>
+      row.months.map((total, month) => ({
+        coverage: total === null ? "Fora do período" : "Mês certificado",
+        month: COUNTING_MONTH_LABELS[month],
+        total: total === null ? "" : Math.round(total),
+        year: row.year,
+      })),
+    ),
+    title: "Dados - Mapa de calor · meses x anos",
+  };
+}
+
+function countingMonthYearHeatmapRows(model: CountingIntelligenceModel) {
+  return [...model.yearRows]
+    .sort((left, right) => right.year - left.year)
+    .slice(0, 4)
+    .map((row) => ({
+      months: [...row.months],
+      year: row.year,
+    }));
+}
+
 function buildMonthlyComparisonReportTable(
   model: CountingIntelligenceModel,
 ): ReportTable {
@@ -1718,7 +2453,8 @@ function buildDirectionalHourlyReportTable(
       flow: Math.round(row.total),
       hour: hourRangeLabel(row.hour),
     })),
-    title: "Fluxo direcional consolidado por hora",
+    description: `Perfil horário consolidado em uma janela de até 7 dias: ${formatCountingDirectionalPeriod(model)}.`,
+    title: "Fluxo direcional · últimos 7 dias",
   };
 }
 
@@ -1733,7 +2469,7 @@ function buildAccessPeakReportTable(model: CountingIntelligenceModel): ReportTab
       { key: "flow_hour", label: "Pico fluxo", width: 16 },
       { key: "flow", label: "Fluxo no pico", width: 16, numeric: true },
     ],
-    description: `Picos calculados separadamente para cada cenário de acesso em ${formatCountingIntelligencePeriod(
+    description: `Picos de uma janela de até 7 dias, calculados separadamente para cada cenário de acesso: ${formatCountingDirectionalPeriod(
       model,
     )}.`,
     rows: model.accesses.map((row) => ({
@@ -1761,8 +2497,7 @@ function buildAccessHourlyDetailReportTable(
       { key: "flow", label: "Fluxo", width: 17, numeric: true },
       { key: "balance", label: "Saldo E-S", width: 17, numeric: true },
     ],
-    description:
-      "Detalhamento horário completo para auditoria e comparação dos cenários de acesso.",
+    description: `Detalhamento horário dos cenários de acesso em uma janela de até 7 dias: ${formatCountingDirectionalPeriod(model)}.`,
     rows: model.accessHours
       .filter((row) => row.total > 0)
       .map((row) => ({
@@ -1865,6 +2600,10 @@ function startOfCalendarMonth(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), 1);
 }
 
+function startOfCalendarDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
 function startOfNextMonth(date: Date) {
   return new Date(date.getFullYear(), date.getMonth() + 1, 1);
 }
@@ -1926,6 +2665,33 @@ function monthKey(year: number, month: number) {
   return `${year}-${String(month + 1).padStart(2, "0")}`;
 }
 
+function dayKey(year: number, month: number, day: number) {
+  return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(
+    2,
+    "0",
+  )}`;
+}
+
+function heatmapTuple(value: unknown): [number, number, number] | null {
+  if (
+    !Array.isArray(value) ||
+    value.length < 3 ||
+    !value.slice(0, 3).every((entry) => typeof entry === "number")
+  ) {
+    return null;
+  }
+
+  return [value[0], value[1], value[2]];
+}
+
+function heatmapTooltipTuple(
+  parameters: unknown,
+): [number, number, number] | null {
+  const parameter = Array.isArray(parameters) ? parameters[0] : parameters;
+  if (!parameter || typeof parameter !== "object") return null;
+  return heatmapTuple((parameter as { data?: unknown }).data);
+}
+
 function accessHourKey(accessId: string, hour: number) {
   return `${accessId}:${hour}`;
 }
@@ -1964,6 +2730,14 @@ function formatMonthYear(date: Date) {
     .format(date)
     .replace(" de ", "/")
     .replace(".", "");
+}
+
+function formatDayMonthYear(date: Date) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date);
 }
 
 function compactNumber(value: number) {

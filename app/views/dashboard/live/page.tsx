@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { AuthGuard } from "@/components/app/auth-guard";
-import { LiveVideoWallView } from "@/components/app/live-video-wall-view";
+import { DeferredLiveVideoWallView as LiveVideoWallView } from "@/components/app/deferred-live-views";
 
 export default function LiveVideoWallPage() {
   return (
