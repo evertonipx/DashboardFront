@@ -346,12 +346,30 @@ test("página usa guarda de auditoria e apresenta somente contexto de negócio",
     resolve(projectRoot, "components/app/audit-manager.tsx"),
     "utf8",
   );
+  const appShell = readFileSync(
+    resolve(projectRoot, "components/app/app-shell.tsx"),
+    "utf8",
+  );
+  const authGuard = readFileSync(
+    resolve(projectRoot, "components/app/auth-guard.tsx"),
+    "utf8",
+  );
 
   assert.match(managerLayout, /<ManagerRouteShell>\{children\}<\/ManagerRouteShell>/);
   assert.match(routeShell, /"\/manager\/audit": "audit"/);
   assert.match(
     routeShell,
     /<AuthGuard[\s\S]*?requireManager[\s\S]*?requireResource=\{MANAGER_RESOURCE_BY_PATH\[pathname\]\}/,
+  );
+  assert.match(
+    appShell,
+    /href: "\/manager\/audit",[\s\S]*?label: "Auditoria",[\s\S]*?canShow: canViewAudit/,
+    "o menu deve usar a mesma decisão exclusiva do superadmin aplicada à rota",
+  );
+  assert.match(
+    authGuard,
+    /case "audit":\s*return canViewAudit\(user\)/,
+    "acessar a URL diretamente deve passar pela mesma decisão de acesso do menu",
   );
   assert.match(source, /DeferredAuditManager as AuditManager/);
   assert.match(source, /<AuditManager \/>/);

@@ -32,16 +32,23 @@ test("Master enxerga os três módulos sem depender do catálogo de permissões"
   );
 });
 
-test("auditoria segue o papel administrativo certificado, fora dos módulos", () => {
+test("auditoria é exclusiva do superadmin certificado pelo JWT", () => {
   const master = user({ is_master: true, permissions: [] });
+  const roleMaster = user({
+    is_master: false,
+    role: "super-admin",
+    permissions: [],
+  });
   const admin = user({ role: "admin", permissions: [] });
   const operator = user({ role: "operator", permissions: [] });
 
   assert.equal(permissions.canViewAudit(master), true);
-  assert.equal(permissions.canViewAudit(admin), true);
+  assert.equal(permissions.canViewAudit(roleMaster), true);
+  assert.equal(permissions.canViewAudit(admin), false);
   assert.equal(permissions.canViewAudit(operator), false);
-  assert.equal(access.hasDeclaredManagerAccess(admin), true);
-  assert.equal(access.resolveAuthorizedHomePath(admin), "/manager/audit");
+  assert.equal(access.hasDeclaredManagerAccess(master), true);
+  assert.equal(access.hasDeclaredManagerAccess(admin), false);
+  assert.equal(access.resolveAuthorizedHomePath(admin), "/dashboard/live");
 });
 
 test("visibilidade usa module.slug/name do Swagger sem hardcode de permission slug", () => {

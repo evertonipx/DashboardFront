@@ -292,12 +292,12 @@ export function canManageViews(user: CurrentUser | null) {
 }
 
 /**
- * The audit endpoints are protected by the tenant role itself in the API,
- * not by a module permission. Keep this capability separate from operational
- * grants so an operator never gains access through a read-only module claim.
+ * Audit exposes company-wide administrative history and is therefore reserved
+ * for the superadmin identity certified by the JWT. Operational roles and
+ * module grants must never widen this capability.
  */
 export function canViewAudit(user: CurrentUser | null) {
-  return isMasterUser(user) || isOperationalAdmin(user);
+  return isMasterUser(user);
 }
 
 export function hasAnyOperationalPermission(user: CurrentUser | null) {
