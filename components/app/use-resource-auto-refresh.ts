@@ -4,7 +4,7 @@ import * as React from "react";
 
 import {
   RESOURCE_METADATA_REFRESH_INTERVAL_MS,
-  shouldAutoRefreshResources,
+  shouldRefreshResourcesNow,
 } from "@/lib/resource-auto-refresh";
 
 export function useResourceAutoRefresh(
@@ -28,18 +28,29 @@ export function useResourceAutoRefresh(
     if (!enabled) return;
 
     let active = true;
+    // Screens already load their catalog on mount. A focus/visibility event
+    // immediately afterward must not repeat that initial request.
+    let lastAttemptAt = Date.now();
+    const refreshInterval = Number.isFinite(intervalMs) && intervalMs > 0
+      ? intervalMs
+      : RESOURCE_METADATA_REFRESH_INTERVAL_MS;
     async function refreshWhenVisible() {
       if (
         !active ||
         refreshRunningRef.current ||
-        !shouldAutoRefreshResources({
+        !shouldRefreshResourcesNow({
           enabled,
+          intervalMs: refreshInterval,
+          lastAttemptAt,
+          now: Date.now(),
+          online: navigator.onLine,
           visibilityState: document.visibilityState,
         })
       ) {
         return;
       }
 
+      lastAttemptAt = Date.now();
       refreshRunningRef.current = true;
       try {
         await refreshRef.current();
@@ -52,17 +63,19 @@ export function useResourceAutoRefresh(
 
     const interval = window.setInterval(() => {
       void refreshWhenVisible();
-    }, intervalMs);
+    }, refreshInterval);
     const handleFocus = () => void refreshWhenVisible();
     const handleVisibilityChange = () => void refreshWhenVisible();
 
     window.addEventListener("focus", handleFocus);
+    window.addEventListener("online", handleFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       active = false;
       window.clearInterval(interval);
       window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("online", handleFocus);
       document.removeEventListener(
         "visibilitychange",
         handleVisibilityChange,

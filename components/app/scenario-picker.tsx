@@ -163,7 +163,7 @@ export function ScenarioPicker({
             {label}
           </div>
           <div
-            className="truncate text-sm font-semibold"
+            className="break-words text-sm font-semibold [overflow-wrap:anywhere]"
             title={selectedSummary}
           >
             {selectedSummary}
@@ -204,12 +204,13 @@ export function ScenarioPicker({
             data-scenario-picker-selection
             className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5"
           >
-            <div className="flex min-w-0 flex-nowrap items-center gap-1 overflow-hidden">
+            <div className="flex min-w-0 flex-wrap items-center gap-1">
               {selectedScenarios.slice(0, 2).map((scenario) => (
                 <Badge
                   key={scenario.id}
                   variant="outline"
-                  className="min-w-0 max-w-28 truncate bg-card px-1.5 @sm:max-w-36"
+                  className="min-w-0 max-w-full whitespace-normal break-words bg-card px-1.5 text-left [overflow-wrap:anywhere]"
+                  data-scenario-name
                   title={scenario.name}
                 >
                   {scenario.name}
@@ -221,7 +222,7 @@ export function ScenarioPicker({
                 </Badge>
               ) : null}
               {!selectedScenarios.length ? (
-                <span className="truncate text-xs text-muted-foreground">
+                <span className="break-words text-xs text-muted-foreground">
                   Abra a lista para escolher {nounPlural}.
                 </span>
               ) : null}
@@ -317,17 +318,17 @@ export function ScenarioPicker({
                       type="button"
                       aria-pressed={selected}
                       className={cn(
-                        "min-w-0 rounded-md border px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                        "focus-contained min-w-0 rounded-md border px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
                         selected
                           ? "border-primary bg-primary/10 text-primary"
                           : "border-transparent bg-card hover:border-primary/40",
                       )}
                       onClick={() => toggleScenario(scenario.id)}
                     >
-                      <span className="block truncate font-medium">
+                      <span data-scenario-name className="block break-words font-medium [overflow-wrap:anywhere]">
                         {scenario.name}
                       </span>
-                      <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                      <span className="mt-0.5 block break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
                         {summaryForItem
                           ? summaryForItem(scenario)
                           : `${formatNumber(scenario.lines?.length ?? 0)} linhas`}

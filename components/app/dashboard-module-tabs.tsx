@@ -17,9 +17,8 @@ import {
   useEffectiveCompanyScopeId,
 } from "@/lib/master-company-scope";
 import {
-  canViewCounting,
-  canViewDemographics,
-  canViewOccupancy,
+  canViewModuleSurface,
+  type DashboardSurface,
 } from "@/lib/permissions";
 import {
   claimLegacyUserGridPreference,
@@ -33,10 +32,12 @@ type DashboardModule = AppDashboardModule;
 const DASHBOARD_MODULE_STORAGE_KEY = "ipxdata.dashboard-module.v1";
 
 export function DashboardModuleTabs({
+  surface,
   counting,
   demographics,
   occupancy,
 }: {
+  surface: DashboardSurface;
   counting: React.ReactNode;
   demographics: React.ReactNode;
   occupancy: React.ReactNode;
@@ -48,8 +49,8 @@ export function DashboardModuleTabs({
   const legacyUserStorageKey = dashboardModuleStorageKey(null, user?.id);
   const legacyRawUserStorageKey = legacyDashboardModuleStorageKey(user?.id);
   const availableModules = React.useMemo(
-    () => dashboardModulesForUser(user),
-    [user],
+    () => dashboardModulesForUser(user, surface),
+    [user, surface],
   );
   const availableModuleKey = availableModules.join(":");
   const [module, setModule] = React.useState<DashboardModule | null>(null);
@@ -135,8 +136,8 @@ export function DashboardModuleTabs({
           Nenhum módulo disponível
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
-          Seu perfil não possui acesso de visualização a Contagem, Ocupação ou
-          Demographics.
+          Seu perfil não possui acesso a esta tela nos módulos Contagem, Ocupação ou
+          Demográfico.
         </p>
       </div>
     );
@@ -324,10 +325,11 @@ function dashboardModuleStorageKey(
 
 function dashboardModulesForUser(
   user: ReturnType<typeof useAuth>["user"],
+  surface: DashboardSurface,
 ): DashboardModule[] {
   const modules: DashboardModule[] = [];
-  if (canViewCounting(user)) modules.push("counting");
-  if (canViewOccupancy(user)) modules.push("occupancy");
-  if (canViewDemographics(user)) modules.push("demographics");
+  if (canViewModuleSurface(user, "counting", surface)) modules.push("counting");
+  if (canViewModuleSurface(user, "occupancy", surface)) modules.push("occupancy");
+  if (canViewModuleSurface(user, "demographics", surface)) modules.push("demographics");
   return modules;
 }

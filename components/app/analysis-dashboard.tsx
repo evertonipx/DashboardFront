@@ -34,6 +34,7 @@ type AnalysisDashboardProps = {
 export function AnalysisDashboard({ manager = false }: AnalysisDashboardProps) {
   return (
     <DashboardModuleTabs
+      surface="analytics"
       counting={<PeriodAnalysisDashboard manager={manager} />}
       demographics={
         <DemographicsDashboard manager={manager} surface="analysis" />

@@ -1831,7 +1831,7 @@ export function InfrastructureManager({
             <div id="locations" className="scroll-mt-6 space-y-4">
               <Card>
                 <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
+                  <div className="min-w-0">
                     <CardTitle>Locais cadastrados</CardTitle>
                     <CardDescription>
                       Cadastro operacional usado para vincular e agrupar
@@ -2045,7 +2045,7 @@ export function InfrastructureManager({
 
               <Card>
                 <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
+                  <div className="min-w-0">
                     <CardTitle>
                       Setores{" "}
                       {selectedLocation ? `de ${selectedLocation.name}` : ""}
@@ -2274,7 +2274,7 @@ export function InfrastructureManager({
             <div id="cameras" className="scroll-mt-6 space-y-4">
               <Card>
                 <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
+                  <div className="min-w-0">
                     <CardTitle>Câmeras cadastradas</CardTitle>
                     <CardDescription>
                       Origem operacional das linhas de contagem.
@@ -2457,7 +2457,7 @@ export function InfrastructureManager({
 
               <Card>
                 <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
+                  <div className="min-w-0">
                     <CardTitle>
                       Linhas de contagem{" "}
                       {selectedCamera ? `de ${selectedCamera.name}` : ""}
@@ -3104,7 +3104,7 @@ function BulkActionBar({
   return (
     <div
       aria-live="polite"
-      className="flex flex-col gap-3 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
+      className="flex min-w-0 flex-col gap-3 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
     >
       <div className="flex min-w-0 items-center gap-2 text-sm">
         <Badge variant="secondary">{count}</Badge>
@@ -3112,7 +3112,7 @@ function BulkActionBar({
           {label} selecionado{count === 1 ? "" : "s"}
         </span>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         {onEdit ? (
           <Button
             type="button"
@@ -3579,7 +3579,7 @@ function FormField({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 space-y-2">
       <Label>{label}</Label>
       {children}
     </div>

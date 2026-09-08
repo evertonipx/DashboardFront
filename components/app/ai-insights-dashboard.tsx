@@ -458,9 +458,9 @@ export function AiInsightsDashboard({
                 Depois de salva, a credencial permanece protegida e não pode ser consultada novamente.
               </CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.38fr)]">
-              <div className="space-y-1.5">
-                <div className="flex min-w-0 items-center justify-between gap-3">
+            <CardContent className="grid min-w-0 max-w-full gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.38fr)]">
+              <div className="min-w-0 space-y-1.5">
+                <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
                   <Label htmlFor="ai-insights-api-key">Credencial OpenAI</Label>
                   {configured.configured ? (
                     <Badge variant="success" className="shrink-0">
@@ -470,7 +470,7 @@ export function AiInsightsDashboard({
                     <Badge variant="warning" className="shrink-0">Pendente</Badge>
                   )}
                 </div>
-                <div className="relative">
+                <div className="relative min-w-0 max-w-full">
                   <Input
                     id="ai-insights-api-key"
                     type={showApiKey ? "text" : "password"}
@@ -513,7 +513,7 @@ export function AiInsightsDashboard({
                 ) : null}
               </div>
 
-              <div className="space-y-1.5">
+              <div className="min-w-0 space-y-1.5">
                 <Label htmlFor="ai-insights-model">Modelo</Label>
                 <Select
                   value={form.model}
@@ -783,7 +783,7 @@ function RoleAccessCheckbox({
     <label
       htmlFor={id}
       className={cn(
-        "flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-md border p-3 text-left transition focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2",
+        "focus-within-contained flex w-full min-w-0 max-w-full cursor-pointer items-center gap-3 rounded-md border p-3 text-left transition focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring focus-within:ring-offset-0",
         checked ? "border-primary/30 bg-primary/[0.045]" : "border-border bg-card hover:bg-muted/25",
         disabled && "cursor-not-allowed opacity-60",
       )}
@@ -792,10 +792,10 @@ function RoleAccessCheckbox({
         <Icon className="h-4 w-4" />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-foreground">{label}</span>
+        <span className="block text-sm font-medium text-foreground [overflow-wrap:anywhere]">{label}</span>
         <span
           id={descriptionId}
-          className="mt-0.5 block text-xs leading-4 text-muted-foreground"
+          className="mt-0.5 block text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]"
         >
           {description}
         </span>

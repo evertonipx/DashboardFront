@@ -792,7 +792,7 @@ test("Relatórios consulta somente parâmetros aplicados e reutiliza o comparati
   );
   assert.match(
     reports,
-    /visibleCardIds\.has\(`report_custom_\$\{widget\.id\}`\)/,
+    /visibleReportCardIdSet\.has\(`report_custom_\$\{widget\.id\}`\)/,
   );
   assert.match(
     reports,
@@ -812,7 +812,7 @@ test("Relatórios consulta somente parâmetros aplicados e reutiliza o comparati
   );
   assert.doesNotMatch(
     reports,
-    /\.\.\.\(visibleCardIds\.size[\s\S]*?buildCountingHourHistoryDefinition/,
+    /\.\.\.\(visibleReportCardIdSet\.size[\s\S]*?buildCountingHourHistoryDefinition/,
   );
   assert.match(reports, /onApply=\{applyCountingPeriod\}/);
   assert.match(reports, /onReportChartChange=\{updateComparisonReportChart\}/);

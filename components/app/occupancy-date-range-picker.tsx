@@ -432,14 +432,14 @@ export function AnalysisDateRangePicker({
         <Button
           type="button"
           variant="outline"
-          className="h-8 w-8 min-w-0 max-w-full shrink-0 justify-center bg-card px-0 py-0 text-left text-xs @sm:w-[300px] @sm:justify-start @sm:px-2.5"
+          className="h-auto min-h-8 w-full min-w-0 max-w-full justify-start whitespace-normal bg-card px-2.5 py-1.5 text-left text-xs"
           disabled={disabled}
           aria-haspopup="dialog"
           aria-label={`Alterar período da ${contextLabel}. Atual: ${formatAnalysisDateRangeLabel(value)}, ${triggerModeLabel.toLowerCase()}, no horário da empresa`}
           title={`${formatAnalysisDateRangeLabel(value)} · ${triggerModeLabel} · ${formatRangeDayCount(value)} · horário da empresa`}
         >
           <CalendarDays className="h-4 w-4 shrink-0 text-primary" />
-          <span className="sr-only font-medium @sm:not-sr-only @sm:min-w-0 @sm:flex-1 @sm:truncate">
+          <span className="min-w-0 flex-1 break-words font-medium">
             {formatAnalysisDateRangeLabel(value)}
           </span>
           <span className="hidden shrink-0 text-[10px] font-normal text-muted-foreground @2xl:inline">
@@ -471,7 +471,7 @@ export function AnalysisDateRangePicker({
                   type="button"
                   aria-pressed={selected}
                   className={cn(
-                    "flex min-w-0 items-center justify-center gap-2 rounded-md border px-2 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                    "focus-contained flex min-w-0 flex-col items-center justify-center gap-1.5 rounded-md border px-2 py-2 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0 sm:flex-row sm:gap-2 sm:text-left",
                     selected
                       ? "border-primary/35 bg-primary/10 text-primary"
                       : "border-transparent bg-background/70 hover:border-border hover:bg-background",
@@ -480,10 +480,10 @@ export function AnalysisDateRangePicker({
                 >
                   <Icon className="h-4 w-4 shrink-0" />
                   <span className="min-w-0">
-                    <span className="block truncate text-xs font-semibold">
+                    <span className="block break-words text-xs font-semibold">
                       {option.label}
                     </span>
-                    <span className="hidden truncate text-[10px] font-normal text-muted-foreground sm:block">
+                    <span className="hidden break-words text-[10px] font-normal text-muted-foreground sm:block">
                       {option.description}
                     </span>
                   </span>
@@ -537,7 +537,7 @@ export function AnalysisDateRangePicker({
                   >
                     <ChevronLeft className="h-4 w-4" />
                   </Button>
-                  <div className="w-40">
+                  <div className="w-40 min-w-0 max-w-full">
                     <Label
                       className="sr-only"
                       htmlFor={`${startInputId}-year`}
@@ -608,9 +608,9 @@ export function AnalysisDateRangePicker({
                         }
                         onClick={() => selectMonth(monthIndex)}
                         className={cn(
-                          "flex min-h-14 items-center gap-2 rounded-lg border px-3 py-2 text-left outline-none transition focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                          "focus-contained flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg border px-2 py-2 text-center outline-none transition focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0 sm:flex-row sm:justify-start sm:gap-2 sm:px-3 sm:text-left",
                           selected
-                            ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                            ? "border-primary bg-primary text-primary-foreground shadow-sm focus-visible:ring-primary-foreground"
                             : "bg-card hover:border-primary/35 hover:bg-primary/5",
                           !available &&
                             "cursor-not-allowed border-dashed bg-muted/25 text-muted-foreground/45 shadow-none",
@@ -619,7 +619,7 @@ export function AnalysisDateRangePicker({
                         <span className="text-[10px] font-semibold tabular-nums opacity-70">
                           {String(monthIndex + 1).padStart(2, "0")}
                         </span>
-                        <span className="text-sm font-semibold">{label}</span>
+                        <span className="min-w-0 break-words text-sm font-semibold">{label}</span>
                       </button>
                     );
                   })}
@@ -637,10 +637,10 @@ export function AnalysisDateRangePicker({
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="min-w-0 justify-start"
+                      className="h-auto min-h-8 min-w-0 justify-start whitespace-normal py-1.5 text-left"
                       onClick={() => applyPreset(preset.range)}
                     >
-                      <span className="truncate">{preset.label}</span>
+                      <span className="break-words">{preset.label}</span>
                     </Button>
                   ))}
                 </div>
@@ -908,13 +908,13 @@ function CalendarMonth({
                           if (!disabled) onDayPreview(dateInput);
                         }}
                         className={cn(
-                          "relative flex h-9 w-9 items-center justify-center rounded-md text-sm outline-none transition focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                          "focus-contained relative flex h-9 w-9 min-w-0 max-w-full items-center justify-center rounded-md text-sm outline-none transition focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
                           selected && "bg-primary/10 text-primary",
                           previewed &&
                             !selected &&
                             "bg-primary/5 text-primary",
                           boundary &&
-                            "bg-primary font-semibold text-primary-foreground hover:bg-primary/90",
+                            "bg-primary font-semibold text-primary-foreground hover:bg-primary/90 focus-visible:ring-primary-foreground",
                           today &&
                             !boundary &&
                             "ring-1 ring-inset ring-primary/50",

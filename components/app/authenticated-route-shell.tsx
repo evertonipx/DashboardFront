@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 
 import { AppShell } from "@/components/app/app-shell";
 import { AuthGuard } from "@/components/app/auth-guard";
+import { dashboardSurfaceForPathname } from "@/lib/access";
 
 type ManagerResource =
   | "audit"
@@ -32,6 +33,8 @@ export function ManagerRouteShell({ children }: { children: React.ReactNode }) {
     <AuthGuard
       requireManager
       requireMaster={requireMaster}
+      requireModule={pathname === "/manager/occupancy" ? "occupancy" : undefined}
+      requireSurface={dashboardSurfaceForPathname(pathname)}
       requireResource={MANAGER_RESOURCE_BY_PATH[pathname]}
     >
       <AppShell mode="manager">{children}</AppShell>
@@ -45,6 +48,7 @@ export function DashboardRouteShell({ children }: { children: React.ReactNode })
   return (
     <AuthGuard
       requireModule={pathname === "/dashboard/occupancy" ? "occupancy" : undefined}
+      requireSurface={dashboardSurfaceForPathname(pathname)}
     >
       <AppShell mode="client">{children}</AppShell>
     </AuthGuard>

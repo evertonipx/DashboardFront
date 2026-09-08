@@ -69,6 +69,8 @@ type FetchHourlyAggregateRangesOptions = {
   now?: Date;
   queryConcurrency?: number;
   ranges: readonly AggregateQueryRange[];
+  /** Optional per-generation queue; receives every physical partition. */
+  request?: (path: string) => Promise<AggregateEventsResponse>;
   signal?: AbortSignal;
 };
 
@@ -84,6 +86,7 @@ export async function fetchHourlyAggregateRanges({
   now = new Date(),
   queryConcurrency = DEFAULT_QUERY_CONCURRENCY,
   ranges,
+  request,
   signal,
 }: FetchHourlyAggregateRangesOptions) {
   requireValidFetchOptions(cacheScope, metricType, now, queryConcurrency);
@@ -103,6 +106,7 @@ export async function fetchHourlyAggregateRanges({
         companyScopeId,
         query,
         metricType,
+        request,
         revision: hourlyAggregateCacheRevision(query, now),
         signal,
       }),
@@ -126,6 +130,7 @@ export async function fetchBoundedHourlyAggregateRanges({
   now = new Date(),
   queryConcurrency = DEFAULT_QUERY_CONCURRENCY,
   ranges,
+  request,
   signal,
 }: FetchHourlyAggregateRangesOptions) {
   requireValidFetchOptions(cacheScope, metricType, now, queryConcurrency);
@@ -140,6 +145,7 @@ export async function fetchBoundedHourlyAggregateRanges({
         companyScopeId,
         query,
         metricType,
+        request,
         revision: hourlyAggregateCacheRevision(query, now),
         signal,
       }),
@@ -230,6 +236,7 @@ async function fetchHourlyAggregateQuery(
   signal?: AbortSignal,
   companyScopeId?: string,
   splitDepth = 0,
+  request?: (path: string) => Promise<AggregateEventsResponse>,
 ) {
   signal?.throwIfAborted();
   const params = new URLSearchParams({
@@ -238,10 +245,11 @@ async function fetchHourlyAggregateQuery(
     metric_type: metricType,
     to: aggregateQueryIso(query.to, "hour"),
   });
-  const response = await apiFetch<AggregateEventsResponse>(
-    `/analytics/aggregate?${params.toString()}`,
-    { companyScopeId, signal },
-  );
+  const path = `/analytics/aggregate?${params.toString()}`;
+  const response = request
+    ? await request(path)
+    : await apiFetch<AggregateEventsResponse>(path, { companyScopeId, signal });
+  signal?.throwIfAborted();
   const granularity = requireAggregateGranularity(
     response.granularity,
     "hour",
@@ -273,6 +281,7 @@ async function fetchHourlyAggregateQuery(
         signal,
         companyScopeId,
         splitDepth + 1,
+        request,
       )),
     );
   }
@@ -314,6 +323,7 @@ async function loadHourlyAggregateQuery({
   companyScopeId,
   metricType,
   query,
+  request,
   revision,
   signal,
 }: {
@@ -322,6 +332,7 @@ async function loadHourlyAggregateQuery({
   companyScopeId?: string;
   metricType: string;
   query: HourlyAggregateQuery;
+  request?: (path: string) => Promise<AggregateEventsResponse>;
   revision: string;
   signal?: AbortSignal;
 }) {
@@ -350,6 +361,8 @@ async function loadHourlyAggregateQuery({
     metricType,
     signal,
     companyScopeId,
+    0,
+    request,
   );
   pendingRequests?.set(cacheKey, { promise, revision, signal });
 

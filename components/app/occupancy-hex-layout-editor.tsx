@@ -927,7 +927,7 @@ export function OccupancyHexLayoutEditor({
                           type="button"
                           tabIndex={-1}
                           className={cn(
-                            "flex w-full items-center justify-center rounded-md border border-dashed text-muted-foreground transition hover:border-primary hover:bg-primary/5 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                            "focus-contained flex min-w-0 max-w-full w-full items-center justify-center rounded-md border border-dashed text-muted-foreground transition hover:border-primary hover:bg-primary/5 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
                             movingCellId && "border-primary bg-primary/5 text-primary",
                           )}
                           style={{ height: `${96 * canvasScale}px` }}
@@ -1163,6 +1163,8 @@ function HexEditorCell({
     scenario?.name ||
     (cell.scenarioId ? "Cenário indisponível" : "Sem vínculo");
   const status = editorCellStatus(state, total);
+  const zeroNumericValue = displayMode === "actual" && total === 0 &&
+    (state === "occupied" || state === "unoccupied");
   const radiusRatio =
     occupancyHexDisplayRadiusRatio(visual, displayMode) ?? 0;
   const valueColor = occupancyHexValueColor(visual, palette, displayMode);
@@ -1183,7 +1185,7 @@ function HexEditorCell({
       tabIndex={selected ? 0 : -1}
       title={label}
       className={cn(
-        "relative w-full rounded-xl px-2 text-center text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2",
+        "focus-contained relative min-w-0 max-w-full w-full rounded-xl px-2 text-center text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
         selected && "z-10",
       )}
       style={{
@@ -1262,7 +1264,7 @@ function HexEditorCell({
             }}
           >
             <span className="block truncate">{label}</span>
-            {scale >= 0.65 ? (
+            {scale >= 0.65 && !zeroNumericValue ? (
               <span className="mt-1 block text-[11px] font-extrabold">
                 {state === "occupied" || state === "unoccupied"
                   ? displayMode === "status"
@@ -1540,14 +1542,14 @@ function ScenarioPalette({
   totalByScenario: Map<string, number | null>;
 }) {
   return (
-    <div className="space-y-3">
+    <div className="min-w-0 max-w-full space-y-3">
       <div>
         <h3 className="font-semibold">Biblioteca de cenários</h3>
         <p className="mt-1 text-xs text-muted-foreground">
           Localize um cenário para abrir sua célula ou adicioná-lo na primeira posição disponível.
         </p>
       </div>
-      <div className="relative">
+      <div className="relative min-w-0 max-w-full">
         <Search
           aria-hidden="true"
           className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground"
@@ -1560,7 +1562,7 @@ function ScenarioPalette({
           onChange={(event) => setQuery(event.target.value)}
         />
       </div>
-      <div className="max-h-[48dvh] space-y-2 overflow-y-auto pr-1">
+      <div className="min-w-0 max-w-full max-h-[48dvh] space-y-2 overflow-y-auto pr-1">
         {scenarios.length ? (
           scenarios.map((scenario) => {
             const linkedCell = linkedCellByScenarioId.get(scenario.id);
@@ -1569,17 +1571,17 @@ function ScenarioPalette({
               <button
                 key={scenario.id}
                 type="button"
-                className="flex w-full items-center justify-between gap-3 rounded-md border bg-background px-3 py-2 text-left transition hover:border-primary hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                className="focus-contained flex min-w-0 max-w-full w-full items-center justify-between gap-3 rounded-md border bg-background px-3 py-2 text-left transition hover:border-primary hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!linkedCell && disabled}
                 onClick={() =>
                   linkedCell ? onSelect(linkedCell.id) : onAdd(scenario.id)
                 }
               >
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-medium">
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-medium [overflow-wrap:anywhere]">
                     {scenario.name}
                   </span>
-                  <span className="block text-[11px] text-muted-foreground">
+                  <span className="block text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
                     {total === null
                       ? "Leitura atual indisponível"
                       : `Ocupação atual: ${formatNumber(total)}`}

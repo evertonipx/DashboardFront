@@ -2503,8 +2503,14 @@ test("análises compartilham datasets e ignoram alterações puramente visuais",
   );
   assert.match(
     occupancySource,
-    /requestedDefinitionIdsKey[\s\S]*?preferenceById\.get\(id\)\?\.visible !== false/,
+    /buildOccupancyReportResourcePlan\(\{[\s\S]*?preferences:/,
   );
+  const occupancyResourcePlan = readFileSync(
+    resolve(projectRoot, "lib/occupancy-dashboard-query.ts"),
+    "utf8",
+  );
+  assert.match(occupancyResourcePlan, /byId\.get\(id\)\?\.visible !== false/);
+  assert.match(occupancyResourcePlan, /definitionIds\.filter\(\(id\) => visible\(id\)/);
   assert.match(
     occupancySource,
     /buildOccupancyReportDefinitions\([\s\S]*?\.filter\(\(definition\) => requiredDefinitionIds\.has\(definition\.id\)\)/,
@@ -3055,7 +3061,7 @@ test("análise por período envia empresa e abort signal em toda consulta", () =
   }
   assert.match(
     source,
-    /`\/locations\/\$\{location\.id\}\/sub-locations`,[\s\S]*?companyScopeId: companyScopeId\?\.trim\(\) \|\| undefined,[\s\S]*?signal/,
+    /function fetchAnalysisSubLocations[\s\S]*?const expectedCompanyId = companyScopeId\?\.trim\(\) \|\| undefined;[\s\S]*?createCountingHistoryRequestQueue\([\s\S]*?apiFetch<unknown>\(path, \{\s*companyScopeId: expectedCompanyId,\s*signal,[\s\S]*?request\(`\/locations\/\$\{location\.id\}\/sub-locations`\)/,
     "sub-locations também deve usar a empresa e o mesmo cancelamento",
   );
   assert.equal(
@@ -3690,8 +3696,8 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     compactToolbarSource,
-    /className="grid min-w-0 grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(248px,1fr\)\][^"]*@md:grid-cols-\[minmax\(120px,160px\)_64px_minmax\(248px,1fr\)\]/,
-    "cenário, paleta, horário e ações devem permanecer na mesma linha",
+    /data-dashboard-toolbar[\s\S]*?data-toolbar-filters[\s\S]*?data-toolbar-actions/,
+    "filtros à esquerda e ações à direita compartilham a barra com adaptação à largura disponível",
   );
   assert.doesNotMatch(
     compactToolbarSource,
@@ -3706,7 +3712,7 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   assert.match(compactToolbarSource, /<ReportExportActions[\s\S]*?compact/);
   assert.match(
     compactToolbarSource,
-    /aria-label="Ações da visão de ocupação"\s+className="ml-auto flex shrink-0 flex-nowrap/,
+    /aria-label="Ações da visão de ocupação"\s+className="ml-auto flex min-w-0 flex-wrap/,
   );
   assert.match(
     compactToolbarSource,
@@ -3813,13 +3819,13 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     liveToolbar,
-    /className="grid w-full min-w-0 grid-cols-\[80px_minmax\(0,104px\)_minmax\(212px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(212px,1fr\)\]/,
+    /data-dashboard-toolbar[\s\S]*?data-toolbar-filters/,
   );
   assert.doesNotMatch(liveToolbar, /enterprise-horizontal-scroll|overflow-x-auto/);
   assert.doesNotMatch(liveToolbar, /row-start-2/);
   assert.match(
     liveToolbar,
-    /className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2"/,
+    /data-toolbar-actions/,
   );
   assert.match(liveToolbar, /<ReportExportActions[\s\S]*?compact/);
   assert.match(liveToolbar, /<MonitorModeButton[\s\S]*?compact/);
@@ -3847,7 +3853,7 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     analysisToolbar,
-    /grid-cols-\[32px_minmax\(32px,1fr\)_176px\][^"]*@2xl:grid-cols-\[300px_minmax\(32px,1fr\)_176px\]/,
+    /data-dashboard-toolbar[\s\S]*?data-toolbar-filters/,
   );
   assert.match(
     analysisToolbar,
@@ -3855,7 +3861,7 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   );
   assert.match(
     analysisToolbar,
-    /aria-label="Ações da análise de Contagem"\s+className="col-start-3 row-start-1 flex w-\[176px\][^"]*flex-nowrap/,
+    /aria-label="Ações da análise de Contagem"\s+data-toolbar-actions/,
   );
   assert.match(analysisToolbar, /<AnalysisDateRangePicker/);
   assert.match(
@@ -3894,7 +3900,7 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
   assert.match(pickerSource, /aria-haspopup="dialog"/);
   assert.match(
     pickerSource,
-    /className="h-8 w-8 min-w-0 max-w-full shrink-0[^"]*@sm:w-\[300px\][^"]*"/,
+    /className="h-auto min-h-8 w-full min-w-0 max-w-full[^\n]*whitespace-normal/,
   );
   assert.match(
     analysisSource,
@@ -4201,8 +4207,8 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
   );
   assert.match(
     reports,
-    /analysis[\s\S]*?"grid min-w-0 grid-cols-\[minmax\(0,32px\)_minmax\(0,64px\)_minmax\(0,96px\)_minmax\(248px,1fr\)\] items-center gap-1 @4xl:grid-cols-\[300px_minmax\(140px,170px\)_minmax\(180px,220px\)_minmax\(248px,1fr\)\]/,
-    "calendário, filtros, horário e ações devem compartilhar uma linha compacta",
+    /data-dashboard-toolbar[\s\S]*?data-toolbar-filters[\s\S]*?data-toolbar-actions/,
+    "calendário, filtros e ações compartilham uma barra flexível sem larguras mínimas que excedam a tela",
   );
   const analysisToolbar = reports.slice(
     reports.indexOf('"Controles da análise de Ocupação"'),
@@ -4262,16 +4268,16 @@ test("Relatórios de Ocupação mantém filtros e ações na régua compacta", (
   assert.match(source, /<div className="@container rounded-md border/);
   assert.match(
     source,
-    /: "grid min-w-0 grid-cols-\[minmax\(0,64px\)_minmax\(0,96px\)_minmax\(248px,1fr\)\][^"]*@2xl:grid-cols-\[132px_220px_minmax\(248px,1fr\)\]"/,
+    /data-dashboard-toolbar[\s\S]*?data-toolbar-filters/,
   );
   assert.equal(
-    (reportControls.match(/className="h-8 w-full min-w-0 bg-card"/g) ?? [])
+    (reportControls.match(/className="h-auto min-h-8 w-full min-w-0 bg-card[^\n]*"/g) ?? [])
       .length,
     2,
   );
   assert.match(
     reportControls,
-    /aria-label="Ações dos relatórios de Ocupação"\s+className="ml-auto flex shrink-0 flex-nowrap/,
+    /aria-label="Ações dos relatórios de Ocupação"\s+className="ml-auto flex min-w-0 max-w-full flex-wrap/,
   );
   assert.doesNotMatch(
     reportControls,
@@ -4300,11 +4306,11 @@ test("Relatórios de Contagem não duplica o controle do mês aberto", () => {
   assert.match(periodSource, /<DialogTrigger asChild>/);
   assert.match(
     periodSource,
-    /className="h-8 w-8[^"]*@sm:w-full[^"]*@sm:justify-start/,
+    /className="h-auto min-h-8 w-full[^\n]*whitespace-normal/,
   );
   assert.match(
     reportsSource,
-    /aria-label="Ações dos relatórios de Contagem"\s+className="col-start-5 row-start-1 flex w-\[248px\][^"]*flex-nowrap/,
+    /aria-label="Ações dos relatórios de Contagem"\s+data-toolbar-actions/,
   );
 });
 
@@ -14468,6 +14474,25 @@ test("bootstrap minuto evita cauda duplicada e subdivide respostas no teto", asy
   }
 });
 
+test("loader agregado interrompe validação e subdivisões se o filtro mudou durante a resposta", async () => {
+  const controller = new AbortController();
+  let requests = 0;
+  await assert.rejects(aggregateRangeQuery.fetchCompleteAggregateRange({
+    from: new Date("2026-08-01T00:00:00Z"),
+    to: new Date("2026-08-03T00:00:00Z"),
+    granularity: "day",
+    signal: controller.signal,
+    request: async () => {
+      requests += 1;
+      controller.abort();
+      // Mesmo uma resposta tardia inválida deve resultar em cancelamento,
+      // nunca em erro de gráfico ou numa nova rodada de requisições.
+      return { data: null, granularity: "invalid" };
+    },
+  }), { name: "AbortError" });
+  assert.equal(requests, 1);
+});
+
 test("loader agregado certifica o teto em qualquer granularidade", async () => {
   const requests = [];
   const from = new Date(2026, 7, 1);
@@ -14508,6 +14533,77 @@ test("loader agregado certifica o teto em qualquer granularidade", async () => {
 
   assert.equal(requests.length, 3);
   assert.deepEqual(rows.map((row) => row.total), [1, 2]);
+});
+
+test("loader horário encaminha todas as subdivisões à fila e preserva cache e completude", async () => {
+  const requests = [];
+  const cache = new Map();
+  const options = {
+    cache,
+    cacheScope: "company-a:user-a:America/Sao_Paulo",
+    now: new Date("2026-09-08T12:00:00Z"),
+    ranges: [{ from: new Date("2026-08-15T03:00:00Z"), to: new Date("2026-08-15T07:00:00Z") }],
+    request: async (path) => {
+      requests.push(path);
+      const params = new URL(`http://local${path}`).searchParams;
+      const bucket = params.get("from");
+      return {
+        granularity: "hour",
+        data: requests.length === 1
+          ? Array.from({ length: 1_000 }, (_, index) => ({ bucket, camera_id: `camera-${index}`, metric_type: "count", total: 1 }))
+          : [{ bucket, camera_id: "camera-a", metric_type: "count", total: 2 }],
+      };
+    },
+  };
+  const rows = await aggregateHourQuery.fetchBoundedHourlyAggregateRanges(options);
+  assert.equal(requests.length, 3, "inclusive as duas partições corretivas passam pela fila");
+  assert.equal(rows.reduce((total, row) => total + row.total, 0), 4);
+  assert.deepEqual(await aggregateHourQuery.fetchBoundedHourlyAggregateRanges(options), rows);
+  assert.equal(requests.length, 3, "cache horário continua evitando requisições");
+});
+
+test("fontes horárias e diárias compartilham o mesmo teto de quatro requisições físicas", async () => {
+  const { createCountingHistoryRequestQueue } = loadTypeScriptModule("lib/counting-history-performance.ts");
+  const controller = new AbortController();
+  let active = 0;
+  let peak = 0;
+  let calls = 0;
+  const request = createCountingHistoryRequestQueue(async (path) => {
+    active += 1;
+    calls += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    active -= 1;
+    return { data: [], granularity: new URL(`http://local${path}`).searchParams.get("granularity") };
+  }, controller.signal);
+  await Promise.all(Array.from({ length: 12 }, (_, index) => {
+    const from = new Date(Date.UTC(2026, 7, index + 2));
+    const to = new Date(Date.UTC(2026, 7, index + 3));
+    return Promise.all([
+      aggregateHourQuery.fetchBoundedHourlyAggregateRanges({
+        cacheScope: "company-a:user-a", ranges: [{ from, to }], request, signal: controller.signal,
+      }),
+      aggregateRangeQuery.fetchCompleteAggregateRange({
+        from, to, granularity: "day", request, signal: controller.signal,
+      }),
+    ]);
+  }));
+  assert.equal(calls, 24);
+  assert.equal(peak, 4);
+});
+
+test("loader horário descarta resposta tardia cancelada antes de validar ou guardar cache", async () => {
+  const controller = new AbortController();
+  const cache = new Map();
+  await assert.rejects(aggregateHourQuery.fetchBoundedHourlyAggregateRanges({
+    cache, cacheScope: "company-a:user-a", signal: controller.signal,
+    ranges: [{ from: new Date("2026-08-01T03:00:00Z"), to: new Date("2026-08-01T04:00:00Z") }],
+    request: async () => {
+      controller.abort();
+      return { data: null, granularity: "invalid" };
+    },
+  }), { name: "AbortError" });
+  assert.equal(cache.size, 0);
 });
 
 test("loader horário limitado recorta os meses de borda na própria API", async () => {
@@ -16037,9 +16133,10 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
   );
   assert.match(exportSource, /CHART_VALUE_LABEL_ANGLE/);
   assert.match(exportSource, /hideOverlap: !isLine/);
-  assert.doesNotMatch(
+  assert.match(
     exportSource,
     /numericValue === 0[\s\S]{0,80}return ""/,
+    "a exportação omite rótulos zero sem remover os pontos da série",
   );
   const formatBarLabelValue = loadStandaloneFunction(
     "lib/report-export.ts",
@@ -16106,15 +16203,16 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
   });
   assert.equal(exportedHorizontalBar.label.rotate, 0);
   assert.equal(exportedHorizontalBar.label.position, "right");
-  assert.equal(exportedLine.label.formatter({ value: 0 }), "0");
+  assert.equal(exportedLine.label.formatter({ value: 0 }), "");
   assert.equal(formatBarLabelValue({ value: ["2026-08", 1_234.5] }), "1.234,5");
   const exportedMinuteLine = addExportValueLabel(
     { data: Array.from({ length: 120 }, (_, index) => index), type: "line" },
     true,
     false,
   );
-  assert.equal(exportedMinuteLine.label.formatter({ dataIndex: 0, value: 0 }), "0");
-  assert.equal(exportedMinuteLine.label.formatter({ dataIndex: 1, value: 1 }), "");
+  assert.equal(exportedMinuteLine.label.formatter({ dataIndex: 0, value: 0 }), "");
+  assert.equal(exportedMinuteLine.label.formatter({ dataIndex: 1, value: 1 }), "1");
+  assert.equal(exportedMinuteLine.label.formatter({ dataIndex: 2, value: 2 }), "");
   assert.equal(
     exportedMinuteLine.label.formatter({ dataIndex: 119, value: 119 }),
     "119",
@@ -17007,7 +17105,7 @@ test("widgets de Relatórios preservam títulos, métricas e contexto dentro do 
   );
 });
 
-test("réguas principais mantêm filtros e ações na mesma linha compacta", () => {
+test("réguas principais preservam controles compactos sem forçar overflow em telas estreitas", () => {
   const globalsSource = readFileSync(
     resolve(projectRoot, "app/globals.css"),
     "utf8",
@@ -17053,39 +17151,41 @@ test("réguas principais mantêm filtros e ações na mesma linha compacta", () 
 
   for (const toolbar of [analysisToolbar, realtimeToolbar, occupancyToolbar]) {
     assert.match(toolbar, /@container/);
-    assert.match(toolbar, /grid[^\"]*grid-cols-\[/);
-    assert.match(toolbar, /row-start-1/);
-    assert.match(toolbar, /flex-nowrap/);
+    assert.match(toolbar, /data-dashboard-toolbar/);
+    assert.match(toolbar, /data-toolbar-filters/);
+    assert.match(toolbar, /data-toolbar-actions/);
     assert.doesNotMatch(
       toolbar,
       /enterprise-horizontal-scroll|overflow-x-auto|tabIndex=\{0\}|row-start-2/,
     );
   }
+  assert.match(globalsSource, /\[data-dashboard-toolbar\] \{[^}]*flex-wrap: wrap/);
+  assert.match(globalsSource, /\[data-toolbar-actions\] \{[^}]*margin-left: auto/);
 
   assert.match(
     realtimeToolbar,
-    /grid-cols-\[80px_minmax\(0,104px\)_minmax\(212px,1fr\)\]/,
+    /flex-\[1_1_14rem\]/,
   );
   assert.match(
     realtimeToolbar,
-    /aria-label="Ações da visão ao vivo de Contagem"[\s\S]*?ml-auto flex shrink-0 flex-nowrap/,
+    /aria-label="Ações da visão ao vivo de Contagem"[\s\S]*?ml-auto flex min-w-0 flex-wrap/,
   );
   assert.match(
     occupancyToolbar,
-    /grid-cols-\[minmax\(0,96px\)_minmax\(0,64px\)_minmax\(248px,1fr\)\]/,
+    /flex-\[1_1_14rem\]/,
   );
   assert.match(occupancyToolbar, /<OccupancyPaletteSelect[\s\S]*?compact[\s\S]*?fluid/);
   assert.match(
     occupancyToolbar,
-    /aria-label="Ações da visão de ocupação"[\s\S]*?ml-auto flex shrink-0 flex-nowrap/,
+    /aria-label="Ações da visão de ocupação"[\s\S]*?ml-auto flex min-w-0 flex-wrap/,
   );
   assert.match(
     analysisToolbar,
-    /grid-cols-\[32px_minmax\(32px,1fr\)_176px\]/,
+    /max-w-\[300px\]/,
   );
   assert.match(
     analysisToolbar,
-    /aria-label="Ações da análise de Contagem"[\s\S]*?col-start-3 row-start-1[\s\S]*?flex-nowrap/,
+    /aria-label="Ações da análise de Contagem"\s+data-toolbar-actions/,
   );
   assert.match(
     analysisSource,
@@ -17821,14 +17921,15 @@ test("navegação carrega somente o módulo ativo sem ocultar a nova página", (
   );
   assert.match(
     shell,
-    /scheduleAppRoutePreload\([\s\S]*?item\.href,[\s\S]*?fallbackDashboardModule,[\s\S]*?\(\) => router\.prefetch\(item\.href\)/,
+    /scheduleAppRoutePreload\([\s\S]*?item\.href,[\s\S]*?fallbackDashboardModule\(item\.href\),[\s\S]*?\(\) => router\.prefetch\(item\.href\)/,
   );
   assert.match(
     shell,
-    /onPointerDown=\{\(\) => \{[\s\S]*?router\.prefetch\(item\.href\);[\s\S]*?preloadAppRoute\(item\.href, fallbackDashboardModule\)/,
+    /onPointerDown=\{\(\) => \{[\s\S]*?router\.prefetch\(item\.href\);[\s\S]*?preloadAppRoute\(item\.href, fallbackDashboardModule\(item\.href\)\)/,
   );
   assert.match(routePreload, /const dashboardPanelLoaders:/);
-  assert.match(routePreload, /activeDashboardModule\(\) \?\? fallbackDashboardModule/);
+  assert.match(routePreload, /const dashboardModule = fallbackDashboardModule;[\s\S]*?preloadDashboardPanel\(pathname, dashboardModule\)/);
+  assert.doesNotMatch(routePreload, /activeDashboardModule\(\) \?\? fallbackDashboardModule/);
   assert.match(routePreload, /setTimeout\(\(\) => \{[\s\S]*?preloadAppRoute/);
   assert.match(moduleTabs, /scheduleDashboardPanelPreload\(pathname, targetModule\)/);
   assert.match(moduleTabs, /preloadDashboardPanel\(pathname, targetModule\)/);

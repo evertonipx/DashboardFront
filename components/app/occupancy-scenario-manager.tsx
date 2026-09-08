@@ -575,7 +575,7 @@ export function OccupancyScenarioManager() {
     <section className="space-y-4">
       <Card id="config-cenarios-ocupacao" className="scroll-mt-6">
         <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div>
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <MapPinned className="h-4 w-4" />
               Cenários de ocupação
@@ -584,7 +584,7 @@ export function OccupancyScenarioManager() {
               Configure cenários de ocupação por câmera, objeto e limites de alerta.
             </CardDescription>
           </div>
-          <div className="flex w-full flex-wrap gap-2 sm:w-auto">
+          <div className="flex min-w-0 w-full flex-wrap gap-2 sm:w-auto">
             <Button
               type="button"
               variant="outline"
@@ -638,8 +638,8 @@ export function OccupancyScenarioManager() {
             </div>
           ) : scenarios.length ? (
             <>
-              <div className="grid gap-2 sm:grid-cols-[minmax(220px,1fr)_180px_auto] sm:items-center">
-                <div className="relative">
+              <div className="grid min-w-0 gap-2 md:grid-cols-[minmax(0,1fr)_180px_auto] md:items-center">
+                <div className="relative min-w-0">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     value={scenarioSearch}
@@ -1146,7 +1146,7 @@ function OccupancyScenarioDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="grid max-h-[92vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-5xl">
+      <DialogContent className="grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle>
             {draft.id ? "Editar cenário de ocupação" : "Novo cenário de ocupação"}
@@ -1156,7 +1156,7 @@ function OccupancyScenarioDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+        <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto pr-1">
           {!areaCatalogReady ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
               Salvamento indisponível:{" "}
@@ -1164,7 +1164,7 @@ function OccupancyScenarioDialog({
                 "as áreas ainda estão sendo carregadas."}
             </div>
           ) : null}
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_150px_150px_150px]">
+          <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_150px_150px_150px]">
             <FormField label="Nome">
               <Input
                 value={draft.name}
@@ -1221,7 +1221,7 @@ function OccupancyScenarioDialog({
           </div>
 
           {draft.id ? (
-            <div className="max-w-[180px]">
+            <div className="min-w-0 w-full max-w-[180px]">
               <FormField label="Status">
                 <button
                   type="button"
@@ -1234,7 +1234,7 @@ function OccupancyScenarioDialog({
                     }))
                   }
                   className={cn(
-                    "flex h-10 w-full items-center justify-between rounded-md border px-3 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                    "focus-contained flex h-10 min-w-0 max-w-full w-full items-center justify-between rounded-md border px-3 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
                     draft.active
                       ? "border-primary/30 bg-primary/10 text-primary"
                       : "border-border bg-background text-muted-foreground",
@@ -1407,7 +1407,7 @@ function FormField({
   label: string;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 space-y-2">
       <Label>{label}</Label>
       {children}
     </div>

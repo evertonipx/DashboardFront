@@ -694,7 +694,7 @@ export function ViewsManager() {
       <TabsContent value="view-builder">
         <section className="space-y-4">
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <Card>
+        <Card className="@container">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <MonitorUp className="h-4 w-4 text-primary" />
@@ -705,7 +705,7 @@ export function ViewsManager() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid min-w-0 gap-4 @lg:grid-cols-2">
               <FormField label="Visão">
                 <Select
                   value={chart}
@@ -761,7 +761,7 @@ export function ViewsManager() {
                 </div>
 
                 {scenarioSettingsOpen ? (
-                  <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <div className="mt-3 grid min-w-0 gap-3 @2xl:grid-cols-3">
                     <FormField label="Agrupamento">
                       <Select
                         value={scenarioCompareGranularity}
@@ -806,7 +806,7 @@ export function ViewsManager() {
                       </Select>
                     </FormField>
 
-                    <div className="md:col-span-3">
+                    <div className="min-w-0 @2xl:col-span-3">
                       <ScenarioPicker
                         loading={loadingScenarios}
                         mode={scenarioSelectionMode}
@@ -840,7 +840,7 @@ export function ViewsManager() {
                       </>
                     ) : null}
 
-                    <div className="flex justify-end md:col-span-3">
+                    <div className="flex justify-end @2xl:col-span-3">
                       <Button
                         type="button"
                         variant="secondary"
@@ -856,7 +856,7 @@ export function ViewsManager() {
               </div>
             ) : null}
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid min-w-0 gap-4 @lg:grid-cols-2">
               {chart === "scenario-hour" ? null : (
                 <FormField label="Cenário">
                   <Input readOnly value="Não se aplica a este gráfico" />
@@ -888,7 +888,7 @@ export function ViewsManager() {
                 ) : null}
               </div>
 
-              <div className="grid gap-3 md:grid-cols-2">
+              <div className="grid min-w-0 gap-3 @lg:grid-cols-2">
                 <FormField label="Gráfico do widget">
                   <Select
                     value={widgetChart}
@@ -948,7 +948,7 @@ export function ViewsManager() {
                   </div>
 
                   {widgetScenarioSettingsOpen ? (
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <div className="mt-3 grid min-w-0 gap-3 @lg:grid-cols-2">
                       <FormField label="Agrupamento">
                         <Select
                           value={widgetScenarioCompareGranularity}
@@ -993,7 +993,7 @@ export function ViewsManager() {
                         </Select>
                       </FormField>
 
-                      <div className="md:col-span-2">
+                      <div className="min-w-0 @lg:col-span-2">
                         <ScenarioPicker
                           loading={loadingScenarios}
                           mode={widgetScenarioSelectionMode}
@@ -1027,7 +1027,7 @@ export function ViewsManager() {
                         </>
                       ) : null}
 
-                      <div className="flex justify-end md:col-span-2">
+                      <div className="flex justify-end @lg:col-span-2">
                         <Button
                           type="button"
                           variant="secondary"
@@ -1156,7 +1156,7 @@ export function ViewsManager() {
               ) : null}
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid min-w-0 gap-4 @lg:grid-cols-2">
               <FormField label="Empresa usada">
                 <Input
                   readOnly
@@ -1300,7 +1300,7 @@ function FormField({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 space-y-2">
       <Label>{label}</Label>
       {children}
     </div>

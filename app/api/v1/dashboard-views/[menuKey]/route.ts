@@ -9,8 +9,8 @@ import {
   type CardPreference,
 } from "@/lib/view-preferences";
 import { resolveBackendBaseUrl } from "@/lib/backend-routing";
-import { canManageWidgets } from "@/lib/permissions";
-import type { CurrentUser, UserPermission } from "@/lib/types";
+import { canManageWidgets, canViewModuleSurface } from "@/lib/permissions";
+import type { CurrentUser, CurrentUserCompanyModule, UserPermission } from "@/lib/types";
 import { reconcileCurrentUserWithAccessToken } from "@/lib/access-token-claims";
 
 type DashboardViewStore = Partial<
@@ -43,7 +43,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: "Menu inválido." }, { status: 400 });
   }
 
-  const session = await resolveSession(request, "read");
+  const session = await resolveSession(request, "read", menuKey);
   if ("response" in session) return session.response;
 
   const store = await readStore().catch(() => null);
@@ -69,7 +69,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: "Menu inválido." }, { status: 400 });
   }
 
-  const session = await resolveSession(request, "write");
+  const session = await resolveSession(request, "write", menuKey);
   if ("response" in session) return session.response;
 
   const payload = (await request.json().catch(() => null)) as {
@@ -111,7 +111,11 @@ async function resolveMenuKey(context: RouteContext) {
     : null;
 }
 
-async function resolveSession(request: NextRequest, mode: "read" | "write") {
+async function resolveSession(
+  request: NextRequest,
+  mode: "read" | "write",
+  menuKey: CardMenuKey,
+) {
   const authorization = request.headers.get("authorization");
   if (!authorization) {
     return {
@@ -144,7 +148,7 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   }
   const rawUser = requireCurrentUser(userResult.payload);
   const accessToken = authorization.replace(/^Bearer\s+/i, "").trim();
-  const user = rawUser
+  let user = rawUser
     ? reconcileCurrentUserWithAccessToken(rawUser, accessToken)
     : null;
   if (!user) {
@@ -171,7 +175,7 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
     };
   }
 
-  if (mode === "write" && !isMaster) {
+  if (!isMaster) {
     let permissions = requireUserPermissions(user.permissions);
     if (user.permissions === undefined) {
       const permissionResult = await backendFetch(
@@ -199,7 +203,34 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
       };
     }
 
-    if (!canManageWidgets({ ...user, permissions })) {
+    if (user.company_modules === undefined) {
+      const moduleResult = await backendFetch(
+        backendBaseUrl,
+        "/api/v1/company/modules",
+        authorization,
+        request.signal,
+      );
+      if (!moduleResult.ok) {
+        return { response: backendFailureResponse(moduleResult.status, "validar os módulos") };
+      }
+      const companyModules = requireCompanyModules(moduleResult.payload, companyId);
+      if (!companyModules) {
+        return { response: NextResponse.json(
+          { error: "Não foi possível confirmar os módulos neste momento." },
+          { status: 502 },
+        ) };
+      }
+      user = { ...user, company_modules: companyModules };
+    }
+
+    if (!canAccessDashboardViewMenu({ ...user, permissions }, menuKey)) {
+      return { response: NextResponse.json(
+        { error: "Sem acesso a esta tela." },
+        { status: 403 },
+      ) };
+    }
+
+    if (mode === "write" && !canManageWidgets({ ...user, permissions })) {
       return {
         response: NextResponse.json(
           { error: "Sem permissão para configurar widgets." },
@@ -210,6 +241,59 @@ async function resolveSession(request: NextRequest, mode: "read" | "write") {
   }
 
   return { user, companyId };
+}
+
+function canAccessDashboardViewMenu(user: CurrentUser, menuKey: CardMenuKey) {
+  if (menuKey === "occupancy" || menuKey === "demographics") {
+    // These two legacy records are shared by all surfaces of their module;
+    // the old storage contract does not identify one specific surface.
+    return (["live", "analytics", "reports"] as const).some(
+      (surface) => canViewModuleSurface(user, menuKey, surface),
+    );
+  }
+  return canViewModuleSurface(
+    user,
+    "counting",
+    menuKey === "analysis" ? "analytics" : menuKey,
+  );
+}
+
+function requireCompanyModules(
+  payload: unknown,
+  companyId: string,
+): CurrentUserCompanyModule[] | null {
+  if (!Array.isArray(payload)) return null;
+  const modules = new Map<string, CurrentUserCompanyModule>();
+  for (const value of payload) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    if (
+      typeof value.enabled !== "boolean" ||
+      typeof value.module_id !== "string" || !value.module_id.trim() ||
+      (value.company_id !== undefined && typeof value.company_id !== "string")
+    ) return null;
+    if (value.company_id?.trim() && value.company_id.trim() !== companyId) continue;
+
+    const moduleId = value.module_id.trim();
+    if (value.module !== undefined && value.module !== null) {
+      if (
+        typeof value.module !== "object" || Array.isArray(value.module) ||
+        (value.module.active !== undefined && typeof value.module.active !== "boolean") ||
+        (value.module.id !== undefined && value.module.id !== moduleId) ||
+        (value.module.slug !== undefined && typeof value.module.slug !== "string") ||
+        (value.module.name !== undefined && typeof value.module.name !== "string")
+      ) return null;
+    }
+    const previous = modules.get(moduleId);
+    modules.set(moduleId, {
+      ...value,
+      company_id: companyId,
+      module_id: moduleId,
+      // Duplicate endpoint rows cannot override an explicit revocation.
+      enabled: value.enabled && value.module?.active !== false &&
+        (!previous || previous.enabled),
+    });
+  }
+  return [...modules.values()];
 }
 
 async function backendFetch(

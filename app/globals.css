@@ -91,6 +91,12 @@
     transform: translateY(-1.5px) scale(1.002);
   }
 
+  /* Controls at the edge of a form/scroll region must keep their hit area and
+     focus indicator aligned. Cards retain their independent hover motion. */
+  [data-premium-control][data-premium-hover]:hover {
+    transform: none;
+  }
+
   [data-premium-card][data-premium-hover="true"]:hover,
   [data-layout-reorder-enabled="true"] > [data-premium-card]:hover {
     border-color: hsl(var(--primary) / 0.28);
@@ -282,6 +288,46 @@
   }
 }
 
+@layer components {
+  /* Filter names get usable space before actions wrap. No fixed grid minimum
+     may push controls outside a narrow dashboard or sidebar-adjusted view. */
+  [data-dashboard-toolbar] {
+    display: flex;
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  [data-toolbar-filters] {
+    display: flex;
+    min-width: 0;
+    max-width: 100%;
+    flex: 1 1 18rem;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  [data-toolbar-actions] {
+    display: flex;
+    min-width: 0;
+    max-width: 100%;
+    margin-left: auto;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.25rem;
+  }
+
+  [data-toolbar-status] {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
 @layer utilities {
   .text-balance {
     text-wrap: balance;
@@ -315,8 +361,40 @@
   .enterprise-horizontal-scroll:focus-visible {
     border-radius: calc(var(--radius) - 2px);
     outline: 2px solid hsl(var(--ring));
-    outline-offset: 2px;
+    outline-offset: -2px;
   }
+}
+
+/* Windows high-contrast mode suppresses box shadows. Preserve an inset focus
+   indicator instead of losing keyboard focus or drawing beyond the form. */
+@media (forced-colors: active) {
+  .focus-contained:focus-visible,
+  .focus-within-contained:focus-within,
+  .peer:focus-visible ~ [data-checkbox-indicator] {
+    outline: 2px solid Highlight !important;
+    outline-offset: -2px !important;
+  }
+}
+
+/* Existing compact callers specify h-8/h-9. Treat these as minimum heights,
+   so a selected scenario/location can wrap without being vertically clipped. */
+[data-select-trigger] {
+  height: auto;
+}
+
+[data-select-trigger].h-8 {
+  min-height: 2rem;
+  padding-block: 0.25rem;
+}
+
+[data-select-trigger].h-9 {
+  min-height: 2.25rem;
+  padding-block: 0.375rem;
+}
+
+[data-select-content] {
+  max-height: min(24rem, var(--radix-select-content-available-height, 24rem));
+  max-width: min(calc(100vw - 1rem), var(--radix-select-content-available-width, 100vw));
 }
 
 /* Container queries live outside Tailwind layers so they override viewport

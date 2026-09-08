@@ -86,6 +86,10 @@ import {
 } from "@/lib/aggregate-hour-query";
 import { fetchCompleteAggregateRange } from "@/lib/aggregate-range-query";
 import {
+  createCountingHistoryRequestQueue,
+  reconcileCountingHistoryItems,
+} from "@/lib/counting-history-performance";
+import {
   reconcileAggregateRows,
   rollupAggregateRows,
 } from "@/lib/aggregate-reconciliation";
@@ -191,8 +195,11 @@ const ANALYSIS_READABLE_BADGE_CLASS_NAME =
   "h-auto max-w-full flex-wrap whitespace-normal text-left leading-4 [overflow-wrap:anywhere]";
 
 type AnalysisDayCacheEntry = Readonly<{
+  cacheScope: string;
   dataset: PeriodAnalysisDataset;
+  from: number;
   revision: string;
+  to: number;
 }>;
 
 type AnalysisDayCache = Map<string, AnalysisDayCacheEntry>;
@@ -528,7 +535,7 @@ export function PeriodAnalysisDashboard({
         createDefaultPeriodAnalysisSettings().from,
         createDefaultPeriodAnalysisSettings().to,
       )!,
-    [appliedSettings],
+    [appliedSettings.from, appliedSettings.to],
   );
   const configurationScopeKey = [
     companyScopeId ?? "",
@@ -778,7 +785,8 @@ export function PeriodAnalysisDashboard({
 
   React.useEffect(() => {
     function syncWidgets() {
-      setWidgets(loadPeriodAnalysisWidgets(companyScopeId, user?.id));
+      const next = loadPeriodAnalysisWidgets(companyScopeId, user?.id);
+      setWidgets((current) => reconcileCountingHistoryItems(current, next));
     }
 
     window.addEventListener(PERIOD_ANALYSIS_WIDGETS_UPDATED_EVENT, syncWidgets);
@@ -1695,15 +1703,14 @@ export function PeriodAnalysisDashboard({
       companyScopeId,
       user?.id,
     );
-    setWidgets(next);
+    setWidgets((current) => reconcileCountingHistoryItems(current, next));
     setWidgetDialogOpen(false);
     toast.success(widgetForm.id ? "Widget atualizado." : "Widget adicionado.");
   }
 
   function removeWidget(widgetId: string) {
-    setWidgets(
-      deletePeriodAnalysisWidget(widgetId, companyScopeId, user?.id),
-    );
+    const next = deletePeriodAnalysisWidget(widgetId, companyScopeId, user?.id);
+    setWidgets((current) => reconcileCountingHistoryItems(current, next));
     toast.success("Widget removido.");
   }
 
@@ -1808,46 +1815,49 @@ export function PeriodAnalysisDashboard({
         <div className="@container rounded-md border bg-card px-3 py-2 shadow-soft">
           <div
             aria-label="Controles da análise de Contagem"
-            className="grid min-w-0 grid-cols-[32px_minmax(32px,1fr)_176px] items-center gap-2 @sm:grid-cols-[160px_minmax(32px,1fr)_176px] @lg:grid-cols-[220px_minmax(32px,1fr)_176px] @2xl:grid-cols-[300px_minmax(32px,1fr)_176px]"
+            data-dashboard-toolbar
             role="group"
           >
-            <div className="col-start-1 row-start-1 min-w-0">
-              <AnalysisDateRangePicker
-                key={`${companyScopeId ?? ""}|${user?.id ?? ""}`}
-                contextLabel="análise de Contagem"
-                maximumInput={companyDateKey(new Date(), companyTimeZone)}
-                onApply={applyAnalysisRange}
-                value={{
-                  endInput: appliedSettings.to,
-                  startInput: appliedSettings.from,
-                }}
-              />
+            <div data-toolbar-filters>
+              <div className="w-full min-w-0 max-w-[300px]">
+                <AnalysisDateRangePicker
+                  key={`${companyScopeId ?? ""}|${user?.id ?? ""}`}
+                  contextLabel="análise de Contagem"
+                  maximumInput={companyDateKey(new Date(), companyTimeZone)}
+                  onApply={applyAnalysisRange}
+                  value={{
+                    endInput: appliedSettings.to,
+                    startInput: appliedSettings.from,
+                  }}
+                />
+              </div>
             </div>
 
             <div
-              className="col-start-2 row-start-1 flex min-w-0 flex-nowrap items-center justify-end gap-1 overflow-hidden"
+              data-toolbar-status
+              className="flex min-w-0 flex-wrap items-center justify-end gap-1"
               aria-label="Informações da análise de Contagem"
             >
               {analysisRangePlan.mode === "consolidated" ? (
                 <Badge
                   variant="secondary"
-                  className="hidden h-8 min-w-0 max-w-full overflow-hidden whitespace-nowrap @xl:inline-flex"
+                  className="hidden min-h-8 min-w-0 max-w-full whitespace-normal @xl:inline-flex"
                   title="A resolução visual é ajustada automaticamente; os totais continuam usando todo o intervalo."
                 >
-                  <span className="truncate @4xl:hidden">Consolidada</span>
-                  <span className="hidden truncate @4xl:inline">
+                  <span className="@4xl:hidden">Consolidada</span>
+                  <span className="hidden @4xl:inline">
                     Consolidação automática ativa
                   </span>
                 </Badge>
               ) : null}
               {analysisRangePlan.mode === "consolidated" &&
-              hourlyDetailRequested ? (
+                hourlyDetailRequested ? (
                 <Badge
                   variant="outline"
-                  className="hidden h-8 min-w-0 max-w-full overflow-hidden whitespace-nowrap @4xl:inline-flex"
+                  className="hidden min-h-8 min-w-0 max-w-full whitespace-normal @4xl:inline-flex"
                   title="Somente widgets estritamente horários usam esta janela; consolidados usam todo o intervalo."
                 >
-                  <span className="truncate">
+                  <span>
                     Detalhe horário · {hourlyDetailDayCount} dias
                   </span>
                 </Badge>
@@ -1855,11 +1865,11 @@ export function PeriodAnalysisDashboard({
               {lastUpdated ? (
                 <span
                   aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center gap-1 whitespace-nowrap px-0 text-xs tabular-nums text-muted-foreground @md:w-auto @md:justify-start @md:px-1.5"
+                  className="inline-flex min-h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs tabular-nums text-muted-foreground"
                   title={`Última atualização às ${formatTime(lastUpdated)}`}
                 >
                   <Clock3 className="h-3.5 w-3.5 shrink-0" />
-                  <span className="sr-only @md:not-sr-only">
+                  <span>
                     {formatTime(lastUpdated)}
                   </span>
                 </span>
@@ -1868,7 +1878,7 @@ export function PeriodAnalysisDashboard({
 
             <div
               aria-label="Ações da análise de Contagem"
-              className="col-start-3 row-start-1 flex w-[176px] min-w-0 flex-nowrap items-center justify-end gap-1 justify-self-end"
+              data-toolbar-actions
               role="group"
             >
               {canEditVisual ? (
@@ -2618,7 +2628,7 @@ function WidgetDialog({
 
           {hourlyOccupancy ? (
             <div className="space-y-3 sm:col-span-2">
-              <div className="max-w-[220px] space-y-2">
+              <div className="min-w-0 max-w-[220px] space-y-2">
                 <Label htmlFor={widgetStartHourInputId}>
                   Início da contagem diária
                 </Label>
@@ -2644,7 +2654,7 @@ function WidgetDialog({
                 </Select>
               </div>
               <div className="rounded-md border bg-background p-2">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="text-xs font-medium uppercase text-muted-foreground">
                       Cenários de ocupação
@@ -2655,7 +2665,7 @@ function WidgetDialog({
                         : "Entradas e saídas escolhidas manualmente"}
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 sm:w-[260px]">
+                  <div className="grid w-full min-w-0 max-w-full grid-cols-2 gap-2 sm:w-[260px]">
                     <Button
                       type="button"
                       size="sm"
@@ -2788,7 +2798,7 @@ function Field({
   label: string;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 space-y-2">
       <Label htmlFor={htmlFor}>{label}</Label>
       {children}
     </div>
@@ -2961,15 +2971,16 @@ async function fetchAnalysisSubLocations(
   requireExplicitCompanyId = false,
 ) {
   const expectedCompanyId = companyScopeId?.trim() || undefined;
+  const request = createCountingHistoryRequestQueue(
+    (path) => apiFetch<unknown>(path, {
+      companyScopeId: expectedCompanyId,
+      signal,
+    }),
+    signal ?? new AbortController().signal,
+  );
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<unknown>(
-        `/locations/${location.id}/sub-locations`,
-        {
-          companyScopeId: expectedCompanyId,
-          signal,
-        },
-      ).then((value) =>
+      request(`/locations/${location.id}/sub-locations`).then((value) =>
         requireSubLocationRows(
           requireExplicitCompanyId
             ? selectExplicitCompanyScopedRows(value, expectedCompanyId!, {
@@ -3202,6 +3213,26 @@ async function fetchCachedAnalysisDayDataset(
     return cached.dataset;
   }
 
+  if (key && cacheOptions) {
+    const covered = readCoveringAnalysisDayDataset(
+      cacheOptions.cache,
+      range,
+      cacheOptions.cacheScope,
+      cacheOptions.revision,
+    );
+    if (covered) {
+      signal?.throwIfAborted();
+      setAnalysisDayCacheEntry(cacheOptions.cache, key, {
+        cacheScope: cacheOptions.cacheScope,
+        dataset: covered,
+        from: range.from.getTime(),
+        revision: cacheOptions.revision,
+        to: range.to.getTime(),
+      });
+      return covered;
+    }
+  }
+
   const pendingRequests = cacheOptions
     ? pendingAnalysisDayRequestsForCache(cacheOptions.cache)
     : undefined;
@@ -3234,8 +3265,11 @@ async function fetchCachedAnalysisDayDataset(
     signal?.throwIfAborted();
     if (key && cacheOptions && !dataset.error) {
       setAnalysisDayCacheEntry(cacheOptions.cache, key, {
+        cacheScope: cacheOptions.cacheScope,
         dataset,
+        from: range.from.getTime(),
         revision: cacheOptions.revision,
+        to: range.to.getTime(),
       });
     }
     return dataset;
@@ -3244,6 +3278,36 @@ async function fetchCachedAnalysisDayDataset(
       pendingRequests.delete(key);
     }
   }
+}
+
+function readCoveringAnalysisDayDataset(
+  cache: AnalysisDayCache,
+  range: PeriodAnalysisRange,
+  cacheScope: string,
+  revision: string,
+): PeriodAnalysisDataset | undefined {
+  // Only certified full-day entries are stored here. A narrower date range
+  // can reuse them without changing partial-boundary reconciliation or totals.
+  let source: AnalysisDayCacheEntry | undefined;
+  for (const entry of cache.values()) {
+    if (
+      entry.cacheScope === cacheScope &&
+      entry.revision === revision &&
+      !entry.dataset.error &&
+      entry.from <= range.from.getTime() &&
+      entry.to >= range.to.getTime() &&
+      (!source || entry.dataset.rows.length < source.dataset.rows.length)
+    ) {
+      source = entry;
+    }
+  }
+  if (!source) return undefined;
+  return {
+    ...source.dataset,
+    rows: source.dataset.rows.filter((row) =>
+      aggregateBucketInRange(row.bucket, "day", range.from, range.to),
+    ),
+  };
 }
 
 function pendingAnalysisDayRequestsForCache(cache: AnalysisDayCache) {

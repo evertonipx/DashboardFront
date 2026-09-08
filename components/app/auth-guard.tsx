@@ -4,9 +4,11 @@ import * as React from "react";
 import { usePathname, useRouter } from "next/navigation";
 
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { useAuth } from "@/components/app/auth-provider";
 import { hasMasterAccess, resolveAuthorizedHomePath } from "@/lib/access";
 import {
+  canAccessOperationalDashboards,
   canManageCameras,
   canManageLocations,
   canManageOccupancy,
@@ -17,6 +19,8 @@ import {
   canViewCounting,
   canViewDemographics,
   canViewOccupancy,
+  canViewModuleSurface,
+  type DashboardSurface,
   type OperationalModuleFamily,
 } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/types";
@@ -35,6 +39,7 @@ type AuthGuardProps = {
   requireManager?: boolean;
   requireMaster?: boolean;
   requireModule?: OperationalModuleFamily;
+  requireSurface?: DashboardSurface;
   requireResource?: ManagerResource;
 };
 
@@ -43,14 +48,22 @@ export function AuthGuard({
   requireManager = false,
   requireMaster = false,
   requireModule,
+  requireSurface,
   requireResource,
 }: AuthGuardProps) {
   const router = useRouter();
   const pathname = usePathname();
-  const { user, loading, isManager } = useAuth();
+  const { user, loading, isManager, logout } = useAuth();
   const isMaster = hasMasterAccess(user);
   const hasRequiredResource = canManageResource(user, requireResource);
-  const hasRequiredModule = canViewModule(user, requireModule);
+  const hasRequiredModule = requireModule && requireSurface
+    ? canViewModuleSurface(user, requireModule, requireSurface)
+    : canViewModule(user, requireModule);
+  const hasRequiredSurface = !requireSurface || canAccessOperationalDashboards(user, requireSurface);
+  const denied = (requireMaster && !isMaster) ||
+    (requireManager && !isManager) ||
+    !hasRequiredModule || !hasRequiredSurface || !hasRequiredResource;
+  const authorizedHomePath = resolveAuthorizedHomePath(user);
 
   React.useEffect(() => {
     if (loading) return;
@@ -60,47 +73,33 @@ export function AuthGuard({
       return;
     }
 
-    if (requireMaster && !isMaster) {
-      router.replace(resolveAuthorizedHomePath(user));
-      return;
-    }
-
-    if (requireManager && !isManager) {
-      router.replace("/dashboard/live");
-      return;
-    }
-
-    if (requireResource && !hasRequiredResource) {
-      router.replace(resolveAuthorizedHomePath(user));
-      return;
-    }
-
-    if (requireModule && !hasRequiredModule) {
-      router.replace(resolveAuthorizedHomePath(user));
+    if (denied && authorizedHomePath !== pathname) {
+      router.replace(authorizedHomePath);
     }
   }, [
-    hasRequiredModule,
-    hasRequiredResource,
-    isManager,
-    isMaster,
+    authorizedHomePath,
+    denied,
     loading,
     pathname,
-    requireManager,
-    requireMaster,
-    requireModule,
-    requireResource,
     router,
     user,
   ]);
 
-  if (
-    loading ||
-    !user ||
-    (requireManager && !isManager) ||
-    (requireMaster && !isMaster) ||
-    (Boolean(requireModule) && !hasRequiredModule) ||
-    (Boolean(requireResource) && !hasRequiredResource)
-  ) {
+  if (!loading && user && denied && authorizedHomePath === pathname) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background p-6">
+        <div className="max-w-md space-y-4 text-center" role="status">
+          <h1 className="text-lg font-semibold">Nenhum acesso disponível</h1>
+          <p className="text-sm text-muted-foreground">
+            Seu perfil não possui acesso a esta tela. Solicite a revisão dos acessos ao administrador.
+          </p>
+          <Button onClick={() => void logout()}>Sair</Button>
+        </div>
+      </main>
+    );
+  }
+
+  if (loading || !user || denied) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-background p-6">
         <div className="w-full max-w-md space-y-4">

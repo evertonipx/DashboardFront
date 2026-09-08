@@ -1993,7 +1993,9 @@ function formatBarLabelValue(value: unknown) {
   const numericValue =
     typeof rawValue === "number" ? rawValue : Number(String(rawValue));
 
-  if (!Number.isFinite(numericValue)) return "";
+  // Zero labels do not consume the limited annotation budget of the exported
+  // chart. The raw series and the separate data tables remain unchanged.
+  if (!Number.isFinite(numericValue) || numericValue === 0) return "";
   return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(
     numericValue,
   );

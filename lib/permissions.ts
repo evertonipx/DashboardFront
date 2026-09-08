@@ -491,6 +491,14 @@ export type OperationalModuleFamily =
   | "occupancy"
   | "demographics";
 
+export type DashboardSurface = "live" | "analytics" | "reports";
+
+const DASHBOARD_SURFACE_TERMS = {
+  live: ["live", "realtime", "real time", "ao vivo"],
+  analytics: ["analytics", "analysis", "analyses", "analise", "analises"],
+  reports: ["reports", "report", "relatorio", "relatorios"],
+} as const satisfies Record<DashboardSurface, readonly string[]>;
+
 const MODULE_FAMILY_TERMS = {
   counting: ["counting", "contagem", "people counting", "people count"],
   occupancy: ["occupancy", "ocupacao", "people occupancy"],
@@ -538,9 +546,19 @@ export function permissionModuleFamily(
 ): OperationalModuleFamily | null {
   if (permission.module?.active === false) return null;
 
-  const declaredFamily = moduleFamilyFromText(
+  const declaredFamilies = moduleFamiliesFromText(
     [permission.module?.slug, permission.module?.name].join(" "),
   );
+  // Unknown metadata can fall back to a compact JWT slug; contradictory
+  // metadata cannot. In particular, do not collapse two families to null and
+  // then accidentally treat that explicit conflict as missing metadata.
+  if (
+    declaredFamilies.length > 1 ||
+    moduleFamiliesFromText(permission.slug).length > 1
+  ) {
+    return null;
+  }
+  const declaredFamily = declaredFamilies[0] ?? null;
   const slugFamily = moduleFamilyFromPermissionSlug(permission.slug);
 
   if (declaredFamily && slugFamily && declaredFamily !== slugFamily) {
@@ -562,8 +580,102 @@ export function canViewDemographics(user: CurrentUser | null) {
   return userCanViewModule(user, "demographics");
 }
 
-/** Ao Vivo, Análises e Relatórios formam o pacote de leitura dos módulos. */
-export function canAccessOperationalDashboards(user: CurrentUser | null) {
+/**
+ * Resolves only an unambiguous, readable surface grant from the real catalog.
+ * Generic module grants deliberately return null: they remain the legacy
+ * three-screen bundle, never three independently persisted permissions.
+ */
+export function permissionDashboardSurface(
+  permission: Pick<UserPermission, "slug" | "action" | "module">,
+): DashboardSurface | null {
+  const family = permissionModuleFamily(permission);
+  if (!family) return null;
+
+  let suffix = normalizePermissionText(permission.slug);
+  const familyPrefix = [...MODULE_FAMILY_TERMS[family]]
+    .sort((left, right) => right.length - left.length)
+    .find((term) => suffix === term || suffix.startsWith(`${term} `));
+  if (familyPrefix) suffix = suffix.slice(familyPrefix.length).trim();
+  else if (!permission.module) return null;
+
+  const surfaces = dashboardSurfaceTermsInSlug(suffix);
+  if (surfaces.length !== 1) return null;
+  const surface = surfaces[0];
+  const term = [...DASHBOARD_SURFACE_TERMS[surface]]
+    .sort((left, right) => right.length - left.length)
+    .find((candidate) => normalizedTextContainsTerm(suffix, candidate));
+  if (!term) return null;
+
+  const action = normalizePermissionText(permission.action);
+  if (action && !MODULE_READ_ACTIONS.some((candidate) => candidate === action)) {
+    return null;
+  }
+  const remaining = ` ${suffix} `.replace(` ${term} `, " ").trim();
+  const tokens = remaining.split(" ").filter(Boolean);
+  if (!tokens.every((token) => MODULE_READ_ACTIONS.some((candidate) => candidate === token))) {
+    return null;
+  }
+  return action || tokens.length ? surface : null;
+}
+
+function dashboardSurfaceTermsInSlug(slug: string): DashboardSurface[] {
+  const normalized = normalizePermissionText(slug);
+  return (Object.keys(DASHBOARD_SURFACE_TERMS) as DashboardSurface[]).filter(
+    (surface) => DASHBOARD_SURFACE_TERMS[surface].some(
+      (term) => normalizedTextContainsTerm(normalized, term),
+    ),
+  );
+}
+
+export function canViewModuleSurface(
+  user: CurrentUser | null,
+  family: OperationalModuleFamily,
+  surface: DashboardSurface,
+) {
+  if (isMasterUser(user)) return true;
+  return Boolean(user?.permissions?.some((permission) => {
+    if (
+      !permissionBelongsToUserCompany(user, permission) ||
+      permissionHasContradictoryModuleIds(permission) ||
+      permissionModuleFamily(permission) !== family ||
+      !companyEnablesPermissionModule(user, permission, family) ||
+      !permissionAllowsModuleVisibility(permission)
+    ) return false;
+
+    const explicitSurface = permissionDashboardSurface(permission);
+    if (explicitSurface) return explicitSurface === surface;
+    // Ambiguous/malformed surface-shaped grants must not fall back to a broad
+    // legacy module grant. Explicit capability false flags are checked above.
+    return dashboardSurfaceTermsInSlug(permission.slug).length === 0;
+  }));
+}
+
+function permissionHasContradictoryModuleIds(
+  permission: Pick<UserPermission, "module_id" | "module">,
+) {
+  const declaredId = permission.module_id?.trim();
+  const nestedId = permission.module?.id?.trim();
+  // Synthetic module IDs only label legacy JWT metadata; they are not real
+  // catalog identities and must not conflict with a hydrated real ID.
+  if (
+    !declaredId || !nestedId ||
+    declaredId.startsWith("jwt-module:") || nestedId.startsWith("jwt-module:")
+  ) {
+    return false;
+  }
+  return declaredId !== nestedId;
+}
+
+/** With no surface, reports whether at least one dashboard is authorized. */
+export function canAccessOperationalDashboards(
+  user: CurrentUser | null,
+  surface?: DashboardSurface,
+) {
+  if (surface) {
+    return canViewModuleSurface(user, "counting", surface) ||
+      canViewModuleSurface(user, "occupancy", surface) ||
+      canViewModuleSurface(user, "demographics", surface);
+  }
   return (
     canViewCounting(user) ||
     canViewOccupancy(user) ||
@@ -598,17 +710,9 @@ function userCanViewModule(
   user: CurrentUser | null,
   family: OperationalModuleFamily,
 ) {
-  if (isMasterUser(user)) return true;
-
-  return Boolean(
-    user?.permissions?.some(
-      (permission) =>
-        permissionBelongsToUserCompany(user, permission) &&
-        permissionModuleFamily(permission) === family &&
-        companyEnablesPermissionModule(user, permission, family) &&
-        permissionAllowsModuleVisibility(permission),
-    ),
-  );
+  return canViewModuleSurface(user, family, "live") ||
+    canViewModuleSurface(user, family, "analytics") ||
+    canViewModuleSurface(user, family, "reports");
 }
 
 function companyEnablesPermissionModule(
@@ -798,17 +902,20 @@ function moduleFamilyFromPermissionSlug(slug: string) {
 }
 
 function moduleFamilyFromText(value: string) {
-  const text = normalizePermissionText(value);
-  if (!text) return null;
+  const matches = moduleFamiliesFromText(value);
+  return matches.length === 1 ? matches[0] : null;
+}
 
-  const matches = (Object.keys(MODULE_FAMILY_TERMS) as OperationalModuleFamily[])
+function moduleFamiliesFromText(value: string): OperationalModuleFamily[] {
+  const text = normalizePermissionText(value);
+  if (!text) return [];
+
+  return (Object.keys(MODULE_FAMILY_TERMS) as OperationalModuleFamily[])
     .filter((family) =>
       MODULE_FAMILY_TERMS[family].some((term) =>
         normalizedTextContainsTerm(text, normalizePermissionText(term)),
       ),
     );
-
-  return matches.length === 1 ? matches[0] : null;
 }
 
 function normalizedTextContainsTerm(text: string, term: string) {

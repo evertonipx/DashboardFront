@@ -138,6 +138,11 @@ import {
 } from "@/lib/occupancy-dashboard-settings";
 import { occupancyComparisonBucketStarts } from "@/lib/occupancy-report-comparison";
 import {
+  buildOccupancyReportResourcePlan,
+  createOccupancyQueryScheduler,
+  type OccupancyQueryScheduler,
+} from "@/lib/occupancy-dashboard-query";
+import {
   requireOccupancyHistoryResponse,
   requireOccupancyScenarioRows,
   requireOccupancySnapshotRows,
@@ -466,59 +471,19 @@ export function OccupancyReportsDashboard({
     },
     [layoutPreferencesIdentityKey],
   );
-  const requestedDefinitionIdsKey = React.useMemo(() => {
-    if (!layoutPreferencesReady) return "";
-    const preferenceById = new Map(
-      layoutPreferences.map((preference) => [preference.id, preference]),
-    );
-    const isVisible = (id: string) =>
-      preferenceById.get(id)?.visible !== false;
-    const visibleMetricIds = [
-      "occupancy_report_current",
-      ...(metricVisibility.average ? ["occupancy_report_average"] : []),
-      ...(metricVisibility.peak ? ["occupancy_report_peak"] : []),
-      ...(metricVisibility.minimum ? ["occupancy_report_minimum"] : []),
-    ].filter(isVisible);
-
-    return definitions
-      .filter(
-        (definition) =>
-          isVisible(definition.id) ||
-          (definition.id === "occupancy_report_day" &&
-            visibleMetricIds.length > 0),
-      )
-      .map((definition) => definition.id)
-      .sort()
-      .join("|");
-  }, [
-    definitions,
-    layoutPreferences,
-    layoutPreferencesReady,
-    metricVisibility.average,
-    metricVisibility.minimum,
-    metricVisibility.peak,
-  ]);
-  const currentSnapshotRequested = React.useMemo(() => {
-    if (!layoutPreferencesReady) return false;
-    return (
-      layoutPreferences.find(
-        (preference) => preference.id === "occupancy_report_current",
-      )?.visible !== false
-    );
-  }, [layoutPreferences, layoutPreferencesReady]);
-  const comparisonDefinitionIdsKey = React.useMemo(() => {
-    if (!layoutPreferencesReady) return "";
-    const preferenceById = new Map(
-      layoutPreferences.map((preference) => [preference.id, preference]),
-    );
-    return definitions
-      .filter(
-        (definition) => preferenceById.get(definition.id)?.visible !== false,
-      )
-      .map((definition) => definition.id)
-      .sort()
-      .join("|");
-  }, [definitions, layoutPreferences, layoutPreferencesReady]);
+  const reportResourcePlan = React.useMemo(() =>
+    layoutPreferencesReady
+      ? buildOccupancyReportResourcePlan({
+          definitionIds: definitions.map((definition) => definition.id),
+          hasScenario: Boolean(selectedScope?.scenario),
+          metricVisibility,
+          preferences: layoutPreferences,
+        })
+      : { comparisonDefinitionIds: "", currentSnapshot: false, definitionIds: "" },
+  [definitions, layoutPreferences, layoutPreferencesReady, metricVisibility, selectedScope?.scenario]);
+  const requestedDefinitionIdsKey = reportResourcePlan.definitionIds;
+  const currentSnapshotRequested = reportResourcePlan.currentSnapshot;
+  const comparisonDefinitionIdsKey = reportResourcePlan.comparisonDefinitionIds;
   const requestPlanKey = `${requestedDefinitionIdsKey}|snapshot:${
     currentSnapshotRequested ? "1" : "0"
   }|comparison:${showPreviousPeriod ? comparisonDefinitionIdsKey : ""}`;
@@ -751,6 +716,7 @@ export function OccupancyReportsDashboard({
         chartAbortControllerRef.current?.abort();
         const controller = new AbortController();
         chartAbortControllerRef.current = controller;
+        const scheduleQuery = createOccupancyQueryScheduler(controller.signal);
 
         const now = new Date();
         const currentRange = resolveOccupancyAnalysisRange(
@@ -789,6 +755,7 @@ export function OccupancyReportsDashboard({
 
         try {
           requireCertifiedRuntimeCompanyTimeZone(companyTimeZoneResolution);
+          const snapshotScenario = scope.scenario;
           const [entries, currentSnapshotResult] = await Promise.all([
             Promise.all(
               [...currentDefinitions, ...previousDefinitions].map(
@@ -803,6 +770,7 @@ export function OccupancyReportsDashboard({
                       undefined,
                       controller.signal,
                       closedSegmentCacheRef.current,
+                      scheduleQuery,
                     );
                     return [definition.id, state] as const;
                   } catch (error) {
@@ -820,20 +788,20 @@ export function OccupancyReportsDashboard({
                 },
               ),
             ),
-            currentSnapshotRequested && scope.scenario
+            currentSnapshotRequested && snapshotScenario
               ? captureOccupancyLoad(
-                  apiFetch<unknown>(
+                  scheduleQuery(`snapshot:${snapshotScenario.id}:${currentRange.reference.toISOString()}`, () => apiFetch<unknown>(
                     occupancyScenarioHistoryPath(
-                      scope.scenario.id,
+                      snapshotScenario.id,
                       currentRange.reference,
                     ),
                     { companyScopeId, signal: controller.signal },
-                  ).then((response) => {
+                  )).then((response) => {
                     const history = requireOccupancyHistoryResponse(
                       response,
-                      scope.scenario!.id,
+                      snapshotScenario.id,
                       {
-                        expectedAreas: scope.scenario!.areas,
+                        expectedAreas: snapshotScenario.areas,
                         requestedAt: currentRange.reference,
                       },
                     );
@@ -1859,290 +1827,271 @@ export function OccupancyReportsDashboard({
           </div>
         </div>
       ) : (
-      <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
-        {occupancyCertificationError ? (
-          <>
-            {analysis ? (
-              <div
-                aria-label="Período da análise de Ocupação"
-                className="mb-2 min-w-0"
-                role="region"
-              >
-                {analysisDateRangeControl}
-              </div>
-            ) : null}
-            <OccupancyBlockingState
-              onRetry={retryOccupancyData}
-              retrying={loadingScopes || chartsPending || refreshing}
-            />
-          </>
-        ) : loadingScopes && !scopeOptions.length ? (
-          <div
-            className={cn(
-              analysis
-                ? "grid min-w-0 grid-cols-[minmax(0,32px)_minmax(0,64px)_minmax(0,96px)_minmax(248px,1fr)] items-center gap-1 @4xl:grid-cols-[300px_minmax(140px,170px)_minmax(180px,220px)_minmax(248px,1fr)] @4xl:gap-2"
-                : "grid min-w-0 grid-cols-[minmax(0,64px)_minmax(0,96px)_minmax(248px,1fr)] items-center gap-1 @md:grid-cols-[96px_minmax(120px,1fr)_minmax(248px,1fr)] @md:gap-2 @xl:grid-cols-[120px_200px_minmax(248px,1fr)] @2xl:grid-cols-[132px_220px_minmax(248px,1fr)]",
-            )}
-            aria-label={analysis ? "Carregando controles da análise de Ocupação" : undefined}
-            role={analysis ? "region" : undefined}
-          >
-            {analysis ? (
-              <>
-                <div className="col-start-1 row-start-1 min-w-0">
+        <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
+          {occupancyCertificationError ? (
+            <>
+              {analysis ? (
+                <div
+                  aria-label="Período da análise de Ocupação"
+                  className="mb-2 min-w-0"
+                  role="region"
+                >
                   {analysisDateRangeControl}
                 </div>
-                <div className="contents">
-                  <Skeleton className="h-8 w-full" />
-                  <Skeleton className="h-8 w-full" />
-                </div>
-                <div className="col-start-4 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
-                  <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @sm:block @5xl:w-12" />
-                  <Skeleton className="h-8 w-[248px] shrink-0" />
-                </div>
-              </>
-            ) : (
-              <>
-                <Skeleton className="h-8 w-full" />
-                <Skeleton className="h-8 w-full" />
-                <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
-                  <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @lg:block @2xl:w-10 @4xl:w-24" />
-                  <Skeleton className="h-8 w-[248px] max-w-full shrink-0" />
-                </div>
-              </>
-            )}
-          </div>
-        ) : scopeOptions.length ? (
-          <div className="space-y-2">
+              ) : null}
+              <OccupancyBlockingState
+                onRetry={retryOccupancyData}
+                retrying={loadingScopes || chartsPending || refreshing}
+              />
+            </>
+          ) : loadingScopes && !scopeOptions.length ? (
             <div
-              aria-label={
-                analysis
-                  ? "Controles da análise de Ocupação"
-                  : "Controles dos relatórios de Ocupação"
-              }
-              className={cn(
-                analysis
-                  ? "grid min-w-0 grid-cols-[minmax(0,32px)_minmax(0,64px)_minmax(0,96px)_minmax(248px,1fr)] items-center gap-1 @4xl:grid-cols-[300px_minmax(140px,170px)_minmax(180px,220px)_minmax(248px,1fr)] @4xl:gap-2"
-                  : "grid min-w-0 grid-cols-[minmax(0,64px)_minmax(0,96px)_minmax(248px,1fr)] items-center gap-1 @md:grid-cols-[96px_minmax(120px,1fr)_minmax(248px,1fr)] @md:gap-2 @xl:grid-cols-[120px_200px_minmax(248px,1fr)] @2xl:grid-cols-[132px_220px_minmax(248px,1fr)]",
-              )}
-              role="group"
+              data-dashboard-toolbar
+              aria-label={analysis ? "Carregando controles da análise de Ocupação" : undefined}
+              role={analysis ? "region" : undefined}
             >
-            {analysis ? (
-              <div className="col-start-1 row-start-1 min-w-0">
-                {analysisDateRangeControl}
-              </div>
-            ) : null}
-            <div
-              className="contents"
-            >
-              <div className="min-w-0">
-                {!analysis ? (
-                  <Label className="sr-only" htmlFor={scopeModeSelectId}>
-                    Visão
-                  </Label>
+              <div data-toolbar-filters className={analysis ? "basis-[37rem]" : "basis-[24rem]"}>
+                {analysis ? (
+                  <div className="min-w-0 flex-[1_1_230px]">
+                    {analysisDateRangeControl}
+                  </div>
                 ) : null}
-                <Select
-                  value={scopeMode}
-                  onValueChange={(value) => {
-                    invalidateChartDataset();
-                    setScopeMode(value as OccupancyReportScopeMode);
-                    setSelectedId("");
-                  }}
-                >
-                  <SelectTrigger
-                    id={scopeModeSelectId}
-                    aria-label={
-                      analysis
-                        ? "Tipo de visão da análise de Ocupação"
-                        : "Tipo de visão dos relatórios de Ocupação"
-                    }
-                    className="h-8 w-full min-w-0 bg-card"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableModes.map((mode) => (
-                      <SelectItem key={mode.value} value={mode.value}>
-                        {mode.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Skeleton className="h-8 min-w-0 flex-[1_1_140px]" />
+                <Skeleton className="h-8 min-w-0 flex-[2_1_200px]" />
               </div>
-              <div className="min-w-0">
-                {!analysis ? (
-                  <Label className="sr-only" htmlFor={scopeSelectId}>
-                    {scopeModeLabel(scopeMode)}
-                  </Label>
-                ) : null}
-                <Select value={selectedId} onValueChange={updateSelectedScope}>
-                  <SelectTrigger
-                    id={scopeSelectId}
-                    aria-label={
-                      analysis
-                        ? `${scopeModeLabel(scopeMode)} da análise de Ocupação`
-                        : `${scopeModeLabel(scopeMode)} dos relatórios em foco`
-                    }
-                    className="h-8 w-full min-w-0 bg-card"
-                  >
-                    <SelectValue placeholder="Selecione uma visão" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {scopeOptions.map((scope) => (
-                      <SelectItem key={scope.id} value={scope.id}>
-                        {scope.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <div data-toolbar-actions>
+                <Skeleton className="h-8 w-[248px] max-w-full" />
               </div>
             </div>
-            {analysis ? (
-              <div className="col-start-4 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
-                {visibleLastUpdated ? (
-                  <span
-                    className="hidden h-8 w-8 shrink-0 items-center justify-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @sm:inline-flex @5xl:w-auto @5xl:justify-start @5xl:px-1.5"
-                    aria-label={`Última atualização às ${formatTime(visibleLastUpdated)}`}
-                    title={`Última atualização: ${formatTime(visibleLastUpdated)}`}
-                  >
-                    <Clock3 className="h-3.5 w-3.5 shrink-0" />
-                    <span className="sr-only @5xl:not-sr-only">
-                      {formatTime(visibleLastUpdated)}
-                    </span>
-                  </span>
-                ) : null}
-                <div
-                  aria-label="Ações da análise de Ocupação"
-                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [&_[data-premium-control]]:shrink-0"
-                  role="group"
-                >
-                  <Button
-                    type="button"
-                    size="icon"
-                    className="h-8 w-8 shrink-0"
-                    variant={analysisSettingsOpen ? "default" : "outline"}
-                    onClick={() => setAnalysisSettingsOpen((current) => !current)}
-                    aria-expanded={analysisSettingsOpen}
-                    aria-controls="occupancy-analysis-settings"
-                    aria-label="Configurações da análise de Ocupação"
-                    title="Configurações da análise"
-                  >
-                    <SlidersHorizontal className="h-4 w-4" />
-                  </Button>
-                  {compactViewActions}
-                </div>
-              </div>
-            ) : (
-              <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
-                {visibleLastUpdated ? (
-                  <span
-                    className="hidden min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @lg:inline-flex"
-                    aria-label={`Última atualização às ${formatTime(visibleLastUpdated)}`}
-                    title={`Última atualização: ${formatTime(visibleLastUpdated)}`}
-                  >
-                    <Clock3 className="h-3.5 w-3.5 shrink-0" />
-                    <span className="hidden @2xl:inline @4xl:hidden">
-                      {formatTime(visibleLastUpdated)}
-                    </span>
-                    <span className="hidden @4xl:inline">
-                      Atualizado às {formatTime(visibleLastUpdated)}
-                    </span>
-                  </span>
-                ) : null}
-                <div
-                  aria-label="Ações dos relatórios de Ocupação"
-                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [&_[data-premium-control]]:shrink-0"
-                  role="group"
-                >
-                  <Button
-                    type="button"
-                    size="icon"
-                    className="h-8 w-8 shrink-0"
-                    variant={reportSettingsOpen ? "default" : "outline"}
-                    onClick={() => setReportSettingsOpen((current) => !current)}
-                    aria-expanded={reportSettingsOpen}
-                    aria-controls="occupancy-report-settings"
-                    aria-label="Configurações dos relatórios de Ocupação"
-                    title="Configurações dos relatórios"
-                  >
-                    <SlidersHorizontal className="h-4 w-4" />
-                  </Button>
-                  {compactViewActions}
-                </div>
-              </div>
-            )}
-            </div>
-            {(analysis && analysisSettingsOpen) ||
-            (!analysis && reportSettingsOpen) ? (
+          ) : scopeOptions.length ? (
+            <div className="space-y-2">
               <div
-                id={
-                  analysis
-                    ? "occupancy-analysis-settings"
-                    : "occupancy-report-settings"
-                }
                 aria-label={
                   analysis
-                    ? "Configurações da análise de Ocupação"
-                    : "Configurações dos relatórios de Ocupação"
+                    ? "Controles da análise de Ocupação"
+                    : "Controles dos relatórios de Ocupação"
                 }
-                className="grid gap-3 rounded-xl border bg-muted/15 p-3 shadow-sm lg:grid-cols-2"
+                data-dashboard-toolbar
                 role="group"
               >
-                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold">Comparação temporal</div>
-                    <div className="text-[11px] text-muted-foreground">
-                      Ative e escolha a base usada no período anterior.
+                <div data-toolbar-filters className={analysis ? "basis-[37rem]" : "basis-[24rem]"}>
+                  {analysis ? (
+                    <div className="min-w-0 flex-[1_1_230px]">
+                      {analysisDateRangeControl}
+                    </div>
+                  ) : null}
+                  <div
+                    className="contents"
+                  >
+                    <div className="min-w-0 flex-[1_1_140px]">
+                      {!analysis ? (
+                        <Label className="sr-only" htmlFor={scopeModeSelectId}>
+                          Visão
+                        </Label>
+                      ) : null}
+                      <Select
+                        value={scopeMode}
+                        onValueChange={(value) => {
+                          invalidateChartDataset();
+                          setScopeMode(value as OccupancyReportScopeMode);
+                          setSelectedId("");
+                        }}
+                      >
+                        <SelectTrigger
+                          id={scopeModeSelectId}
+                          aria-label={
+                            analysis
+                              ? "Tipo de visão da análise de Ocupação"
+                              : "Tipo de visão dos relatórios de Ocupação"
+                          }
+                          className="h-auto min-h-8 w-full min-w-0 bg-card py-1.5 text-xs"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {availableModes.map((mode) => (
+                            <SelectItem key={mode.value} value={mode.value}>
+                              {mode.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="min-w-0 flex-[2_1_200px]">
+                      {!analysis ? (
+                        <Label className="sr-only" htmlFor={scopeSelectId}>
+                          {scopeModeLabel(scopeMode)}
+                        </Label>
+                      ) : null}
+                      <Select value={selectedId} onValueChange={updateSelectedScope}>
+                        <SelectTrigger
+                          id={scopeSelectId}
+                          aria-label={
+                            analysis
+                              ? `${scopeModeLabel(scopeMode)} da análise de Ocupação`
+                              : `${scopeModeLabel(scopeMode)} dos relatórios em foco`
+                          }
+                          className="h-auto min-h-8 w-full min-w-0 bg-card py-1.5 text-xs"
+                        >
+                          <SelectValue placeholder="Selecione uma visão" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {scopeOptions.map((scope) => (
+                            <SelectItem key={scope.id} value={scope.id}>
+                              {scope.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
-                  <div className="flex shrink-0 flex-wrap items-center gap-2">
-                    <PreviousPeriodToggle
-                      checked={showPreviousPeriod}
-                      compact
-                      onCheckedChange={updateShowPreviousPeriod}
-                    />
-                    {showPreviousPeriod ? (
-                      <ComparisonModeSelect
-                        compact
-                        fit
-                        value={intradayComparison}
-                        onValueChange={updateIntradayComparison}
-                      />
+                </div>
+                {analysis ? (
+                  <div data-toolbar-actions>
+                    {visibleLastUpdated ? (
+                      <span
+                        data-toolbar-status
+                        className="hidden min-h-8 items-center gap-1 whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @4xl:inline-flex"
+                        aria-label={`Última atualização às ${formatTime(visibleLastUpdated)}`}
+                        title={`Última atualização: ${formatTime(visibleLastUpdated)}`}
+                      >
+                        <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          {formatTime(visibleLastUpdated)}
+                        </span>
+                      </span>
                     ) : null}
-                  </div>
-                </div>
-                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold">Séries históricas</div>
-                    <div className="text-[11px] text-muted-foreground">
-                      Média, mínimo e máximo exibidos nos gráficos.
+                    <div
+                      aria-label="Ações da análise de Ocupação"
+                      className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 [&_[data-premium-control]]:shrink-0"
+                      role="group"
+                    >
+                      <Button
+                        type="button"
+                        size="icon"
+                        className="h-8 w-8 shrink-0"
+                        variant={analysisSettingsOpen ? "default" : "outline"}
+                        onClick={() => setAnalysisSettingsOpen((current) => !current)}
+                        aria-expanded={analysisSettingsOpen}
+                        aria-controls="occupancy-analysis-settings"
+                        aria-label="Configurações da análise de Ocupação"
+                        title="Configurações da análise"
+                      >
+                        <SlidersHorizontal className="h-4 w-4" />
+                      </Button>
+                      {compactViewActions}
                     </div>
                   </div>
-                  <MetricVisibilityControls
-                    compact
-                    value={metricVisibility}
-                    onChange={setMetricVisibility}
-                  />
+                ) : (
+                  <div data-toolbar-actions>
+                    {visibleLastUpdated ? (
+                      <span
+                        data-toolbar-status
+                        className="hidden min-h-8 items-center gap-1 whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @4xl:inline-flex"
+                        aria-label={`Última atualização às ${formatTime(visibleLastUpdated)}`}
+                        title={`Última atualização: ${formatTime(visibleLastUpdated)}`}
+                      >
+                        <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          Atualizado às {formatTime(visibleLastUpdated)}
+                        </span>
+                      </span>
+                    ) : null}
+                    <div
+                      aria-label="Ações dos relatórios de Ocupação"
+                      className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 [&_[data-premium-control]]:shrink-0"
+                      role="group"
+                    >
+                      <Button
+                        type="button"
+                        size="icon"
+                        className="h-8 w-8 shrink-0"
+                        variant={reportSettingsOpen ? "default" : "outline"}
+                        onClick={() => setReportSettingsOpen((current) => !current)}
+                        aria-expanded={reportSettingsOpen}
+                        aria-controls="occupancy-report-settings"
+                        aria-label="Configurações dos relatórios de Ocupação"
+                        title="Configurações dos relatórios"
+                      >
+                        <SlidersHorizontal className="h-4 w-4" />
+                      </Button>
+                      {compactViewActions}
+                    </div>
+                  </div>
+                )}
+              </div>
+              {(analysis && analysisSettingsOpen) ||
+                (!analysis && reportSettingsOpen) ? (
+                <div
+                  id={
+                    analysis
+                      ? "occupancy-analysis-settings"
+                      : "occupancy-report-settings"
+                  }
+                  aria-label={
+                    analysis
+                      ? "Configurações da análise de Ocupação"
+                      : "Configurações dos relatórios de Ocupação"
+                  }
+                  className="grid gap-3 rounded-xl border bg-muted/15 p-3 shadow-sm lg:grid-cols-2"
+                  role="group"
+                >
+                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold">Comparação temporal</div>
+                      <div className="text-[11px] text-muted-foreground">
+                        Ative e escolha a base usada no período anterior.
+                      </div>
+                    </div>
+                    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+                      <PreviousPeriodToggle
+                        checked={showPreviousPeriod}
+                        compact
+                        onCheckedChange={updateShowPreviousPeriod}
+                      />
+                      {showPreviousPeriod ? (
+                        <ComparisonModeSelect
+                          compact
+                          fit
+                          value={intradayComparison}
+                          onValueChange={updateIntradayComparison}
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold">Séries históricas</div>
+                      <div className="text-[11px] text-muted-foreground">
+                        Média, mínimo e máximo exibidos nos gráficos.
+                      </div>
+                    </div>
+                    <MetricVisibilityControls
+                      compact
+                      value={metricVisibility}
+                      onChange={setMetricVisibility}
+                    />
+                  </div>
                 </div>
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <>
-            {analysis ? (
-              <div
-                aria-label="Período da análise de Ocupação"
-                className="mb-2 min-w-0"
-                role="region"
-              >
-                {analysisDateRangeControl}
-              </div>
-            ) : null}
-            <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-              Nenhuma visão de ocupação disponível para {analysis ? "análise" : "relatório"}.
+              ) : null}
             </div>
-          </>
-        )}
-      </div>
+          ) : (
+            <>
+              {analysis ? (
+                <div
+                  aria-label="Período da análise de Ocupação"
+                  className="mb-2 min-w-0"
+                  role="region"
+                >
+                  {analysisDateRangeControl}
+                </div>
+              ) : null}
+              <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+                Nenhuma visão de ocupação disponível para {analysis ? "análise" : "relatório"}.
+              </div>
+            </>
+          )}
+        </div>
       )}
 
       {monitorMode && occupancyCertificationError ? (
@@ -2377,9 +2326,9 @@ function MetricVisibilityControls({
     <div
       aria-label="Séries históricas exibidas"
       className={cn(
-        "flex flex-wrap items-center rounded-md border bg-muted/20",
+        "flex min-w-0 max-w-full flex-wrap items-center rounded-md border bg-muted/20",
         compact
-          ? "h-8 shrink-0 flex-nowrap gap-0.5 p-0.5"
+          ? "min-h-8 gap-0.5 p-0.5"
           : "gap-1 p-1",
       )}
       role="group"
@@ -2400,10 +2349,10 @@ function MetricVisibilityControls({
               }))
             }
             className={cn(
-              "rounded px-2 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+              "focus-contained min-w-0 max-w-full rounded px-2 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
               compact ? "h-7" : "h-8",
               active
-                ? "bg-primary text-primary-foreground shadow-sm"
+                ? "bg-primary text-primary-foreground shadow-sm focus-visible:ring-primary-foreground"
                 : "text-muted-foreground hover:bg-background",
             )}
           >
@@ -2431,8 +2380,8 @@ function PreviousPeriodToggle({
       aria-checked={checked}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        "inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md border px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-        compact ? "h-8" : "h-9",
+        "focus-contained inline-flex min-w-0 max-w-full items-center gap-2 whitespace-normal rounded-md border px-3 py-1.5 text-left text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
+        compact ? "min-h-8" : "min-h-9",
         checked
           ? "border-primary/30 bg-primary/10 text-primary"
           : "border-border bg-card text-muted-foreground",
@@ -2440,7 +2389,7 @@ function PreviousPeriodToggle({
     >
       <span
         className={cn(
-          "h-4 w-7 rounded-full p-0.5 transition",
+          "h-4 w-7 shrink-0 rounded-full p-0.5 transition",
           checked ? "bg-primary" : "bg-muted-foreground/30",
         )}
       >
@@ -2477,9 +2426,9 @@ function ComparisonModeSelect({
       <SelectTrigger
         aria-label="Base temporal da comparação"
         className={cn(
-          "min-w-0 max-w-full bg-card text-xs",
-          fit ? "w-[190px]" : "w-full sm:w-[190px]",
-          compact ? "h-8" : "h-9",
+          "min-w-0 max-w-full bg-card py-1.5 text-xs",
+          fit ? "w-[220px]" : "w-full sm:w-[220px]",
+          compact ? "h-auto min-h-8" : "h-auto min-h-9",
         )}
       >
         <SelectValue />
@@ -2699,7 +2648,9 @@ async function loadOccupancyReportState(
   companyTimeZoneWarning?: string,
   signal?: AbortSignal,
   closedSegmentCache?: Map<string, OccupancyReportState>,
+  queryScheduler?: OccupancyQueryScheduler,
 ): Promise<OccupancyReportState> {
+  const scheduleQuery = queryScheduler ?? createOccupancyQueryScheduler(signal);
   const expectedTimeZone = requireRuntimeCompanyTimeZone(
     companyTimeZone ?? "America/Sao_Paulo",
   );
@@ -2722,9 +2673,10 @@ async function loadOccupancyReportState(
           definition,
           segment,
         );
-        const response = await apiFetch<OccupancyScenarioAggregateResponse>(
-          occupancyScenarioAggregatePath(scope.scenario!.id, segmentDefinition),
-          { companyScopeId: companyScopeId ?? undefined, signal },
+        const path = occupancyScenarioAggregatePath(scope.scenario!.id, segmentDefinition);
+        const response = await scheduleQuery(path, () =>
+          apiFetch<OccupancyScenarioAggregateResponse>(path,
+            { companyScopeId: companyScopeId ?? undefined, signal }),
         );
         const rows = requireOccupancyAggregateRows(
           response,
@@ -2786,9 +2738,9 @@ async function loadOccupancyReportState(
         async (bucketStart) => {
           const bucketEnd = addGranularity(bucketStart, segment.granularity);
           const requestTo = bucketEnd > segment.to ? segment.to : bucketEnd;
-          const response = await apiFetch<unknown>(
-            occupancyPath(bucketStart, requestTo),
-            { companyScopeId: companyScopeId ?? undefined, signal },
+          const path = occupancyPath(bucketStart, requestTo);
+          const response = await scheduleQuery(path, () =>
+            apiFetch<unknown>(path, { companyScopeId: companyScopeId ?? undefined, signal }),
           );
           const rows = requireOccupancySnapshotRows(response, {
             expectedCameraIds: scope.cameraIds,

@@ -29,16 +29,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { resolvePostLoginPath } from "@/lib/access";
-import {
-  preloadAppRoute,
-  type AppDashboardModule,
-} from "@/lib/app-route-preload";
-import {
-  canViewCounting,
-  canViewDemographics,
-  canViewOccupancy,
-} from "@/lib/permissions";
+import { resolveAuthorizedDashboardModule, resolvePostLoginPath } from "@/lib/access";
+import { preloadAppRoute } from "@/lib/app-route-preload";
 import type { CurrentUser } from "@/lib/types";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import {
@@ -394,17 +386,8 @@ function navigateToAuthenticatedRoute(
   user: CurrentUser,
 ) {
   router.prefetch(path);
-  preloadAppRoute(path, preferredDashboardModule(user));
+  preloadAppRoute(path, resolveAuthorizedDashboardModule(user, path));
   router.replace(path);
-}
-
-function preferredDashboardModule(
-  user: CurrentUser,
-): AppDashboardModule | undefined {
-  if (canViewCounting(user)) return "counting";
-  if (canViewOccupancy(user)) return "occupancy";
-  if (canViewDemographics(user)) return "demographics";
-  return undefined;
 }
 
 function IPXDataMark({ compact = false }: { compact?: boolean }) {

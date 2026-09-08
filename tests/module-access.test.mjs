@@ -413,7 +413,7 @@ test("atribuição da empresa também controla o módulo Demográfico", () => {
   );
 });
 
-test("Ao Vivo, Análises e Relatórios formam um pacote de visualização por módulo", () => {
+test("grants legados mantêm as três telas, mas os menus verificam a superfície de destino", () => {
   const master = user({ is_master: true, permissions: [] });
   const countingOperator = user({
     permissions: [permission({ action: "view", slug: "counting_view" })],
@@ -451,14 +451,11 @@ test("Ao Vivo, Análises e Relatórios formam um pacote de visualização por m�
     resolve(projectRoot, "components/app/app-shell.tsx"),
     "utf8",
   );
-  const packageGuards = shellSource.match(
-    /canShow:\s*canAccessOperationalDashboards/g,
-  );
-  assert.equal(
-    packageGuards?.length,
-    6,
-    "os três itens dos menus client e manager devem compartilhar o mesmo guard",
-  );
+  for (const surface of ["live", "analytics", "reports"]) {
+    const guards = shellSource.match(new RegExp(`canShow: \\(user\\) => canAccessOperationalDashboards\\(user, "${surface}"\\)`, "g"));
+    assert.equal(guards?.length, 2, `menus client e manager devem verificar ${surface}`);
+    assert.equal(permissions.canAccessOperationalDashboards(countingOperator, surface), true);
+  }
 });
 
 test("redirecionamento escolhe a primeira tela realmente autorizada", () => {
@@ -589,9 +586,9 @@ test("Dashboard monta somente módulos concedidos e corrige seleção persistida
     "utf8",
   );
 
-  assert.match(source, /canViewCounting\(user\)/);
-  assert.match(source, /canViewOccupancy\(user\)/);
-  assert.match(source, /canViewDemographics\(user\)/);
+  assert.match(source, /canViewModuleSurface\(user, "counting", surface\)/);
+  assert.match(source, /canViewModuleSurface\(user, "occupancy", surface\)/);
+  assert.match(source, /canViewModuleSurface\(user, "demographics", surface\)/);
   assert.match(source, /useEffectiveCompanyScopeId\(user\)/);
   assert.match(
     source,

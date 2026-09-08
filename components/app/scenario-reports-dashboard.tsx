@@ -93,6 +93,11 @@ import {
   type CompleteAggregateRequest,
 } from "@/lib/aggregate-range-query";
 import {
+  createCountingHistoryDatasetLoader,
+  createCountingHistoryRequestQueue,
+  reconcileCountingHistoryItems,
+} from "@/lib/counting-history-performance";
+import {
   reconcileAggregateRows,
 } from "@/lib/aggregate-reconciliation";
 import {
@@ -683,10 +688,6 @@ export function ScenarioReportsDashboard({
 
     return [...ordered, ...missing];
   }, [reportCardIdsKey, reportPreferences]);
-  const visibleReportCardIdsKey = React.useMemo(
-    () => [...visibleReportCardIds].sort().join("|"),
-    [visibleReportCardIds],
-  );
   const visibleReportCardIdSet = React.useMemo(
     () => new Set(visibleReportCardIds),
     [visibleReportCardIds],
@@ -766,7 +767,9 @@ export function ScenarioReportsDashboard({
     () =>
       JSON.stringify([
         companyScopeId ?? "",
+        userId ?? "",
         companyTimeZone,
+        companyTimeZoneResolution.fallback,
         effectivePeriodDates.from.toISOString(),
         effectivePeriodDates.to.toISOString(),
         countingViewSettings.includeOpenPeriod,
@@ -785,6 +788,7 @@ export function ScenarioReportsDashboard({
       canonicalHistoryRequired,
       companyScopeId,
       companyTimeZone,
+      companyTimeZoneResolution.fallback,
       countingIntelligenceDayRequired,
       countingViewSettings.includeOpenPeriod,
       customComparisonRequired,
@@ -795,6 +799,7 @@ export function ScenarioReportsDashboard({
       currentHourReconciliationRequired,
       requiredCustomGranularitiesKey,
       showPreviousPeriod,
+      userId,
     ],
   );
 
@@ -1025,33 +1030,24 @@ export function ScenarioReportsDashboard({
       }
 
       const now = new Date();
-      const aggregateRequests = new Map<
-        string,
-        Promise<AggregateEventsResponse>
-      >();
-      const requestAggregate: CompleteAggregateRequest = (path) => {
-        const pending = aggregateRequests.get(path);
-        if (pending) return pending;
-        const request = apiFetch<AggregateEventsResponse>(path, {
-          companyScopeId,
-          signal: controller.signal,
-        });
-        aggregateRequests.set(path, request);
-        return request;
-      };
+      const requestAggregate: CompleteAggregateRequest =
+        createCountingHistoryRequestQueue(
+          (path) => apiFetch<AggregateEventsResponse>(path, {
+            companyScopeId,
+            signal: controller.signal,
+          }),
+          controller.signal,
+        );
       const definitions = buildScenarioAggregateDefinitions(
         now,
         effectivePeriodDates,
       );
-      const visibleCardIds = new Set(
-        visibleReportCardIdsKey ? visibleReportCardIdsKey.split("|") : [],
-      );
       const requiredChartIds = new Set(
-        customWidgets.flatMap((widget) =>
-          widget.kind === "scope" &&
-          visibleCardIds.has(`report_custom_${widget.id}`)
-            ? [reportChartIdForGranularity(widget.granularity)]
-            : [],
+        (requiredCustomGranularitiesKey
+          ? requiredCustomGranularitiesKey.split("|")
+          : []
+        ).map((granularity) =>
+          reportChartIdForGranularity(granularity as ReportCustomWidgetGranularity),
         ),
       );
       const visibleDefinitions = definitions.filter((definition) =>
@@ -1126,8 +1122,32 @@ export function ScenarioReportsDashboard({
         supportDefinitions.push(buildCurrentHourMinutesDefinition(now));
       }
 
+      const loadDataset = createCountingHistoryDatasetLoader(
+        async (definition): Promise<ScenarioChartState> => ({
+          granularity: definition.granularity,
+          rows: definition.granularity === "hour"
+            ? await fetchBoundedHourlyAggregateRanges({
+                cache: hourlyAggregateCacheRef.current,
+                cacheScope: `reports:${companyScopeId ?? "jwt-company"}:${companyTimeZone}`,
+                companyScopeId: companyScopeId?.trim() || undefined,
+                now,
+                ranges: [definition],
+                request: requestAggregate,
+                signal: controller.signal,
+              })
+            : await fetchCompleteAggregateRange({
+                companyScopeId: companyScopeId?.trim() || undefined,
+                from: definition.from,
+                granularity: definition.granularity,
+                request: requestAggregate,
+                signal: controller.signal,
+                to: definition.to,
+              }),
+        }),
+      );
+
       try {
-      const entries = await Promise.all(
+        const entries = await Promise.all(
           [...visibleDefinitions, ...previousDefinitions, ...supportDefinitions].map(async (definition) => {
             if (definition.to <= definition.from) {
               return [
@@ -1136,36 +1156,9 @@ export function ScenarioReportsDashboard({
               ] as const;
             }
             try {
-              if (definition.granularity === "hour") {
-                return [
-                  definition.id,
-                  {
-                    granularity: "hour",
-                    rows: await fetchBoundedHourlyAggregateRanges({
-                      cache: hourlyAggregateCacheRef.current,
-                      cacheScope: `reports:${companyScopeId ?? "jwt-company"}:${companyTimeZone}`,
-                      companyScopeId: companyScopeId?.trim() || undefined,
-                      now,
-                      ranges: [definition],
-                      signal: controller.signal,
-                    }),
-                  },
-                ] as const;
-              }
-
               return [
                 definition.id,
-                {
-                  rows: await fetchCompleteAggregateRange({
-                    companyScopeId: companyScopeId?.trim() || undefined,
-                    from: definition.from,
-                    granularity: definition.granularity,
-                    request: requestAggregate,
-                    signal: controller.signal,
-                    to: definition.to,
-                  }),
-                  granularity: definition.granularity,
-                },
+                await loadDataset(definition),
               ] as const;
             } catch (error) {
               if (controller.signal.aborted) throw error;
@@ -1275,12 +1268,11 @@ export function ScenarioReportsDashboard({
       chartQueryKey,
       companyTimeZone,
       companyTimeZoneResolution,
-      customWidgets,
       effectivePeriodDates,
       intradayComparison,
       showPreviousPeriod,
       currentHourReconciliationRequired,
-      visibleReportCardIdsKey,
+      requiredCustomGranularitiesKey,
     ],
   );
 
@@ -1364,7 +1356,7 @@ export function ScenarioReportsDashboard({
     setLastUpdated(null);
     setReportRequested(false);
     setSettingsReadyScopeKey("");
-  }, [companyScopeId]);
+  }, [companyScopeId, userId]);
 
   React.useEffect(() => {
     const settings = loadLiveDashboardSettings(companyScopeId, preferenceScope);
@@ -1407,8 +1399,9 @@ export function ScenarioReportsDashboard({
 
   React.useEffect(() => {
     function syncCustomWidgets() {
-      setCustomWidgets(
-        loadReportCustomWidgets(companyScopeId, preferenceScope),
+      const next = loadReportCustomWidgets(companyScopeId, preferenceScope);
+      setCustomWidgets((current) =>
+        reconcileCountingHistoryItems(current, next),
       );
     }
 
@@ -1495,6 +1488,10 @@ export function ScenarioReportsDashboard({
 
   React.useEffect(() => {
     if (!selectedScope) {
+      // Changing the type of view briefly clears selectedId while its new
+      // first option is resolved. Aggregate rows cover the whole company;
+      // keep that dataset and its in-flight request during this local filter.
+      if (scopeOptions.length) return;
       chartRequestSequenceRef.current += 1;
       if (chartRequestControllerRef.current) {
         abortRequest(
@@ -1503,6 +1500,8 @@ export function ScenarioReportsDashboard({
         );
       }
       chartRequestControllerRef.current = null;
+      activeChartQueryKeyRef.current = "";
+      completedChartQueryKeyRef.current = "";
       setChartLoadError("");
       setChartData({});
       return;
@@ -1519,6 +1518,7 @@ export function ScenarioReportsDashboard({
     reportRequested,
     reportSettingsScopeKey,
     selectedScope,
+    scopeOptions.length,
     settingsReadyScopeKey,
   ]);
 
@@ -2728,100 +2728,109 @@ export function ScenarioReportsDashboard({
       ) : (
         <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
           {loadingScenarios ? (
-            <div className="grid min-w-0 grid-cols-[32px_minmax(64px,80px)_minmax(72px,104px)_minmax(0,1fr)_248px] items-center gap-1.5 @sm:grid-cols-[minmax(140px,180px)_80px_104px_minmax(0,1fr)_248px] @lg:grid-cols-[minmax(180px,220px)_88px_120px_minmax(0,1fr)_248px] @xl:grid-cols-[minmax(220px,260px)_104px_144px_minmax(0,1fr)_248px] @2xl:grid-cols-[300px_120px_180px_minmax(0,1fr)_248px]">
-              <CountingReportPeriodControl
-                disabled
-                includeOpenPeriod={countingViewSettings.includeOpenPeriod}
-                value={countingPeriod}
-                onChange={updateCountingPeriod}
-                onIncludeOpenPeriodChange={(includeOpenPeriod) =>
-                  updateCountingViewSettings({ includeOpenPeriod })
-                }
-              />
-              <Skeleton className="col-start-2 row-start-1 h-8 w-full" />
-              <Skeleton className="col-start-3 row-start-1 h-8 w-full" />
-              <Skeleton className="col-start-4 row-start-1 h-8 w-8 shrink-0 justify-self-end @lg:w-[54px]" />
-              <Skeleton className="col-start-5 row-start-1 h-8 w-[248px] shrink-0" />
+            <div data-dashboard-toolbar>
+              <div data-toolbar-filters className="basis-[37rem]">
+                <div className="min-w-0 flex-[1_1_230px]">
+                  <CountingReportPeriodControl
+                    disabled
+                    includeOpenPeriod={countingViewSettings.includeOpenPeriod}
+                    value={countingPeriod}
+                    onChange={updateCountingPeriod}
+                    onIncludeOpenPeriodChange={(includeOpenPeriod) =>
+                      updateCountingViewSettings({ includeOpenPeriod })
+                    }
+                  />
+                </div>
+                <Skeleton className="h-8 min-w-0 flex-[1_1_140px]" />
+                <Skeleton className="h-8 min-w-0 flex-[2_1_200px]" />
+              </div>
+              <div data-toolbar-actions>
+                <Skeleton className="h-8 w-[248px] max-w-full" />
+              </div>
             </div>
           ) : scopeOptions.length ? (
             <div className="space-y-2">
               <div
                 aria-label="Controles dos relatórios de Contagem"
-                className="grid min-w-0 grid-cols-[32px_minmax(64px,80px)_minmax(72px,104px)_minmax(0,1fr)_248px] items-center gap-1.5 @sm:grid-cols-[minmax(140px,180px)_80px_104px_minmax(0,1fr)_248px] @lg:grid-cols-[minmax(180px,220px)_88px_120px_minmax(0,1fr)_248px] @xl:grid-cols-[minmax(220px,260px)_104px_144px_minmax(0,1fr)_248px] @2xl:grid-cols-[300px_120px_180px_minmax(0,1fr)_248px]"
+                data-dashboard-toolbar
                 role="group"
               >
-                <CountingReportPeriodControl
-                  disabled={loadingCharts}
-                  includeOpenPeriod={countingViewSettings.includeOpenPeriod}
-                  value={countingPeriod}
-                  onChange={updateCountingPeriod}
-                  onApply={applyCountingPeriod}
-                  pending={!reportRequested || countingPeriodPending}
-                  onIncludeOpenPeriodChange={(includeOpenPeriod) =>
-                    updateCountingViewSettings({ includeOpenPeriod })
-                  }
-                />
+                <div data-toolbar-filters className="basis-[37rem]">
+                  <div className="min-w-0 flex-[1_1_230px]">
+                    <CountingReportPeriodControl
+                      disabled={loadingCharts}
+                      includeOpenPeriod={countingViewSettings.includeOpenPeriod}
+                      value={countingPeriod}
+                      onChange={updateCountingPeriod}
+                      onApply={applyCountingPeriod}
+                      pending={!reportRequested || countingPeriodPending}
+                      onIncludeOpenPeriodChange={(includeOpenPeriod) =>
+                        updateCountingViewSettings({ includeOpenPeriod })
+                      }
+                    />
+                  </div>
 
-                <div className="col-start-2 row-start-1 min-w-0">
-                  <Label className="sr-only" htmlFor={reportScopeModeSelectId}>
-                    Visão
-                  </Label>
-                  <Select
-                    value={scopeMode}
-                    onValueChange={(value) => {
-                      setScopeMode(value as ReportScopeMode);
-                      setSelectedId("");
-                    }}
-                  >
-                    <SelectTrigger
-                      id={reportScopeModeSelectId}
-                      aria-label="Tipo da visão dos relatórios de Contagem"
-                      className="h-8 w-full min-w-0 bg-card"
+                  <div className="min-w-0 flex-[1_1_140px]">
+                    <Label className="sr-only" htmlFor={reportScopeModeSelectId}>
+                      Visão
+                    </Label>
+                    <Select
+                      value={scopeMode}
+                      onValueChange={(value) => {
+                        setScopeMode(value as ReportScopeMode);
+                        setSelectedId("");
+                      }}
                     >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableModes.map((mode) => (
-                        <SelectItem key={mode.value} value={mode.value}>
-                          {mode.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                      <SelectTrigger
+                        id={reportScopeModeSelectId}
+                        aria-label="Tipo da visão dos relatórios de Contagem"
+                        className="h-auto min-h-8 w-full min-w-0 bg-card py-1.5 text-xs"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {availableModes.map((mode) => (
+                          <SelectItem key={mode.value} value={mode.value}>
+                            {mode.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
 
-                <div className="col-start-3 row-start-1 min-w-0">
-                  <Label className="sr-only" htmlFor={reportScopeSelectId}>
-                    {scopeModeLabel(scopeMode)}
-                  </Label>
-                  <Select value={selectedId} onValueChange={setSelectedId}>
-                    <SelectTrigger
-                      id={reportScopeSelectId}
-                      aria-label={`${scopeModeLabel(scopeMode)} dos relatórios em foco`}
-                      className="h-8 w-full min-w-0 bg-card"
-                    >
-                      <SelectValue placeholder="Selecione uma visão" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {scopeOptions.map((scope) => (
-                        <SelectItem key={scope.id} value={scope.id}>
-                          {scope.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <div className="min-w-0 flex-[2_1_200px]">
+                    <Label className="sr-only" htmlFor={reportScopeSelectId}>
+                      {scopeModeLabel(scopeMode)}
+                    </Label>
+                    <Select value={selectedId} onValueChange={setSelectedId}>
+                      <SelectTrigger
+                        id={reportScopeSelectId}
+                        aria-label={`${scopeModeLabel(scopeMode)} dos relatórios em foco`}
+                        className="h-auto min-h-8 w-full min-w-0 bg-card py-1.5 text-xs"
+                      >
+                        <SelectValue placeholder="Selecione uma visão" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {scopeOptions.map((scope) => (
+                          <SelectItem key={scope.id} value={scope.id}>
+                            {scope.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
 
                 <div className="contents">
-                  <div className="col-start-4 row-start-1 flex h-8 min-w-0 items-center justify-end">
+                  <div data-toolbar-status className="hidden min-h-8 min-w-0 items-center justify-end @4xl:flex">
                     {lastUpdated ? (
                       <span
                         aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center gap-1 whitespace-nowrap px-0 text-xs tabular-nums text-muted-foreground @lg:w-auto @lg:justify-start @lg:px-1.5"
+                        className="inline-flex min-h-8 items-center gap-1 whitespace-nowrap px-1.5 text-xs tabular-nums text-muted-foreground"
                         title={`Última atualização às ${formatTime(lastUpdated)}`}
                       >
                         <Clock3 className="h-3.5 w-3.5 shrink-0" />
-                        <span className="sr-only @lg:not-sr-only">
+                        <span>
                           {formatTime(lastUpdated)}
                         </span>
                       </span>
@@ -2830,7 +2839,7 @@ export function ScenarioReportsDashboard({
 
                   <div
                     aria-label="Ações dos relatórios de Contagem"
-                    className="col-start-5 row-start-1 flex w-[248px] min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1"
+                    data-toolbar-actions
                     role="group"
                   >
                     <Button
@@ -2940,7 +2949,7 @@ export function ScenarioReportsDashboard({
                     <div className="text-xs font-semibold">
                       Comparação do relatório
                     </div>
-                    <div className="truncate text-[11px] text-muted-foreground">
+                    <div className="break-words text-[11px] text-muted-foreground">
                       Configure o período anterior sem ocupar a régua principal.
                     </div>
                   </div>
@@ -3336,7 +3345,7 @@ function PreviousPeriodToggle({
       aria-checked={checked}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        "inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+        "focus-contained inline-flex min-h-9 min-w-0 max-w-full items-center gap-2 whitespace-normal rounded-md border px-3 py-1.5 text-left text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
         checked
           ? "border-primary/30 bg-primary/10 text-primary"
           : "border-border bg-card text-muted-foreground",
@@ -3344,7 +3353,7 @@ function PreviousPeriodToggle({
     >
       <span
         className={cn(
-          "h-4 w-7 rounded-full p-0.5 transition",
+          "h-4 w-7 shrink-0 rounded-full p-0.5 transition",
           checked ? "bg-primary" : "bg-muted-foreground/30",
         )}
       >
@@ -3376,7 +3385,7 @@ function ComparisonModeSelect({
     >
       <SelectTrigger
         aria-label="Base de comparação do período anterior"
-        className="h-8 w-[190px] min-w-0 max-w-full bg-card text-xs"
+        className="h-auto min-h-8 w-[220px] min-w-0 max-w-full bg-card py-1.5 text-xs"
       >
         <SelectValue />
       </SelectTrigger>
@@ -3955,12 +3964,16 @@ async function fetchSubLocations(
   requireExplicitCompanyId = false,
 ) {
   const expectedCompanyId = companyScopeId?.trim() || undefined;
+  const request = createCountingHistoryRequestQueue(
+    (path) => apiFetch<unknown>(path, {
+      companyScopeId: expectedCompanyId,
+      signal,
+    }),
+    signal ?? new AbortController().signal,
+  );
   const rows = await Promise.all(
     locations.map((location) =>
-      apiFetch<unknown>(`/locations/${location.id}/sub-locations`, {
-        companyScopeId: expectedCompanyId,
-        signal,
-      }).then((value) =>
+      request(`/locations/${location.id}/sub-locations`).then((value) =>
         requireSubLocationRows(
           requireExplicitCompanyId
             ? selectExplicitCompanyScopedRows(value, expectedCompanyId!, {

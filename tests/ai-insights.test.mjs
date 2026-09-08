@@ -756,8 +756,10 @@ test("rota IA usa configuração por empresa e separa status, escrita e geraçã
   assert.doesNotMatch(route, /\/api\/v1\/companies\/\$\{/);
   assert.match(route, /"\/api\/v1\/company\/modules"/);
   assert.match(route, /authentication\.user\.permissions === undefined/);
-  assert.match(route, /canViewCounting/);
-  assert.match(route, /canViewOccupancy/);
+  assert.match(route, /canViewModuleSurface/);
+  assert.match(route, /surface === "analysis" \? "analytics" : surface/);
+  assert.match(route, /scope\.module, scope\.surface/);
+  assert.match(route, /boundPayload\.snapshot\.source\.surface/);
   assert.match(
     route,
     /readJsonPayload\(\s*request,\s*AI_INSIGHTS_LIMITS\.bodyBytes/,

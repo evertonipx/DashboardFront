@@ -89,6 +89,7 @@ async function fetchCompleteAggregatePartition({
     to: aggregateQueryIso(to, granularity),
   });
   const response = await execute(`/analytics/aggregate?${params.toString()}`);
+  signal?.throwIfAborted();
   const responseGranularity = requireAggregateGranularity(
     response.granularity,
     granularity,

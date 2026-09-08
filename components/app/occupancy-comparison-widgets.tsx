@@ -2894,7 +2894,7 @@ function OccupancyHalfDonutCompactFallback({
               type="button"
               variant="ghost"
               size="sm"
-              className="h-6 px-2 text-[10px]"
+              className="h-6 min-h-6 px-2 py-0 text-[10px]"
               disabled={safePage === 0}
               onClick={() => setPage(Math.max(0, safePage - 1))}
             >
@@ -2904,7 +2904,7 @@ function OccupancyHalfDonutCompactFallback({
               type="button"
               variant="ghost"
               size="sm"
-              className="h-6 px-2 text-[10px]"
+              className="h-6 min-h-6 px-2 py-0 text-[10px]"
               disabled={safePage >= pageCount - 1}
               onClick={() => setPage(Math.min(pageCount - 1, safePage + 1))}
             >
@@ -2995,7 +2995,7 @@ export function OccupancyStatusColorsDialog({
                 <button
                   aria-pressed={selected}
                   className={cn(
-                    "rounded-lg border bg-card p-3 text-left transition hover:border-primary/60 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                    "focus-contained min-w-0 rounded-lg border bg-card p-3 text-left transition hover:border-primary/60 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
                     selected &&
                       "border-primary ring-2 ring-primary/20 ring-offset-1 ring-offset-background",
                   )}
@@ -3027,7 +3027,7 @@ export function OccupancyStatusColorsDialog({
           </div>
 
           <div className="rounded-lg border bg-muted/20 p-4">
-            <div className="mb-3 flex items-center justify-between gap-2">
+            <div className="mb-3 flex min-w-0 flex-wrap items-center justify-between gap-2">
               <div>
                 <div className="text-sm font-semibold">Cores personalizadas</div>
                 <div className="text-xs text-muted-foreground">
@@ -3130,7 +3130,7 @@ function OccupancyStatusColorField({
 }) {
   return (
     <label
-      className="flex cursor-pointer items-center gap-3 rounded-md border bg-background p-3"
+      className="flex min-w-0 max-w-full cursor-pointer items-center gap-3 rounded-md border bg-background p-3"
       htmlFor={id}
     >
       <Input
@@ -5339,7 +5339,10 @@ function buildHexLayoutOption(
       Math.min(68, Math.min(Math.abs(unit[0]), Math.abs(unit[1])) * 0.38),
     );
     const showName = preferences.showNames && outerRadius >= 14;
-    const showValue = preferences.showValues && outerRadius >= 11;
+    const zeroNumericValue = preferences.displayMode === "actual" &&
+      position.total === 0 &&
+      (position.state === "occupied" || position.state === "unoccupied");
+    const showValue = preferences.showValues && outerRadius >= 11 && !zeroNumericValue;
     const compactValue = outerRadius < 22;
     const outerVisual = palette.surfaces[position.state];
     const displayRadiusRatio = occupancyHexDisplayRadiusRatio(

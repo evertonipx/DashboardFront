@@ -614,9 +614,9 @@ export function WidgetViewPresetsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
-          <section className="grid gap-3 rounded-md border bg-muted/15 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-            <div className="space-y-1.5">
+        <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto pr-1">
+          <section className="grid min-w-0 gap-3 rounded-md border bg-muted/15 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+            <div className="min-w-0 space-y-1.5">
               <Label htmlFor={`widget-view-name-${menuKey}`}>
                 Nome da visão atual
               </Label>
@@ -862,7 +862,7 @@ export function WidgetViewPresetsDialog({
                             O cenário da visão será remapeado para cada destino.
                           </div>
                         </div>
-                        <div className="flex gap-2">
+                        <div className="flex min-w-0 flex-wrap gap-2">
                           <Button
                             type="button"
                             variant="outline"
@@ -901,24 +901,22 @@ export function WidgetViewPresetsDialog({
                         />
                       </div>
 
-                      <div className="grid max-h-52 gap-1 overflow-y-auto sm:grid-cols-2">
+                      <div className="grid max-h-52 min-w-0 gap-1 overflow-y-auto sm:grid-cols-2">
                         {visibleScopes.map((scope) => {
                           const checked = selectedScopeIds.includes(scope.id);
                           return (
                             <label
                               key={scope.id}
                               className={cn(
-                                "flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm",
+                                "flex min-w-0 max-w-full cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm",
                                 checked
                                   ? "border-primary/40 bg-primary/5"
                                   : "bg-background",
                               )}
                             >
-                              <input
-                                type="checkbox"
+                              <Checkbox
                                 checked={checked}
-                                onChange={() => toggleScope(scope.id)}
-                                className="h-4 w-4 accent-primary"
+                                onCheckedChange={() => toggleScope(scope.id)}
                               />
                               <span className="min-w-0 flex-1 truncate">
                                 {scope.name}

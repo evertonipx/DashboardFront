@@ -30,7 +30,7 @@ export function OccupancyBlockingState({
       </span>
       <Button
         aria-label="Tentar carregar os dados de ocupação novamente"
-        className="h-7 shrink-0 px-2 text-xs"
+          className="h-7 min-h-7 shrink-0 px-2 text-xs"
         disabled={retrying}
         onClick={onRetry}
         size="sm"

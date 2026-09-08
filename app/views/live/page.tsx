@@ -5,7 +5,7 @@ import { DeferredEmbeddedLiveView as EmbeddedLiveView } from "@/components/app/d
 
 export default function LiveViewPage() {
   return (
-    <AuthGuard>
+    <AuthGuard requireSurface="live">
       <React.Suspense fallback={<ViewLoading />}>
         <EmbeddedLiveView />
       </React.Suspense>

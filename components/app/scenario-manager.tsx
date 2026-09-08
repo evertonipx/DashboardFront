@@ -639,7 +639,7 @@ export function ScenarioManager() {
         {canEditScenarios ? <TabsContent value="flow">
           <Card id="config-cenarios" className="scroll-mt-6">
             <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div>
+              <div className="min-w-0">
                 <CardTitle className="flex items-center gap-2">
                   <ListChecks className="h-4 w-4" />
                   Cenários de contagem
@@ -648,7 +648,7 @@ export function ScenarioManager() {
                   Configure os cenários de contagem usados por ao vivo e relatórios.
                 </CardDescription>
               </div>
-              <div className="flex w-full flex-wrap gap-2 sm:w-auto">
+              <div className="flex min-w-0 w-full flex-wrap gap-2 sm:w-auto">
                 <Button
                   type="button"
                   variant="outline"
@@ -693,8 +693,8 @@ export function ScenarioManager() {
                 </div>
               ) : scenarios.length ? (
                 <>
-                  <div className="grid gap-2 sm:grid-cols-[minmax(220px,1fr)_180px_auto] sm:items-center">
-                    <div className="relative">
+                  <div className="grid min-w-0 gap-2 md:grid-cols-[minmax(0,1fr)_180px_auto] md:items-center">
+                    <div className="relative min-w-0">
                       <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                       <Input
                         value={scenarioSearch}
@@ -1240,7 +1240,7 @@ function ScenarioDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>{scenario ? "Editar cenário" : "Novo cenário"}</DialogTitle>
           <DialogDescription>
@@ -1248,7 +1248,7 @@ function ScenarioDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-4 md:grid-cols-[1fr_180px]">
+        <div className="grid min-w-0 gap-4 md:grid-cols-[minmax(0,1fr)_180px]">
           <div className="space-y-2">
             <Label htmlFor="scenario-name">Nome</Label>
             <Input
@@ -1287,7 +1287,7 @@ function ScenarioDialog({
         <div className="space-y-4">
           <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
             <div>
-              <div className="flex items-center gap-2 text-sm font-medium">
+              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
                 <Route className="h-4 w-4 text-primary" />
                 Linhas de contagem
                 <Badge variant="outline">
@@ -1369,7 +1369,7 @@ function ScenarioDialog({
               {lines.map((line, index) => (
                 <div
                   key={line.key}
-                  className="grid gap-4 rounded-md border bg-muted/20 p-4 md:grid-cols-[1fr_150px_1fr_44px]"
+                  className="grid min-w-0 gap-4 rounded-md border bg-muted/20 p-4 md:grid-cols-[minmax(0,1fr)_150px_minmax(0,1fr)_44px] [&>div]:min-w-0"
                 >
                   <div className="space-y-2">
                     <Label className="text-xs">Linha</Label>
@@ -1658,7 +1658,7 @@ function BulkScenarioDialog({
         if (!saving) onOpenChange(nextOpen);
       }}
     >
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
+      <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>Criar um cenário por linha</DialogTitle>
           <DialogDescription>

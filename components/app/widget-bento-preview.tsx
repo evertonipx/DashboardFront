@@ -296,7 +296,7 @@ export function WidgetBentoPreview({
                   "flex h-full min-h-0 min-w-0 w-full flex-col overflow-hidden rounded-md border bg-card text-left shadow-sm transition-colors motion-reduce:transition-none",
                   compactTile ? "p-1" : "p-1.5",
                   interactive &&
-                    "cursor-pointer hover:border-primary/50 hover:bg-primary/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+                    "focus-contained cursor-pointer hover:border-primary/50 hover:bg-primary/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
                   item.selected &&
                     "border-primary bg-primary/[0.08] ring-1 ring-primary/30",
                   item.dragging && "cursor-grabbing opacity-50",

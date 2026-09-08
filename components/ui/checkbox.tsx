@@ -72,10 +72,12 @@ const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
         />
         <span
           aria-hidden="true"
+          data-checkbox-indicator
           className={cn(
             "pointer-events-none flex h-full w-full items-center justify-center rounded-[4px] border border-input bg-background text-primary-foreground shadow-sm transition-colors",
-            "peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-background",
+            "peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-inset peer-focus-visible:ring-ring peer-focus-visible:ring-offset-0",
             (isChecked || isIndeterminate) && "border-primary bg-primary",
+            (isChecked || isIndeterminate) && "peer-focus-visible:ring-primary-foreground",
           )}
         >
           {isIndeterminate ? (

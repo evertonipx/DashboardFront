@@ -7,7 +7,10 @@ import {
   canManageWidgets,
   canManageWorkers,
   canViewAudit,
+  canViewModuleSurface,
   hasAnyOperationalPermission,
+  type DashboardSurface,
+  type OperationalModuleFamily,
 } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/types";
 import { isMasterUser } from "@/lib/user-role";
@@ -36,7 +39,9 @@ export function resolveAuthorizedHomePath(user: CurrentUser | null) {
   }
 
   if (hasAnyOperationalPermission(user)) {
-    if (canAccessOperationalDashboards(user)) return "/manager/live";
+    for (const surface of ["live", "analytics", "reports"] as const) {
+      if (canAccessOperationalDashboards(user, surface)) return `/manager/${surface}`;
+    }
     if (canManageViews(user)) return "/manager/views";
     if (canManageWorkers(user)) return "/manager/workers";
     if (canManageCameras(user)) return "/manager/cameras";
@@ -46,5 +51,29 @@ export function resolveAuthorizedHomePath(user: CurrentUser | null) {
 
   if (canViewAudit(user)) return "/manager/audit";
 
+  for (const surface of ["live", "analytics", "reports"] as const) {
+    if (canAccessOperationalDashboards(user, surface)) return `/dashboard/${surface}`;
+  }
+
   return "/dashboard/live";
+}
+
+export function dashboardSurfaceForPathname(pathname: string): DashboardSurface | undefined {
+  const match = /^\/(?:dashboard|manager)\/(live|analytics|reports|occupancy)$/.exec(pathname);
+  if (!match) return undefined;
+  return match[1] === "occupancy" ? "live" : match[1] as DashboardSurface;
+}
+
+export function resolveAuthorizedDashboardModule(
+  user: CurrentUser | null,
+  pathname: string,
+  preferred?: string,
+): OperationalModuleFamily | undefined {
+  const surface = dashboardSurfaceForPathname(pathname);
+  if (!surface) return undefined;
+  const modules: OperationalModuleFamily[] = pathname.endsWith("/occupancy")
+    ? ["occupancy"]
+    : ["counting", "occupancy", "demographics"];
+  const available = modules.filter((module) => canViewModuleSurface(user, module, surface));
+  return available.find((module) => module === preferred) ?? available[0];
 }

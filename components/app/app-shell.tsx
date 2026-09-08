@@ -24,9 +24,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { useAuth } from "@/components/app/auth-provider";
+import { MobileNavigation } from "@/components/app/mobile-navigation";
 import { ThemeToggle } from "@/components/app/theme-provider";
 import { usePremiumShellMotion } from "@/components/app/use-premium-motion";
-import { hasMasterAccess } from "@/lib/access";
+import { hasMasterAccess, resolveAuthorizedDashboardModule } from "@/lib/access";
 import {
   cancelScheduledAppRoutePreload,
   preloadAppRoute,
@@ -49,9 +50,6 @@ import {
   canManageViews,
   canManageWorkers,
   canViewAudit,
-  canViewCounting,
-  canViewDemographics,
-  canViewOccupancy,
 } from "@/lib/permissions";
 import { cn, initials } from "@/lib/utils";
 import type { CurrentUser } from "@/lib/types";
@@ -81,19 +79,19 @@ const clientNavItems: NavItem[] = [
     href: "/dashboard/live",
     label: "Ao Vivo",
     icon: Activity,
-    canShow: canAccessOperationalDashboards,
+    canShow: (user) => canAccessOperationalDashboards(user, "live"),
   },
   {
     href: "/dashboard/analytics",
     label: "Análises",
     icon: ChartNoAxesCombined,
-    canShow: canAccessOperationalDashboards,
+    canShow: (user) => canAccessOperationalDashboards(user, "analytics"),
   },
   {
     href: "/dashboard/reports",
     label: "Relatórios",
     icon: FileText,
-    canShow: canAccessOperationalDashboards,
+    canShow: (user) => canAccessOperationalDashboards(user, "reports"),
   },
 ];
 
@@ -102,19 +100,19 @@ const managerNavItems: NavItem[] = [
     href: "/manager/live",
     label: "Ao Vivo",
     icon: Activity,
-    canShow: canAccessOperationalDashboards,
+    canShow: (user) => canAccessOperationalDashboards(user, "live"),
   },
   {
     href: "/manager/analytics",
     label: "Análises",
     icon: ChartNoAxesCombined,
-    canShow: canAccessOperationalDashboards,
+    canShow: (user) => canAccessOperationalDashboards(user, "analytics"),
   },
   {
     href: "/manager/reports",
     label: "Relatórios",
     icon: FileText,
-    canShow: canAccessOperationalDashboards,
+    canShow: (user) => canAccessOperationalDashboards(user, "reports"),
   },
   {
     href: "/manager/audit",
@@ -263,14 +261,12 @@ export function AppShell({
   const visibleClientNavItems = clientNavItems.filter(
     (item) => !item.canShow || item.canShow(user),
   );
-  const fallbackDashboardModule: AppDashboardModule | undefined =
-    canViewCounting(user)
-      ? "counting"
-      : canViewOccupancy(user)
-        ? "occupancy"
-        : canViewDemographics(user)
-          ? "demographics"
-          : undefined;
+  function fallbackDashboardModule(targetPath: string): AppDashboardModule | undefined {
+    const preferred = shellRef.current
+      ?.querySelector<HTMLElement>("[data-dashboard-module]")
+      ?.dataset.dashboardModule;
+    return resolveAuthorizedDashboardModule(user, targetPath, preferred);
+  }
   const navItems =
     mode === "manager"
       ? [
@@ -495,19 +491,19 @@ export function AppShell({
                 onFocus={() =>
                   scheduleAppRoutePreload(
                     item.href,
-                    fallbackDashboardModule,
+                    fallbackDashboardModule(item.href),
                     140,
                     () => router.prefetch(item.href),
                   )
                 }
                 onPointerDown={() => {
                   router.prefetch(item.href);
-                  preloadAppRoute(item.href, fallbackDashboardModule);
+                  preloadAppRoute(item.href, fallbackDashboardModule(item.href));
                 }}
                 onPointerEnter={() =>
                   scheduleAppRoutePreload(
                     item.href,
-                    fallbackDashboardModule,
+                    fallbackDashboardModule(item.href),
                     140,
                     () => router.prefetch(item.href),
                   )
@@ -614,29 +610,24 @@ export function AppShell({
         </div>
       </aside>
 
-      <header className="sticky top-0 z-20 border-b border-border bg-card/95 px-4 py-3 backdrop-blur lg:hidden">
-        <div className="flex min-w-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2">
-            <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-xs font-black text-primary-foreground">
-              IPX
-            </div>
-            <div className="min-w-0">
-              <div className="text-sm font-semibold">IPXData</div>
-              <div className="truncate text-xs text-muted-foreground">{pageTitle}</div>
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <ThemeToggle />
-            <Button variant="ghost" size="icon" onClick={logout} aria-label="Sair">
-              <LogOut className="h-4 w-4" />
+      <MobileNavigation
+        pageTitle={pageTitle}
+        companyName={companyName}
+        userName={user?.name}
+        userEmail={user?.email}
+        pathname={pathname}
+        accountActions={
+          <>
+            <ThemeToggle showLabel />
+            <Button type="button" variant="ghost" onClick={logout}>
+              <LogOut aria-hidden="true" />
+              Sair
             </Button>
-          </div>
-        </div>
-        <nav
-          aria-label="Navegação principal em telas estreitas"
-          className="enterprise-horizontal-scroll mt-3 flex gap-2 overflow-x-auto pb-1"
-        >
-          {navItems.map((item) => {
+          </>
+        }
+      >
+        {(closeMenu) =>
+          navItems.map((item) => {
             const Icon = item.icon;
             const active = pathname === item.href;
             const liveItem = item.href.endsWith("/live");
@@ -650,44 +641,46 @@ export function AppShell({
                 aria-label={item.label}
                 onClick={() => {
                   if (liveItem) requestLiveRefresh();
+                  closeMenu();
                 }}
                 onBlur={() => cancelScheduledAppRoutePreload(item.href)}
                 onFocus={() =>
                   scheduleAppRoutePreload(
                     item.href,
-                    fallbackDashboardModule,
+                    fallbackDashboardModule(item.href),
                     140,
                     () => router.prefetch(item.href),
                   )
                 }
                 onPointerDown={() => {
                   router.prefetch(item.href);
-                  preloadAppRoute(item.href, fallbackDashboardModule);
+                  preloadAppRoute(item.href, fallbackDashboardModule(item.href));
                 }}
                 onPointerEnter={() =>
                   scheduleAppRoutePreload(
                     item.href,
-                    fallbackDashboardModule,
+                    fallbackDashboardModule(item.href),
                     140,
                     () => router.prefetch(item.href),
                   )
                 }
                 onPointerLeave={() => cancelScheduledAppRoutePreload(item.href)}
                 className={cn(
-                  "relative inline-flex items-center gap-2 overflow-hidden whitespace-nowrap rounded-md border bg-card px-3 py-2 text-xs font-medium",
-                  active && "border-primary/30 bg-primary/10 text-primary",
+                  "relative flex min-h-11 min-w-0 items-center gap-3 rounded-md px-3 py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+                  active && "bg-primary/10 text-primary",
                 )}
                 data-premium-hover
                 data-premium-nav-item
               >
-                <Icon className="h-3.5 w-3.5" />
-                {item.label}
+                <Icon className="h-5 w-5 shrink-0" />
+                <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{item.label}</span>
+                {active ? <ChevronRight aria-hidden="true" className="h-4 w-4 shrink-0" /> : null}
                 <NavigationPendingIndicator />
               </Link>
             );
-          })}
-        </nav>
-      </header>
+          })
+        }
+      </MobileNavigation>
 
       <main
         id="main-content"
@@ -697,7 +690,7 @@ export function AppShell({
           !sidebarCollapsed && "lg:pl-64",
         )}
       >
-        <div className="w-full p-4">
+        <div className="min-w-0 w-full p-4">
           <div className="mb-4 max-w-4xl">
             <h1
               className="text-2xl font-semibold tracking-normal text-balance text-foreground"
@@ -742,9 +735,9 @@ function NavigationPendingIndicator() {
 function MasterScopeLoading() {
   return (
     <div className="rounded-md border border-border bg-card p-6 shadow-soft">
-      <div className="h-5 w-48 animate-pulse rounded-md bg-muted" />
+      <div className="h-5 w-48 max-w-full animate-pulse rounded-md bg-muted" />
       <div className="mt-3 h-4 w-full max-w-xl animate-pulse rounded-md bg-muted" />
-      <div className="mt-2 h-4 w-80 animate-pulse rounded-md bg-muted" />
+      <div className="mt-2 h-4 w-80 max-w-full animate-pulse rounded-md bg-muted" />
     </div>
   );
 }

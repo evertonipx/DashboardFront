@@ -132,14 +132,14 @@ export function CountingReportPeriodControl({
         <Button
           type="button"
           variant="outline"
-          className="h-8 w-8 min-w-0 max-w-full shrink-0 justify-center bg-card px-0 py-0 text-left text-xs @sm:w-full @sm:justify-start @sm:px-2.5"
+          className="h-auto min-h-8 w-full min-w-0 max-w-full justify-start whitespace-normal bg-card px-2.5 py-1.5 text-left text-xs"
           disabled={disabled}
           aria-haspopup="dialog"
           aria-label={`Alterar período do relatório. Atual: ${formatCountingReportPeriod(normalized)}`}
           title={`${formatCountingReportPeriod(normalized)} · ${countingReportPeriodMonthCount(normalized)} meses`}
         >
           <CalendarRange className="h-4 w-4 shrink-0 text-primary" />
-          <span className="sr-only font-medium @sm:not-sr-only @sm:min-w-0 @sm:flex-1 @sm:truncate">
+          <span className="min-w-0 flex-1 break-words font-medium">
             {formatCountingReportPeriod(normalized)}
           </span>
           <span className="hidden shrink-0 text-[10px] font-normal text-muted-foreground @2xl:inline">
@@ -168,7 +168,7 @@ export function CountingReportPeriodControl({
                   key={preset.value}
                   type="button"
                   variant={draftPreset === preset.value ? "secondary" : "ghost"}
-                  className="h-auto min-h-10 justify-start gap-2 px-2.5 py-2 text-left"
+                  className="h-auto min-h-10 justify-start gap-2 whitespace-normal px-2.5 py-2 text-left"
                   onClick={() => updatePreset(preset.value)}
                 >
                   <span className="flex h-5 w-5 shrink-0 items-center justify-center">
@@ -177,10 +177,10 @@ export function CountingReportPeriodControl({
                     ) : null}
                   </span>
                   <span className="min-w-0">
-                    <span className="block truncate text-xs font-medium">
+                    <span className="block break-words text-xs font-medium">
                       {preset.label}
                     </span>
-                    <span className="block truncate text-[10px] font-normal text-muted-foreground">
+                    <span className="block break-words text-[10px] font-normal text-muted-foreground">
                       {preset.description}
                     </span>
                   </span>
@@ -191,7 +191,7 @@ export function CountingReportPeriodControl({
 
           <div className="min-w-0 space-y-4 p-4 md:p-5">
             <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
+              <div className="min-w-0 space-y-1.5">
                 <Label htmlFor={fromInputId}>Mês inicial</Label>
                 <Input
                   id={fromInputId}
@@ -205,7 +205,7 @@ export function CountingReportPeriodControl({
                   }
                 />
               </div>
-              <div className="space-y-1.5">
+              <div className="min-w-0 space-y-1.5">
                 <Label htmlFor={toInputId}>Mês final</Label>
                 <Input
                   id={toInputId}
@@ -227,7 +227,7 @@ export function CountingReportPeriodControl({
               onClick={() =>
                 setDraftIncludeOpenPeriod((current) => !current)
               }
-              className="flex w-full items-center justify-between gap-4 rounded-lg border bg-card px-3 py-2.5 text-left transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="focus-contained flex w-full min-w-0 max-w-full items-center justify-between gap-4 rounded-lg border bg-card px-3 py-2.5 text-left transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0"
             >
               <span className="min-w-0">
                 <span className="block text-sm font-medium">
@@ -257,12 +257,12 @@ export function CountingReportPeriodControl({
               </span>
             </button>
 
-            <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border bg-muted/15 px-3 py-2">
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/15 px-3 py-2">
               <div className="min-w-0">
-                <div className="truncate text-xs font-medium">
+                <div className="break-words text-xs font-medium">
                   {formatCountingReportPeriod(draft)}
                 </div>
-                <div className="truncate text-[11px] text-muted-foreground">
+                <div className="break-words text-[11px] text-muted-foreground">
                   Aplicado a widgets, tabelas e exportações
                 </div>
               </div>

@@ -34,6 +34,7 @@ type ReportsDashboardProps = {
 export function ReportsDashboard({ manager = false }: ReportsDashboardProps) {
   return (
     <DashboardModuleTabs
+      surface="reports"
       counting={<ScenarioReportsDashboard manager={manager} />}
       demographics={
         <DemographicsDashboard manager={manager} surface="reports" />

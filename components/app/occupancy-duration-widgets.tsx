@@ -1510,6 +1510,7 @@ function durationTimelineRenderItem(
     if (
       right - left >= 54 &&
       bottom - top >= height * 0.8 &&
+      durationSeconds !== 0 &&
       state !== "unknown"
     ) {
       children.push({

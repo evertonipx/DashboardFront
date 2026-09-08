@@ -11,7 +11,7 @@ const Table = React.forwardRef<HTMLTableElement, TableProps>(
     <div
       aria-label={scrollRegionLabel}
       className={cn(
-        "relative w-full overflow-auto",
+        "relative min-w-0 w-full max-w-full overflow-auto",
         scrollRegionLabel && "enterprise-horizontal-scroll",
       )}
       role={scrollRegionLabel ? "region" : undefined}

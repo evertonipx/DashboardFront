@@ -921,7 +921,7 @@ function CardLayoutItem({
           draggable
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
-          className="absolute left-1/2 top-0 z-30 flex h-6 w-8 -translate-x-1/2 -translate-y-1/2 cursor-grab items-center justify-center rounded-md border bg-card/95 text-muted-foreground shadow-sm transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 active:cursor-grabbing"
+          className="focus-contained absolute left-1/2 top-1 z-30 flex h-6 w-8 -translate-x-1/2 cursor-grab items-center justify-center rounded-md border bg-card/95 text-muted-foreground shadow-sm transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0 active:cursor-grabbing"
           aria-grabbed={draggingId === card.id}
           aria-label={`Mover ${card.label ?? "Widget"}`}
           title="Arrastar para mover"
@@ -1168,8 +1168,8 @@ function WidgetOrganizerDialog({
           </div>
         </div>
 
-        <div className="min-h-0 space-y-4 overflow-y-auto lg:grid lg:grid-cols-[minmax(0,1.35fr)_minmax(20rem,0.65fr)] lg:gap-4 lg:space-y-0 lg:overflow-hidden">
-          <div className="space-y-4 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+        <div className="min-h-0 min-w-0 max-w-full space-y-4 overflow-y-auto lg:grid lg:grid-cols-[minmax(0,1.35fr)_minmax(20rem,0.65fr)] lg:gap-4 lg:space-y-0 lg:overflow-hidden">
+          <div className="min-w-0 max-w-full space-y-4 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
             <WidgetBentoPreview
               columnCount={previewColumnCount}
               hiddenCount={hiddenCards.length}
@@ -1195,7 +1195,7 @@ function WidgetOrganizerDialog({
               data-hidden-widget-section
               open={hiddenCards.length > 0}
             >
-              <summary className="cursor-pointer list-none px-3 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+              <summary className="focus-contained cursor-pointer list-none px-3 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
                 <span className="flex items-center justify-between gap-3">
                   <span className="text-sm font-semibold">Widgets ocultos</span>
                   <Badge variant="secondary">{hiddenCards.length}</Badge>
@@ -1232,7 +1232,7 @@ function WidgetOrganizerDialog({
                       >
                         <button
                           type="button"
-                          className="min-w-0 rounded-sm px-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          className="focus-contained min-w-0 rounded-sm px-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0"
                           onClick={() => onSelectedCardIdChange(card.id)}
                           aria-pressed={selectedCard?.id === card.id}
                         >
@@ -1274,7 +1274,7 @@ function WidgetOrganizerDialog({
           </div>
 
           <aside
-            className="rounded-lg border bg-card p-3 lg:min-h-0 lg:overflow-y-auto"
+            className="min-w-0 max-w-full rounded-lg border bg-card p-3 lg:min-h-0 lg:overflow-y-auto"
             data-widget-inspector
             id={inspectorId}
           >
@@ -1744,8 +1744,8 @@ function DimensionLevelButton({
     <button
       type="button"
       className={cn(
-        "flex h-11 min-w-0 flex-col items-center justify-center gap-1 rounded-sm text-[9px] font-semibold text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
-        active && "bg-primary text-primary-foreground shadow-sm hover:bg-primary hover:text-primary-foreground",
+        "focus-contained flex h-11 min-w-0 max-w-full flex-col items-center justify-center gap-1 rounded-sm text-[9px] font-semibold text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
+        active && "bg-primary text-primary-foreground shadow-sm hover:bg-primary hover:text-primary-foreground focus-visible:ring-primary-foreground",
       )}
       onClick={onClick}
       aria-label={label}
@@ -1799,7 +1799,7 @@ function WidgetTitleEditor({
   }
 
   return (
-    <div className="flex min-w-[220px] flex-1 items-center gap-1.5">
+    <div className="flex min-w-0 max-w-full w-full flex-1 items-center gap-1.5">
       <Input
         aria-label={`Título de ${defaultTitle}`}
         className="h-8 min-w-0"
@@ -1923,9 +1923,9 @@ function WidgetChartTypePicker({
             key={type}
             type="button"
             className={cn(
-              "flex h-6 w-7 items-center justify-center rounded-sm text-muted-foreground transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+              "focus-contained flex h-6 w-7 items-center justify-center rounded-sm text-muted-foreground transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
               chartType === type &&
-                "bg-primary text-primary-foreground shadow-sm hover:text-primary-foreground",
+                "bg-primary text-primary-foreground shadow-sm hover:text-primary-foreground focus-visible:ring-primary-foreground",
             )}
             onClick={() => onChange(cardId, type)}
             aria-label={option.ariaLabel}
@@ -1993,7 +1993,7 @@ function WidgetColorPicker({
           key={swatch}
           type="button"
           className={cn(
-            "h-4 w-4 rounded-sm border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+            "focus-contained h-4 w-4 rounded-sm border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
             color === swatch && "ring-2 ring-primary ring-offset-1",
           )}
           style={widgetColorPreviewStyle(swatch, gradient)}
@@ -2003,11 +2003,11 @@ function WidgetColorPicker({
         />
       ))}
       <label
-        className="relative h-4 w-4 cursor-pointer overflow-hidden rounded-sm border"
+        className="focus-within-contained relative h-4 w-4 cursor-pointer overflow-hidden rounded-sm border focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring focus-within:ring-offset-0"
         title="Cor personalizada"
       >
         <span
-          className="absolute inset-0"
+          className="pointer-events-none absolute inset-[2px] rounded-[1px]"
           style={widgetColorPreviewStyle(
             color ?? "#1267C4",
             gradient,
@@ -2017,14 +2017,14 @@ function WidgetColorPicker({
           type="color"
           value={color ?? "#1267C4"}
           onChange={(event) => onChange(cardId, event.target.value)}
-          className="absolute inset-0 cursor-pointer opacity-0"
+          className="absolute inset-0 h-full min-w-0 w-full cursor-pointer opacity-0"
           aria-label="Escolher cor personalizada"
         />
       </label>
       {color ? (
         <button
           type="button"
-          className="flex h-4 w-4 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+          className="focus-contained flex h-4 w-4 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0"
           onClick={() => onChange(cardId, undefined)}
           aria-label="Restaurar cor padrão"
           title="Cor padrão"

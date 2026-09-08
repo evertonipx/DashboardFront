@@ -784,7 +784,10 @@ export function OccupancyScenarioDashboard() {
       }
 
       if (runningRef.current) {
-        if (!force) return;
+        // A superseded request can still be settling its aborted promise.
+        // The newly selected scenario/plan must start immediately; the old
+        // finally block is already guarded by the controller identity.
+        if (!force && !requestRef.current?.signal.aborted) return;
         requestRef.current?.abort();
       }
 
@@ -1221,7 +1224,9 @@ export function OccupancyScenarioDashboard() {
   }, [loadScenarioData, occupancyPreferencesReady, selectedScenario]);
 
   React.useEffect(() => {
-    if (!occupancyPreferencesReady) return;
+    if (!occupancyPreferencesReady || !selectedScenario ||
+        (!occupancyDataPlan.history && !occupancyDataPlan.alerts &&
+          occupancyDataPlan.granularities.length === 0)) return;
 
     let disposed = false;
     let timeout: number | undefined;
@@ -1238,7 +1243,7 @@ export function OccupancyScenarioDashboard() {
 
     async function refreshWhenVisible() {
       if (disposed || refreshRunning) return;
-      if (document.visibilityState !== "visible" || !selectedScenario) {
+      if (document.visibilityState !== "visible" || navigator.onLine === false || !selectedScenario) {
         scheduleNextRefresh();
         return;
       }
@@ -1262,16 +1267,19 @@ export function OccupancyScenarioDashboard() {
     }
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleVisibilityChange);
 
     return () => {
       disposed = true;
       if (timeout !== undefined) window.clearTimeout(timeout);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleVisibilityChange);
       requestRef.current?.abort();
     };
   }, [
     liveRefreshMs,
     loadScenarioData,
+    occupancyDataPlan,
     occupancyPreferencesReady,
     selectedScenario,
   ]);
@@ -1766,10 +1774,12 @@ export function OccupancyScenarioDashboard() {
             retrying={loadingScenarios || loadingData || refreshing}
           />
         ) : loadingScenarios ? (
-          <div className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(248px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(248px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(248px,1fr)] @md:gap-2">
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full" />
-            <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+          <div data-dashboard-toolbar>
+            <div data-toolbar-filters className="basis-[24rem]">
+              <Skeleton className="h-8 min-w-0 max-w-md flex-[1_1_14rem]" />
+              <Skeleton className="h-8 w-[8.75rem] max-w-full" />
+            </div>
+            <div data-toolbar-actions>
               <Skeleton className="hidden h-3.5 w-3.5 shrink-0 @md:block @lg:w-10 @xl:w-24" />
               <Skeleton className="h-8 w-[248px] max-w-full shrink-0" />
             </div>
@@ -1779,48 +1789,51 @@ export function OccupancyScenarioDashboard() {
             <div className="space-y-1">
               <div
                 aria-label="Controles da visão de ocupação"
-                className="grid min-w-0 grid-cols-[minmax(0,96px)_minmax(0,64px)_minmax(248px,1fr)] items-center gap-1 @sm:grid-cols-[minmax(96px,112px)_64px_minmax(248px,1fr)] @md:grid-cols-[minmax(120px,160px)_64px_minmax(248px,1fr)] @md:gap-2"
+                data-dashboard-toolbar
                 role="group"
               >
-              <div className="min-w-0">
-                <Select value={selectedId} onValueChange={setSelectedId}>
-                  <SelectTrigger
-                    aria-label="Cenário de ocupação em foco"
-                    className="h-8 w-full min-w-0 bg-card"
-                  >
-                    <SelectValue placeholder="Selecione um cenário" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {visibleScenarios.map((scenario) => (
-                      <SelectItem key={scenario.id} value={scenario.id}>
-                        {scenario.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <div data-toolbar-filters className="basis-[24rem]">
+                <div className="min-w-0 max-w-md flex-[1_1_14rem]">
+                  <Select value={selectedId} onValueChange={setSelectedId}>
+                    <SelectTrigger
+                      aria-label="Cenário de ocupação em foco"
+                      className="h-auto min-h-8 w-full min-w-0 bg-card py-1"
+                    >
+                      <SelectValue placeholder="Selecione um cenário" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {visibleScenarios.map((scenario) => (
+                        <SelectItem key={scenario.id} value={scenario.id}>
+                          {scenario.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div
+                  aria-label="Aparência dos comparativos desta visão"
+                  className="flex w-[8.75rem] min-w-0 max-w-full items-center gap-2"
+                  role="group"
+                >
+                  <OccupancyPaletteSelect
+                    ariaLabel="Paleta dos comparativos desta visão"
+                    compact
+                    fluid
+                    value={occupancyComparisonSettings.colorPaletteId}
+                    onValueChange={(colorPaletteId) =>
+                      updateOccupancyComparisonSettings({ colorPaletteId })
+                    }
+                  />
+                </div>
               </div>
 
-              <div
-                aria-label="Aparência dos comparativos desta visão"
-                className="flex min-w-0 items-center gap-2"
-                role="group"
-              >
-                <OccupancyPaletteSelect
-                  ariaLabel="Paleta dos comparativos desta visão"
-                  compact
-                  fluid
-                  value={occupancyComparisonSettings.colorPaletteId}
-                  onValueChange={(colorPaletteId) =>
-                    updateOccupancyComparisonSettings({ colorPaletteId })
-                  }
-                />
-              </div>
-
-              <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+              <div data-toolbar-actions>
                 {lastUpdated ? (
                   <span
+                    data-toolbar-status
                     aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                    className="hidden min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @md:inline-flex"
+                    className="hidden min-w-0 items-center gap-1 whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @4xl:inline-flex"
                     title={`Última atualização às ${formatTime(lastUpdated)}`}
                   >
                     <Clock3 className="h-3.5 w-3.5 shrink-0" />
@@ -1834,7 +1847,7 @@ export function OccupancyScenarioDashboard() {
                 ) : null}
                 <div
                   aria-label="Ações da visão de ocupação"
-                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 [&_[data-monitor-mode-trigger]]:shrink-0 [&_[data-premium-control]]:shrink-0"
+                  className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1 [&_[data-monitor-mode-trigger]]:shrink-0 [&_[data-premium-control]]:shrink-0"
                   role="group"
                 >
                   <ReportExportActions
@@ -1933,7 +1946,7 @@ export function OccupancyScenarioDashboard() {
                 role="group"
               >
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-                  <div className="min-w-[180px] shrink-0">
+                  <div className="min-w-0 max-w-full lg:basis-[180px] lg:shrink-0">
                     <div className="text-sm font-semibold">Séries históricas</div>
                     <div className="text-[11px] text-muted-foreground">
                       Medidas exibidas nos gráficos temporais.
@@ -1948,7 +1961,7 @@ export function OccupancyScenarioDashboard() {
                     />
                   </div>
                   <Button
-                    className="h-9 w-full shrink-0 lg:w-auto lg:min-w-[112px]"
+                    className="h-9 min-h-9 w-full shrink-0 lg:w-auto lg:min-w-[112px]"
                     type="button"
                     variant="secondary"
                     onClick={() => setOperationalSettingsOpen(false)}
@@ -2247,9 +2260,9 @@ function MetricVisibilityControls({
               })
             }
             className={cn(
-              "h-8 rounded px-2 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+              "focus-contained h-8 min-w-0 max-w-full rounded px-2 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
               active
-                ? "bg-primary text-primary-foreground shadow-sm"
+                ? "bg-primary text-primary-foreground shadow-sm focus-visible:ring-primary-foreground"
                 : "text-muted-foreground hover:bg-background",
             )}
           >

@@ -145,6 +145,7 @@ import {
   filterScopedApiRows,
   getCurrentUserCompanyId,
   getEntityCompanyId,
+  getUserViewScopedStorageReadKeys,
   MASTER_COMPANY_SCOPE_EVENT,
   useEffectiveCompanyScopeId,
   useEffectiveCompanyTimeZoneResolution,
@@ -267,7 +268,11 @@ import type {
   Worker,
 } from "@/lib/types";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
-import { USER_GRID_LOCAL_CHANGE_EVENT } from "@/lib/user-grid-local";
+import { USER_GRID_HYDRATED_EVENT } from "@/lib/user-grid";
+import {
+  USER_GRID_LOCAL_CHANGE_EVENT,
+  type UserGridLocalChangeDetail,
+} from "@/lib/user-grid-local";
 import { cn, formatNumber, formatTime } from "@/lib/utils";
 import {
   collapseWorkerIdentityChains,
@@ -334,6 +339,7 @@ type OptionalScenarioMetadata = {
 
 type WorkerMetadataValidationOptions = {
   requireExplicitCompanyId: boolean;
+  signal?: AbortSignal;
 };
 
 type ChartPoint = {
@@ -647,12 +653,15 @@ export function RealtimeDashboard({
     });
 
   const requestRef = React.useRef<AbortController | null>(null);
+  const lastChartsCompletedAtRef = React.useRef(0);
+  const completedChartsRequestKeyRef = React.useRef("");
   const annualHistoryRequestRef = React.useRef<AbortController | null>(null);
   const runningRef = React.useRef(false);
   const hasLoadedChartsRef = React.useRef(false);
   const annualHistoryRequestSequenceRef = React.useRef(0);
   const annualHistoryAttemptDayRef = React.useRef("");
   const metadataRequestSequenceRef = React.useRef(0);
+  const metadataAbortControllerRef = React.useRef<AbortController | null>(null);
   const metadataRequestKeyRef = React.useRef("");
   const metadataLoadedKeyRef = React.useRef("");
   const metadataCatalogScopeKeyRef = React.useRef("");
@@ -775,32 +784,69 @@ export function RealtimeDashboard({
     () => parseRealtimeDataPlanKey(realtimeDataPlanKey),
     [realtimeDataPlanKey],
   );
+  // Operational controls affect requests only when their source is visible.
+  const requestedIntradayComparison = realtimeDataPlan.definitionIds.includes(
+    OPERATIONAL_COMPARISON_HOURS_ID,
+  ) ? operationalSettings.intradayComparison : "yesterday";
+  const requestedOccupancyStartHour = realtimeDataPlan.definitionIds.includes(
+    OCCUPANCY_HOURS_ID,
+  ) ? operationalSettings.occupancyStartHour : 0;
+  // Aggregates are fetched for the company and filtered locally per view.
+  // Equivalent views can reuse a fresh certified dataset after preferences
+  // hydrate, while a different source plan or timezone still reloads.
+  const realtimeRequestKey = JSON.stringify([
+    companyScopeId,
+    companyTimeZone,
+    companyScopeCertificationError,
+    realtimeDataPlanKey,
+    requestedIntradayComparison,
+    requestedOccupancyStartHour,
+  ]);
   const preferenceScope = React.useMemo(
     () => ({ userId: user?.id, viewId: selectedScope?.id }),
     [selectedScope?.id, user?.id],
   );
-  const openScenarioComparisonWidgetIds = React.useMemo(() => {
+  const comparisonWidgetIdsKey = customWidgets
+    .filter((widget) => widget.kind === "scenario_comparison")
+    .map((widget) => widget.id)
+    .sort()
+    .join("|");
+  const comparisonSettingsReadKeys = React.useMemo(
+    () => new Set(
+      (comparisonWidgetIdsKey ? comparisonWidgetIdsKey.split("|") : [])
+        .flatMap((id) => getUserViewScopedStorageReadKeys(
+          `ipxdata.${realtimeScenarioComparisonStorageKey(id)}.scenario-comparison.v1`,
+          companyScopeId,
+          preferenceScope.userId,
+          preferenceScope.viewId,
+        )),
+    ),
+    [companyScopeId, comparisonWidgetIdsKey, preferenceScope],
+  );
+  const comparisonSettingsForPlan = React.useMemo(() => {
     void comparisonSettingsRevision;
-    return new Set(
-      customWidgets.flatMap((widget) => {
-        if (widget.kind !== "scenario_comparison") return [];
-        const settings = loadScenarioComparisonSettings(
-          realtimeScenarioComparisonStorageKey(widget.id),
+    return (comparisonWidgetIdsKey ? comparisonWidgetIdsKey.split("|") : [])
+      .map((id) => ({
+        id,
+        settings: loadScenarioComparisonSettings(
+          realtimeScenarioComparisonStorageKey(id),
           companyScopeId,
           preferenceScope,
-        );
+        ),
+      }));
+  }, [companyScopeId, comparisonSettingsRevision, comparisonWidgetIdsKey, preferenceScope]);
+  const openScenarioComparisonWidgetIds = React.useMemo(() => {
+    return new Set(
+      comparisonSettingsForPlan.flatMap(({ id, settings }) => {
         const definition = buildScenarioComparisonDefinition(settings, clock);
         return scenarioComparisonDefinitionIncludesOpenHour(definition, clock)
-          ? [widget.id]
+          ? [id]
           : [];
       }),
     );
   }, [
     clock,
-    companyScopeId,
-    comparisonSettingsRevision,
-    customWidgets,
-    preferenceScope,
+    comparisonSettingsForPlan,
   ]);
 
   React.useEffect(() => {
@@ -932,6 +978,9 @@ export function RealtimeDashboard({
       setLoadingScenarios(false);
       return;
     }
+    metadataAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    metadataAbortControllerRef.current = controller;
     if (!silent) {
       setLoadingScenarios(true);
       setMetadataError("");
@@ -943,22 +992,28 @@ export function RealtimeDashboard({
         await Promise.allSettled([
           fetchRealtimeScenarios(companyScopeId, {
             requireExplicitCompanyId: requireExplicitWorkerCompanyId,
+            signal: controller.signal,
           }),
           infrastructureCatalogsAllowed
-            ? apiFetch<unknown>("/cameras", { companyScopeId })
+            ? apiFetch<unknown>("/cameras", { companyScopeId, signal: controller.signal })
             : Promise.resolve([]),
           infrastructureCatalogsAllowed
-            ? apiFetch<unknown>("/locations", { companyScopeId })
+            ? apiFetch<unknown>("/locations", { companyScopeId, signal: controller.signal })
             : Promise.resolve([]),
           infrastructureCatalogsAllowed
             ? fetchRealtimeWorkers(companyScopeId, {
                 requireExplicitCompanyId: requireExplicitWorkerCompanyId,
+                signal: controller.signal,
               })
             : Promise.resolve<OptionalWorkerMetadata>({
                 rows: [],
                 warning: "",
               }),
         ]);
+      if (
+        controller.signal.aborted ||
+        requestSequence !== metadataRequestSequenceRef.current
+      ) return;
       if (cameraResult.status === "rejected") throw cameraResult.reason;
       if (locationResult.status === "rejected") throw locationResult.reason;
       if (
@@ -1000,6 +1055,7 @@ export function RealtimeDashboard({
         scopedLocations,
         companyScopeId,
         requireExplicitWorkerCompanyId,
+        controller.signal,
       );
       requireInfrastructureRelations({
         cameras: scopedCameras,
@@ -1010,7 +1066,10 @@ export function RealtimeDashboard({
         ? scenarioMetadata.rows
         : scenarioMetadata.rows.filter((scenario) => scenario.active);
 
-      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      if (
+        controller.signal.aborted ||
+        requestSequence !== metadataRequestSequenceRef.current
+      ) return;
       const currentCameraGroups = cameraGroupsRef.current;
       const currentWorkerLocationAssignments =
         workerLocationAssignmentsRef.current;
@@ -1068,7 +1127,10 @@ export function RealtimeDashboard({
       setSelectedId(nextFocus.selectedId);
       metadataLoadedKeyRef.current = metadataKey;
     } catch (error) {
-      if (requestSequence !== metadataRequestSequenceRef.current) return;
+      if (
+        isAbortError(error) || controller.signal.aborted ||
+        requestSequence !== metadataRequestSequenceRef.current
+      ) return;
       metadataLoadedKeyRef.current = "";
       if (silent) return;
       const message = dashboardErrorMessage(
@@ -1087,6 +1149,9 @@ export function RealtimeDashboard({
       setWorkerMetadataWarning("");
       toast.error(message);
     } finally {
+      if (metadataAbortControllerRef.current === controller) {
+        metadataAbortControllerRef.current = null;
+      }
       if (
         requestSequence === metadataRequestSequenceRef.current &&
         metadataRequestKeyRef.current === metadataKey
@@ -1105,6 +1170,18 @@ export function RealtimeDashboard({
     manager,
     personalFocusEnabled,
     requireExplicitWorkerCompanyId,
+    setCameras,
+    setChartData,
+    setLoadingScenarios,
+    setLocations,
+    setMetadataError,
+    setScenarioMetadataWarning,
+    setScenarios,
+    setScopeMode,
+    setSelectedId,
+    setSubLocations,
+    setWorkerMetadataWarning,
+    setWorkers,
     userId,
   ]);
 
@@ -1194,14 +1271,14 @@ export function RealtimeDashboard({
         buildCurrentMonthDaysDefinition(now),
         buildOperationalComparisonHoursDefinition(
           now,
-          operationalSettings.intradayComparison,
+          requestedIntradayComparison,
         ),
         buildOperationalBaselineMonthDefinition(now, "previous_month"),
         buildOperationalBaselineMonthDefinition(now, "last_year"),
         buildOperationalTrendDaysDefinition(now),
         buildHourlyOccupancyDataDefinition(
           now,
-          operationalSettings.occupancyStartHour,
+          requestedOccupancyStartHour,
         ),
       ];
       const requestedDefinitionIds = new Set(
@@ -1457,9 +1534,19 @@ export function RealtimeDashboard({
             rows: minuteDayRows,
           };
         }
+        // Minute-day reconciliation can await additional coverage. A newer
+        // scope/plan may have replaced this request while it was suspended.
+        if (
+          controller.signal.aborted ||
+          requestRef.current !== controller
+        ) return;
         const refreshedAt = new Date();
 
         hasLoadedChartsRef.current = true;
+        lastChartsCompletedAtRef.current = refreshedAt.getTime();
+        completedChartsRequestKeyRef.current = Object.values(nextData).some(
+          (state) => state.error,
+        ) ? "" : realtimeRequestKey;
         const publishChartData = () => {
           setChartData(nextData);
           setChartLoadError("");
@@ -1483,6 +1570,7 @@ export function RealtimeDashboard({
           );
         }
       } catch (error) {
+        if (controller.signal.aborted || requestRef.current !== controller) return;
         if (!isAbortError(error)) {
           const message = dashboardErrorMessage(
             error,
@@ -1503,10 +1591,19 @@ export function RealtimeDashboard({
       companyScopeCertificationError,
       companyScopeId,
       companyTimeZone,
-      operationalSettings.intradayComparison,
-      operationalSettings.occupancyStartHour,
+      requestedIntradayComparison,
+      requestedOccupancyStartHour,
       realtimeDataPlan,
       realtimeDataPlanKey,
+      realtimeRequestKey,
+      setAnnualHistoryState,
+      setChartData,
+      setChartLoadError,
+      setClock,
+      setHasLoadedCharts,
+      setLastUpdated,
+      setLoadingAnnualHistory,
+      setLoadingCharts,
     ],
   );
 
@@ -1555,7 +1652,11 @@ export function RealtimeDashboard({
         signal: controller.signal,
         to: range.periodTo,
       });
-      if (requestSequence !== annualHistoryRequestSequenceRef.current) return;
+      if (
+        controller.signal.aborted ||
+        annualHistoryRequestRef.current !== controller ||
+        requestSequence !== annualHistoryRequestSequenceRef.current
+      ) return;
 
       setAnnualHistoryState({
         granularity: "month",
@@ -1563,7 +1664,7 @@ export function RealtimeDashboard({
       });
       annualHistoryAttemptDayRef.current = attemptDay;
     } catch (error) {
-      if (isAbortError(error)) return;
+      if (isAbortError(error) || controller.signal.aborted) return;
       if (requestSequence !== annualHistoryRequestSequenceRef.current) return;
 
       annualHistoryAttemptDayRef.current = attemptDay;
@@ -1591,6 +1692,8 @@ export function RealtimeDashboard({
     companyScopeCertificationError,
     companyScopeId,
     companyTimeZone,
+    setAnnualHistoryState,
+    setLoadingAnnualHistory,
   ]);
   const annualHistoryDayKey = [
     clock.getFullYear(),
@@ -1599,7 +1702,15 @@ export function RealtimeDashboard({
   ].join("-");
 
   React.useEffect(() => {
-    void loadScenarios();
+    // Coalesce the StrictMode setup/cleanup replay before starting network I/O.
+    const initialLoad = window.setTimeout(() => void loadScenarios(), 0);
+    return () => {
+      window.clearTimeout(initialLoad);
+      metadataAbortControllerRef.current?.abort();
+      metadataAbortControllerRef.current = null;
+      metadataRequestSequenceRef.current += 1;
+      metadataRequestKeyRef.current = "";
+    };
   }, [loadScenarios]);
 
   useResourceAutoRefresh(
@@ -1644,9 +1755,32 @@ export function RealtimeDashboard({
   }, [companyScopeCertificationError, companyScopeId]);
 
   React.useEffect(() => {
-    function syncCustomWidgets() {
-      setCustomWidgets(
-        loadRealtimeCustomWidgets(companyScopeId, preferenceScope),
+    const readKeys = new Set(getUserViewScopedStorageReadKeys(
+      "ipxdata.realtime-custom-widgets.v1",
+      companyScopeId,
+      preferenceScope.userId,
+      preferenceScope.viewId,
+    ));
+    function syncCustomWidgets(event?: Event) {
+      if (event?.type === "storage") {
+        const key = (event as StorageEvent).key;
+        if (key && !readKeys.has(key)) return;
+      }
+      if (event?.type === REALTIME_CUSTOM_WIDGETS_UPDATED_EVENT) {
+        const detail = (event as CustomEvent<{
+          companyId?: string | null;
+          userId?: string | null;
+          viewId?: string | null;
+        }>).detail;
+        if (
+          (detail?.companyId != null && detail.companyId !== companyScopeId) ||
+          (detail?.userId != null && detail.userId !== preferenceScope.userId) ||
+          (detail?.viewId != null && detail.viewId !== preferenceScope.viewId)
+        ) return;
+      }
+      const nextWidgets = loadRealtimeCustomWidgets(companyScopeId, preferenceScope);
+      setCustomWidgets((current) =>
+        JSON.stringify(current) === JSON.stringify(nextWidgets) ? current : nextWidgets,
       );
     }
 
@@ -1657,6 +1791,7 @@ export function RealtimeDashboard({
     );
     window.addEventListener("storage", syncCustomWidgets);
     window.addEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCustomWidgets);
+    window.addEventListener(USER_GRID_HYDRATED_EVENT, syncCustomWidgets);
 
     return () => {
       window.removeEventListener(
@@ -1665,11 +1800,17 @@ export function RealtimeDashboard({
       );
       window.removeEventListener("storage", syncCustomWidgets);
       window.removeEventListener(MASTER_COMPANY_SCOPE_EVENT, syncCustomWidgets);
+      window.removeEventListener(USER_GRID_HYDRATED_EVENT, syncCustomWidgets);
     };
   }, [companyScopeId, preferenceScope]);
 
   React.useEffect(() => {
-    function syncComparisonSettingsPlan() {
+    function syncComparisonSettingsPlan(event: Event) {
+      if (!comparisonSettingsReadKeys.size) return;
+      const key = event.type === "storage"
+        ? (event as StorageEvent).key
+        : (event as CustomEvent<UserGridLocalChangeDetail>).detail?.key;
+      if (key && !comparisonSettingsReadKeys.has(key)) return;
       setComparisonSettingsRevision((current) => current + 1);
     }
 
@@ -1677,13 +1818,17 @@ export function RealtimeDashboard({
       USER_GRID_LOCAL_CHANGE_EVENT,
       syncComparisonSettingsPlan,
     );
+    window.addEventListener("storage", syncComparisonSettingsPlan);
+    window.addEventListener(USER_GRID_HYDRATED_EVENT, syncComparisonSettingsPlan);
     return () => {
       window.removeEventListener(
         USER_GRID_LOCAL_CHANGE_EVENT,
         syncComparisonSettingsPlan,
       );
+      window.removeEventListener("storage", syncComparisonSettingsPlan);
+      window.removeEventListener(USER_GRID_HYDRATED_EVENT, syncComparisonSettingsPlan);
     };
-  }, []);
+  }, [comparisonSettingsReadKeys]);
 
   React.useEffect(() => {
     const metadataCatalogScopeKey = JSON.stringify([
@@ -1701,6 +1846,8 @@ export function RealtimeDashboard({
     requestRef.current?.abort();
     requestRef.current = null;
     runningRef.current = false;
+    lastChartsCompletedAtRef.current = 0;
+    completedChartsRequestKeyRef.current = "";
     annualHistoryRequestRef.current?.abort();
     annualHistoryRequestRef.current = null;
     annualHistoryRequestSequenceRef.current += 1;
@@ -1815,31 +1962,46 @@ export function RealtimeDashboard({
       return;
     }
 
-    loadCharts({ force: true });
+    const initialLoad = window.setTimeout(() => {
+      if (
+        completedChartsRequestKeyRef.current === realtimeRequestKey &&
+        Date.now() - lastChartsCompletedAtRef.current < realtimeDataPlan.refreshIntervalMs
+      ) return;
+      void loadCharts({ force: true });
+    }, 0);
 
     const interval = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
+      if (document.visibilityState === "visible" && navigator.onLine !== false) {
         loadCharts({ silent: true });
       }
     }, realtimeDataPlan.refreshIntervalMs);
 
     function handleVisibilityChange() {
-      if (document.visibilityState === "visible") {
-        loadCharts({ force: true, silent: true });
+      if (
+        document.visibilityState === "visible" &&
+        navigator.onLine !== false &&
+        Date.now() - lastChartsCompletedAtRef.current >= realtimeDataPlan.refreshIntervalMs
+      ) {
+        // A foreground event does not supersede an equivalent live request.
+        loadCharts({ silent: true });
       }
     }
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleVisibilityChange);
 
     return () => {
+      window.clearTimeout(initialLoad);
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleVisibilityChange);
       requestRef.current?.abort();
     };
   }, [
     loadCharts,
     realtimeDataPlan.refreshIntervalMs,
     realtimeDataPlanKey,
+    realtimeRequestKey,
   ]);
 
   const initialLoading = (loadingScenarios || loadingCharts) && !hasLoadedCharts;
@@ -3631,10 +3793,13 @@ export function RealtimeDashboard({
     if (annualHistoryRequestRef.current) return;
     if (annualHistoryAttemptDayRef.current === annualHistoryDayKey) return;
 
-    void loadAnnualHistory();
+    const initialLoad = window.setTimeout(() => void loadAnnualHistory(), 0);
 
     return () => {
+      window.clearTimeout(initialLoad);
       annualHistoryRequestRef.current?.abort();
+      annualHistoryRequestRef.current = null;
+      annualHistoryRequestSequenceRef.current += 1;
     };
   }, [
     annualHistoryDayKey,
@@ -4490,10 +4655,12 @@ export function RealtimeDashboard({
       ) : (
       <div className="@container rounded-md border border-border bg-card px-3 py-2 shadow-soft">
         {loadingScenarios ? (
-          <div className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(212px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(212px,1fr)] @lg:grid-cols-[112px_168px_minmax(212px,1fr)] @xl:grid-cols-[120px_200px_minmax(212px,1fr)] @2xl:grid-cols-[132px_220px_minmax(212px,1fr)]">
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full" />
-            <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+          <div data-dashboard-toolbar>
+            <div data-toolbar-filters className="basis-[24rem]">
+              <Skeleton className="h-8 w-[8.75rem] max-w-full" />
+              <Skeleton className="h-8 min-w-0 max-w-md flex-[1_1_14rem]" />
+            </div>
+            <div data-toolbar-actions>
               <Skeleton className="hidden h-3.5 w-4 shrink-0 @lg:block @xl:w-12 @2xl:w-24" />
               <Skeleton className="h-8 w-[212px] shrink-0" />
             </div>
@@ -4502,54 +4669,57 @@ export function RealtimeDashboard({
           <div className="space-y-3">
             <div
               aria-label="Controles da visão ao vivo de Contagem"
-              className="grid w-full min-w-0 grid-cols-[80px_minmax(0,104px)_minmax(212px,1fr)] items-center gap-1 @sm:grid-cols-[80px_104px_minmax(212px,1fr)] @sm:gap-2 @md:grid-cols-[104px_144px_minmax(212px,1fr)] @lg:grid-cols-[112px_168px_minmax(212px,1fr)] @xl:grid-cols-[120px_200px_minmax(212px,1fr)] @2xl:grid-cols-[132px_220px_minmax(212px,1fr)]"
+              data-dashboard-toolbar
               role="group"
             >
-              <div className="min-w-0">
-                <Select
-                  value={scopeMode}
-                  onValueChange={(value) => {
-                    setScopeMode(value as RealtimeScopeMode);
-                    setSelectedId("");
-                  }}
-                >
-                  <SelectTrigger
-                    aria-label="Tipo da visão de Contagem"
-                    className="h-8 w-full min-w-0 bg-card"
+              <div data-toolbar-filters className="basis-[24rem]">
+                <div className="w-[8.75rem] min-w-0 max-w-full shrink-0">
+                  <Select
+                    value={scopeMode}
+                    onValueChange={(value) => {
+                      setScopeMode(value as RealtimeScopeMode);
+                      setSelectedId("");
+                    }}
                   >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableModes.map((mode) => (
-                      <SelectItem key={mode.value} value={mode.value}>
-                        {mode.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                    <SelectTrigger
+                      aria-label="Tipo da visão de Contagem"
+                      className="h-auto min-h-8 w-full min-w-0 bg-card py-1"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableModes.map((mode) => (
+                        <SelectItem key={mode.value} value={mode.value}>
+                          {mode.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="min-w-0 max-w-md flex-[1_1_14rem]">
+                  <Select value={selectedId} onValueChange={setSelectedId}>
+                    <SelectTrigger
+                      aria-label={`${scopeModeLabel(scopeMode)} em foco`}
+                      className="h-auto min-h-8 w-full min-w-0 bg-card py-1"
+                    >
+                      <SelectValue placeholder="Selecione uma visão" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {scopeOptions.map((option) => (
+                        <SelectItem key={option.id} value={option.id}>
+                          {option.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
-              <div className="min-w-0">
-                <Select value={selectedId} onValueChange={setSelectedId}>
-                  <SelectTrigger
-                    aria-label={`${scopeModeLabel(scopeMode)} em foco`}
-                    className="h-8 w-full min-w-0 bg-card"
-                  >
-                    <SelectValue placeholder="Selecione uma visão" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {scopeOptions.map((option) => (
-                      <SelectItem key={option.id} value={option.id}>
-                        {option.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="col-start-3 row-start-1 flex w-full min-w-0 items-center justify-end gap-2">
+              <div data-toolbar-actions>
                 {lastUpdated ? (
                   <span
+                    data-toolbar-status
                     aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
-                    className="hidden min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @lg:inline-flex"
+                    className="hidden min-w-0 items-center gap-1 whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @4xl:inline-flex"
                     title={`Última atualização às ${formatTime(lastUpdated)}`}
                   >
                     <Clock3 className="h-3.5 w-3.5 shrink-0" />
@@ -4563,7 +4733,7 @@ export function RealtimeDashboard({
                 ) : null}
                 <div
                   aria-label="Ações da visão ao vivo de Contagem"
-                  className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1"
+                  className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1"
                   role="group"
                 >
                   <ReportExportActions
@@ -8290,24 +8460,40 @@ async function fetchSubLocations(
   locations: Location[],
   companyScopeId?: string | null,
   requireExplicitCompanyId = false,
+  signal?: AbortSignal,
 ) {
   const expectedCompanyId = companyScopeId?.trim() || undefined;
-  const rows = await Promise.all(
-    locations.map((location) =>
-      apiFetch<unknown>(`/locations/${location.id}/sub-locations`, {
-        companyScopeId: expectedCompanyId,
-      }).then((value) =>
-        requireSubLocationRows(
-          requireExplicitCompanyId
-            ? selectExplicitCompanyScopedRows(value, expectedCompanyId!, {
-                label: "sublocais",
-              }).rows
-            : value,
-          expectedCompanyId,
-        ),
-      ),
-    ),
-  );
+  const rows: SubLocation[][] = new Array(locations.length);
+  let nextIndex = 0;
+  let failed = false;
+  // A company can have many locations; do not saturate the browser/backend
+  // with an unbounded fan-out before the first live chart can load.
+  await Promise.all(Array.from(
+    { length: Math.min(4, locations.length) },
+    async () => {
+      while (!failed && nextIndex < locations.length) {
+        signal?.throwIfAborted();
+        const index = nextIndex++;
+        try {
+          const value = await apiFetch<unknown>(
+            `/locations/${locations[index].id}/sub-locations`,
+            { companyScopeId: expectedCompanyId, signal },
+          );
+          rows[index] = requireSubLocationRows(
+            requireExplicitCompanyId
+              ? selectExplicitCompanyScopedRows(value, expectedCompanyId!, {
+                  label: "sublocais",
+                }).rows
+              : value,
+            expectedCompanyId,
+          );
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }
+    },
+  ));
 
   return filterScopedApiRows(
     requireSubLocationRows(rows.flat(), expectedCompanyId),
@@ -8317,10 +8503,10 @@ async function fetchSubLocations(
 
 async function fetchRealtimeWorkers(
   companyId: string | null | undefined,
-  { requireExplicitCompanyId }: WorkerMetadataValidationOptions,
+  { requireExplicitCompanyId, signal }: WorkerMetadataValidationOptions,
 ): Promise<OptionalWorkerMetadata> {
   const companyScopeId = companyId?.trim() || undefined;
-  const rows = await apiFetch<unknown>("/workers", { companyScopeId }).then(
+  const rows = await apiFetch<unknown>("/workers", { companyScopeId, signal }).then(
     (value) => {
       const payload = requireExplicitCompanyId
         ? selectExplicitCompanyScopedRows(value, companyScopeId!, {
@@ -8347,10 +8533,10 @@ async function fetchRealtimeWorkers(
 
 async function fetchRealtimeScenarios(
   companyId: string | null | undefined,
-  { requireExplicitCompanyId }: WorkerMetadataValidationOptions,
+  { requireExplicitCompanyId, signal }: WorkerMetadataValidationOptions,
 ): Promise<OptionalScenarioMetadata> {
   const companyScopeId = companyId?.trim() || undefined;
-  const rows = await apiFetch<unknown>("/scenarios", { companyScopeId }).then(
+  const rows = await apiFetch<unknown>("/scenarios", { companyScopeId, signal }).then(
     (value) => {
       const payload = requireExplicitCompanyId
         ? selectExplicitCompanyScopedRows(value, companyScopeId!, {

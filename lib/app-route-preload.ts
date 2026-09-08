@@ -83,7 +83,9 @@ export function preloadAppRoute(
 
   cancelScheduledAppRoutePreload(pathname);
 
-  const dashboardModule = activeDashboardModule() ?? fallbackDashboardModule;
+  // The caller resolves this module against the destination surface. The
+  // currently rendered module may be forbidden on that destination.
+  const dashboardModule = fallbackDashboardModule;
   if (dashboardModule) preloadDashboardPanel(pathname, dashboardModule);
   if (pendingRouteModules.has(pathname)) return;
 
@@ -163,18 +165,6 @@ export function scheduleAppRoutePreload(
     preloadAppRoute(pathname, fallbackDashboardModule);
   }, delayMs);
   scheduledRouteModules.set(pathname, timer);
-}
-
-function activeDashboardModule(): AppDashboardModule | undefined {
-  if (typeof document === "undefined") return undefined;
-  const value = document
-    .querySelector<HTMLElement>("[data-dashboard-module]")
-    ?.dataset.dashboardModule;
-  return value === "counting" ||
-    value === "occupancy" ||
-    value === "demographics"
-    ? value
-    : undefined;
 }
 
 export function cancelScheduledAppRoutePreload(pathname: string) {

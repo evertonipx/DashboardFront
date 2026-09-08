@@ -1170,91 +1170,32 @@ test("sincronização de admin é aditiva e alterações granulares não tocam o
   );
 });
 
-test("grade do Superadmin mostra somente módulos e capacidades reais", () => {
-  const source = readFileSync(
-    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
-    "utf8",
-  );
-  const resolverStart = source.indexOf(
-    "function resolveOperationalPermissionOptions",
-  );
-  const resolverSource = source.slice(resolverStart);
-  const groupingStart = source.indexOf("function groupPermissionCatalog");
-  const groupingEnd = source.indexOf(
-    "function companyAdminCertificationErrorMessage",
-    groupingStart,
-  );
-  const groupingSource = source.slice(groupingStart, groupingEnd);
-  const moduleSelectorStart = source.indexOf(
-    "function selectVisibleProductModules",
-  );
-  const moduleSelectorEnd = source.indexOf(
-    "function algorithmModuleFamily",
-    moduleSelectorStart,
-  );
-  const moduleSelectorSource = source.slice(
-    moduleSelectorStart,
-    moduleSelectorEnd >= 0 ? moduleSelectorEnd : resolverStart,
-  );
-
-  assert.ok(
-    moduleSelectorStart >= 0,
-    "a seção de módulos deve ter um seletor explícito",
-  );
+test("grade do Superadmin usa catálogo real, módulos conhecidos e seleções por superfície", () => {
+  const source = readFileSync(resolve(projectRoot, "components/app/super-admin-dashboard.tsx"), "utf8");
+  const resolverSource = readFileSync(resolve(projectRoot, "lib/user-access-catalog.ts"), "utf8");
+  const editorSource = readFileSync(resolve(projectRoot, "lib/user-access-editor.ts"), "utf8");
+  const moduleSelectorStart = source.indexOf("function selectVisibleProductModules");
+  const moduleSelectorEnd = source.indexOf("function algorithmModuleFamily", moduleSelectorStart);
+  const moduleSelectorSource = source.slice(moduleSelectorStart, moduleSelectorEnd);
+  assert.ok(moduleSelectorStart >= 0);
   assert.match(source, /selectVisibleProductModules\(modules\)/);
-  assert.match(moduleSelectorSource, /modules\.(?:filter|forEach|map)/);
   assert.match(moduleSelectorSource, /if \(!family\) return/);
-  assert.match(
-    moduleSelectorSource,
-    /new Map<AlgorithmModuleFamily, IpxModule>/,
-    "cada família de módulo deve aparecer uma única vez",
-  );
-  assert.match(resolverSource, /catalog\.forEach/);
-  assert.match(resolverSource, /resolvePermissionPresentation/);
-  assert.match(resolverSource, /if \(!presentation\) return;/);
+  assert.match(moduleSelectorSource, /new Map<AlgorithmModuleFamily, IpxModule>/);
+  assert.match(source, /resolveUserAccessCatalog\(catalog, modules\)/);
+  assert.match(resolverSource, /for \(const permission of catalog\)/);
+  assert.match(resolverSource, /if \(!presentation\) continue;/);
   assert.match(resolverSource, /module_id: moduleId/);
   assert.match(resolverSource, /grants: \[grant\]/);
-  assert.match(groupingSource, /groups\.get\(permission\.group_key\)/);
-  assert.doesNotMatch(source, /Slug: <code>|Módulo: <code>/);
-  assert.doesNotMatch(
-    source,
-    /is_master=true|GET \/companies\/\{companyId\}|API respondeu/,
-    "a interface não deve expor detalhes de implementação",
-  );
-  assert.doesNotMatch(
-    resolverSource,
-    /managementModuleLabel|humanizePermissionSlug/,
-    "nomes técnicos e slugs desconhecidos não devem virar rótulos visíveis",
-  );
-  assert.match(
-    resolverSource,
-    /if \(knownPermission\)[\s\S]*?label: knownPermission\.label/,
-  );
-  assert.match(source, /"Módulos"[\s\S]*?"Capacidades de gestão"/);
-  assert.doesNotMatch(source, /"Recursos administrativos"/);
-  assert.match(
-    resolverSource,
-    /groupName: workspaceCapability[\s\S]*?"Painéis e visões"[\s\S]*?"Configuração operacional"/,
-  );
-  for (const internalModule of [
-    "alarms",
-    "analytics",
-    "audit log",
-    "edge workers",
-    "heatmap",
-    "qr code",
-  ]) {
-    assert.doesNotMatch(
-      resolverSource,
-      new RegExp(`"${internalModule}"`, "i"),
-      `${internalModule} não deve ser apresentado como módulo ou capacidade`,
-    );
+  assert.match(resolverSource, /permissionDashboardSurface/);
+  assert.match(resolverSource, /operationalPermissionDefinitionForGrant/);
+  assert.match(source, /<UserAccessGrid/);
+  assert.match(editorSource, /Menus e recursos de gestão/);
+  assert.match(source, /unavailable: option\.unavailable \|\| !hasEnabledGrant/);
+  assert.doesNotMatch(source, /Slug: <code>|Módulo: <code>|is_master=true|API respondeu/);
+  assert.doesNotMatch(resolverSource, /managementModuleLabel|humanizePermissionSlug/);
+  for (const internalModule of ["alarms", "analytics", "audit log", "edge workers", "heatmap", "qr code"]) {
+    assert.doesNotMatch(editorSource, new RegExp('label: "' + internalModule + '"', "i"));
   }
-  assert.match(
-    source,
-    /unavailable: option\.unavailable \|\| !hasEnabledGrant/,
-    "permissões de módulo não habilitado devem continuar visíveis, porém indisponíveis",
-  );
 });
 
 test("alteração real de usuário gera o PUT completo exigido pela API", () => {
@@ -1883,7 +1824,7 @@ test("video wall e comparativo propagam o escopo explícito em todas as consulta
     assert.match(
       liveSource,
       new RegExp(
-        `apiFetch<unknown>\\("/${path}", \\{ companyScopeId \\}\\)`,
+        `apiFetch<unknown>\\("/${path}", \\{[^}]*companyScopeId[^}]*\\}\\)`,
       ),
       `/${path} deve receber a empresa explícita`,
     );
@@ -1895,11 +1836,11 @@ test("video wall e comparativo propagam o escopo explícito em todas as consulta
   );
   assert.match(
     liveSource,
-    /`\/locations\/\$\{location\.id\}\/sub-locations`, \{[\s\S]*?companyScopeId:/,
+    /`\/locations\/\$\{locations\[index\]\.id\}\/sub-locations`,\s*\{\s*companyScopeId: expectedCompanyId, signal\s*\}/,
   );
   assert.match(
     liveSource,
-    /apiFetch<unknown>\("\/workers", \{ companyScopeId \}\)/,
+    /apiFetch<unknown>\("\/workers", \{[^}]*companyScopeId[^}]*\}\)/,
   );
   assert.match(
     comparisonSource,

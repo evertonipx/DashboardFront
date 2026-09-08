@@ -34,6 +34,7 @@ type LiveDashboardTabsProps = {
 export function LiveDashboardTabs({ manager = false }: LiveDashboardTabsProps) {
   return (
     <DashboardModuleTabs
+      surface="live"
       counting={<RealtimeDashboard manager={manager} />}
       demographics={
         <DemographicsDashboard manager={manager} surface="live" />

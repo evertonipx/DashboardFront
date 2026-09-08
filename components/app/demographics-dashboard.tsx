@@ -736,55 +736,56 @@ export function DemographicsDashboard({
       <div className="@container rounded-md border bg-card px-3 py-2 shadow-soft">
         <div
           aria-label="Controles do módulo Demographics"
-          className="grid min-w-0 grid-cols-[32px_minmax(32px,1fr)_144px] items-center gap-2 @sm:grid-cols-[minmax(180px,300px)_minmax(32px,1fr)_144px]"
+          data-dashboard-toolbar
           role="group"
         >
-          <div className="col-start-1 row-start-1 min-w-0">
-            {surface === "live" ? (
-              <div
-                className="inline-flex h-8 max-w-full items-center gap-2 rounded-md border bg-background px-2.5 text-xs font-medium"
-                title={`${rangeLabel} · horário da empresa`}
-              >
-                <CalendarRange className="h-4 w-4 shrink-0 text-primary" />
-                <span className="hidden truncate @sm:inline">
-                  Hoje · {rangeLabel}
-                </span>
-                <span className="sr-only @sm:hidden">Hoje · {rangeLabel}</span>
-              </div>
-            ) : (
-              <AnalysisDateRangePicker
-                key={`${companyScopeId}|${surface}|${user?.id ?? ""}`}
-                contextLabel="análise do módulo Demographics"
-                maximumDays={MAX_DEMOGRAPHICS_DATE_RANGE_DAYS}
-                maximumInput={todayInput}
-                onApply={applyRange}
-                value={appliedRange}
-              />
-            )}
+          <div data-toolbar-filters>
+            <div className="w-full min-w-0 max-w-[300px]">
+              {surface === "live" ? (
+                <div
+                  className="inline-flex min-h-8 max-w-full items-center gap-2 rounded-md border bg-background px-2.5 py-1.5 text-xs font-medium"
+                  title={`${rangeLabel} · horário da empresa`}
+                >
+                  <CalendarRange className="h-4 w-4 shrink-0 text-primary" />
+                  <span className="min-w-0 break-words">
+                    Hoje · {rangeLabel}
+                  </span>
+                </div>
+              ) : (
+                <AnalysisDateRangePicker
+                  key={`${companyScopeId}|${surface}|${user?.id ?? ""}`}
+                  contextLabel="análise do módulo Demographics"
+                  maximumDays={MAX_DEMOGRAPHICS_DATE_RANGE_DAYS}
+                  maximumInput={todayInput}
+                  onApply={applyRange}
+                  value={appliedRange}
+                />
+              )}
+            </div>
           </div>
 
-          <div className="col-start-2 row-start-1 flex min-w-0 items-center justify-end overflow-hidden">
+          <div data-toolbar-status className="flex min-w-0 items-center justify-end">
             {(loading || refreshing) &&
-            loadProgress &&
-            loadProgress.total > 4 ? (
+              loadProgress &&
+              loadProgress.total > 4 ? (
               <span
                 aria-live="polite"
-                className="inline-flex h-8 min-w-0 items-center gap-1 truncate px-1 text-[11px] tabular-nums text-muted-foreground"
+                className="inline-flex min-h-8 min-w-0 items-center gap-1 px-1 text-[11px] tabular-nums text-muted-foreground"
                 role="status"
               >
                 <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin" />
-                <span className="hidden truncate @md:inline">
+                <span className="break-words">
                   Consultando {progressPercentage(loadProgress)}
                 </span>
               </span>
             ) : lastUpdated ? (
               <span
                 aria-label={`Dados recebidos em ${formatCompanyDateTime(lastUpdated, timeZone)}`}
-                className="inline-flex h-8 min-w-0 items-center gap-1 truncate px-1 text-[11px] tabular-nums text-muted-foreground"
+                className="inline-flex min-h-8 min-w-0 items-center gap-1 px-1 text-[11px] tabular-nums text-muted-foreground"
                 title={`Dados recebidos em ${formatCompanyDateTime(lastUpdated, timeZone)}`}
               >
                 <Clock3 className="h-3.5 w-3.5 shrink-0" />
-                <span className="hidden truncate @md:inline">
+                <span className="break-words">
                   Recebido às {formatCompanyClock(lastUpdated, timeZone)}
                 </span>
               </span>
@@ -793,7 +794,7 @@ export function DemographicsDashboard({
 
           <div
             aria-label="Ações do módulo Demographics"
-            className="col-start-3 row-start-1 flex w-[144px] flex-nowrap items-center justify-end gap-1 justify-self-end"
+            data-toolbar-actions
             role="group"
           >
             <ReportExportActions

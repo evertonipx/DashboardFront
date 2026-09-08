@@ -21,6 +21,7 @@ import { toast } from "sonner";
 
 import { DeferredAiInsightsDashboard as AiInsightsDashboard } from "@/components/app/deferred-route-panels";
 import { useAuth } from "@/components/app/auth-provider";
+import { UserAccessGrid } from "@/components/app/user-access-grid";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -103,9 +104,15 @@ import {
 } from "@/lib/metadata-validation";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
 import {
-  operationalPermissionDefinitionForGrant,
-  type OperationalModuleFamily,
-} from "@/lib/permissions";
+  createUserAccessPermissionState,
+  resolveUserAccessCatalog,
+  userAccessPermissionMatchesOption,
+  type UserAccessCatalogOption,
+} from "@/lib/user-access-catalog";
+import {
+  buildUserAccessEditorGroups,
+  userAccessEditorPermissionKeys,
+} from "@/lib/user-access-editor";
 import { requireScenarioRows } from "@/lib/scenario-validation";
 import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type {
@@ -185,35 +192,7 @@ type UserFormState = {
   isCompanyAdmin: boolean;
 };
 
-type PermissionGroup = {
-  category: "product" | "administrative";
-  key: string;
-  name: string;
-  permissions: PermissionOption[];
-};
-
-type PermissionOption = {
-  category: "product" | "administrative";
-  group_key: string;
-  group_name: string;
-  id: string;
-  module_id: string;
-  module_name: string;
-  module_slug: string;
-  slug: string;
-  action: string;
-  label: string;
-  description: string;
-  slugs: string[];
-  grants: PermissionGrantOption[];
-  unavailable?: boolean;
-};
-
-type PermissionGrantOption = {
-  id: string;
-  module_id?: string;
-  slug: string;
-};
+type PermissionOption = UserAccessCatalogOption;
 
 type WorkerRow = WorkerScopeRow;
 
@@ -761,8 +740,8 @@ export function SuperAdminDashboard() {
   );
 
   const permissionGroups = React.useMemo(
-    () => groupPermissionCatalog(visiblePermissionOptions),
-    [visiblePermissionOptions],
+    () => buildUserAccessEditorGroups(visiblePermissionOptions, userPermissions),
+    [visiblePermissionOptions, userPermissions],
   );
   const additiveAdminPromotionMode = Boolean(
     editingUser &&
@@ -1629,7 +1608,7 @@ export function SuperAdminDashboard() {
   }
 
   function setCompanyAdminAccess(enabled: boolean) {
-    if (userForm.isMaster) return;
+    if (saving || loadingUserPermissions || userForm.isMaster) return;
 
     if (
       editingUser &&
@@ -1711,22 +1690,26 @@ export function SuperAdminDashboard() {
     }));
   }
 
-  function setPermissionGroupAccess(group: PermissionGroup, enabled: boolean) {
-    const editablePermissions = group.permissions.filter(
-      (permission) => !permission.unavailable,
-    );
-    if (!editablePermissions.length || loadingUserPermissions) return;
+  function setPermissionAccess(groupId: string, enabled: boolean, optionId?: string) {
+    if (
+      loadingUserPermissions || saving || userForm.isMaster ||
+      additiveAdminPromotionMode || (editingUser && !userPermissionBaselineCertified)
+    ) return;
+    const group = permissionGroups.find((candidate) => candidate.id === groupId);
+    if (!group) return;
+    const permissionKeys = userAccessEditorPermissionKeys(group, optionId);
+    if (!permissionKeys.length) return;
 
     setCompanyAdminPromotionRequested(false);
     setTouchedUserPermissionSlugs((current) => {
       const next = new Set(current);
-      editablePermissions.forEach((permission) => next.add(permission.slug));
+      permissionKeys.forEach((key) => next.add(key));
       return next;
     });
     setUserPermissions((current) => {
       const next = { ...current };
-      editablePermissions.forEach((permission) => {
-        next[permission.slug] = enabled;
+      permissionKeys.forEach((key) => {
+        next[key] = enabled;
       });
       setUserForm((form) => ({
         ...form,
@@ -1744,11 +1727,13 @@ export function SuperAdminDashboard() {
     field: "name" | "email" | "password" | "active",
     value: string,
   ) {
+    if (saving) return;
     setUserProfileDirty(true);
     setUserForm((form) => ({ ...form, [field]: value }));
   }
 
   function setSuperAdminAccess(enabled: boolean) {
+    if (saving || additiveAdminPromotionMode) return;
     setUserForm((form) => ({
       ...form,
       isMaster: enabled,
@@ -3555,7 +3540,7 @@ export function SuperAdminDashboard() {
             <TabsContent value="users" className="m-0 p-4">
               <section className="overflow-hidden rounded-lg border border-border bg-card">
                 <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
+                  <div className="min-w-0">
                     <CardTitle>Admins e operadores</CardTitle>
                     <CardDescription>
                       Usuários pertencentes à empresa selecionada.
@@ -4225,7 +4210,7 @@ export function SuperAdminDashboard() {
                   {loadingOperationalDetails || !hasCurrentCompanyWorkers ? (
                     <TableSkeleton />
                   ) : workers.length ? (
-                    <Table>
+                    <Table scrollRegionLabel="Workers da empresa selecionada">
                       <TableHeader>
                         <TableRow>
                           <TableHead>Worker</TableHead>
@@ -4398,7 +4383,7 @@ export function SuperAdminDashboard() {
       </Dialog>
 
       <Dialog open={userDialog} onOpenChange={handleUserDialogOpenChange}>
-        <DialogContent className="max-h-[92vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-2xl">
+        <DialogContent className="grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>
               {editingUser ? "Editar usuário" : "Novo usuário"}
@@ -4408,7 +4393,7 @@ export function SuperAdminDashboard() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+          <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto pr-1">
             <div className="grid gap-4 md:grid-cols-2">
               <FormField label="Nome">
                 <Input
@@ -4469,7 +4454,7 @@ export function SuperAdminDashboard() {
               <Checkbox
                 className="mt-1"
                 checked={userForm.isMaster}
-                disabled={additiveAdminPromotionMode}
+                disabled={saving || additiveAdminPromotionMode}
                 onCheckedChange={(checked) =>
                   setSuperAdminAccess(checked === true)
                 }
@@ -4503,7 +4488,7 @@ export function SuperAdminDashboard() {
                 className="mt-1"
                 checked={userForm.isCompanyAdmin}
                 disabled={
-                  userForm.isMaster ||
+                  saving || userForm.isMaster ||
                   loadingUserPermissions ||
                   (Boolean(editingUser) &&
                     !userPermissionBaselineCertified &&
@@ -4519,8 +4504,8 @@ export function SuperAdminDashboard() {
                   Administrador da empresa
                 </span>
                 <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                  Concede os acessos de gestão disponíveis nos módulos
-                  habilitados para esta empresa.
+                  Seleciona automaticamente todas as telas e os recursos de gestão
+                  disponíveis nos módulos habilitados para esta empresa.
                 </span>
               </span>
             </label>
@@ -4565,118 +4550,17 @@ export function SuperAdminDashboard() {
                   alteração parcial.
                 </div>
               ) : permissionGroups.length ? (
-                <div className="mt-3 space-y-3">
-                  {permissionGroups.map((group, index) => {
-                    const editablePermissions = group.permissions.filter(
-                      (permission) => !permission.unavailable,
-                    );
-                    const selectedPermissionCount = editablePermissions.filter(
-                      (permission) => userPermissions[permission.slug],
-                    ).length;
-                    const groupChecked = Boolean(
-                      editablePermissions.length &&
-                        selectedPermissionCount === editablePermissions.length,
-                    );
-
-                    return (
-                    <React.Fragment key={group.key}>
-                      {index === 0 ||
-                      permissionGroups[index - 1]?.category !== group.category ? (
-                        <div className="pt-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                          {group.category === "product"
-                            ? "Módulos"
-                            : "Capacidades de gestão"}
-                        </div>
-                      ) : null}
-                      <div className="rounded-md border border-border bg-muted/20 p-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-sm font-medium text-foreground">
-                            {group.name}
-                          </div>
-                          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-muted-foreground">
-                            <Checkbox
-                              checked={
-                                groupChecked
-                                  ? true
-                                  : selectedPermissionCount
-                                    ? "indeterminate"
-                                    : false
-                              }
-                              disabled={
-                                loadingUserPermissions ||
-                                !editablePermissions.length
-                              }
-                              onCheckedChange={(checked) =>
-                                setPermissionGroupAccess(group, checked === true)
-                              }
-                              aria-label={`Selecionar todos os acessos de ${group.name}`}
-                            />
-                            Selecionar grupo
-                          </label>
-                        </div>
-
-                        <div className="mt-3 grid gap-2 md:grid-cols-2">
-                          {group.permissions.map((permission) => (
-                            <label
-                              key={permission.id}
-                              className={cn(
-                                "flex cursor-pointer items-start gap-3 rounded-md border px-3 py-3 transition",
-                                userPermissions[permission.slug]
-                                  ? "border-primary/30 bg-primary/10"
-                                  : "border-border bg-card",
-                                (loadingUserPermissions || permission.unavailable) &&
-                                  "cursor-default opacity-80",
-                              )}
-                            >
-                              <Checkbox
-                                className="mt-1"
-                                checked={Boolean(userPermissions[permission.slug])}
-                                disabled={loadingUserPermissions || permission.unavailable}
-                                onCheckedChange={(checked) => {
-                                  setCompanyAdminPromotionRequested(false);
-                                  setTouchedUserPermissionSlugs((current) => {
-                                    const next = new Set(current);
-                                    next.add(permission.slug);
-                                    return next;
-                                  });
-                                  setUserPermissions((current) => {
-                                    const next = {
-                                      ...current,
-                                      [permission.slug]: checked === true,
-                                    };
-                                    setUserForm((form) => ({
-                                      ...form,
-                                      isCompanyAdmin: isCertifiedCompanyAdminState(
-                                        next,
-                                        visiblePermissionOptions,
-                                        enabledCompanyModuleIds,
-                                      ),
-                                    }));
-                                    return next;
-                                  });
-                                }}
-                              />
-                              <span className="min-w-0">
-                                <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
-                                  <span>{permission.label}</span>
-                                  <Badge variant="outline">
-                                    {formatPermissionAction(permission)}
-                                  </Badge>
-                                  {permission.unavailable ? (
-                                    <Badge variant="outline">Indisponível</Badge>
-                                  ) : null}
-                                </span>
-                                <span className="mt-1 block break-words text-xs leading-5 text-muted-foreground">
-                                  {permission.description}
-                                </span>
-                              </span>
-                            </label>
-                          ))}
-                        </div>
-                      </div>
-                    </React.Fragment>
-                    );
-                  })}
+                <div className="mt-3">
+                  <UserAccessGrid
+                    groups={permissionGroups}
+                    disabled={loadingUserPermissions || saving}
+                    onOptionChange={(groupId, optionId, checked) =>
+                      setPermissionAccess(groupId, checked, optionId)
+                    }
+                    onGroupChange={(groupId, checked) =>
+                      setPermissionAccess(groupId, checked)
+                    }
+                  />
                 </div>
               ) : (
                 <div className="mt-3">
@@ -4864,12 +4748,12 @@ function CompanySummary({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="truncate text-lg font-semibold text-foreground">
+            <h2 className="min-w-0 max-w-full break-words text-lg font-semibold text-foreground [overflow-wrap:anywhere]">
               {company.name}
             </h2>
             <StatusBadge active={company.active} />
           </div>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-1 break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">
             {company.trade_name || company.cnpj || "Empresa cadastrada"}
           </p>
         </div>
@@ -4934,7 +4818,7 @@ function FormField({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 space-y-2">
       <Label>{label}</Label>
       {children}
     </div>
@@ -5260,37 +5144,13 @@ function createPermissionState(
   permissions: UserPermission[] = [],
   options: PermissionOption[] = [],
 ) {
-  const grantedPermissionIds = new Set(
-    permissions
-      .filter(permissionIsEnabled)
-      .map(getPermissionRecordId)
-      .filter(Boolean),
-  );
-  const grantedSlugs = new Set(
-    permissions
-      .filter((permission) => permission.slug && permissionIsEnabled(permission))
-      .map((permission) => permission.slug),
-  );
-  return Object.fromEntries(
-    options.map((option) => {
-      const hasExactGrant =
-        option.grants.some((grant) => grantedPermissionIds.has(grant.id)) ||
-        option.slugs.some((slug) => grantedSlugs.has(slug));
-
-      return [option.slug, Boolean(hasExactGrant)];
-    }),
-  );
+  return createUserAccessPermissionState(permissions, options);
 }
 
 function getPermissionRecordId(permission: UserPermission) {
   return permission.permission_id ?? permission.id;
 }
 
-function getPermissionModuleId(
-  permission: Pick<UserPermission, "module_id" | "module">,
-) {
-  return permission.module_id ?? permission.module?.id ?? "";
-}
 
 function permissionIsEnabled(permission: UserPermission) {
   const flags = [
@@ -5308,14 +5168,7 @@ function userPermissionMatchesOption(
   permission: UserPermission,
   option: PermissionOption,
 ) {
-  const permissionId = getPermissionRecordId(permission);
-  const permissionSlug = permission.slug?.trim();
-
-  return Boolean(
-    (permissionId && option.grants.some((grant) => grant.id === permissionId)) ||
-      (permissionSlug &&
-        option.grants.some((grant) => grant.slug === permissionSlug)),
-  );
+  return userAccessPermissionMatchesOption(permission, option);
 }
 
 function additiveCompanyAdminGrants(
@@ -5489,46 +5342,6 @@ async function revokeUserPermission(
   );
 }
 
-function groupPermissionCatalog(permissions: PermissionOption[]): PermissionGroup[] {
-  const groups = new Map<string, PermissionGroup>();
-
-  permissions.forEach((permission) => {
-    const current = groups.get(permission.group_key);
-    if (current) {
-      current.permissions.push(permission);
-      return;
-    }
-
-    groups.set(permission.group_key, {
-      category: permission.category,
-      key: permission.group_key,
-      name: permission.group_name,
-      permissions: [permission],
-    });
-  });
-
-  return Array.from(groups.values())
-    .map((group) => ({
-      ...group,
-      permissions: [...group.permissions].sort((left, right) =>
-        `${left.action}\u0000${left.slug}`.localeCompare(
-          `${right.action}\u0000${right.slug}`,
-          "pt-BR",
-        ),
-      ),
-    }))
-    .sort((left, right) => {
-      if (left.category !== right.category) {
-        return left.category === "product" ? -1 : 1;
-      }
-      const leftFamily = algorithmModuleFamily(left.name);
-      const rightFamily = algorithmModuleFamily(right.name);
-      if (leftFamily && rightFamily) {
-        return algorithmFamilyOrder(leftFamily) - algorithmFamilyOrder(rightFamily);
-      }
-      return left.name.localeCompare(right.name, "pt-BR");
-    });
-}
 
 function companyAdminCertificationErrorMessage(
   slugs: readonly string[],
@@ -5543,27 +5356,6 @@ function companyAdminCertificationErrorMessage(
   return `Não foi possível aplicar o perfil de Administrador da empresa.${detail} Nenhum acesso existente foi removido.`;
 }
 
-function formatPermissionAction(permission: PermissionOption) {
-  return permissionActionLabel(permission.action);
-}
-
-function permissionActionLabel(rawAction: string) {
-  const action = normalizeSlug(rawAction);
-  const terms = new Set(action.split(" ").filter(Boolean));
-  if (["view", "read", "list"].some((term) => terms.has(term))) {
-    return "Visualização";
-  }
-  if (["create", "add"].some((term) => terms.has(term))) return "Criação";
-  if (["edit", "update"].some((term) => terms.has(term))) return "Edição";
-  if (["delete", "remove"].some((term) => terms.has(term))) return "Exclusão";
-  if (["export", "download"].some((term) => terms.has(term))) {
-    return "Exportação";
-  }
-  if (["manage", "write", "admin"].some((term) => terms.has(term))) {
-    return "Gestão";
-  }
-  return "Acesso específico";
-}
 
 function normalizeSlug(value: string) {
   return value
@@ -5641,164 +5433,5 @@ function resolveOperationalPermissionOptions(
   catalog: Permission[],
   modules: IpxModule[],
 ): PermissionOption[] {
-  const modulesById = new Map(modules.map((module) => [module.id, module]));
-  const optionsByCapability = new Map<string, PermissionOption>();
-
-  catalog.forEach((permission) => {
-    const id = permission.id?.trim();
-    const moduleId = getPermissionModuleId(permission).trim();
-    const slug = permission.slug?.trim();
-    const catalogModule = permission.module;
-    const permissionModule = modulesById.get(moduleId) ??
-      (catalogModule
-        ? {
-            id: catalogModule.id,
-            name: catalogModule.name,
-            slug: catalogModule.slug,
-            description: catalogModule.description,
-            active: catalogModule.active !== false,
-          }
-        : undefined);
-
-    if (
-      !id ||
-      !moduleId ||
-      !slug ||
-      !permissionModule
-    ) {
-      return;
-    }
-
-    const presentation = resolvePermissionPresentation(
-      permission,
-      permissionModule,
-    );
-    if (!presentation) return;
-
-    const grant = {
-      id,
-      module_id: moduleId,
-      slug,
-    };
-    const optionKey = `${moduleId}\u0000${presentation.slug}`;
-    const current = optionsByCapability.get(optionKey);
-    if (current) {
-      current.grants.push(grant);
-      if (!current.slugs.includes(slug)) current.slugs.push(slug);
-      current.unavailable =
-        Boolean(current.unavailable) && permissionModule.active === false;
-      return;
-    }
-
-    optionsByCapability.set(optionKey, {
-      action: presentation.action,
-      category: presentation.category,
-      description: presentation.description,
-      grants: [grant],
-      group_key: presentation.groupKey,
-      group_name: presentation.groupName,
-      id,
-      label: presentation.label,
-      module_id: moduleId,
-      module_name: presentation.groupName,
-      module_slug: presentation.groupKey,
-      slug: presentation.slug,
-      slugs: [slug],
-      unavailable: permissionModule.active === false,
-    });
-  });
-
-  return Array.from(optionsByCapability.values());
-}
-
-type PermissionPresentation = {
-  action: "manage" | "view";
-  category: PermissionGroup["category"];
-  description: string;
-  groupKey: string;
-  groupName: string;
-  label: string;
-  slug: string;
-};
-
-function resolvePermissionPresentation(
-  permission: Permission,
-  module: IpxModule,
-): PermissionPresentation | null {
-  const knownPermission = operationalPermissionDefinitionForGrant(permission);
-  if (knownPermission) {
-    const workspaceCapability =
-      knownPermission.slug === "dashboard_widgets_manage" ||
-      knownPermission.slug === "views_manage";
-    return {
-      action: "manage",
-      category: "administrative",
-      description: knownPermission.description,
-      groupKey: workspaceCapability
-        ? "capability:workspace"
-        : "capability:operation",
-      groupName: workspaceCapability
-        ? "Painéis e visões"
-        : "Configuração operacional",
-      label: knownPermission.label,
-      slug: knownPermission.slug,
-    };
-  }
-
-  const family = algorithmModuleFamily(module);
-  if (!family) return null;
-  const mode = productPermissionMode(permission, family);
-  if (!mode) return null;
-  const productName = algorithmModuleDefinitions.find(
-    (definition) => definition.family === family,
-  )?.label;
-  if (!productName) return null;
-
-  return {
-    action: mode,
-    category: "product",
-    description:
-      mode === "view"
-        ? `Consultar os painéis de ${productName}.`
-        : `Configurar o módulo ${productName} e seus recursos.`,
-    groupKey: `product:${family}`,
-    groupName: productName,
-    label: mode === "view" ? "Visualização" : "Gestão",
-    slug: `${family}_${mode}`,
-  };
-}
-
-function productPermissionMode(
-  permission: Permission,
-  family: OperationalModuleFamily,
-): "manage" | "view" | null {
-  const definition = algorithmModuleDefinitions.find(
-    (candidate) => candidate.family === family,
-  );
-  if (!definition) return null;
-
-  const normalizedSlug = normalizeSlug(permission.slug);
-  const matchingAlias = definition.aliases
-    .map(normalizeSlug)
-    .sort((left, right) => right.length - left.length)
-    .find(
-      (alias) =>
-        normalizedSlug === alias || normalizedSlug.startsWith(`${alias} `),
-    );
-  if (!matchingAlias) return null;
-
-  const suffix = normalizedSlug.slice(matchingAlias.length).trim();
-  const suffixMode = productPermissionActionMode(suffix);
-  const declaredMode = productPermissionActionMode(
-    normalizeSlug(permission.action ?? ""),
-  );
-  if (suffix && !suffixMode) return null;
-  if (suffixMode && declaredMode && suffixMode !== declaredMode) return null;
-  return declaredMode ?? suffixMode;
-}
-
-function productPermissionActionMode(value: string): "manage" | "view" | null {
-  if (["manage", "admin"].includes(value)) return "manage";
-  if (["view", "read", "list", "export"].includes(value)) return "view";
-  return null;
+  return resolveUserAccessCatalog(catalog, modules);
 }

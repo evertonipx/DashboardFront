@@ -5,7 +5,7 @@ import { DeferredLiveVideoWallView as LiveVideoWallView } from "@/components/app
 
 export default function LiveVideoWallPage() {
   return (
-    <AuthGuard>
+    <AuthGuard requireSurface="live">
       <React.Suspense fallback={<WallLoading />}>
         <LiveVideoWallView />
       </React.Suspense>

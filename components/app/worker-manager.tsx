@@ -600,7 +600,7 @@ export function WorkerManager() {
 
       <Card>
         <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div>
+          <div className="min-w-0">
             <CardTitle className="flex items-center gap-2">
               <ServerCog className="h-4 w-4 text-primary" />
               Workers da empresa
@@ -611,7 +611,7 @@ export function WorkerManager() {
                 : "Acompanhe os Workers e a comunicação mais recente."}
             </CardDescription>
           </div>
-          <div className="flex w-full flex-wrap gap-2 sm:w-auto">
+          <div className="flex min-w-0 w-full flex-wrap gap-2 sm:w-auto">
             <Button
               type="button"
               variant="outline"
@@ -1146,7 +1146,7 @@ function FormField({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 space-y-2">
       <Label>{label}</Label>
       {children}
     </div>

@@ -20,6 +20,7 @@ import {
   composeChartValueLabelLayout,
 } from "@/lib/chart-value-labels";
 import { synchronizeLineSeriesVisualColors } from "@/lib/chart-series-colors";
+import { suppressZeroChartLabels } from "@/lib/chart-zero-labels";
 import type { CardChartType } from "@/lib/view-preferences";
 import { cn } from "@/lib/utils";
 
@@ -137,9 +138,9 @@ export function EChart({
       effectiveTheme === "dark",
       valueLabels,
     );
-    const visualOption = themeMode === "explicit"
+    const visualOption = suppressZeroChartLabels(themeMode === "explicit"
       ? interactiveOption
-      : applyChartTheme(interactiveOption, effectiveTheme === "dark");
+      : applyChartTheme(interactiveOption, effectiveTheme === "dark"));
     return prefersReducedMotion
       ? disableChartMotion(visualOption)
       : visualOption;
@@ -1084,7 +1085,7 @@ export async function renderEChartToDataUrl(
   try {
     const runtime = await loadEChartRuntime();
     signal?.throwIfAborted();
-    const synchronizedOption = synchronizeLineSeriesVisualColors(option);
+    const synchronizedOption = suppressZeroChartLabels(synchronizeLineSeriesVisualColors(option));
     await runtime.ensureEChartCapabilities(
       resolveEChartRuntimeCapabilities(synchronizedOption),
     );

@@ -46,7 +46,7 @@ import {
   readLatestAiInsightsReport,
   saveLatestAiInsightsReport,
 } from "@/lib/ai-insights-report-store";
-import { canViewCounting, canViewOccupancy } from "@/lib/permissions";
+import { canViewModuleSurface } from "@/lib/permissions";
 import type {
   CurrentUser,
   CurrentUserCompanyModule,
@@ -93,7 +93,7 @@ export async function GET(request: NextRequest) {
 
     let latestReport: AiInsightsReport | null = null;
     if (status.available) {
-      await assertModuleAccess(authentication, scope.module, request.signal);
+      await assertModuleAccess(authentication, scope.module, scope.surface, request.signal);
       latestReport = await readLatestAiInsightsReport(
         authentication.companyId,
         scope.module,
@@ -169,6 +169,7 @@ export async function POST(request: NextRequest) {
     await assertModuleAccess(
       authentication,
       boundPayload.snapshot.source.module,
+      boundPayload.snapshot.source.surface,
       request.signal,
     );
 
@@ -534,16 +535,18 @@ async function hydrateOperationalAccess(
 async function assertModuleAccess(
   authentication: AuthenticatedRouteContext,
   module: "counting" | "occupancy",
+  surface: "live" | "analysis" | "reports",
   signal: AbortSignal,
 ) {
   const authorizedUser = await hydrateOperationalAccess(
     authentication,
     signal,
   );
-  const allowed =
-    module === "counting"
-      ? canViewCounting(authorizedUser)
-      : canViewOccupancy(authorizedUser);
+  const allowed = canViewModuleSurface(
+    authorizedUser,
+    module,
+    surface === "analysis" ? "analytics" : surface,
+  );
   if (!allowed) throw new RouteFailure("module_access_denied", 403);
 }
 

@@ -61,7 +61,7 @@ test("login enterprise preserva o contrato autenticado e a navegação pós-logi
   );
   assert.match(
     loginSource,
-    /router\.prefetch\(path\)[\s\S]*?preloadAppRoute\(path, preferredDashboardModule\(user\)\)[\s\S]*?router\.replace\(path\)/,
+    /router\.prefetch\(path\)[\s\S]*?preloadAppRoute\(path, resolveAuthorizedDashboardModule\(user, path\)\)[\s\S]*?router\.replace\(path\)/,
     "a rota e o painel autorizado devem ser aquecidos antes da transição",
   );
   assert.doesNotMatch(loginSource, /company_id\s*[:=]|X-Company-ID|apiFetch\(/);
