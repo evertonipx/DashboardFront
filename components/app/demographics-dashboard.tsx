@@ -38,6 +38,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { hasVisualAdminAccess } from "@/lib/access";
 import { ApiError, apiFetch } from "@/lib/api";
+import { heatmapLabelColor, monochromeHeatmapPalette } from "@/lib/chart-palette";
 import {
   companyDateKey,
   formatCompanyDateTime,
@@ -108,7 +109,8 @@ const GENDER_COLORS: Record<DemographicGender, string> = {
   Man: "#2D7FF9",
   unknown: "#94A3B8",
 };
-const HEATMAP_COLORS = ["#EFF6FF", "#BFDBFE", "#60A5FA", "#2563EB", "#172554"];
+const HEATMAP_BASE_COLOR = "#2563EB";
+const HEATMAP_COLORS = monochromeHeatmapPalette(HEATMAP_BASE_COLOR);
 
 type DashboardDataState = {
   key: string;
@@ -677,7 +679,7 @@ export function DemographicsDashboard({
         id: "demographics_age_emotion_heatmap",
         label: "Faixa etária × emoção",
         node: <AgeEmotionHeatmapCard loading={loading} summary={summary} />,
-        previewColors: HEATMAP_COLORS,
+        previewColors: [HEATMAP_BASE_COLOR],
         previewKind: "heatmap",
         titleEditable: true,
         zoomEnabled: true,
@@ -1894,6 +1896,7 @@ function buildAgeEmotionHeatmapOption(
   summary: DemographicAggregation,
   theme: "light" | "dark" = "light",
 ): EnterpriseChartOption {
+  const axisTextColor = theme === "dark" ? "#CBD5E1" : "#526477";
   const cellBorderColor =
     theme === "dark"
       ? "rgba(226, 232, 240, 0.12)"
@@ -1932,22 +1935,26 @@ function buildAgeEmotionHeatmapOption(
     },
     visualMap: {
       calculable: false,
+      dimension: 2,
       inRange: { color: HEATMAP_COLORS },
       max: maximum,
       min: 0,
       orient: "vertical",
       right: 0,
+      seriesIndex: 0,
       text: ["%", ""],
+      textStyle: { color: axisTextColor },
       top: "middle",
     },
     xAxis: {
-      axisLabel: { interval: 0, rotate: 38 },
+      axisLabel: { color: axisTextColor, interval: 0, rotate: 38 },
       axisTick: { show: false },
       data: crossing.columns.map((column) => column.label),
       splitArea: { show: true },
       type: "category",
     },
     yAxis: {
+      axisLabel: { color: axisTextColor },
       axisTick: { show: false },
       data: crossing.rows.map((row) => row.label),
       inverse: true,
@@ -1975,8 +1982,8 @@ function buildAgeEmotionHeatmapOption(
           fontSize: 9,
           fontWeight: 700,
           rich: {
-            dark: { color: "#101828", fontWeight: 700 },
-            light: { color: "#F9FAFB", fontWeight: 700 },
+            dark: { color: "#0F172A", fontWeight: 700 },
+            light: { color: "#FFFFFF", fontWeight: 700 },
           },
           show: true,
         },
@@ -2255,7 +2262,10 @@ function heatmapPercentageLabel(parameters: unknown, maximum: number) {
   if (!isRecord(parameters) || !Array.isArray(parameters.value)) return "—";
   const value = Number(parameters.value[2]);
   if (!Number.isFinite(value) || value <= 0) return "";
-  const contrastStyle = value / maximum >= 0.45 ? "light" : "dark";
+  const contrastStyle =
+    heatmapLabelColor(HEATMAP_COLORS, value / maximum) === "#FFFFFF"
+      ? "light"
+      : "dark";
   return `{${contrastStyle}|${formatDecimal(value)}%}`;
 }
 

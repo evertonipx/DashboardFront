@@ -9,6 +9,7 @@ import {
   CARD_LAYOUT_ROW_HEIGHT,
 } from "@/lib/card-layout-sizing";
 import { packCardLayout } from "@/lib/card-layout-packing";
+import { monochromeHeatmapPalette } from "@/lib/chart-palette";
 import { cn } from "@/lib/utils";
 import {
   resolveWidgetBentoPreviewGeometry,
@@ -515,6 +516,8 @@ function WidgetBentoMiniature({
   }
 
   if (kind === "heatmap") {
+    // Use opaque intensity colors, so the dark canvas cannot invert low values.
+    const heatmapPalette = monochromeHeatmapPalette(color);
     return (
       <span
         className={cn(sharedClassName, "grid grid-cols-6 gap-px p-1")}
@@ -522,11 +525,14 @@ function WidgetBentoMiniature({
         aria-hidden="true"
         data-widget-bento-miniature={kind}
       >
-        {HEATMAP_CELLS.map((opacity, index) => (
+        {HEATMAP_CELLS.map((intensity, index) => (
           <span
             key={index}
             className="min-h-1 rounded-[1px]"
-            style={{ backgroundColor: miniatureColor(index), opacity }}
+            style={{
+              backgroundColor:
+                heatmapPalette[Math.round(intensity * (heatmapPalette.length - 1))],
+            }}
           />
         ))}
       </span>
@@ -750,8 +756,8 @@ function WidgetBentoMiniature({
 }
 
 const HEATMAP_CELLS = [
-  0.18, 0.28, 0.48, 0.72, 0.42, 0.24, 0.32, 0.62, 0.86, 0.52, 0.3, 0.16,
-  0.22, 0.42, 0.68, 0.92, 0.58, 0.34,
+  0, 0.28, 0.48, 0.72, 0.42, 0.24, 0.32, 0.62, 1, 0.52, 0.3, 0.16,
+  0.22, 0.42, 0.68, 0.92, 0.58, 0,
 ] as const;
 
 const HEX_CELLS = [false, false, false, false, true, true, true, false] as const;

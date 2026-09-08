@@ -5,6 +5,7 @@ import {
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
+  heatmapLabelColor,
   monochromeHeatmapPalette,
   pastelBarColor,
 } from "@/lib/chart-palette";
@@ -1074,6 +1075,7 @@ export function buildCountingMonthYearHeatmapChartOption(
   color = "#1267C4",
   theme: "light" | "dark" = "light",
 ): EnterpriseChartOption {
+  const heatmapColors = monochromeHeatmapPalette(color, theme);
   const unavailableColor = theme === "dark" ? "#1E293B" : "#EEF2F6";
   const cellBorderColor =
     theme === "dark"
@@ -1143,23 +1145,20 @@ export function buildCountingMonthYearHeatmapChartOption(
             const tuple = heatmapTuple(parameters.data);
             if (!tuple || tuple[2] < 0) return "";
             const tone =
-              tuple[2] >= certifiedMaximum * 0.48 ? "strong" : "soft";
+              heatmapLabelColor(heatmapColors, tuple[2] / certifiedMaximum) === "#FFFFFF" ? "strong" : "soft";
             return `{${tone}|${compactNumber(tuple[2])}}`;
           },
           rich: {
             soft: {
-              color: theme === "dark" ? "#F8FAFC" : "#203247",
+              color: "#0F172A",
               fontSize: 9,
               fontWeight: 600,
             },
             strong: {
-              color: theme === "dark" ? "#0F172A" : "#FFFFFF",
+              color: "#FFFFFF",
               fontSize: 9,
               fontWeight: 600,
-              textBorderColor:
-                theme === "dark"
-                  ? "rgba(248, 250, 252, 0.35)"
-                  : "rgba(15, 23, 42, 0.28)",
+              textBorderColor: "rgba(15, 23, 42, 0.28)",
               textBorderWidth: 1,
             },
           },
@@ -1204,7 +1203,7 @@ export function buildCountingMonthYearHeatmapChartOption(
       {
         bottom: 4,
         calculable: true,
-        inRange: { color: monochromeHeatmapPalette(color, theme) },
+        inRange: { color: heatmapColors },
         itemHeight: 120,
         itemWidth: 10,
         left: "center",

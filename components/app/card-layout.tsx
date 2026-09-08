@@ -135,6 +135,7 @@ export type LayoutCard = {
   colorEditable?: boolean;
   colorPreview?: "gradient" | "solid";
   condensed?: boolean;
+  configurationContent?: React.ReactNode;
   id: string;
   inheritedScenarioIds?: string[];
   inheritedScenarioLabel?: string;
@@ -1381,6 +1382,17 @@ function WidgetOrganizerDialog({
                     }}
                     selectionPolicy={selectedCard.scenarioSelectionPolicy}
                   />
+                ) : null}
+
+                {selectedCard.configurationContent ? (
+                  <section
+                    aria-label="Opções do widget"
+                    className="@container min-w-0 space-y-2 rounded-md border bg-background p-3"
+                    data-layout-card-options={selectedCard.id}
+                  >
+                    <h3 className="text-xs font-medium text-muted-foreground">Opções do widget</h3>
+                    {selectedCard.configurationContent}
+                  </section>
                 ) : null}
 
                 <WidgetDimensionControls

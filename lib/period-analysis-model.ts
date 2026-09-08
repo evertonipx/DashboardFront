@@ -915,6 +915,7 @@ function buildTimelineModel(
   const option = buildBarTimelineOption(
     points,
     color,
+    granularity,
     granularity === "hour" && isSingleDayAnalysisPeriod(period),
   );
   const total = points.reduce((sum, point) => sum + point.total, 0);
@@ -990,6 +991,7 @@ function buildComparisonModel(
   const option = buildMultiScenarioOption(
     series,
     color,
+    granularity,
     granularity === "hour" && isSingleDayAnalysisPeriod(period),
   );
   const labels = series[0]?.points.map((point) => point.label) ?? [];
@@ -2503,15 +2505,18 @@ function buildHourProfileModel(
 function buildBarTimelineOption(
   points: ScenarioAnalyticsPoint[],
   color: string,
+  granularity: ScenarioAnalyticsGranularity,
   fixedHourlyAxis = false,
 ): EnterpriseChartOption {
-  const saturdayIndexes = points.flatMap((point, index) =>
+  // Calendar bands describe civil days, not intraday UTC buckets or larger groups.
+  const calendarPoints = granularity === "day" ? points : [];
+  const saturdayIndexes = calendarPoints.flatMap((point, index) =>
     point.isSaturday ? [index] : [],
   );
-  const sundayIndexes = points.flatMap((point, index) =>
+  const sundayIndexes = calendarPoints.flatMap((point, index) =>
     point.isSunday ? [index] : [],
   );
-  const calendarDates = points.map((point) => point.bucket);
+  const calendarDates = calendarPoints.map((point) => point.bucket);
   const throughHour = fixedHourlyAxis ? latestHourlyPointHour(points) : -1;
   const labels = fixedHourlyAxis
     ? HOUR_LABELS
@@ -2545,14 +2550,17 @@ function buildBarTimelineOption(
         `${formatNumber(Number(value ?? 0))} eventos`,
     },
     xAxis: {
-      axisLabel: buildCalendarAxisLabel({
-        fontSize: 10,
-        hideOverlap: true,
-        holidayIndexes: holidayCategoryIndexes(calendarDates),
-        interval: 0,
-        saturdayIndexes,
-        sundayIndexes,
-      }),
+      axisLabel:
+        granularity === "day"
+          ? buildCalendarAxisLabel({
+              fontSize: 10,
+              hideOverlap: true,
+              holidayIndexes: holidayCategoryIndexes(calendarDates),
+              interval: 0,
+              saturdayIndexes,
+              sundayIndexes,
+            })
+          : { color: "#66758A", fontSize: 10, hideOverlap: true, interval: 0 },
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
       data: labels,
@@ -2574,9 +2582,11 @@ function buildMultiScenarioOption(
     points: ScenarioAnalyticsPoint[];
   }>,
   color: string,
+  granularity: ScenarioAnalyticsGranularity,
   fixedHourlyAxis = false,
 ): EnterpriseChartOption {
-  const calendarPoints = series[0]?.points ?? [];
+  const axisPoints = series[0]?.points ?? [];
+  const calendarPoints = granularity === "day" ? axisPoints : [];
   const saturdayIndexes = calendarPoints.flatMap((point, index) =>
     point.isSaturday ? [index] : [],
   );
@@ -2585,11 +2595,11 @@ function buildMultiScenarioOption(
   );
   const calendarDates = calendarPoints.map((point) => point.bucket);
   const throughHour = fixedHourlyAxis
-    ? latestHourlyPointHour(calendarPoints)
+    ? latestHourlyPointHour(axisPoints)
     : -1;
   const labels = fixedHourlyAxis
     ? HOUR_LABELS
-    : calendarPoints.map((point) => point.label);
+    : axisPoints.map((point) => point.label);
 
   return {
     color: series.map((_, index) =>
@@ -2637,14 +2647,17 @@ function buildMultiScenarioOption(
         `${formatNumber(Number(value ?? 0))} eventos`,
     },
     xAxis: {
-      axisLabel: buildCalendarAxisLabel({
-        fontSize: 10,
-        hideOverlap: true,
-        holidayIndexes: holidayCategoryIndexes(calendarDates),
-        interval: 0,
-        saturdayIndexes,
-        sundayIndexes,
-      }),
+      axisLabel:
+        granularity === "day"
+          ? buildCalendarAxisLabel({
+              fontSize: 10,
+              hideOverlap: true,
+              holidayIndexes: holidayCategoryIndexes(calendarDates),
+              interval: 0,
+              saturdayIndexes,
+              sundayIndexes,
+            })
+          : { color: "#66758A", fontSize: 10, hideOverlap: true, interval: 0 },
       axisLine: { lineStyle: { color: "#D8E3F2" } },
       axisTick: { show: false },
       data: labels,

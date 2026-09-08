@@ -1041,11 +1041,16 @@ function mapChartValue(value: unknown, replacements: Record<string, string>): un
   }
 
   if (value && typeof value === "object") {
+    const heatmapSeries = (value as { type?: unknown }).type === "heatmap";
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [
-        key,
-        mapChartValue(item, replacements),
-      ]),
+      Object.entries(value).map(([key, item]) => {
+        // Intensity and cell-label contrast are data semantics, not surfaces.
+        // Mapping white to the dark canvas would invert the lowest heat level.
+        const preserveScale = key === "inRange" || key === "outOfRange" || key === "pieces";
+        const preserveCell = heatmapSeries &&
+          ["data", "label", "itemStyle", "emphasis", "blur", "select"].includes(key);
+        return [key, preserveScale || preserveCell ? item : mapChartValue(item, replacements)];
+      }),
     );
   }
 

@@ -2157,7 +2157,7 @@ test("comparativos de Ocupação desligam fontes ocultas e não atualizam cinco 
     source,
     /aggregateCoversCurrentHour[\s\S]*?broader hourly request owns this source[\s\S]*?aggregateDataset\.series\.find/,
   );
-  assert.match(source, /if \(!needsHourlyAggregate\) \{[\s\S]*?scheduleNext/);
+  assert.match(source, /if \(!needsHourlyAggregate \|\| !comparisonSelectionKey\) \{[\s\S]*?scheduleNext/);
 });
 
 test("retorno à Ocupação respeita o TTL independente de cada fonte", () => {
@@ -3754,7 +3754,7 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     comparisonSource,
-    /colorPalette=\{selectedHexColorPalette\.colors\}[\s\S]*?paletteId=\{settings\.hexColorPaletteId\}[\s\S]*?ariaLabel="Paleta de cores do simulador hexagonal"[\s\S]*?onSettingsChange\(\{ hexColorPaletteId \}\)/,
+    /ariaLabel="Paleta de cores do simulador hexagonal"[\s\S]*?value=\{settings\.hexColorPaletteId\}[\s\S]*?onChange\(\{ hexColorPaletteId \}\)/,
   );
   assert.equal(
     (comparisonSource.match(/<OccupancyStatusColorsDialog/g) ?? []).length,
@@ -3763,7 +3763,7 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     comparisonSource,
-    /statusColors=\{settings\.hexStatusColors\}[\s\S]*?buttonLabel="Cores do hex"[\s\S]*?onSettingsChange\(\{ hexStatusColors \}\)/,
+    /buttonLabel="Cores do hex"[\s\S]*?colors=\{settings\.hexStatusColors\}[\s\S]*?onChange\(\{ hexStatusColors \}\)/,
   );
   assert.match(
     comparisonSource,
@@ -3777,12 +3777,12 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     comparisonSource,
-    /grid min-w-0 gap-3 @xl:grid-cols-\[minmax\(220px,0\.8fr\)_minmax\(0,1\.2fr\)\][\s\S]*?<Hexagon[\s\S]*?flex min-w-0 flex-wrap items-center gap-2 @xl:justify-end/,
-    "o cabeçalho do Hex deve distribuir título e controles sem criar uma faixa vazia",
+    /id: "occupancy_hex_layout",\s*configurationContent:[\s\S]*?cardId="occupancy_hex_layout"/,
+    "o Hex deve reunir controles no mesmo organizador, sem criar uma faixa extra no cabeçalho",
   );
   const heatmapCardsSource = comparisonSource.slice(
     comparisonSource.indexOf("function OccupancyDayHourHeatmapCard"),
-    comparisonSource.indexOf("function ScenarioScopeDialog"),
+    comparisonSource.indexOf("function MetricSelect"),
   );
   assert.equal(
     (heatmapCardsSource.match(/fallbackColor=\{colorPalette\[0\]\}/g) ?? [])
@@ -4010,7 +4010,7 @@ test("exportação da Ocupação Ao Vivo inclui comparativos e duração configu
   );
   assert.match(
     comparisonSource,
-    /dateKey=\{scenarioHourHeatmapDateKey\}[\s\S]*?onDateKeyChange=\{\(scenarioHourHeatmapDateKey\) =>[\s\S]*?updateSettings\(\{ scenarioHourHeatmapDateKey \}\)/,
+    /dateKey=\{scenarioHourHeatmapDateKey\}[\s\S]*?value=\{dateKey\}[\s\S]*?dateKeys\.includes\(event\.target\.value\)[\s\S]*?onChange\(\{ scenarioHourHeatmapDateKey: event\.target\.value \}\)/,
     "a data exibida no heatmap cenários x horários deve ser a mesma persistida e exportada",
   );
   assert.match(
@@ -4020,7 +4020,7 @@ test("exportação da Ocupação Ao Vivo inclui comparativos e duração configu
   );
   assert.match(
     dashboardSource,
-    /occupancyDurationReportAssets[\s\S]*?occupancyDurationReportAssets\.forEach\([\s\S]*?titleSuffix/,
+    /\[\.\.\.occupancyDurationReportAssets, \.\.\.occupancyDurationInsightReportAssets\]\.forEach\([\s\S]*?titleSuffix/,
     "o relatório deve incorporar a linha do tempo e o comparativo de duração",
   );
   assert.match(
@@ -4033,6 +4033,24 @@ test("exportação da Ocupação Ao Vivo inclui comparativos e duração configu
     /occupancyReportDataCompleteUntil\([\s\S]*?occupancyDurationDataCompleteUntil/,
     "o corte certificado deve considerar também os agregados de duração",
   );
+});
+
+test("corte do relatório não certifica uma duração incompleta com dados de outra fonte", () => {
+  const cutoff = loadStandaloneFunction(
+    "components/app/occupancy-scenario-dashboard.tsx",
+    "occupancyReportDataCompleteUntil",
+  );
+  const history = new Date("2026-09-04T14:00:00Z");
+  const daily = new Date("2026-09-04T13:59:00Z");
+  const monthly = new Date("2026-09-04T13:58:00Z");
+  assert.equal(cutoff(history, null, monthly), null);
+  assert.equal(cutoff(history, daily, null), null);
+  assert.equal(cutoff(null, null, monthly), null);
+  assert.equal(cutoff(history, new Date(NaN), monthly), null);
+  assert.equal(cutoff(history, daily, monthly).toISOString(), monthly.toISOString());
+  assert.equal(cutoff(history, undefined, undefined).toISOString(), history.toISOString());
+  assert.equal(cutoff(null, undefined, monthly).toISOString(), monthly.toISOString());
+  assert.equal(cutoff(null, undefined, undefined), null);
 });
 
 test("widgets de duração preservam composição, acessibilidade e resumo numérico limitado", () => {
@@ -11956,13 +11974,9 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
     resolve(projectRoot, "components/app/demographics-dashboard.tsx"),
     "utf8",
   );
-  const heatmapColors = [
-    "#EFF6FF",
-    "#BFDBFE",
-    "#60A5FA",
-    "#2563EB",
-    "#172554",
-  ];
+  const heatmapColors = chartPalette.monochromeHeatmapPalette("#2563EB");
+  assert.match(source, /HEATMAP_COLORS\s*=\s*monochromeHeatmapPalette\(HEATMAP_BASE_COLOR\)/);
+  assert.match(source, /heatmapLabelColor\(HEATMAP_COLORS, value \/ maximum\)/);
   const buildAgeEmotionHeatmapOption = loadStandaloneFunction(
     "components/app/demographics-dashboard.tsx",
     "buildAgeEmotionHeatmapOption",
@@ -12157,6 +12171,163 @@ test("análise de um dia usa somente as horas da data escolhida", () => {
   assert.equal(model.metrics?.[0]?.value, 109);
   assert.equal(model.table?.rows[0]?.value, 109);
 });
+
+for (const kind of ["timeline", "comparison"]) {
+  for (const { description, granularity, fromDay, fromHour = 0 } of [
+    { description: "hora a hora de um dia", granularity: "hour", fromDay: 7 },
+    { description: "hora a hora de vários dias", granularity: "hour", fromDay: 6 },
+    {
+      description: "hora a hora a partir das 10h",
+      granularity: "hour",
+      fromDay: 7,
+      fromHour: 10,
+    },
+    { description: "minuto a minuto", granularity: "minute", fromDay: 7 },
+  ]) {
+    test(`Análises ${kind} ${description} não colore feriados ou finais de semana`, () => {
+      const previousTimeZone = process.env.TZ;
+      try {
+        for (const browserTimeZone of ["UTC", "America/Sao_Paulo"]) {
+          process.env.TZ = browserTimeZone;
+          const period = {
+            from: new Date(2026, 8, fromDay, fromHour),
+            to: new Date(2026, 8, 8),
+          };
+          const scenarios = [
+            scenario("north", "Entrada norte", "line-north", 1),
+            scenario("south", "Entrada sul", "line-south", 1),
+          ];
+          // As últimas horas do feriado brasileiro já têm prefixo 08/09 em UTC.
+          // O calendário não deve interpretar esse prefixo em eixos intradiários.
+          const minute = granularity === "minute" ? 15 : 0;
+          const rows = [0, 10, 20, 21, 22, 23]
+            .filter((hour) => hour >= fromHour)
+            .flatMap((hour, index) => [
+              aggregateRow(
+                new Date(2026, 8, 7, hour, minute).toISOString(),
+                "line-north",
+                index + 1,
+              ),
+              aggregateRow(
+                new Date(2026, 8, 7, hour, minute).toISOString(),
+                "line-south",
+                (index + 1) * 10,
+              ),
+            ]);
+          if (fromDay === 6) {
+            rows.push(
+              aggregateRow(
+                new Date(2026, 8, 6, 12).toISOString(),
+                "line-north",
+                7,
+              ),
+            );
+          }
+          const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+            companyTimeZone: "America/Sao_Paulo",
+            data: analysisData({
+              ...(granularity === "minute"
+                ? { minuteRows: rows }
+                : { hourRows: rows }),
+            }),
+            period,
+            scenarios,
+            widget: analysisWidget(kind, { granularity }),
+          });
+          const context = `${kind} / ${description} / ${browserTimeZone}`;
+          assert.equal(model.appliedGranularity, granularity, context);
+          assert.equal(model.hasData, true, context);
+          assert.ok(model.option, context);
+          const { series, xAxis } = model.option;
+          assert.equal(series.length, kind === "comparison" ? 2 : 1, context);
+          series.forEach((item) => {
+            assert.equal(item.markArea, undefined, context);
+          });
+          assert.equal(xAxis.axisLabel.rich, undefined, context);
+          xAxis.data.forEach((label, index) => {
+            const formatter = xAxis.axisLabel.formatter;
+            const formatted = typeof formatter === "function"
+              ? formatter(label, index)
+              : label;
+            assert.equal(formatted, label, context);
+          });
+          assert.equal(
+            series.reduce(
+              (total, item) => total + item.data.reduce(
+                (sum, value) => sum + (value ?? 0),
+                0,
+              ),
+              0,
+            ),
+            rows.reduce((sum, row) => sum + row.total, 0),
+            `os valores continuam integrais: ${context}`,
+          );
+          if (granularity === "hour" && fromDay === 7 && fromHour === 0) {
+            assert.deepEqual(xAxis.data, hourlyAxis.HOUR_OF_DAY_LABELS, context);
+          } else {
+            assert.equal(
+              xAxis.data.length,
+              granularity === "minute" ? 1_440 : fromHour ? 24 - fromHour : 48,
+              context,
+            );
+          }
+        }
+      } finally {
+        if (previousTimeZone === undefined) delete process.env.TZ;
+        else process.env.TZ = previousTimeZone;
+      }
+    });
+  }
+
+  test(`Análises ${kind} diário preserva o feriado na categoria civil correta`, () => {
+    const previousTimeZone = process.env.TZ;
+    try {
+      for (const browserTimeZone of ["UTC", "America/Sao_Paulo"]) {
+        process.env.TZ = browserTimeZone;
+        const model = periodAnalysisModel.buildPeriodAnalysisWidgetModel({
+          data: analysisData({
+            dayRows: [
+              aggregateRow("2026-09-06", "line-entry", 10),
+              aggregateRow("2026-09-07", "line-entry", 20),
+            ],
+          }),
+          period: {
+            from: new Date(2026, 8, 6),
+            to: new Date(2026, 8, 8),
+          },
+          scenarios: [scenario("entry", "Entrada", "line-entry", 1)],
+          widget: analysisWidget(kind, { granularity: "day" }),
+        });
+        const context = `${kind} / diário / ${browserTimeZone}`;
+        assert.equal(model.appliedGranularity, "day", context);
+        assert.equal(model.hasData, true, context);
+        const { series, xAxis } = model.option;
+        const holidayBands = series.flatMap((item) =>
+          (item.markArea?.data ?? []).filter(
+            ([start]) => start.name === "Independência do Brasil",
+          ),
+        );
+        assert.equal(holidayBands.length, 1, context);
+        assert.equal(holidayBands[0][0].xAxis, 1, context);
+        assert.equal(holidayBands[0][1].xAxis, 1, context);
+        assert.deepEqual(series[0].data, [10, 20], context);
+        assert.equal(
+          xAxis.axisLabel.formatter(xAxis.data[0], 0),
+          `{sunday|${xAxis.data[0]}}`,
+          context,
+        );
+        assert.equal(
+          xAxis.axisLabel.formatter(xAxis.data[1], 1),
+          `{holiday|${xAxis.data[1]}}`,
+          context,
+        );
+      }
+    } finally {
+      if (previousTimeZone === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTimeZone;
+    }
+  });
+}
 
 test("período anterior mantém limites em meia-noite ao atravessar DST", () => {
   const previousTimeZone = process.env.TZ;
@@ -16169,7 +16340,8 @@ test("gráficos e modo monitor preservam navegação por teclado", () => {
   assert.match(monitorSource, /buttonRef\.current\?\.focus\(\{ preventScroll: true \}\)/);
   assert.match(
     comparisonSource,
-    /aria-label="Cenário do mapa de calor por dias e horários"/,
+    /scenarioSelectionPolicy: "single"[\s\S]*?inheritedScenarioIds:/,
+    "o heatmap diário usa a seleção individual acessível do CardLayout",
   );
   assert.match(
     comparisonSource,
@@ -16233,7 +16405,8 @@ test("ações individuais dos widgets permanecem no topo direito em qualquer lar
   );
   assert.match(
     occupancySource,
-    /<EmptyOccupancyCard action=\{action\} title=\{widget\.title\} \/>/,
+    /configurationContent,[\s\S]*?<EmptyOccupancyCard title=\{widget\.title\} \/>/,
+    "os widgets customizados devem reunir suas ações no organizador, sem botões duplicados no cabeçalho",
   );
   assert.match(comparisonSource, /col-span-full flex min-w-0 flex-wrap/);
   assert.match(reportsSource, /<WidgetCardActions label=\{`Ações do widget/);
@@ -16412,12 +16585,12 @@ test("widgets do Ao Vivo respondem à largura real sem ocultar texto essencial",
   const heatmapShell = section(
     occupancyComparisonSource,
     "function OccupancyHeatmapCardShell",
-    "function ScenarioScopeDialog",
-  );
-  const scenarioPicker = section(
-    occupancyComparisonSource,
-    "function ScenarioScopeDialog",
     "function MetricSelect",
+  );
+  const comparisonOptions = section(
+    occupancyComparisonSource,
+    "function OccupancyComparisonOptions",
+    "function OccupancyHalfDonutCard",
   );
 
   for (const source of [realtimeSource, occupancySource]) {
@@ -16465,7 +16638,7 @@ test("widgets do Ao Vivo respondem à largura real sem ocultar texto essencial",
   assert.doesNotMatch(occupancyAlerts, /overflow-y-auto/);
 
   assert.match(currentComparison, /@2xl:grid-cols-/);
-  assert.match(currentComparison, /@sm:w-\[180px\]/);
+  assert.match(comparisonOptions, /className="w-full min-w-0"/);
   assert.match(
     currentComparison,
     /grid-cols-\[repeat\(auto-fit,minmax\(min\(100%,8\.5rem\),1fr\)\)\]/,
@@ -16480,7 +16653,8 @@ test("widgets do Ao Vivo respondem à largura real sem ocultar texto essencial",
   assert.match(maximumComparison, /@xl:grid-cols-/);
   assert.match(heatmapShell, /@container/);
   assert.match(heatmapShell, /@xl:grid-cols-/);
-  assert.doesNotMatch(scenarioPicker, /\btruncate\b/);
+  assert.doesNotMatch(occupancyComparisonSource, /function ScenarioScopeDialog/);
+  assert.match(occupancyComparisonSource, /scenarioConfigurable: true/);
 
   assert.match(scenarioComparisonSource, /@container min-w-0 overflow-hidden/);
   assert.match(
@@ -16603,7 +16777,7 @@ test("widgets de Ocupação ao vivo respeitam os seis níveis de altura do Bento
   const comparisonHeatmaps = section(
     comparisonSource,
     "function OccupancyDayHourHeatmapCard",
-    "function ScenarioScopeDialog",
+    "function MetricSelect",
   );
   const comparisonStates = section(
     comparisonSource,

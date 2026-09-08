@@ -24,25 +24,15 @@ export function monochromeHeatmapPalette(
   baseColor: string,
   theme: "light" | "dark" = "light",
 ) {
+  // Theme changes the surrounding UI, never the meaning of heat intensity.
+  // Keep the argument compatible with callers that also style axes by theme.
+  void theme;
   const source = parseHexColor(baseColor) ?? [18, 103, 196];
   const white: RgbColor = [255, 255, 255];
   const black: RgbColor = [0, 0, 0];
 
-  if (theme === "dark") {
-    const canvas: RgbColor = [15, 23, 42];
-    return [
-      mixRgb(source, canvas, 0.78),
-      mixRgb(source, canvas, 0.64),
-      mixRgb(source, canvas, 0.48),
-      mixRgb(source, canvas, 0.32),
-      mixRgb(source, canvas, 0.16),
-      mixRgb(source, white, 0.1),
-      mixRgb(source, white, 0.24),
-    ].map(rgbToHex);
-  }
-
   return [
-    mixRgb(source, white, 0.88),
+    white,
     mixRgb(source, white, 0.7),
     mixRgb(source, white, 0.48),
     mixRgb(source, white, 0.26),
@@ -52,7 +42,27 @@ export function monochromeHeatmapPalette(
   ].map(rgbToHex);
 }
 
+export function heatmapLabelColor(colors: readonly string[], ratio: number) {
+  const position = Math.max(0, Math.min(1, Number.isFinite(ratio) ? ratio : 0)) * Math.max(0, colors.length - 1);
+  const index = Math.floor(position);
+  const start = parseHexColor(colors[index] ?? "#FFFFFF") ?? [255, 255, 255];
+  const end = parseHexColor(colors[Math.min(index + 1, colors.length - 1)] ?? "#FFFFFF") ?? start;
+  const luminance = relativeLuminance(mixRgb(start, end, position - index));
+  const whiteContrast = 1.05 / (luminance + 0.05);
+  const darkLuminance = relativeLuminance([15, 23, 42]);
+  const darkContrast = (Math.max(luminance, darkLuminance) + 0.05) / (Math.min(luminance, darkLuminance) + 0.05);
+  return whiteContrast >= darkContrast ? "#FFFFFF" : "#0F172A";
+}
+
 type RgbColor = [number, number, number];
+
+function relativeLuminance(color: RgbColor) {
+  const linear = color.map((channel) => {
+    const value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+}
 
 function parseHexColor(value: string): RgbColor | null {
   const match = /^#([0-9a-f]{6})$/i.exec(value);

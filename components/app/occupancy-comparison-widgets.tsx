@@ -5,18 +5,17 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   CalendarDays,
-  Check,
   Clock3,
   Grid3X3,
   Hexagon,
   LineChart,
   Palette,
   RotateCcw,
-  Settings2,
   Trophy,
 } from "lucide-react";
 
 import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
+import type { LayoutCard, LayoutCardRenderContext } from "@/components/app/card-layout";
 import { getOccupancyChartPalette } from "@/components/app/occupancy-chart-palette";
 import { OccupancyHexLayoutEditor } from "@/components/app/deferred-occupancy-hex-layout-editor";
 import { OccupancyPaletteSelect } from "@/components/app/occupancy-palette-select";
@@ -136,10 +135,12 @@ import {
   type OccupancyWidgetSettings,
 } from "@/lib/occupancy-widget-settings";
 import { requireOccupancyHistoryResponse } from "@/lib/occupancy-validation";
-import type {
-  WidgetBentoPreviewChartType,
-  WidgetBentoPreviewKind,
-} from "@/lib/widget-bento-preview-content";
+import {
+  buildOccupancyComparisonSelectionPlan,
+  filterOccupancyComparisonRows,
+  resolveOccupancyComparisonScenarioIds,
+  selectOccupancyComparisonSharedSource,
+} from "@/lib/occupancy-comparison-selection";
 import type {
   OccupancyScenario,
   OccupancyScenarioAggregateResponse,
@@ -185,23 +186,7 @@ const OCCUPANCY_MAXIMUM_TREND_CARD_IDS = new Set([
   "occupancy_scenario_max_month",
   "occupancy_scenario_max_year",
 ]);
-type ComparisonLayoutCard = {
-  chartTypeEnabled?: boolean;
-  colorEditable?: boolean;
-  className?: string;
-  defaultHeight?: "short" | "standard" | "tall";
-  defaultHeightLevel?: 1 | 2 | 3 | 4 | 5 | 6;
-  defaultSize?: "compact" | "wide" | "large" | "full";
-  id: string;
-  label: string;
-  node: React.ReactNode;
-  previewChartType?: WidgetBentoPreviewChartType;
-  previewColors?: readonly string[];
-  previewKind?: WidgetBentoPreviewKind;
-  previewOrientation?: "horizontal" | "vertical";
-  titleEditable?: boolean;
-  zoomEnabled?: boolean;
-};
+type ComparisonLayoutCard = LayoutCard;
 
 export type OccupancyComparisonReportAsset = {
   cardId: string;
@@ -310,7 +295,7 @@ export function useOccupancyComparisonCards({
   maximumTrendRefreshMs?: number;
   monitorMode: boolean;
   preferenceScopeId?: string | null;
-  preferences: ReadonlyArray<Pick<CardPreference, "id" | "visible">>;
+  preferences: ReadonlyArray<CardPreference>;
   snapshotRefreshMs?: number;
   scenarios: OccupancyScenario[];
   timeZone: string;
@@ -348,9 +333,6 @@ export function useOccupancyComparisonCards({
     visibleCardIds,
     OCCUPANCY_HOURLY_AGGREGATE_CARD_IDS,
   );
-  const needsHourlyHeatmap =
-    visibleCardIds.has("occupancy_day_hour_heatmap") ||
-    visibleCardIds.has("occupancy_scenario_hour_heatmap");
   const needsCurrentHourMaximum = setIntersects(
     visibleCardIds,
     OCCUPANCY_CURRENT_HOUR_MAXIMUM_CARD_IDS,
@@ -405,29 +387,30 @@ export function useOccupancyComparisonCards({
         : selectedScenarioIds,
     [selectedScenarioIds, settings.hexLayout],
   );
-  const snapshotScenarios = React.useMemo(() => {
-    const requested = new Set<string>();
-    if (
-      visibleCardIds.has("occupancy_scenario_half_donut") ||
-      visibleCardIds.has("occupancy_scenario_bar_race") ||
-      visibleCardIds.has("occupancy_scenario_max_hour") ||
-      visibleCardIds.has("occupancy_scenario_max_year")
-    ) {
-      selectedScenarioIds.forEach((scenarioId) => requested.add(scenarioId));
-    }
-    if (visibleCardIds.has("occupancy_hex_layout")) {
-      hexScenarioIds.forEach((scenarioId) => requested.add(scenarioId));
-    }
-    return scopedScenarios.filter((scenario) => requested.has(scenario.id));
-  }, [hexScenarioIds, scopedScenarios, selectedScenarioIds, visibleCardIds]);
-  const comparisonSelectionKey = selectedScenarioIds.join(",");
+  const inheritedHeatmapScenarioId = resolveHeatmapScenarioId(
+    settings.heatmapScenarioId,
+    focusScenarioId,
+    selectedScenarioIds,
+  );
+  const selectionPlan = React.useMemo(() => buildOccupancyComparisonSelectionPlan({
+    scenarios: scopedScenarios,
+    preferences,
+    inheritedScenarioIds: selectedScenarioIds,
+    inheritedHeatmapScenarioId,
+    hexScenarioIds,
+  }), [hexScenarioIds, inheritedHeatmapScenarioId, preferences, scopedScenarios, selectedScenarioIds]);
+  const comparisonSelectionKey = selectionPlan.hourly.join(",");
+  const currentHourSelectionKey = selectionPlan.currentHour.join(",");
+  const maximumTrendSelectionKey = selectionPlan.trends.join(",");
+  const needsHourlyHeatmap = ["occupancy_day_hour_heatmap", "occupancy_scenario_hour_heatmap"].some(
+    (cardId) => visibleCardIds.has(cardId) && (selectionPlan.byCard.get(cardId)?.length ?? 0) > 0,
+  );
   const hourlyAggregateDayCount = needsHourlyHeatmap ? settings.dayCount : 1;
-  const snapshotSelectionKey = snapshotScenarios
-    .map((scenario) => scenario.id)
-    .join(",");
+  const snapshotSelectionKey = selectionPlan.snapshots.join(",");
   const snapshotScopeKey = `${companyScopeId}|${timeZone}|${snapshotSelectionKey}`;
   const aggregateScopeKey = `${companyScopeId}|${timeZone}|${comparisonSelectionKey}|${hourlyAggregateDayCount}`;
-  const maximumTrendScopeKey = `${companyScopeId}|${timeZone}|${comparisonSelectionKey}`;
+  const maximumTrendScopeKey = `${companyScopeId}|${timeZone}|${maximumTrendSelectionKey}`;
+  const currentHourScopeKey = `${companyScopeId}|${timeZone}|${currentHourSelectionKey}`;
   const [snapshotDataset, setSnapshotDataset] =
     React.useState<SnapshotDataset>({
       loading: false,
@@ -464,7 +447,7 @@ export function useOccupancyComparisonCards({
   );
   const focusSnapshotRef = React.useRef(focusSnapshot);
   const focusHourlyAggregateRef = React.useRef(focusHourlyAggregate);
-  const focusHourlyAggregateKey = focusHourlyAggregate
+  const focusHourlyAggregateKey = focusHourlyAggregate && selectionPlan.hourly.includes(focusScenarioId)
     ? [
         focusHourlyAggregate.from.getTime(),
         focusHourlyAggregate.to.getTime(),
@@ -617,7 +600,11 @@ export function useOccupancyComparisonCards({
 
       controller?.abort();
       controller = new AbortController();
-      const sharedFocusSnapshot = focusSnapshotRef.current;
+      const sharedFocusSnapshot = selectOccupancyComparisonSharedSource(
+        focusSnapshotRef.current,
+        focusScenarioId,
+        requestedIds,
+      );
       const requestedAt = sharedFocusSnapshot?.requestedAt ?? new Date();
       setSnapshotDataset((current) =>
         current.scopeKey === snapshotScopeKey
@@ -768,6 +755,7 @@ export function useOccupancyComparisonCards({
         focusHourlyAggregateRef.current,
         focusScenarioId,
         range,
+        requestedIds,
       );
       if (sharedFocus.covered && !sharedFocus.series) {
         // The focused dashboard owns this exact request. Wait for its
@@ -977,7 +965,7 @@ export function useOccupancyComparisonCards({
     async function refreshCurrentHourMaximum() {
       if (disposed || !settingsReady) return;
       const requestedIds = new Set(
-        comparisonSelectionKey.split(",").filter(Boolean),
+        currentHourSelectionKey.split(",").filter(Boolean),
       );
       const requestedScenarios = scopedScenarios.filter((scenario) =>
         requestedIds.has(scenario.id),
@@ -986,7 +974,7 @@ export function useOccupancyComparisonCards({
         setCurrentHourMaximumDataset({
           bucket: null,
           loading: false,
-          scopeKey: maximumTrendScopeKey,
+          scopeKey: currentHourScopeKey,
           series: [],
         });
         return;
@@ -997,7 +985,7 @@ export function useOccupancyComparisonCards({
         setCurrentHourMaximumDataset({
           bucket: null,
           loading: false,
-          scopeKey: maximumTrendScopeKey,
+          scopeKey: currentHourScopeKey,
           series: requestedScenarios.map((scenario) => ({
             error: occupancyRequestError(
               error,
@@ -1024,7 +1012,7 @@ export function useOccupancyComparisonCards({
           aggregateDataset.from <= range.from &&
           aggregateDataset.to >= range.to,
       );
-      if (needsHourlyAggregate && !aggregateCoversCurrentHour) {
+      if (needsHourlyAggregate && comparisonSelectionKey && !aggregateCoversCurrentHour) {
         // The broader hourly request owns this source. Its state update reruns
         // this effect, avoiding a second request for the same open hour.
         return;
@@ -1043,12 +1031,12 @@ export function useOccupancyComparisonCards({
           now: requestedAt,
           refreshMs: aggregateRefreshMs,
           refreshVersion: manualRefreshVersion,
-          scopeKey: maximumTrendScopeKey,
+          scopeKey: currentHourScopeKey,
           windowKey,
         },
       );
       if (freshnessRemainingMs > 0) {
-        if (!needsHourlyAggregate) {
+        if (!needsHourlyAggregate || !comparisonSelectionKey) {
           scheduleNext(
             endOfAggregateBucket(requestedAt, "minute"),
             false,
@@ -1063,13 +1051,13 @@ export function useOccupancyComparisonCards({
       const requestController = new AbortController();
       controller = requestController;
       setCurrentHourMaximumDataset((current) =>
-        current.scopeKey === maximumTrendScopeKey &&
+        current.scopeKey === currentHourScopeKey &&
         current.bucket?.getTime() === range.from.getTime()
           ? current
           : {
               bucket: range.from,
               loading: true,
-              scopeKey: maximumTrendScopeKey,
+              scopeKey: currentHourScopeKey,
               series: [],
             },
       );
@@ -1079,7 +1067,7 @@ export function useOccupancyComparisonCards({
         MAX_PARALLEL_REQUESTS,
         async (scenario): Promise<OccupancyScenarioOpenMaximumSeries> => {
           let hourWarning: string | undefined;
-          if (aggregateCoversCurrentHour) {
+          if (aggregateCoversCurrentHour && aggregateDataset.series.some((item) => item.scenarioId === scenario.id)) {
             const sharedSeries = aggregateDataset.series.find(
               (candidate) => candidate.scenarioId === scenario.id,
             );
@@ -1284,9 +1272,9 @@ export function useOccupancyComparisonCards({
       setCurrentHourMaximumDataset((current) => ({
         bucket: range.from,
         loading: false,
-        scopeKey: maximumTrendScopeKey,
+        scopeKey: currentHourScopeKey,
         series:
-          current.scopeKey === maximumTrendScopeKey &&
+          current.scopeKey === currentHourScopeKey &&
           current.bucket?.getTime() === range.from.getTime()
             ? preserveCurrentHourMetricsOnFailure(current.series, series)
             : series,
@@ -1294,10 +1282,10 @@ export function useOccupancyComparisonCards({
       resourceFreshnessRef.current.currentHourMaximum =
         completeOccupancyComparisonResource(
           manualRefreshVersion,
-          maximumTrendScopeKey,
+          currentHourScopeKey,
           windowKey,
         );
-      if (!needsHourlyAggregate) {
+      if (!needsHourlyAggregate || !comparisonSelectionKey) {
         scheduleNext(endOfAggregateBucket(new Date(), "minute"));
       }
     }
@@ -1323,7 +1311,8 @@ export function useOccupancyComparisonCards({
     aggregateScopeKey,
     companyScopeId,
     comparisonSelectionKey,
-    maximumTrendScopeKey,
+    currentHourSelectionKey,
+    currentHourScopeKey,
     manualRefreshVersion,
     needsCurrentHourMaximum,
     needsHourlyAggregate,
@@ -1362,7 +1351,7 @@ export function useOccupancyComparisonCards({
       const requestedAt = new Date();
       const ranges = buildOccupancyMaximumTrendRanges(requestedAt);
       const requestedIds = new Set(
-        comparisonSelectionKey.split(",").filter(Boolean),
+        maximumTrendSelectionKey.split(",").filter(Boolean),
       );
       const requestedScenarios = scopedScenarios.filter((scenario) =>
         requestedIds.has(scenario.id),
@@ -1527,7 +1516,7 @@ export function useOccupancyComparisonCards({
     };
   }, [
     companyScopeId,
-    comparisonSelectionKey,
+    maximumTrendSelectionKey,
     maximumTrendRefreshMs,
     maximumTrendScopeKey,
     manualRefreshVersion,
@@ -1542,13 +1531,6 @@ export function useOccupancyComparisonCards({
     snapshotDataset.scopeKey === snapshotScopeKey
       ? snapshotDataset.snapshots
       : [];
-  const snapshotByScenarioId = new Map(
-    certifiedSnapshots.map((snapshot) => [snapshot.scenarioId, snapshot]),
-  );
-  const comparisonSnapshots = selectedScenarioIds.flatMap((scenarioId) => {
-    const snapshot = snapshotByScenarioId.get(scenarioId);
-    return snapshot ? [snapshot] : [];
-  });
   const certifiedAggregate =
     aggregateDataset.scopeKey === aggregateScopeKey
       ? aggregateDataset
@@ -1570,12 +1552,12 @@ export function useOccupancyComparisonCards({
           series: [],
         };
   const certifiedCurrentHourMaximum =
-    currentHourMaximumDataset.scopeKey === maximumTrendScopeKey
+    currentHourMaximumDataset.scopeKey === currentHourScopeKey
       ? currentHourMaximumDataset
       : {
           bucket: null,
           loading: true,
-          scopeKey: maximumTrendScopeKey,
+          scopeKey: currentHourScopeKey,
           series: [],
         };
   const snapshotLoading =
@@ -1586,7 +1568,7 @@ export function useOccupancyComparisonCards({
     maximumTrendDataset.scopeKey !== maximumTrendScopeKey ||
     maximumTrendDataset.loading;
   const currentHourMaximumLoading =
-    currentHourMaximumDataset.scopeKey !== maximumTrendScopeKey ||
+    currentHourMaximumDataset.scopeKey !== currentHourScopeKey ||
     currentHourMaximumDataset.loading;
   const hourlyMaximumBuckets = React.useMemo(() => {
     const anchorBucket =
@@ -1606,11 +1588,7 @@ export function useOccupancyComparisonCards({
         scenarioId: scenario.scenarioId,
         warning: scenario.warning,
       }));
-  const heatmapScenarioId = resolveHeatmapScenarioId(
-    settings.heatmapScenarioId,
-    focusScenarioId,
-    selectedScenarioIds,
-  );
+  const heatmapScenarioId = selectionPlan.byCard.get("occupancy_day_hour_heatmap")?.[0] ?? "";
   const scenarioHourHeatmapDateKeys = React.useMemo(
     () => Array.from(new Set(certifiedAggregate.buckets.map(localDateKey))),
     [certifiedAggregate.buckets],
@@ -1625,23 +1603,37 @@ export function useOccupancyComparisonCards({
   const selectedHexColorPalette = getOccupancyColorPalette(
     settings.hexColorPaletteId,
   );
-  const updateScenarioIds = React.useCallback(
-    (scenarioIds: string[]) => updateSettings({ scenarioIds }),
-    [updateSettings],
-  );
-
-  const commonScopeProps = {
-    allScenarios: scopedScenarios,
-    monitorMode,
-    onScenarioIdsChange: updateScenarioIds,
-    selectedScenarioIds,
+  const resolveCardScenarioIds = (cardId: string, { scenarioSelection }: LayoutCardRenderContext) =>
+    resolveOccupancyComparisonScenarioIds({
+      availableScenarioIds: scopedScenarios.map((scenario) => scenario.id),
+      cardId,
+      inheritedHeatmapScenarioId,
+      inheritedScenarioIds: selectedScenarioIds,
+      selection: scenarioSelection,
+    });
+  const scenarioCardDefaults = {
+    inheritedScenarioIds: selectedScenarioIds,
+    inheritedScenarioLabel: "Seleção salva da visão",
+    scenarioConfigurable: true,
+    scenarioSelectionPolicy: "compare" as const,
   };
   const cards: ComparisonLayoutCard[] = [
     {
       colorEditable: false,
       defaultHeight: "tall",
       defaultSize: "large",
+      ...scenarioCardDefaults,
       id: "occupancy_scenario_half_donut",
+      configurationContent: !monitorMode ? <OccupancyComparisonOptions
+        cardId="occupancy_scenario_half_donut"
+        settings={settings}
+        onChange={updateSettings}
+        dateKey={scenarioHourHeatmapDateKey}
+        dateKeys={scenarioHourHeatmapDateKeys}
+        scenarios={scopedScenarios}
+        snapshots={certifiedSnapshots}
+        defaultScenarioIds={selectedScenarioIds}
+      /> : undefined,
       label: "Comparação atual por cenário",
       previewChartType: "bar",
       previewColors: selectedColorPalette.colors,
@@ -1651,24 +1643,21 @@ export function useOccupancyComparisonCards({
           : "chart",
       previewOrientation:
         settings.comparisonChartType === "bars" ? "horizontal" : "vertical",
-      node: (
+      node: (context) => {
+        const scenarioIds = resolveCardScenarioIds("occupancy_scenario_half_donut", context);
+        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        return (
         <OccupancyHalfDonutCard
-          {...commonScopeProps}
           chartType={settings.comparisonChartType}
           colorPalette={selectedColorPalette.colors}
           loading={snapshotLoading}
           mode={settings.comparisonMode}
-          onChartTypeChange={(comparisonChartType) =>
-            updateSettings({ comparisonChartType })
-          }
-          onModeChange={(comparisonMode) =>
-            updateSettings({ comparisonMode })
-          }
           requestedAt={snapshotDataset.requestedAt}
-          snapshots={comparisonSnapshots}
+          snapshots={filter(certifiedSnapshots)}
           statusColors={DEFAULT_OCCUPANCY_STATUS_COLORS}
         />
-      ),
+        );
+      },
       titleEditable: true,
       zoomEnabled: true,
     },
@@ -1677,20 +1666,24 @@ export function useOccupancyComparisonCards({
       defaultHeight: "standard",
       defaultHeightLevel: 4,
       defaultSize: "wide",
+      ...scenarioCardDefaults,
       id: "occupancy_scenario_bar_race",
       label: "Ranking ao vivo por cenário",
       previewColors: selectedColorPalette.colors,
       previewKind: "ranking",
-      node: (
+      node: (context) => {
+        const scenarioIds = resolveCardScenarioIds("occupancy_scenario_bar_race", context);
+        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        return (
         <OccupancyBarRaceCard
-          {...commonScopeProps}
           loading={snapshotLoading}
           colorPalette={selectedColorPalette.colors}
           requestedAt={snapshotDataset.requestedAt}
           refreshSeconds={Math.max(1, Math.round(snapshotRefreshMs / 1_000))}
-          snapshots={comparisonSnapshots}
+          snapshots={filter(certifiedSnapshots)}
         />
-      ),
+        );
+      },
       titleEditable: true,
       zoomEnabled: true,
     },
@@ -1699,25 +1692,30 @@ export function useOccupancyComparisonCards({
       defaultHeight: "standard",
       defaultHeightLevel: 4,
       defaultSize: "wide",
+      ...scenarioCardDefaults,
       id: "occupancy_scenario_max_hour",
       label: "Máximo por hora por cenário",
       previewChartType: "line",
       previewColors: selectedColorPalette.colors,
       previewKind: "chart",
-      node: (
+      node: (context) => {
+        const scenarioIds = resolveCardScenarioIds("occupancy_scenario_max_hour", context);
+        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        return (
         <OccupancyScenarioMaximumLineCard
-          {...commonScopeProps}
+          allScenarios={scopedScenarios.filter((scenario) => scenarioIds.includes(scenario.id))}
           buckets={hourlyMaximumBuckets}
           colorPalette={selectedColorPalette.colors}
           currentBucket={certifiedCurrentHourMaximum.bucket}
-          currentSnapshots={comparisonSnapshots}
-          currentSeries={certifiedCurrentHourMaximum.series}
+          currentSnapshots={filter(certifiedSnapshots)}
+          currentSeries={filter(certifiedCurrentHourMaximum.series)}
           granularity="hour"
           loading={aggregateLoading && currentHourMaximumLoading}
           refreshSeconds={Math.max(1, Math.round(snapshotRefreshMs / 1_000))}
-          series={hourlyMaximumSeries}
+          series={filter(hourlyMaximumSeries)}
         />
-      ),
+        );
+      },
       titleEditable: true,
       zoomEnabled: true,
     },
@@ -1726,21 +1724,26 @@ export function useOccupancyComparisonCards({
       defaultHeight: "standard",
       defaultHeightLevel: 4,
       defaultSize: "wide",
+      ...scenarioCardDefaults,
       id: "occupancy_scenario_max_month",
       label: "Máximo por mês por cenário",
       previewChartType: "line",
       previewColors: selectedColorPalette.colors,
       previewKind: "chart",
-      node: (
+      node: (context) => {
+        const scenarioIds = resolveCardScenarioIds("occupancy_scenario_max_month", context);
+        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        return (
         <OccupancyScenarioMaximumLineCard
-          {...commonScopeProps}
+          allScenarios={scopedScenarios.filter((scenario) => scenarioIds.includes(scenario.id))}
           buckets={certifiedMaximumTrend.ranges?.monthly.buckets ?? []}
           colorPalette={selectedColorPalette.colors}
           granularity="month"
           loading={maximumTrendLoading}
-          series={certifiedMaximumTrend.series}
+          series={filter(certifiedMaximumTrend.series)}
         />
-      ),
+        );
+      },
       titleEditable: true,
       zoomEnabled: true,
     },
@@ -1749,27 +1752,32 @@ export function useOccupancyComparisonCards({
       defaultHeight: "standard",
       defaultHeightLevel: 4,
       defaultSize: "wide",
+      ...scenarioCardDefaults,
       id: "occupancy_scenario_max_year",
       label: "Máximo por ano por cenário",
       previewChartType: "line",
       previewColors: selectedColorPalette.colors,
       previewKind: "chart",
-      node: (
+      node: (context) => {
+        const scenarioIds = resolveCardScenarioIds("occupancy_scenario_max_year", context);
+        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        return (
         <OccupancyScenarioMaximumLineCard
-          {...commonScopeProps}
+          allScenarios={scopedScenarios.filter((scenario) => scenarioIds.includes(scenario.id))}
           buckets={certifiedMaximumTrend.ranges?.annual.buckets ?? []}
           colorPalette={selectedColorPalette.colors}
           currentBucket={certifiedCurrentHourMaximum.bucket}
-          currentSnapshots={comparisonSnapshots}
-          currentSeries={certifiedCurrentHourMaximum.series}
+          currentSnapshots={filter(certifiedSnapshots)}
+          currentSeries={filter(certifiedCurrentHourMaximum.series)}
           granularity="year"
           loading={maximumTrendLoading}
           monthlySourceBuckets={
             certifiedMaximumTrend.ranges?.monthlySource.buckets ?? []
           }
-          series={certifiedMaximumTrend.series}
+          series={filter(certifiedMaximumTrend.series)}
         />
-      ),
+        );
+      },
       titleEditable: true,
       zoomEnabled: true,
     },
@@ -1778,12 +1786,21 @@ export function useOccupancyComparisonCards({
       defaultHeight: "tall",
       defaultSize: "full",
       id: "occupancy_hex_layout",
+      configurationContent: !monitorMode ? <OccupancyComparisonOptions
+        cardId="occupancy_hex_layout"
+        settings={settings}
+        onChange={updateSettings}
+        dateKey={scenarioHourHeatmapDateKey}
+        dateKeys={scenarioHourHeatmapDateKeys}
+        scenarios={scopedScenarios}
+        snapshots={certifiedSnapshots}
+        defaultScenarioIds={selectedScenarioIds}
+      /> : undefined,
       label: "Simulador operacional hexagonal",
       previewColors: selectedHexColorPalette.colors,
       previewKind: "hex",
       node: (
         <OccupancyHexLayoutCard
-          allScenarios={scopedScenarios}
           capacities={settings.capacities}
           colorPalette={selectedHexColorPalette.colors}
           columns={settings.hexColumns}
@@ -1791,9 +1808,6 @@ export function useOccupancyComparisonCards({
           displayMode={settings.hexDisplayMode}
           layout={settings.hexLayout}
           loading={snapshotLoading}
-          monitorMode={monitorMode}
-          onSettingsChange={updateSettings}
-          paletteId={settings.hexColorPaletteId}
           preset={settings.hexPreset}
           scenarios={scopedScenarios}
           snapshots={certifiedSnapshots}
@@ -1807,31 +1821,43 @@ export function useOccupancyComparisonCards({
       colorEditable: false,
       defaultHeight: "tall",
       defaultSize: "full",
+      ...scenarioCardDefaults,
       id: "occupancy_day_hour_heatmap",
+      configurationContent: !monitorMode ? <OccupancyComparisonOptions
+        cardId="occupancy_day_hour_heatmap"
+        settings={settings}
+        onChange={updateSettings}
+        dateKey={scenarioHourHeatmapDateKey}
+        dateKeys={scenarioHourHeatmapDateKeys}
+        scenarios={scopedScenarios}
+        snapshots={certifiedSnapshots}
+        defaultScenarioIds={selectedScenarioIds}
+      /> : undefined,
+      scenarioSelectionPolicy: "single",
+      inheritedScenarioIds: inheritedHeatmapScenarioId ? [inheritedHeatmapScenarioId] : [],
+      inheritedScenarioLabel: scopedScenarios.find((scenario) => scenario.id === inheritedHeatmapScenarioId)?.name ?? "Cenário da visão",
       label: "Ocupação por dias x horários",
       previewColors: selectedColorPalette.colors,
       previewKind: "heatmap",
-      node: (
+      node: (context) => {
+        const scenarioIds = resolveCardScenarioIds("occupancy_day_hour_heatmap", context);
+        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        return (
         <OccupancyDayHourHeatmapCard
-          {...commonScopeProps}
           buckets={certifiedAggregate.buckets}
           colorPalette={selectedColorPalette.colors}
           dayCount={settings.dayCount}
           loading={aggregateLoading}
           maximum={sharedHeatmapMaximum(
-            certifiedAggregate.series,
+            filter(certifiedAggregate.series),
             settings.metric,
           )}
           metric={settings.metric}
-          onDayCountChange={(dayCount) => updateSettings({ dayCount })}
-          onMetricChange={(metric) => updateSettings({ metric })}
-          onScenarioChange={(heatmapScenarioId) =>
-            updateSettings({ heatmapScenarioId })
-          }
-          scenarioId={heatmapScenarioId}
-          series={certifiedAggregate.series}
+          scenarioId={scenarioIds[0] ?? ""}
+          series={filter(certifiedAggregate.series)}
         />
-      ),
+        );
+      },
       titleEditable: true,
       zoomEnabled: true,
     },
@@ -1839,30 +1865,39 @@ export function useOccupancyComparisonCards({
       colorEditable: false,
       defaultHeight: "tall",
       defaultSize: "full",
+      ...scenarioCardDefaults,
       id: "occupancy_scenario_hour_heatmap",
+      configurationContent: !monitorMode ? <OccupancyComparisonOptions
+        cardId="occupancy_scenario_hour_heatmap"
+        settings={settings}
+        onChange={updateSettings}
+        dateKey={scenarioHourHeatmapDateKey}
+        dateKeys={scenarioHourHeatmapDateKeys}
+        scenarios={scopedScenarios}
+        snapshots={certifiedSnapshots}
+        defaultScenarioIds={selectedScenarioIds}
+      /> : undefined,
       label: "Ocupação por cenários x horários",
       previewColors: selectedColorPalette.colors,
       previewKind: "heatmap",
-      node: (
+      node: (context) => {
+        const scenarioIds = resolveCardScenarioIds("occupancy_scenario_hour_heatmap", context);
+        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        return (
         <OccupancyScenarioHourHeatmapCard
-          {...commonScopeProps}
           buckets={certifiedAggregate.buckets}
           colorPalette={selectedColorPalette.colors}
           loading={aggregateLoading}
           maximum={sharedHeatmapMaximum(
-            certifiedAggregate.series,
+            filter(certifiedAggregate.series),
             settings.metric,
           )}
           metric={settings.metric}
           dateKey={scenarioHourHeatmapDateKey}
-          dateKeys={scenarioHourHeatmapDateKeys}
-          onDateKeyChange={(scenarioHourHeatmapDateKey) =>
-            updateSettings({ scenarioHourHeatmapDateKey })
-          }
-          onMetricChange={(metric) => updateSettings({ metric })}
-          series={certifiedAggregate.series}
+          series={filter(certifiedAggregate.series)}
         />
-      ),
+        );
+      },
       titleEditable: true,
       zoomEnabled: true,
     },
@@ -1881,9 +1916,10 @@ export function useOccupancyComparisonCards({
     maximumTrendSeries: certifiedMaximumTrend.series,
     scenarioHourHeatmapDateKey,
     scenarios: scopedScenarios,
+    selectionsByCard: selectionPlan.byCard,
     selectedScenarioIds,
     settings,
-    snapshots: comparisonSnapshots,
+    snapshots: certifiedSnapshots,
   });
 
   return { cards, refresh, reportAssets, settings, updateSettings };
@@ -1902,6 +1938,7 @@ function buildOccupancyComparisonReportAssets({
   maximumTrendSeries,
   scenarioHourHeatmapDateKey,
   scenarios,
+  selectionsByCard,
   selectedScenarioIds,
   settings,
   snapshots,
@@ -1918,6 +1955,7 @@ function buildOccupancyComparisonReportAssets({
   maximumTrendSeries: OccupancyScenarioHourlySeries[];
   scenarioHourHeatmapDateKey: string;
   scenarios: OccupancyScenario[];
+  selectionsByCard?: ReadonlyMap<string, readonly string[]>;
   selectedScenarioIds: string[];
   settings: OccupancyWidgetSettings;
   snapshots: OccupancyScenarioSnapshot[];
@@ -1926,15 +1964,19 @@ function buildOccupancyComparisonReportAssets({
   const comparisonPalette = getOccupancyColorPalette(settings.colorPaletteId);
   const hexColorPalette = getOccupancyColorPalette(settings.hexColorPaletteId);
   const widgetColor = comparisonPalette.colors[0];
+  const filterForCard = <T extends { scenarioId: string }>(cardId: string, rows: readonly T[]) =>
+    filterOccupancyComparisonRows(rows, selectionsByCard?.get(cardId) ?? selectedScenarioIds);
+  const currentSnapshots = filterForCard("occupancy_scenario_half_donut", snapshots);
+  const raceSnapshots = filterForCard("occupancy_scenario_bar_race", snapshots);
   const scenarioIndexes = new Map(
-    snapshots.map((snapshot, index) => [snapshot.scenarioId, index + 1]),
+    currentSnapshots.map((snapshot, index) => [snapshot.scenarioId, index + 1]),
   );
   const comparisonEntries = buildOccupancyHalfDonutEntries(
-    snapshots,
+    currentSnapshots,
     settings.comparisonMode,
   );
   const comparisonBarEntries = buildOccupancyComparisonBarEntries(
-    snapshots,
+    currentSnapshots,
     settings.comparisonMode,
   );
   const comparisonStatusColors = {
@@ -1991,7 +2033,7 @@ function buildOccupancyComparisonReportAssets({
       ? "Estado atual por cenário na ordem configurada; zero representa desocupado e ausência permanece sem dados."
       : "Ocupação atual por cenário na ordem configurada, com participação calculada apenas sobre valores disponíveis.";
 
-  const raceEntries = buildOccupancyLiveRaceEntries(snapshots);
+  const raceEntries = buildOccupancyLiveRaceEntries(raceSnapshots);
   const raceRows = raceEntries
     .map((entry, sourceIndex) => ({ ...entry, sourceIndex }))
     .sort((left, right) => {
@@ -2005,12 +2047,12 @@ function buildOccupancyComparisonReportAssets({
   const hourlyMaximum = buildMaximumLineSeries({
     buckets: hourlyMaximumBuckets,
     currentBucket: currentHourBucket,
-    currentSnapshots: snapshots,
-    currentSeries: currentHourSeries,
+    currentSnapshots: filterForCard("occupancy_scenario_max_hour", snapshots),
+    currentSeries: filterForCard("occupancy_scenario_max_hour", currentHourSeries),
     granularity: "hour",
     monthlySourceBuckets: [],
     scenarios,
-    series: hourlyMaximumSeries,
+    series: filterForCard("occupancy_scenario_max_hour", hourlyMaximumSeries),
   });
   const monthlyBuckets = maximumTrendRanges?.monthly.buckets ?? [];
   const monthlyMaximum = buildMaximumLineSeries({
@@ -2021,18 +2063,18 @@ function buildOccupancyComparisonReportAssets({
     granularity: "month",
     monthlySourceBuckets: [],
     scenarios,
-    series: maximumTrendSeries,
+    series: filterForCard("occupancy_scenario_max_month", maximumTrendSeries),
   });
   const annualBuckets = maximumTrendRanges?.annual.buckets ?? [];
   const annualMaximum = buildMaximumLineSeries({
     buckets: annualBuckets,
     currentBucket: currentHourBucket,
-    currentSnapshots: snapshots,
-    currentSeries: currentHourSeries,
+    currentSnapshots: filterForCard("occupancy_scenario_max_year", snapshots),
+    currentSeries: filterForCard("occupancy_scenario_max_year", currentHourSeries),
     granularity: "year",
     monthlySourceBuckets: maximumTrendRanges?.monthlySource.buckets ?? [],
     scenarios,
-    series: maximumTrendSeries,
+    series: filterForCard("occupancy_scenario_max_year", maximumTrendSeries),
   });
 
   const effectiveHexLayout =
@@ -2082,13 +2124,9 @@ function buildOccupancyComparisonReportAssets({
     settings.hexStatusColors,
   );
 
-  const heatmapMaximum = sharedHeatmapMaximum(
-    aggregateSeries,
-    settings.metric,
-  );
-  const dayHourSeries = aggregateSeries.find(
-    (item) => item.scenarioId === heatmapScenarioId,
-  );
+  const dayHourSeries = aggregateSeries.find((item) => item.scenarioId ===
+    (selectionsByCard?.get("occupancy_day_hour_heatmap")?.[0] ?? (selectionsByCard?.has("occupancy_day_hour_heatmap") ? "" : heatmapScenarioId)));
+  const scenarioHourSeries = filterForCard("occupancy_scenario_hour_heatmap", aggregateSeries);
   const dayHourMatrix = dayHourSeries
     ? buildDaysHoursOccupancyCells({
         buckets: aggregateBuckets,
@@ -2102,7 +2140,7 @@ function buildOccupancyComparisonReportAssets({
         buckets: aggregateBuckets,
         dateKey: scenarioHourHeatmapDateKey,
         metric: settings.metric,
-        series: aggregateSeries,
+        series: scenarioHourSeries,
       })
     : { cells: [], scenarioNames: [] };
 
@@ -2124,7 +2162,7 @@ function buildOccupancyComparisonReportAssets({
           description:
             "Ordem fixa configurada; valores ausentes permanecem nulos e não participam do percentual.",
           rows: comparisonBarEntries.map((entry, index) => {
-            const snapshot = snapshots[index];
+            const snapshot = currentSnapshots[index];
             return {
               asOf: snapshot?.asOf ? formatDateTime(snapshot.asOf) : null,
               occupancy: entry.total,
@@ -2166,8 +2204,8 @@ function buildOccupancyComparisonReportAssets({
           description:
             "Ranking visual dos cenários no horário da última atualização.",
           rows: raceRows.map((entry, index) => ({
-            asOf: snapshots[entry.sourceIndex]?.asOf
-              ? formatDateTime(snapshots[entry.sourceIndex].asOf!)
+            asOf: raceSnapshots[entry.sourceIndex]?.asOf
+              ? formatDateTime(raceSnapshots[entry.sourceIndex].asOf!)
               : null,
             occupancy: entry.value,
             rank: entry.value === null ? null : index + 1,
@@ -2260,12 +2298,13 @@ function buildOccupancyComparisonReportAssets({
         description: `Últimos ${settings.dayCount} dias do cenário escolhido; o valor zero permanece visível e a ausência fica sem valor.`,
         option: buildHeatmapOption({
           cells: dayHourMatrix.cells,
-          maximum: heatmapMaximum,
+          interactive: false,
+          maximum: sharedHeatmapMaximum(dayHourSeries ? [dayHourSeries] : [], settings.metric),
           metric: settings.metric,
           theme,
           widgetColor,
-          xLabels: dayHourLabels,
-          yLabels: OCCUPANCY_FIXED_HOUR_LABELS,
+          xLabels: OCCUPANCY_FIXED_HOUR_LABELS,
+          yLabels: dayHourLabels,
         }),
         table: {
           columns: [
@@ -2300,12 +2339,13 @@ function buildOccupancyComparisonReportAssets({
         }; lacunas permanecem sem valor.`,
         option: buildHeatmapOption({
           cells: scenarioHourMatrix.cells,
-          maximum: heatmapMaximum,
+          interactive: false,
+          maximum: sharedHeatmapMaximum(scenarioHourSeries, settings.metric),
           metric: settings.metric,
           theme,
           widgetColor,
-          xLabels: scenarioHourMatrix.scenarioNames,
-          yLabels: OCCUPANCY_FIXED_HOUR_LABELS,
+          xLabels: OCCUPANCY_FIXED_HOUR_LABELS,
+          yLabels: scenarioHourMatrix.scenarioNames,
         }),
         table: {
           columns: [
@@ -2403,34 +2443,120 @@ function comparisonStateLabel(
   return "Sem dados";
 }
 
+function OccupancyComparisonOptions({
+  cardId,
+  settings,
+  onChange,
+  dateKey,
+  dateKeys,
+  scenarios,
+  snapshots,
+  defaultScenarioIds,
+}: {
+  cardId: string;
+  settings: OccupancyWidgetSettings;
+  onChange: (patch: Partial<OccupancyWidgetSettings>) => boolean;
+  dateKey: string;
+  dateKeys: string[];
+  scenarios: OccupancyScenario[];
+  snapshots: OccupancyScenarioSnapshot[];
+  defaultScenarioIds: string[];
+}) {
+  if (cardId === "occupancy_scenario_half_donut") {
+    return <div className="grid min-w-0 gap-3">
+      <Select value={settings.comparisonChartType} onValueChange={(comparisonChartType) => onChange({ comparisonChartType: comparisonChartType as OccupancyWidgetSettings["comparisonChartType"] })}>
+        <SelectTrigger aria-label="Tipo do gráfico da comparação atual por cenário" className="w-full min-w-0"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="half_donut">Meia rosca</SelectItem>
+          <SelectItem value="bars">Barras horizontais</SelectItem>
+          <SelectItem value="vertical_bars">Barras verticais</SelectItem>
+        </SelectContent>
+      </Select>
+      <Select value={settings.comparisonMode} onValueChange={(comparisonMode) => onChange({ comparisonMode: comparisonMode as OccupancyHalfDonutMode })}>
+        <SelectTrigger aria-label="Modo da comparação atual por cenário" className="w-full min-w-0"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="status">Ocupado / desocupado</SelectItem>
+          <SelectItem value="actual">Ocupação real</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>;
+  }
+  if (cardId === "occupancy_hex_layout") {
+    const palette = getOccupancyColorPalette(settings.hexColorPaletteId);
+    return <div className="grid min-w-0 gap-3">
+      <OccupancyHexLayoutEditor
+        capacities={settings.capacities}
+        defaultScenarioIds={defaultScenarioIds}
+        displayMode={settings.hexDisplayMode}
+        fallbackColor={palette.colors[0]}
+        legacyColumns={settings.hexColumns}
+        legacyPreset={settings.hexPreset}
+        layout={settings.hexLayout}
+        onSave={onChange}
+        scenarios={scenarios}
+        semanticColors={settings.hexStatusColors}
+        snapshots={snapshots}
+      />
+      <Select value={settings.hexDisplayMode} onValueChange={(hexDisplayMode) => onChange({ hexDisplayMode: hexDisplayMode as OccupancyWidgetSettings["hexDisplayMode"] })}>
+        <SelectTrigger aria-label="Modo de visualização do simulador hexagonal" className="w-full min-w-0"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="actual">Valor real (gradual)</SelectItem>
+          <SelectItem value="status">Ocupado / desocupado</SelectItem>
+        </SelectContent>
+      </Select>
+      {settings.hexDisplayMode === "actual" ? <OccupancyPaletteSelect
+        ariaLabel="Paleta de cores do simulador hexagonal"
+        className="w-full min-w-0 @sm:w-full"
+        value={settings.hexColorPaletteId}
+        onValueChange={(hexColorPaletteId) => onChange({ hexColorPaletteId })}
+      /> : <OccupancyStatusColorsDialog
+        ariaLabel="Configurar cores de estado do simulador hexagonal"
+        buttonLabel="Cores do hex"
+        colors={settings.hexStatusColors}
+        dialogDescription="Defina as cores de ocupado e desocupado usadas pelo simulador hexagonal."
+        dialogTitle="Cores de estado do simulador hexagonal"
+        onChange={(hexStatusColors) => onChange({ hexStatusColors })}
+        successMessage="Cores do simulador hexagonal atualizadas."
+      />}
+    </div>;
+  }
+  return <div className="grid min-w-0 gap-3">
+    {cardId === "occupancy_day_hour_heatmap" ? <Select value={String(settings.dayCount)} onValueChange={(value) => onChange({ dayCount: Number(value) as 7 | 14 | 30 })}>
+      <SelectTrigger aria-label="Período do mapa de calor por dias e horários" className="w-full min-w-0"><SelectValue /></SelectTrigger>
+      <SelectContent>
+        <SelectItem value="7">7 dias</SelectItem>
+        <SelectItem value="14">14 dias</SelectItem>
+        <SelectItem value="30">30 dias</SelectItem>
+      </SelectContent>
+    </Select> : dateKey ? <Input
+      aria-label="Data do mapa de calor por cenário"
+      className="w-full min-w-0"
+      min={dateKeys[0]}
+      max={dateKeys.at(-1)}
+      type="date"
+      value={dateKey}
+      onChange={(event) => {
+        if (dateKeys.includes(event.target.value)) onChange({ scenarioHourHeatmapDateKey: event.target.value });
+      }}
+    /> : null}
+    <MetricSelect onChange={(metric) => { onChange({ metric }); }} value={settings.metric} />
+  </div>;
+}
+
 function OccupancyHalfDonutCard({
-  allScenarios,
   chartType,
   colorPalette,
   loading,
   mode,
-  monitorMode,
-  onChartTypeChange,
-  onModeChange,
-  onScenarioIdsChange,
   requestedAt,
-  selectedScenarioIds,
   snapshots,
   statusColors,
 }: {
-  allScenarios: OccupancyScenario[];
   chartType: OccupancyWidgetSettings["comparisonChartType"];
   colorPalette: readonly string[];
   loading: boolean;
   mode: OccupancyHalfDonutMode;
-  monitorMode: boolean;
-  onChartTypeChange: (
-    chartType: OccupancyWidgetSettings["comparisonChartType"],
-  ) => void;
-  onModeChange: (mode: OccupancyHalfDonutMode) => void;
-  onScenarioIdsChange: (ids: string[]) => void;
   requestedAt: Date | null;
-  selectedScenarioIds: string[];
   snapshots: OccupancyScenarioSnapshot[];
   statusColors: OccupancyStatusColors;
 }) {
@@ -2571,56 +2697,6 @@ function OccupancyHalfDonutCard({
                   : "A área de cada fatia representa a ocupação real; o callout identifica cenário e participação percentual."}
             </CardDescription>
           </div>
-          {!monitorMode ? (
-            <div className="flex shrink-0 items-start justify-end">
-              <ScenarioScopeDialog
-                allScenarios={allScenarios}
-                onChange={onScenarioIdsChange}
-                selectedIds={selectedScenarioIds}
-              />
-            </div>
-          ) : null}
-          {!monitorMode ? (
-            <div className="col-span-full grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,11.25rem),1fr))] items-center gap-2">
-                <Select
-                  value={chartType}
-                  onValueChange={(value) =>
-                    onChartTypeChange(
-                      value as OccupancyWidgetSettings["comparisonChartType"],
-                    )
-                  }
-                >
-                  <SelectTrigger
-                    aria-label="Tipo do gráfico da comparação atual por cenário"
-                    className="h-8 w-full min-w-0 @sm:w-[180px]"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="half_donut">Meia rosca</SelectItem>
-                    <SelectItem value="bars">Barras horizontais</SelectItem>
-                    <SelectItem value="vertical_bars">Barras verticais</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={mode}
-                  onValueChange={(value) =>
-                    onModeChange(value as OccupancyHalfDonutMode)
-                  }
-                >
-                  <SelectTrigger
-                    aria-label="Modo da comparação atual por cenário"
-                    className="h-8 w-full min-w-0 @sm:w-[190px]"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="status">Ocupado / desocupado</SelectItem>
-                    <SelectItem value="actual">Ocupação real</SelectItem>
-                  </SelectContent>
-                </Select>
-            </div>
-          ) : null}
         </div>
       </CardHeader>
       <CardContent
@@ -3154,24 +3230,16 @@ function colorContrastRatio(first: number, second: number) {
 }
 
 function OccupancyBarRaceCard({
-  allScenarios,
   colorPalette,
   loading,
-  monitorMode,
-  onScenarioIdsChange,
   requestedAt,
   refreshSeconds,
-  selectedScenarioIds,
   snapshots,
 }: {
-  allScenarios: OccupancyScenario[];
   colorPalette: readonly string[];
   loading: boolean;
-  monitorMode: boolean;
-  onScenarioIdsChange: (ids: string[]) => void;
   requestedAt: Date | null;
   refreshSeconds: number;
-  selectedScenarioIds: string[];
   snapshots: OccupancyScenarioSnapshot[];
 }) {
   const widgetColor = useWidgetColor(colorPalette[0]);
@@ -3205,15 +3273,6 @@ function OccupancyBarRaceCard({
               Ranking da ocupação total neste instante, atualizado no Ao Vivo a
               cada {refreshSeconds} segundos.
             </CardDescription>
-          </div>
-          <div className="flex shrink-0 items-start justify-end">
-            {!monitorMode ? (
-              <ScenarioScopeDialog
-                allScenarios={allScenarios}
-                onChange={onScenarioIdsChange}
-                selectedIds={selectedScenarioIds}
-              />
-            ) : null}
           </div>
         </div>
       </CardHeader>
@@ -3253,11 +3312,8 @@ function OccupancyScenarioMaximumLineCard({
   currentSeries = [],
   granularity,
   loading,
-  monitorMode,
   monthlySourceBuckets = [],
-  onScenarioIdsChange,
   refreshSeconds,
-  selectedScenarioIds,
   series,
 }: {
   allScenarios: OccupancyScenario[];
@@ -3268,11 +3324,8 @@ function OccupancyScenarioMaximumLineCard({
   currentSeries?: OccupancyScenarioOpenMaximumSeries[];
   granularity: OccupancyMaximumLineGranularity;
   loading: boolean;
-  monitorMode: boolean;
   monthlySourceBuckets?: Date[];
-  onScenarioIdsChange: (ids: string[]) => void;
   refreshSeconds?: number;
-  selectedScenarioIds: string[];
   series: OccupancyScenarioHourlySeries[];
 }) {
   const widgetColor = useWidgetColor(colorPalette[0]);
@@ -3340,15 +3393,6 @@ function OccupancyScenarioMaximumLineCard({
               {maximumLineDescription(granularity)}
             </CardDescription>
           </div>
-          {!monitorMode ? (
-            <div className="flex shrink-0 items-start justify-end">
-              <ScenarioScopeDialog
-                allScenarios={allScenarios}
-                onChange={onScenarioIdsChange}
-                selectedIds={selectedScenarioIds}
-              />
-            </div>
-          ) : null}
           <div className="col-span-full flex min-w-0 flex-wrap items-center gap-2">
             <Badge variant="secondary">Somente máximo</Badge>
             {granularity === "hour" && refreshSeconds ? (
@@ -3394,7 +3438,6 @@ function OccupancyScenarioMaximumLineCard({
 }
 
 function OccupancyHexLayoutCard({
-  allScenarios,
   capacities,
   colorPalette,
   columns,
@@ -3402,15 +3445,11 @@ function OccupancyHexLayoutCard({
   displayMode,
   layout,
   loading,
-  monitorMode,
-  onSettingsChange,
-  paletteId,
   preset,
   scenarios,
   snapshots,
   statusColors,
 }: {
-  allScenarios: OccupancyScenario[];
   capacities: Record<string, number>;
   colorPalette: readonly string[];
   columns: number;
@@ -3418,9 +3457,6 @@ function OccupancyHexLayoutCard({
   displayMode: OccupancyWidgetSettings["hexDisplayMode"];
   layout: OccupancyWidgetSettings["hexLayout"];
   loading: boolean;
-  monitorMode: boolean;
-  onSettingsChange: (patch: Partial<OccupancyWidgetSettings>) => boolean;
-  paletteId: OccupancyWidgetSettings["hexColorPaletteId"];
   preset: OccupancyWidgetSettings["hexPreset"];
   scenarios: OccupancyScenario[];
   snapshots: OccupancyScenarioSnapshot[];
@@ -3529,23 +3565,6 @@ function OccupancyHexLayoutCard({
                 : "Estado operacional: cada posição mostra ocupado (> 0) ou desocupado (= 0) com o mesmo peso visual."}
             </CardDescription>
           </div>
-          {!monitorMode ? (
-            <div className="flex shrink-0 items-start justify-end">
-              <OccupancyHexLayoutEditor
-                capacities={capacities}
-                defaultScenarioIds={defaultScenarioIds}
-                displayMode={displayMode}
-                fallbackColor={colorPalette[0]}
-                legacyColumns={columns}
-                legacyPreset={preset}
-                layout={layout}
-                onSave={onSettingsChange}
-                scenarios={allScenarios}
-                semanticColors={statusColors}
-                snapshots={snapshots}
-              />
-            </div>
-          ) : null}
           <div className="col-span-full min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-2 @xl:justify-end">
               <Badge variant="outline">
@@ -3559,52 +3578,6 @@ function OccupancyHexLayoutCard({
               </Badge>
             </div>
           </div>
-          {!monitorMode ? (
-            <div className="col-span-full grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,11.875rem),1fr))] items-center gap-2">
-                <Select
-                  value={displayMode}
-                  onValueChange={(hexDisplayMode) =>
-                    onSettingsChange({
-                      hexDisplayMode:
-                        hexDisplayMode as OccupancyWidgetSettings["hexDisplayMode"],
-                    })
-                  }
-                >
-                  <SelectTrigger
-                    aria-label="Modo de visualização do simulador hexagonal"
-                    className="h-8 w-full min-w-0"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="actual">Valor real (gradual)</SelectItem>
-                    <SelectItem value="status">Ocupado / desocupado</SelectItem>
-                  </SelectContent>
-                </Select>
-                {displayMode === "actual" ? (
-                  <OccupancyPaletteSelect
-                    ariaLabel="Paleta de cores do simulador hexagonal"
-                    className="w-full min-w-0 @sm:w-full"
-                    value={paletteId}
-                    onValueChange={(hexColorPaletteId) => {
-                      onSettingsChange({ hexColorPaletteId });
-                    }}
-                  />
-                ) : (
-                  <OccupancyStatusColorsDialog
-                    ariaLabel="Configurar cores de estado do simulador hexagonal"
-                    buttonLabel="Cores do hex"
-                    colors={statusColors}
-                    dialogDescription="Defina exclusivamente as cores de ocupado e desocupado usadas pelo simulador hexagonal. Esta escolha não altera a comparação atual por cenário."
-                    dialogTitle="Cores de estado do simulador hexagonal"
-                    onChange={(hexStatusColors) => {
-                      onSettingsChange({ hexStatusColors });
-                    }}
-                    successMessage="Cores do simulador hexagonal atualizadas."
-                  />
-                )}
-            </div>
-          ) : null}
         </div>
       </CardHeader>
       <CardContent
@@ -3678,36 +3651,22 @@ function OccupancyHexLayoutCard({
 }
 
 function OccupancyDayHourHeatmapCard({
-  allScenarios,
   buckets,
   colorPalette,
   dayCount,
   loading,
   maximum,
   metric,
-  monitorMode,
-  onDayCountChange,
-  onMetricChange,
-  onScenarioChange,
-  onScenarioIdsChange,
   scenarioId,
-  selectedScenarioIds,
   series,
 }: {
-  allScenarios: OccupancyScenario[];
   buckets: Date[];
   colorPalette: readonly string[];
   dayCount: 7 | 14 | 30;
   loading: boolean;
   maximum: number;
   metric: OccupancyComparisonMetricKey;
-  monitorMode: boolean;
-  onDayCountChange: (days: 7 | 14 | 30) => void;
-  onMetricChange: (metric: OccupancyComparisonMetricKey) => void;
-  onScenarioChange: (id: string) => void;
-  onScenarioIdsChange: (ids: string[]) => void;
   scenarioId: string;
-  selectedScenarioIds: string[];
   series: OccupancyScenarioHourlySeries[];
 }) {
   const widgetColor = useWidgetColor(colorPalette[0]);
@@ -3733,66 +3692,25 @@ function OccupancyDayHourHeatmapCard({
         metric,
         theme: effectiveTheme,
         widgetColor,
-        xLabels: dayLabels,
-        yLabels: OCCUPANCY_FIXED_HOUR_LABELS,
+        xLabels: OCCUPANCY_FIXED_HOUR_LABELS,
+        yLabels: dayLabels,
       }),
     [dayLabels, effectiveTheme, matrix.cells, maximum, metric, widgetColor],
   );
 
   return (
     <OccupancyHeatmapCardShell
-      allScenarios={allScenarios}
       description={`Últimos ${dayCount} dias do cenário escolhido; o valor zero permanece visível e a ausência fica cinza.`}
       fallbackColor={colorPalette[0]}
       icon={<Grid3X3 className="h-4 w-4 shrink-0 text-primary" />}
       loading={loading}
       metric={metric}
-      monitorMode={monitorMode}
-      onMetricChange={onMetricChange}
-      onScenarioIdsChange={onScenarioIdsChange}
-      selectedScenarioIds={selectedScenarioIds}
       title="Ocupação por dias x horários"
-      controls={
-        !monitorMode ? (
-          <>
-            <Select value={scenarioId} onValueChange={onScenarioChange}>
-              <SelectTrigger
-                aria-label="Cenário do mapa de calor por dias e horários"
-                className="h-8 w-full min-w-0"
-              >
-                <SelectValue placeholder="Cenário" />
-              </SelectTrigger>
-              <SelectContent>
-                {series.map((item) => (
-                  <SelectItem key={item.scenarioId} value={item.scenarioId}>
-                    {item.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={String(dayCount)}
-              onValueChange={(value) => onDayCountChange(Number(value) as 7 | 14 | 30)}
-            >
-              <SelectTrigger
-                aria-label="Período do mapa de calor por dias e horários"
-                className="h-8 w-full min-w-0"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="7">7 dias</SelectItem>
-                <SelectItem value="14">14 dias</SelectItem>
-                <SelectItem value="30">30 dias</SelectItem>
-              </SelectContent>
-            </Select>
-          </>
-        ) : null
-      }
+
     >
       {matrix.cells.length ? (
         <EChart
-          ariaDescription={`Mapa de ${metricLabel(metric)} nas 24 horas dos últimos ${dayCount} dias para o cenário selecionado.`}
+          ariaDescription={`Mapa de ${metricLabel(metric)} com horários de 00h a 23h no eixo horizontal e os últimos ${dayCount} dias nas linhas para o cenário selecionado.`}
           ariaLabel="Ocupação por dias e horários"
           option={option}
           themeMode="explicit"
@@ -3806,34 +3724,20 @@ function OccupancyDayHourHeatmapCard({
 }
 
 function OccupancyScenarioHourHeatmapCard({
-  allScenarios,
   buckets,
   colorPalette,
   dateKey,
-  dateKeys,
   loading,
   maximum,
   metric,
-  monitorMode,
-  onDateKeyChange,
-  onMetricChange,
-  onScenarioIdsChange,
-  selectedScenarioIds,
   series,
 }: {
-  allScenarios: OccupancyScenario[];
   buckets: Date[];
   colorPalette: readonly string[];
   dateKey: string;
-  dateKeys: string[];
   loading: boolean;
   maximum: number;
   metric: OccupancyComparisonMetricKey;
-  monitorMode: boolean;
-  onDateKeyChange: (dateKey: string) => void;
-  onMetricChange: (metric: OccupancyComparisonMetricKey) => void;
-  onScenarioIdsChange: (ids: string[]) => void;
-  selectedScenarioIds: string[];
   series: OccupancyScenarioHourlySeries[];
 }) {
   const widgetColor = useWidgetColor(colorPalette[0]);
@@ -3858,8 +3762,8 @@ function OccupancyScenarioHourHeatmapCard({
         metric,
         theme: effectiveTheme,
         widgetColor,
-        xLabels: matrix.scenarioNames,
-        yLabels: OCCUPANCY_FIXED_HOUR_LABELS,
+        xLabels: OCCUPANCY_FIXED_HOUR_LABELS,
+        yLabels: matrix.scenarioNames,
       }),
     [
       effectiveTheme,
@@ -3873,38 +3777,17 @@ function OccupancyScenarioHourHeatmapCard({
 
   return (
     <OccupancyHeatmapCardShell
-      allScenarios={allScenarios}
       description="Compara cada cenário nas 24 horas da data escolhida, sem somar cenários nem preencher lacunas com zero."
       fallbackColor={colorPalette[0]}
       icon={<Grid3X3 className="h-4 w-4 shrink-0 text-primary" />}
       loading={loading}
       metric={metric}
-      monitorMode={monitorMode}
-      onMetricChange={onMetricChange}
-      onScenarioIdsChange={onScenarioIdsChange}
-      selectedScenarioIds={selectedScenarioIds}
       title="Ocupação por cenários x horários"
-      controls={
-        !monitorMode && dateKey ? (
-          <Input
-            aria-label="Data do mapa de calor por cenário"
-            className="h-8 w-full min-w-0"
-            min={dateKeys[0]}
-            max={dateKeys[dateKeys.length - 1]}
-            type="date"
-            value={dateKey}
-            onChange={(event) => {
-              if (dateKeys.includes(event.target.value)) {
-                onDateKeyChange(event.target.value);
-              }
-            }}
-          />
-        ) : null
-      }
+
     >
       {matrix.cells.length ? (
         <EChart
-          ariaDescription={`Mapa de ${metricLabel(metric)} por cenário e por hora na data selecionada.`}
+          ariaDescription={`Mapa de ${metricLabel(metric)} com horários de 00h a 23h no eixo horizontal e um cenário por linha na data selecionada.`}
           ariaLabel="Ocupação por cenários e horários"
           option={option}
           themeMode="explicit"
@@ -3918,32 +3801,20 @@ function OccupancyScenarioHourHeatmapCard({
 }
 
 function OccupancyHeatmapCardShell({
-  allScenarios,
   children,
-  controls,
   description,
   fallbackColor,
   icon,
   loading,
   metric,
-  monitorMode,
-  onMetricChange,
-  onScenarioIdsChange,
-  selectedScenarioIds,
   title,
 }: {
-  allScenarios: OccupancyScenario[];
   children: React.ReactNode;
-  controls: React.ReactNode;
   description: string;
   fallbackColor: string;
   icon: React.ReactNode;
   loading: boolean;
   metric: OccupancyComparisonMetricKey;
-  monitorMode: boolean;
-  onMetricChange: (metric: OccupancyComparisonMetricKey) => void;
-  onScenarioIdsChange: (ids: string[]) => void;
-  selectedScenarioIds: string[];
   title: string;
 }) {
   const widgetColor = useWidgetColor(fallbackColor);
@@ -3966,21 +3837,6 @@ function OccupancyHeatmapCardShell({
               {description}
             </CardDescription>
           </div>
-          {!monitorMode ? (
-            <div className="flex shrink-0 items-start justify-end">
-              <ScenarioScopeDialog
-                allScenarios={allScenarios}
-                onChange={onScenarioIdsChange}
-                selectedIds={selectedScenarioIds}
-              />
-            </div>
-          ) : null}
-          {!monitorMode ? (
-            <div className="col-span-full grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,8rem),1fr))] items-center gap-2">
-              {controls}
-              <MetricSelect onChange={onMetricChange} value={metric} />
-            </div>
-          ) : null}
         </div>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col">
@@ -3999,129 +3855,13 @@ function OccupancyHeatmapCardShell({
             {metricLabel(metric)}
           </span>
           <LegendDot color={missingColor} label="Sem dados" />
-          <span>Escala comum aos dois mapas.</span>
+          <span>Escala dos cenários selecionados.</span>
         </div>
       </CardContent>
     </Card>
   );
 }
 
-function ScenarioScopeDialog({
-  allScenarios,
-  onChange,
-  selectedIds,
-}: {
-  allScenarios: OccupancyScenario[];
-  onChange: (ids: string[]) => void;
-  selectedIds: string[];
-}) {
-  const [open, setOpen] = React.useState(false);
-  const selected = new Set(selectedIds);
-  const activeIds = allScenarios
-    .filter((scenario) => scenario.active)
-    .map((scenario) => scenario.id);
-
-  function toggleScenario(id: string) {
-    if (selected.has(id)) {
-      if (selected.size === 1) return;
-      onChange(selectedIds.filter((candidate) => candidate !== id));
-      return;
-    }
-    onChange([...selectedIds, id]);
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-8 w-8 shrink-0 gap-1.5 px-0 @sm:w-auto @sm:px-3"
-          aria-label={`Selecionar cenários compartilhados da visão: ${selectedIds.length} selecionados`}
-          title={`${selectedIds.length} cenários compartilhados da visão`}
-        >
-          <Settings2 className="h-3.5 w-3.5" />
-          <span className="sr-only @sm:not-sr-only">
-            {selectedIds.length} cenários da visão
-          </span>
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="max-h-[85vh] sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Cenários compartilhados da visão</DialogTitle>
-          <DialogDescription>
-            A seleção é compartilhada pelos widgets comparativos desta visão e salva por
-            cenário, empresa e usuário.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={!activeIds.length}
-            onClick={() => onChange(activeIds)}
-          >
-            Todos ativos
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={!allScenarios.length}
-            onClick={() => onChange(allScenarios.map((scenario) => scenario.id))}
-          >
-            Todos
-          </Button>
-        </div>
-        <div className="min-h-0 max-h-[52vh] space-y-2 overflow-y-auto pr-1">
-          {allScenarios.map((scenario) => {
-            const checked = selected.has(scenario.id);
-            return (
-              <button
-                key={scenario.id}
-                type="button"
-                aria-pressed={checked}
-                onClick={() => toggleScenario(scenario.id)}
-                className={cn(
-                  "flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                  checked
-                    ? "border-primary/40 bg-primary/10 text-foreground"
-                    : "border-border bg-background text-muted-foreground",
-                )}
-              >
-                <span className="min-w-0 break-words [overflow-wrap:anywhere]">
-                  {scenario.name}
-                </span>
-                <span className="flex shrink-0 items-center gap-2">
-                  {!scenario.active ? (
-                    <Badge variant="outline">inativo</Badge>
-                  ) : null}
-                  <span
-                    className={cn(
-                      "flex h-5 w-5 items-center justify-center rounded border",
-                      checked
-                        ? "border-primary bg-primary text-primary-foreground"
-                        : "border-border",
-                    )}
-                  >
-                    {checked ? <Check className="h-3.5 w-3.5" /> : null}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        <DialogFooter>
-          <Button type="button" onClick={() => setOpen(false)}>
-            Concluir
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 function MetricSelect({
   onChange,
@@ -5866,6 +5606,7 @@ function hexPositionValueLabel(
 
 function buildHeatmapOption({
   cells,
+  interactive = true,
   maximum,
   metric,
   theme,
@@ -5874,6 +5615,7 @@ function buildHeatmapOption({
   yLabels,
 }: {
   cells: OccupancyHeatmapCell[];
+  interactive?: boolean;
   maximum: number;
   metric: OccupancyComparisonMetricKey;
   theme: "dark" | "light";
@@ -5895,17 +5637,38 @@ function buildHeatmapOption({
       ? "rgba(248, 250, 252, 0.12)"
       : "rgba(15, 23, 42, 0.14)";
   const missingColor = theme === "dark" ? "#273244" : "#E2E8F0";
+  const scrollRows = interactive && yLabels.length > 14;
+  // The query/model coordinates remain (day or scenario, hour). Transpose at
+  // the chart boundary so tables, bucket identity and missing values stay intact.
   const missing = cells
     .filter((cell) => cell.value === null)
-    .map((cell) => [cell.x, cell.y, -1]);
+    .map((cell) => [cell.y, cell.x, -1]);
   const certified = cells
     .filter((cell): cell is OccupancyHeatmapCell & { value: number } =>
       cell.value !== null,
     )
-    .map((cell) => [cell.x, cell.y, cell.value]);
+    .map((cell) => [cell.y, cell.x, cell.value]);
   return {
     animation: false,
-    grid: { bottom: 72, containLabel: true, left: 18, right: 18, top: 18 },
+    grid: { bottom: 60, containLabel: true, left: 8, right: scrollRows ? 28 : 12, top: 12 },
+    ...(scrollRows ? {
+      dataZoom: [{
+        type: "slider",
+        yAxisIndex: 0,
+        orient: "vertical",
+        filterMode: "filter",
+        startValue: 0,
+        endValue: 13,
+        right: 2,
+        top: 12,
+        bottom: 84,
+        width: 10,
+        showDetail: false,
+        showDataShadow: false,
+        brushSelect: false,
+        borderColor: chartPalette.axisLine,
+      }],
+    } : {}),
     series: [
       {
         data: missing,
@@ -5961,8 +5724,8 @@ function buildHeatmapOption({
         const y = Number(value[1]);
         const amount = Number(value[2]);
         return [
-          `<strong>${escapeTooltip(xLabels[x] ?? "Categoria")} · ${escapeTooltip(
-            yLabels[y] ?? "Hora",
+          `<strong>${escapeTooltip(yLabels[y] ?? "Categoria")} · ${escapeTooltip(
+            xLabels[x] ?? "Hora",
           )}</strong>`,
           record.seriesName === "Sem dados" || amount < 0
             ? "Sem dados"
@@ -5978,10 +5741,10 @@ function buildHeatmapOption({
       axisLabel: {
         color: chartPalette.axisText,
         fontSize: 9,
-        formatter: (label: string) =>
-          truncateLabel(label, xLabels.length > 14 ? 10 : 18),
         hideOverlap: true,
-        interval: xLabels.length > 18 ? 1 : 0,
+        interval: 0,
+        showMinLabel: true,
+        showMaxLabel: true,
       },
       axisLine: { lineStyle: { color: chartPalette.axisLine } },
       axisTick: { show: false },
@@ -5994,16 +5757,33 @@ function buildHeatmapOption({
       axisLabel: {
         color: chartPalette.axisText,
         fontSize: 9,
-        formatter: (label: string) => truncateLabel(label, 24),
+        overflow: "truncate",
+        width: 148,
+        formatter: (label: string) => truncateLabel(label, 28),
         interval: 0,
       },
       axisLine: { lineStyle: { color: chartPalette.axisLine } },
       axisTick: { show: false },
       data: yLabels,
+      inverse: true,
       splitArea: { show: false },
       splitLine: { show: false },
       type: "category",
     },
+    media: [{
+      query: { maxWidth: 760 },
+      option: {
+        xAxis: { axisLabel: { interval: (index: number) => index % 3 === 0 || index === 23, hideOverlap: false } },
+      },
+    }, {
+      query: { maxWidth: 480 },
+      option: {
+        xAxis: { axisLabel: { fontSize: 8 } },
+        yAxis: { axisLabel: { fontSize: 8, width: 78 } },
+        visualMap: [{}, { itemHeight: 110, text: ["Maior", "Menor"], textStyle: { fontSize: 9 } }],
+        ...(scrollRows ? { dataZoom: [{ endValue: 7 }] } : {}),
+      },
+    }],
   } as EnterpriseChartOption;
 }
 
@@ -6131,11 +5911,13 @@ function resolveSharedOccupancyHourlyAggregate(
   source: OccupancySharedHourlyAggregate | null | undefined,
   focusScenarioId: string,
   range: { buckets: Date[]; from: Date; to: Date },
+  requestedScenarioIds: ReadonlySet<string>,
 ): {
   covered: boolean;
   series: OccupancyScenarioHourlySeries | null;
 } {
   if (
+    !requestedScenarioIds.has(focusScenarioId) ||
     !source ||
     !focusScenarioId ||
     source.from.getTime() > range.from.getTime() ||

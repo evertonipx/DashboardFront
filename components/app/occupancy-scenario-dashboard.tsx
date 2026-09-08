@@ -41,6 +41,8 @@ import {
   OCCUPANCY_DURATION_CARD_IDS,
   useOccupancyDurationCards,
 } from "@/components/app/occupancy-duration-widgets";
+import { OCCUPANCY_DURATION_INSIGHT_CARD_IDS } from "@/components/app/occupancy-duration-insights-widgets";
+import { useOccupancyDurationInsights } from "@/components/app/use-occupancy-duration-insights";
 import { OccupancyBlockingState } from "@/components/app/occupancy-blocking-state";
 import { OccupancyPaletteSelect } from "@/components/app/occupancy-palette-select";
 import { useAuth } from "@/components/app/auth-provider";
@@ -448,6 +450,7 @@ export function OccupancyScenarioDashboard() {
       ...OCCUPANCY_CHART_CARD_IDS,
       ...OCCUPANCY_COMPARISON_CARD_IDS,
       ...OCCUPANCY_DURATION_CARD_IDS,
+      ...OCCUPANCY_DURATION_INSIGHT_CARD_IDS,
       ...customWidgets.map((widget) => `occupancy_custom_${widget.id}`),
       ...(monitorMode || !selectedScenario ? [] : OCCUPANCY_DETAIL_CARD_IDS),
     ],
@@ -596,6 +599,17 @@ export function OccupancyScenarioDashboard() {
     timeZone: companyTimeZone,
     timeZoneWarning: companyTimeZoneResolution.warning,
   });
+  const occupancyDurationInsights = useOccupancyDurationInsights({
+    companyScopeId,
+    enabled: occupancyPreferencesReady,
+    focusScenarioId: selectedScenario?.id ?? "",
+    monitorMode,
+    preferences: hydratedOccupancyPreferences,
+    scenarios: visibleScenarios,
+    timeZone: companyTimeZone,
+    userId,
+  });
+  const refreshOccupancyDurationInsights = occupancyDurationInsights.refresh;
   const loadScenarios = React.useCallback(async (selectId?: string) => {
     const metadataKey = JSON.stringify([
       companyScopeId,
@@ -1019,11 +1033,13 @@ export function OccupancyScenarioDashboard() {
       await loadScenarioData(selectedScenario, { force: true });
     }
     refreshOccupancyComparisons();
+    refreshOccupancyDurationInsights();
   }, [
     loadScenarios,
     loadScenarioData,
     metadataError,
     refreshOccupancyComparisons,
+    refreshOccupancyDurationInsights,
     selectedScenario,
   ]);
 
@@ -1518,10 +1534,13 @@ export function OccupancyScenarioDashboard() {
   }));
 
   const customWidgetCards = customWidgets.map((widget) => {
-    const action =
+    const configurationContent =
       canEditVisual && !monitorMode ? (
         <CustomWidgetActions
-          onEdit={() => openCustomWidgetEditor(widget)}
+          onEdit={() => {
+            setLayoutOrganizerOpen(false);
+            openCustomWidgetEditor(widget);
+          }}
           onRemove={() => removeCustomWidget(widget.id)}
           title={widget.title}
         />
@@ -1539,12 +1558,12 @@ export function OccupancyScenarioDashboard() {
       });
       return {
         ...COMPACT_METRIC_LAYOUT_DEFAULTS,
+        configurationContent,
         id: `occupancy_custom_${widget.id}`,
         label: widget.title,
         titleEditable: true,
         node: (
           <MetricCard
-            action={action}
             description={presentation.description}
             icon={presentation.icon}
             label={widget.title}
@@ -1564,6 +1583,7 @@ export function OccupancyScenarioDashboard() {
       : null;
     return {
       chartTypeEnabled: true,
+      configurationContent,
       className: "sm:col-span-2 xl:col-span-2",
       defaultHeightLevel: 4 as const,
       defaultSize: "wide" as const,
@@ -1574,7 +1594,6 @@ export function OccupancyScenarioDashboard() {
       node:
         definition && selectedScenario ? (
           <OccupancyChartCard
-            action={action}
             definition={definition}
             loading={initialLoading}
             metricVisibility={widget.series}
@@ -1582,7 +1601,7 @@ export function OccupancyScenarioDashboard() {
             state={sourceDefinition ? certifiedChartData[sourceDefinition.id] : undefined}
           />
         ) : (
-          <EmptyOccupancyCard action={action} title={widget.title} />
+          <EmptyOccupancyCard title={widget.title} />
         ),
     };
   });
@@ -1629,6 +1648,7 @@ export function OccupancyScenarioDashboard() {
     ...chartCards,
     ...occupancyComparisonCards,
     ...occupancyDurationCards,
+    ...occupancyDurationInsights.cards,
     ...customWidgetCards,
     ...(monitorMode ? [] : detailCards),
   ];
@@ -1676,6 +1696,8 @@ export function OccupancyScenarioDashboard() {
     occupancyDurationReportContext,
     occupancyDurationReportMetrics,
     occupancyDurationReportWarnings,
+    occupancyDurationInsightReportAssets: occupancyDurationInsights.reportAssets,
+    occupancyDurationInsightDataCompleteUntil: occupancyDurationInsights.dataCompleteUntil,
     // Relatórios são rasterizados sobre fundo branco, independentemente do
     // tema da tela. Uma paleta clara evita linhas escuras/brancas incoerentes
     // no PDF/PNG quando o dashboard está no modo escuro.
@@ -1820,6 +1842,7 @@ export function OccupancyScenarioDashboard() {
                     disabled={
                       initialLoading ||
                       occupancyDurationLoading ||
+                      occupancyDurationInsights.loading ||
                       !selectedScenario ||
                       Boolean(occupancyCertificationError) ||
                       hasIncompleteOccupancyCoverage
@@ -1830,6 +1853,7 @@ export function OccupancyScenarioDashboard() {
                     disabled={
                       initialLoading ||
                       occupancyDurationLoading ||
+                      occupancyDurationInsights.loading ||
                       !selectedScenario ||
                       Boolean(occupancyCertificationError) ||
                       hasIncompleteOccupancyCoverage
@@ -2436,12 +2460,12 @@ function CustomWidgetActions({
   title: string;
 }) {
   return (
-    <WidgetCardActions label={`Ações do widget ${title}`}>
+    <WidgetCardActions className="flex-wrap justify-start gap-2" label={`Ações do widget ${title}`}>
       <Button
         type="button"
-        variant="ghost"
-        size="icon"
-        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+        variant="outline"
+        size="sm"
+        className="h-8 min-w-0"
         onClick={(event) => {
           event.stopPropagation();
           onEdit();
@@ -2450,12 +2474,13 @@ function CustomWidgetActions({
         title="Editar widget"
       >
         <Pencil className="h-4 w-4" />
+        Editar conteúdo
       </Button>
       <Button
         type="button"
-        variant="ghost"
-        size="icon"
-        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+        variant="outline"
+        size="sm"
+        className="h-8 min-w-0 text-muted-foreground hover:text-destructive"
         onClick={(event) => {
           event.stopPropagation();
           onRemove();
@@ -2464,6 +2489,7 @@ function CustomWidgetActions({
         title="Remover widget"
       >
         <Trash2 className="h-4 w-4" />
+        Remover widget
       </Button>
     </WidgetCardActions>
   );
@@ -3717,6 +3743,8 @@ function buildOccupancyDashboardReport({
   occupancyDurationReportContext,
   occupancyDurationReportMetrics,
   occupancyDurationReportWarnings,
+  occupancyDurationInsightReportAssets,
+  occupancyDurationInsightDataCompleteUntil,
   palette,
   scenario,
   timeZone,
@@ -3755,6 +3783,12 @@ function buildOccupancyDashboardReport({
   occupancyDurationReportWarnings: ReturnType<
     typeof useOccupancyDurationCards
   >["reportWarnings"];
+  occupancyDurationInsightReportAssets: ReturnType<
+    typeof useOccupancyDurationInsights
+  >["reportAssets"];
+  occupancyDurationInsightDataCompleteUntil: ReturnType<
+    typeof useOccupancyDurationInsights
+  >["dataCompleteUntil"];
   palette: OccupancyChartPalette;
   scenario: OccupancyScenario | null;
   timeZone: string;
@@ -3908,7 +3942,7 @@ function buildOccupancyDashboardReport({
     });
   });
   const durationChartsByCardId = new Map<string, ReportChart[]>();
-  occupancyDurationReportAssets.forEach(
+  [...occupancyDurationReportAssets, ...occupancyDurationInsightReportAssets].forEach(
     ({ cardId, chart, titleSuffix = "" }) => {
       const title = `${resolveTitle(cardId, chart.title)}${titleSuffix}`;
       const current = durationChartsByCardId.get(cardId) ?? [];
@@ -3976,6 +4010,9 @@ function buildOccupancyDashboardReport({
       "Períodos sem dados permanecem vazios e nunca são tratados como ocupação zero.",
       "Ordem, visibilidade, títulos, cores e tipo dos gráficos seguem a tela configurada.",
       ...occupancyDurationReportContext,
+      ...(occupancyDurationInsightReportAssets.length ? [
+        "Os mapas de tempo ocupado abrangem o mês atual desde o dia 1, no fuso da empresa. Mostram tempo do cenário ocupado, não permanência individual. Transições e ausência de leitura são identificadas separadamente.",
+      ] : []),
       ...occupancyDurationReportWarnings.map(
         (warning) => `Duração de ocupação: ${warning}`,
       ),
@@ -3983,6 +4020,7 @@ function buildOccupancyDashboardReport({
     dataCompleteUntil: occupancyReportDataCompleteUntil(
       history?.as_of ? new Date(history.as_of) : null,
       occupancyDurationDataCompleteUntil,
+      occupancyDurationInsightDataCompleteUntil,
     ),
     filename: `ipxdata-ocupacao-${reportDateSlug(generatedAt)}`,
     generatedAt,
@@ -3999,7 +4037,7 @@ function buildOccupancyDashboardReport({
 
 function occupancyReportDataCompleteUntil(
   historyCutoff: Date | null,
-  durationCutoff: Date | null | undefined,
+  ...durationCutoffs: (Date | null | undefined)[]
 ) {
   const validHistory =
     historyCutoff instanceof Date && Number.isFinite(historyCutoff.getTime())
@@ -4007,18 +4045,13 @@ function occupancyReportDataCompleteUntil(
       : null;
   // `undefined` means no duration widget participates in this view. `null`
   // means it does participate but one of its sources has no certified cutoff.
-  if (durationCutoff === undefined) return validHistory;
-  if (
-    durationCutoff === null ||
-    !Number.isFinite(durationCutoff.getTime())
-  ) {
-    return null;
+  const timestamps = validHistory ? [validHistory.getTime()] : [];
+  for (const cutoff of durationCutoffs) {
+    if (cutoff === undefined) continue;
+    if (cutoff === null || !Number.isFinite(cutoff.getTime())) return null;
+    timestamps.push(cutoff.getTime());
   }
-  return validHistory
-    ? new Date(
-        Math.min(validHistory.getTime(), durationCutoff.getTime()),
-      )
-    : new Date(durationCutoff);
+  return timestamps.length ? new Date(Math.min(...timestamps)) : null;
 }
 
 function buildOccupancyReportChart({
