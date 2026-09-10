@@ -11988,6 +11988,10 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
     "buildAgeEmotionHeatmapOption",
     {
       HEATMAP_COLORS: heatmapColors,
+      formatDecimal: loadStandaloneFunction(
+        "components/app/demographics-dashboard.tsx",
+        "formatDecimal",
+      ),
       heatmapPercentageLabel: () => "",
       heatmapTooltip: () => "",
     },
@@ -12009,13 +12013,11 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
   const expectations = {
     dark: {
       activeBorder: "rgba(248, 250, 252, 0.24)",
-      border: "rgba(226, 232, 240, 0.12)",
-      shadow: "rgba(248, 250, 252, 0.12)",
+      border: "rgba(226, 232, 240, 0.08)",
     },
     light: {
       activeBorder: "rgba(15, 23, 42, 0.20)",
-      border: "rgba(15, 23, 42, 0.09)",
-      shadow: "rgba(15, 23, 42, 0.14)",
+      border: "rgba(15, 23, 42, 0.06)",
     },
   };
 
@@ -12031,11 +12033,11 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
       series.emphasis.itemStyle.borderColor,
       expectations[theme].activeBorder,
     );
-    assert.equal(series.emphasis.itemStyle.shadowBlur, 4);
-    assert.equal(
-      series.emphasis.itemStyle.shadowColor,
-      expectations[theme].shadow,
-    );
+    assert.equal(series.emphasis.itemStyle.shadowBlur, undefined);
+    assert.equal(series.emphasis.itemStyle.shadowColor, undefined);
+    assert.equal(option.aria.decal.show, false);
+    assert.equal(option.visualMap.orient, "horizontal");
+    assert.deepEqual(option.visualMap.text, ["75%", "0%"]);
     assert.deepEqual(option.visualMap.inRange.color, heatmapColors);
   }
   assert.equal(
@@ -12056,14 +12058,14 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
   assert.match(cardSection, /const \{ effectiveTheme \} = useTheme\(\)/);
   assert.match(
     cardSection,
-    /buildAgeEmotionHeatmapOption\(summary, effectiveTheme\)/,
+    /buildDemographicCrossingOption\(summary, normalizeDemographicPresentation\(presentation, "age-emotion"\), "age-emotion", effectiveTheme\)/,
   );
   assert.notEqual(reportStart, -1);
   assert.notEqual(reportEnd, -1);
   assert.match(
     reportSection,
-    /option:\s*buildAgeEmotionHeatmapOption\(summary\),/,
-    "a exportação deve omitir o tema e conservar o padrão light",
+    /buildDemographicCrossingOption\(summary, ageEmotion, "age-emotion", "light"\)/,
+    "a exportação configurada deve usar explicitamente o tema light",
   );
   assert.doesNotMatch(reportSection, /buildAgeEmotionHeatmapOption\(summary,\s*effectiveTheme/);
 });
@@ -17866,7 +17868,7 @@ test("Análises iniciam ontem uma vez e históricos preservam deduplicação", (
   assert.match(demographics, /if \(!queryRequested\) \{[\s\S]*?setLoading\(false\);[\s\S]*?return;/);
   assert.match(
     demographics,
-    /if \(surface === "analysis"\) \{[\s\S]*?publishRange\(fallbackRange\);[\s\S]*?setHistoricalQueryScopeKey\(historicalQueryIdentityKey\)/,
+    /if \(surface === "analysis"\) \{[\s\S]*?setRangeState\(\(current\) =>[\s\S]*?source: "default", timeZone, value: fallbackRange[\s\S]*?setHistoricalQueryScopeKey\(historicalQueryIdentityKey\)/,
     "Demographics deve iniciar automaticamente apenas Análises, mantendo Relatórios sob demanda",
   );
   assert.match(

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
+const React = require("react");
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const demographics = loadTypeScriptModule("lib/demographics.ts");
 const demographicsDashboardSource = readFileSync(
@@ -41,6 +42,72 @@ const demographicsDateRange = loadTypeScriptModule(
 
 const CAMERA_A = "550e8400-e29b-41d4-a716-446655440000";
 const CAMERA_B = "550e8400-e29b-41d4-a716-446655440001";
+
+test("análise vazia permite consultar hoje com o dia civil atual, inclusive após meia-noite", () => {
+  const calls = [];
+  const view = renderDemographicsEmptyState({ applyRange: (range) => calls.push(range) });
+  const button = findEmptyStateButton(view);
+  assert.ok(button);
+  assert.equal(button.props.disabled, false);
+  button.props.onClick();
+  assert.deepEqual(calls, [{ startInput: "2026-09-11", endInput: "2026-09-11" }]);
+});
+
+test("atalho de hoje não substitui dados nem sugere nova consulta durante falha ou carregamento", () => {
+  for (const context of [
+    { surface: "live" },
+    { surface: "reports" },
+    { summary: { hasData: true } },
+    { queryRequested: false },
+    { error: "Consulta indisponível" },
+    { loading: true },
+    { appliedRange: { startInput: "2026-09-10", endInput: "2026-09-10" } },
+  ]) {
+    assert.equal(findEmptyStateButton(renderDemographicsEmptyState(context)), null);
+  }
+  assert.equal(findEmptyStateButton(renderDemographicsEmptyState({ refreshing: true })).props.disabled, true);
+});
+
+function renderDemographicsEmptyState(overrides = {}) {
+  const ast = ts.createSourceFile("dashboard.tsx", demographicsDashboardSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let expression;
+  function visit(node) {
+    if (ts.isConditionalExpression(node) && node.condition.getText(ast).includes("queryRequested && !loading && !error && !summary.hasData")) expression = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.ok(expression);
+  const bindings = {
+    React,
+    Button: "button", CalendarRange: "span", Sparkles: "span",
+    Date: class extends Date { constructor(...args) { super(...(args.length ? args : ["2026-09-11T03:10:00Z"])); } },
+    companyDateKey: loadTypeScriptModule("lib/company-time-zone.ts").companyDateKey,
+    timeZone: "America/Sao_Paulo",
+    surface: "analysis", todayInput: "2026-09-10",
+    appliedRange: { startInput: "2026-09-09", endInput: "2026-09-09" },
+    rangeLabel: "09/09/2026", summary: { hasData: false },
+    queryRequested: true, loading: false, refreshing: false, error: "",
+    applyRange() {},
+    ...overrides,
+  };
+  const output = ts.transpileModule(`module.exports = (${expression.getText(ast)});`, {
+    fileName: "fixture.tsx",
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+  }).outputText;
+  const loaded = { exports: null };
+  new Function("module", ...Object.keys(bindings), output)(loaded, ...Object.values(bindings));
+  return loaded.exports;
+}
+
+function findEmptyStateButton(node) {
+  if (!React.isValidElement(node)) return null;
+  if (node.type === "button") return node;
+  for (const child of React.Children.toArray(node.props.children)) {
+    const button = findEmptyStateButton(child);
+    if (button) return button;
+  }
+  return null;
+}
 
 test("preserva as ordens canônicas e apresenta unknown sem mascará-lo", () => {
   assert.deepEqual(demographics.GENDER_LABELS, ["Woman", "Man"]);
@@ -513,7 +580,7 @@ test("validação certifica câmera, intervalo exclusivo e unicidade", () => {
   );
 });
 
-test("normaliza período demográfico inclusivo, futuro e limite de 31 dias", () => {
+test("normaliza período demográfico inclusivo, futuro e limite de 366 dias", () => {
   const context = {
     fallback: { startInput: "2026-08-27", endInput: "2026-09-02" },
     todayInput: "2026-09-02",
@@ -533,6 +600,12 @@ test("normaliza período demográfico inclusivo, futuro e limite de 31 dias", ()
     }),
     31,
   );
+  assert.equal(demographicsDateRange.MAX_DEMOGRAPHICS_DATE_RANGE_DAYS, 366);
+  assert.deepEqual(
+    demographicsDateRange.normalizeDemographicsDateRange({ startInput: "2025-09-02", endInput: "2026-09-02" }, context),
+    { startInput: "2025-09-02", endInput: "2026-09-02" },
+    "366 dias inclusivos devem ser aceitos sem reduzir meses fechados",
+  );
   assert.deepEqual(
     demographicsDateRange.normalizeDemographicsDateRange(
       { startInput: "2026-08-30", endInput: "2026-09-20" },
@@ -544,7 +617,7 @@ test("normaliza período demográfico inclusivo, futuro e limite de 31 dias", ()
   for (const invalid of [
     { startInput: "2026-02-30", endInput: "2026-09-02" },
     { startInput: "2026-09-02", endInput: "2026-08-30" },
-    { startInput: "2026-08-02", endInput: "2026-09-02" },
+    { startInput: "2025-09-01", endInput: "2026-09-02" },
   ]) {
     assert.deepEqual(
       demographicsDateRange.normalizeDemographicsDateRange(invalid, context),
@@ -555,12 +628,12 @@ test("normaliza período demográfico inclusivo, futuro e limite de 31 dias", ()
     () =>
       demographicsDateRange.normalizeDemographicsDateRange(null, {
         fallback: {
-          startInput: "2026-08-02",
+          startInput: "2025-09-01",
           endInput: "2026-09-02",
         },
         todayInput: "2026-09-02",
       }),
-    /padrão deve ter no máximo 31 dias/,
+    /padrão deve ter no máximo 366 dias/,
   );
 });
 
@@ -708,10 +781,8 @@ test("dashboard consulta o endpoint bruto uma vez por dia civil, reutiliza parti
   assert.match(source, /demographicPartitionCacheKey\(/);
   assert.match(source, /cache\.get\(cacheKey\)/);
   assert.match(source, /cacheDemographicPartition\(cache, cacheKey, summary\)/);
-  assert.match(
-    source,
-    /combined = combineDemographicAggregations\(\[combined, summary\]\)/,
-  );
+  assert.match(source, /summaries\.push\(summary\)/);
+  assert.match(source, /return combineDemographicAggregations\(summaries\)/);
   assert.doesNotMatch(source, /(?:allRows|rows)\.push\(\.\.\./);
   assert.match(
     source,
@@ -730,7 +801,7 @@ test("dashboard consulta o endpoint bruto uma vez por dia civil, reutiliza parti
   assert.match(source, /isAbortError\(requestError, controller\.signal\)/);
 });
 
-test("dashboard mostra percentuais permanentes, exporta e persiste os nove widgets", () => {
+test("dashboard preserva os nove widgets originais e integra cinco widgets temporais", () => {
   const dashboard = readFileSync(
     resolve(projectRoot, "components/app/demographics-dashboard.tsx"),
     "utf8",
@@ -753,10 +824,18 @@ test("dashboard mostra percentuais permanentes, exporta e persiste os nove widge
     "demographics_emotion_distribution",
     "demographics_age_gender_pyramid",
     "demographics_age_emotion_heatmap",
+    "demographics_gender_timeline",
+    "demographics_emotion_hourly",
+    "demographics_age_hourly",
+    "demographics_daily_evolution",
+    "demographics_period_comparison",
   ];
 
+  assert.equal(cardIds.length, 14);
+  const temporalIds = readFileSync(resolve(projectRoot, "lib/demographics-temporal-preferences.ts"), "utf8");
+
   for (const cardId of cardIds) {
-    assert.ok(dashboard.includes(`"${cardId}"`), `${cardId} ausente da tela`);
+    assert.ok(dashboard.includes(`"${cardId}"`) || (dashboard.includes("...DEMOGRAPHICS_TEMPORAL_WIDGET_IDS") && temporalIds.includes(`"${cardId}"`)), `${cardId} ausente da tela`);
     assert.ok(
       preferences.includes(`"${cardId}"`),
       `${cardId} ausente do catálogo`,
@@ -969,7 +1048,7 @@ function loadTypeScriptModule(relativePath, overrides = {}) {
   const localRequire = (specifier) =>
     Object.hasOwn(overrides, specifier)
       ? overrides[specifier]
-      : nodeRequire(specifier);
+      : specifier.startsWith("@/") ? loadTypeScriptModule(`${specifier.slice(2)}.ts`, overrides) : nodeRequire(specifier);
   execute(
     loadedModule.exports,
     localRequire,

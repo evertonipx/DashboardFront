@@ -10,6 +10,16 @@ import {
   hasUserGridKnownDeletion,
   writeUserGridPreference,
 } from "@/lib/user-grid-local";
+import {
+  demographicDimensionForCard,
+  normalizeDemographicPresentation,
+  type DemographicPresentation,
+} from "@/lib/demographics-presentation";
+import {
+  isDemographicTemporalWidgetId,
+  normalizeDemographicTemporalSettings,
+  type DemographicTemporalSettings,
+} from "@/lib/demographics-temporal-preferences";
 
 export type CardMenuKey =
   | "live"
@@ -89,6 +99,8 @@ export type CardScenarioSelection = {
 export type CardPreference = {
   chartType?: CardChartType;
   color?: string;
+  demographics?: DemographicPresentation;
+  demographicsTemporal?: DemographicTemporalSettings;
   height?: CardHeight;
   heightLevel?: CardLayoutLevel;
   id: string;
@@ -215,6 +227,11 @@ export const cardViewMenus: CardMenuDefinition[] = [
       card("demographics_emotion_distribution", "Distribuição por emoção", "Ranking percentual das emoções classificadas."),
       card("demographics_age_gender_pyramid", "Faixa etária por gênero", "Pirâmide comparativa das faixas etárias por gênero."),
       card("demographics_age_emotion_heatmap", "Faixa etária x emoção", "Mapa de calor da relação entre idade e emoção."),
+      card("demographics_gender_timeline", "Evolução por gênero", "Participação ou detecções por gênero ao longo do período."),
+      card("demographics_emotion_hourly", "Emoções por hora", "Perfil das emoções nas 24 horas do período selecionado."),
+      card("demographics_age_hourly", "Faixas etárias por hora", "Perfil das faixas etárias nas 24 horas do período selecionado."),
+      card("demographics_daily_evolution", "Evolução diária", "Distribuição demográfica ao longo dos dias selecionados."),
+      card("demographics_period_comparison", "Comparação de períodos", "Comparação demográfica com um período anterior equivalente."),
     ],
   },
   {
@@ -318,6 +335,9 @@ export function normalizeCardPreferences(
       storedPreference.scenarioSelectionMode,
     );
     const scenarioIds = normalizeCardScenarioIds(storedPreference.scenarioIds);
+    const demographicDimension = menuKey === "demographics"
+      ? demographicDimensionForCard(id)
+      : undefined;
 
     return {
       chartType: isCardChartType(storedPreference.chartType)
@@ -326,6 +346,12 @@ export function normalizeCardPreferences(
       color: isCardColor(storedPreference.color)
         ? storedPreference.color
         : undefined,
+      ...(demographicDimension && storedPreference.demographics !== undefined
+        ? { demographics: normalizeDemographicPresentation(storedPreference.demographics, demographicDimension) }
+        : {}),
+      ...(menuKey === "demographics" && isDemographicTemporalWidgetId(id) && storedPreference.demographicsTemporal !== undefined
+        ? { demographicsTemporal: normalizeDemographicTemporalSettings(storedPreference.demographicsTemporal, id) }
+        : {}),
       height: heightLevel
         ? cardLayoutLevelToCardHeight(heightLevel)
         : undefined,

@@ -1600,6 +1600,10 @@ export function PeriodAnalysisDashboard({
     }
     if (requestRef.current) abortRequest(requestRef.current);
     requestRef.current = null;
+    // Applying a period is an explicit refresh, even when its dates match.
+    // Do not reuse an older aggregate after late events or corrections.
+    clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+    clearAnalysisDayCache(dailyAggregateCacheRef.current);
     hasLoadedDataRef.current = false;
     setDataLoadError("");
     setData(emptyData());
@@ -3483,6 +3487,9 @@ function mergeExactHoursIntoDays(
   range: PeriodAnalysisRange,
 ) {
   if (
+    // Hourly detail may cover only 31 days of a much larger failed request.
+    // A successful partial source cannot certify the entire daily dataset.
+    dayDataset.error ||
     exactHours.error ||
     dayDataset.granularity !== "day" ||
     exactHours.granularity !== "hour"

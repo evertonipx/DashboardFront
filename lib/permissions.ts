@@ -627,6 +627,34 @@ function dashboardSurfaceTermsInSlug(slug: string): DashboardSurface[] {
   );
 }
 
+/**
+ * Opaque catalog IDs can describe a legacy read bundle through module/action
+ * metadata. This is a presentation classifier, not an authorization check:
+ * company scope, module assignments and capability flags remain separate.
+ * Structured product/resource actions and malformed surface grants must not
+ * be reinterpreted as an opaque bundle just because their action is readable.
+ */
+export function permissionUsesOpaqueModuleReadMetadata(
+  permission: Pick<UserPermission, "slug" | "action" | "module">,
+) {
+  if (
+    !permission.module ||
+    !permissionModuleFamily({ slug: "", module: permission.module })
+  ) return false;
+
+  const action = normalizePermissionText(permission.action);
+  if (!MODULE_READ_ACTIONS.some((candidate) => candidate === action)) return false;
+
+  const slug = normalizePermissionText(permission.slug);
+  if (
+    !slug || moduleFamiliesFromText(slug).length > 0 ||
+    dashboardSurfaceTermsInSlug(slug).length > 0
+  ) return false;
+
+  return MODULE_READ_ACTIONS.some((candidate) => candidate === slug) ||
+    !permissionSlugHasAction(slug, [...MODULE_READ_ACTIONS, ...MODULE_MUTATING_ACTIONS]);
+}
+
 export function canViewModuleSurface(
   user: CurrentUser | null,
   family: OperationalModuleFamily,

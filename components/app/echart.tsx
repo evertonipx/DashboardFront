@@ -734,6 +734,9 @@ function enhanceInteractiveChartOption(
       valueLabel && typeof valueLabel === "object"
         ? (valueLabel as { rotate?: unknown }).rotate
         : 0;
+    const insideValueLabel = valueLabel &&
+      typeof valueLabel.position === "string" &&
+      valueLabel.position.startsWith("inside");
     const angledValueLabel = Boolean(
       typeof valueLabelRotation === "number" &&
         Number.isFinite(valueLabelRotation) &&
@@ -756,7 +759,7 @@ function enhanceInteractiveChartOption(
               hideOverlap: !showEveryLinePoint,
               // Keep bar and point labels anchored to their own data item.
               // Other layouts may shift collisions along their category axis.
-              moveOverlap: anchoredValueLabel
+              moveOverlap: anchoredValueLabel || insideValueLabel
                 ? undefined
                 : horizontal
                   ? "shiftY"
@@ -917,7 +920,14 @@ function valueLabelGrid(
     if (!seriesOption.label || typeof seriesOption.label !== "object") {
       return false;
     }
-    return (seriesOption.label as { show?: unknown }).show !== false;
+    const label = seriesOption.label as { position?: unknown; show?: unknown };
+    // Labels inside a horizontal segment do not need an outside value gutter.
+    // In a 100% composition that gutter otherwise leaves a misleading gap.
+    const insideHorizontalBar = horizontal &&
+      seriesOption.type === "bar" &&
+      typeof label.position === "string" &&
+      label.position.startsWith("inside");
+    return label.show !== false && !insideHorizontalBar;
   });
   if (!visibleValueLabelSeries.length) return grid;
   const angledRightPadding = chartValueLabelRightPadding(

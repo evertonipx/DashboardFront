@@ -4,6 +4,12 @@ import type {
   DemographicEmotion,
   DemographicGender,
 } from "@/lib/types";
+import {
+  combineDemographicTemporalAggregations,
+  createDemographicTemporalHourResolver,
+  type DemographicTemporalAggregation,
+  type DemographicTemporalBin,
+} from "@/lib/demographics-temporal";
 
 export const GENDER_LABELS = ["Woman", "Man"] as const;
 
@@ -69,6 +75,8 @@ export type DemographicValidationOptions = {
   to?: Date | string;
 };
 
+export type DemographicAggregationOptions = { timeZone?: string };
+
 export type DemographicDistributionItem<Key extends string = string> = {
   count: number;
   key: Key;
@@ -128,6 +136,7 @@ export type DemographicAggregation = {
   gender: DemographicDistributionItem<DemographicGender>[];
   hasData: boolean;
   observedBucketCount: number;
+  temporal?: DemographicTemporalAggregation;
   total: number;
   unit: "detections";
 };
@@ -315,6 +324,7 @@ function validateDemographicBucketsResponse(
 
 export function aggregateDemographicBuckets(
   rows: readonly DemographicBucketRow[],
+  options: DemographicAggregationOptions = {},
 ): DemographicAggregation {
   const total = sumCounts(rows);
   const gender = buildDistribution(rows, GENDER_DIMENSION, total);
@@ -350,6 +360,7 @@ export function aggregateDemographicBuckets(
     gender,
     hasData: rows.length > 0,
     observedBucketCount: new Set(rows.map((row) => row.bucket)).size,
+    ...(options.timeZone === undefined ? {} : { temporal: aggregateTemporalBins(rows, options.timeZone) }),
     total,
     unit: "detections",
   };
@@ -358,9 +369,11 @@ export function aggregateDemographicBuckets(
 export function summarizeDemographicBuckets(
   response: unknown,
   options: DemographicValidationOptions = {},
+  aggregationOptions: DemographicAggregationOptions = {},
 ) {
   return aggregateDemographicBuckets(
     validateDemographicBucketsResponse(response, options, false),
+    aggregationOptions,
   );
 }
 
@@ -390,6 +403,7 @@ export function combineDemographicAggregations(
     EMOTION_DIMENSION,
     total,
   );
+  const temporal = combineDemographicTemporalAggregations(summaries);
 
   return {
     age,
@@ -423,9 +437,34 @@ export function combineDemographicAggregations(
       (sum, summary) => safeCountSum(sum, summary.observedBucketCount),
       0,
     ),
+    ...(temporal ? { temporal } : {}),
     total,
     unit: "detections",
   };
+}
+
+function aggregateTemporalBins(rows: readonly DemographicBucketRow[], timeZone: string): DemographicTemporalAggregation {
+  const resolver = createDemographicTemporalHourResolver(timeZone);
+  const bins = new Map<string, DemographicTemporalBin>();
+  for (const row of rows) {
+    const from = resolver.from(row.bucket);
+    let bin = bins.get(from);
+    if (!bin) {
+      bin = {
+        from,
+        total: 0,
+        gender: Object.fromEntries(DEMOGRAPHIC_GENDERS.map((key) => [key, 0])),
+        age: Object.fromEntries(AGE_LABELS.map((key) => [key, 0])),
+        emotion: Object.fromEntries(EMOTION_LABELS.map((key) => [key, 0])),
+      };
+      bins.set(from, bin);
+    }
+    bin.total = safeCountSum(bin.total, row.count);
+    bin.gender[row.gender] = safeCountSum(bin.gender[row.gender], row.count);
+    bin.age[row.age_bucket] = safeCountSum(bin.age[row.age_bucket], row.count);
+    bin.emotion[row.emotion] = safeCountSum(bin.emotion[row.emotion], row.count);
+  }
+  return { timeZone: resolver.timeZone, bins: [...bins.values()].sort((left, right) => left.from.localeCompare(right.from)) };
 }
 
 /**

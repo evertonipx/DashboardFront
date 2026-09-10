@@ -2,6 +2,7 @@ import {
   operationalPermissionDefinitionForGrant,
   permissionDashboardSurface,
   permissionModuleFamily,
+  permissionUsesOpaqueModuleReadMetadata,
   type DashboardSurface,
   type OperationalModuleFamily,
 } from "@/lib/permissions";
@@ -236,7 +237,7 @@ function genericProductMode(
   const prefix = [...PRODUCT_ALIASES[family]]
     .sort((left, right) => right.length - left.length)
     .find((alias) => slug === alias || slug.startsWith(`${alias} `));
-  if (!prefix) return null;
+  if (!prefix) return permissionUsesOpaqueModuleReadMetadata(permission) ? "view" : null;
   const suffix = slug.slice(prefix.length).trim();
   const suffixMode = productActionMode(suffix);
   const action = normalizeText(permission.action);

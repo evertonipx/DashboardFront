@@ -19,6 +19,7 @@ const MAX_COMPLETENESS_SPLIT_DEPTH = 16;
 type MinuteDayAggregateReadyEntry = Readonly<{
   catchUpError?: string;
   coveredTo: string;
+  revision: string;
   retryRevision?: string;
   rows: readonly AggregateEventRow[];
   status: "ready";
@@ -46,9 +47,10 @@ export function clearMinuteDayAggregateCache(
 }
 
 /**
- * Bootstraps the current civil day once. Subsequent five-second refreshes use
- * the already requested rolling minute source to reconcile this cache instead
- * of downloading every elapsed minute again.
+ * Bootstraps the current civil day once per hour so corrections to older
+ * minutes cannot remain frozen all day. Five-second refreshes within that
+ * hour reconcile the already requested rolling source instead of downloading
+ * every elapsed minute again.
  */
 export async function fetchMinuteDayAggregateBootstrap({
   cache,
@@ -73,11 +75,15 @@ export async function fetchMinuteDayAggregateBootstrap({
   signal?.throwIfAborted();
   const key = minuteDayAggregateCacheKey(cacheScope, metricType, from);
   const cached = cache.get(key);
-  if (cached?.status === "ready") return [...cached.rows];
+  const revision = startOfAggregateBucket(now, "hour").toISOString();
+  if (cached?.status === "ready" && cached.revision === revision) {
+    return [...cached.rows];
+  }
 
   if (from.getTime() === to.getTime()) {
     cache.set(key, {
       coveredTo: to.toISOString(),
+      revision,
       rows: [],
       status: "ready",
     });
@@ -107,6 +113,7 @@ export async function fetchMinuteDayAggregateBootstrap({
     signal?.throwIfAborted();
     cache.set(key, {
       coveredTo: to.toISOString(),
+      revision,
       rows: [...rows],
       status: "ready",
     });
@@ -224,6 +231,9 @@ export async function refreshMinuteDayAggregateCache({
     coveredTo: new Date(
       Math.max(coveredTo.getTime(), sourceTo.getTime()),
     ).toISOString(),
+    // Only a successful bootstrap certifies the closed prefix's revision.
+    // Reconciling the rolling tail must not make that older prefix look fresh.
+    revision: cached.revision,
     rows,
     status: "ready",
   });

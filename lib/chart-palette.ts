@@ -30,6 +30,9 @@ export function monochromeHeatmapPalette(
   const source = parseHexColor(baseColor) ?? [18, 103, 196];
   const white: RgbColor = [255, 255, 255];
   const black: RgbColor = [0, 0, 0];
+  // Flatten the softer cell fill into opaque HEX. Using chart/item opacity
+  // instead would also fade labels or change intensity on dark surfaces.
+  const colorStrength = 0.78;
 
   return [
     white,
@@ -39,7 +42,7 @@ export function monochromeHeatmapPalette(
     mixRgb(source, black, 0.02),
     mixRgb(source, black, 0.2),
     mixRgb(source, black, 0.42),
-  ].map(rgbToHex);
+  ].map((color) => rgbToHex(mixRgb(white, color, colorStrength)));
 }
 
 export function heatmapLabelColor(colors: readonly string[], ratio: number) {
@@ -47,6 +50,7 @@ export function heatmapLabelColor(colors: readonly string[], ratio: number) {
   const index = Math.floor(position);
   const start = parseHexColor(colors[index] ?? "#FFFFFF") ?? [255, 255, 255];
   const end = parseHexColor(colors[Math.min(index + 1, colors.length - 1)] ?? "#FFFFFF") ?? start;
+  // Match ECharts' interpolation of the final, already softened HEX stops.
   const luminance = relativeLuminance(mixRgb(start, end, position - index));
   const whiteContrast = 1.05 / (luminance + 0.05);
   const darkLuminance = relativeLuminance([15, 23, 42]);

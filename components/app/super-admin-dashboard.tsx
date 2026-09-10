@@ -103,6 +103,7 @@ import {
   requireWorkerRows,
 } from "@/lib/metadata-validation";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
+import { permissionModuleFamily } from "@/lib/permissions";
 import {
   createUserAccessPermissionState,
   resolveUserAccessCatalog,
@@ -323,7 +324,7 @@ const algorithmModuleDefinitions: Array<{
     ],
     description: "Distribuição por gênero, faixa etária e emoções.",
     family: "demographics",
-    label: "Demographics",
+    label: "Demográfico",
   },
 ];
 
@@ -5396,6 +5397,25 @@ function algorithmModuleFamily(
   const rawName = typeof module === "string" ? "" : module.name;
   const slug = normalizeSlug(rawSlug ?? "");
   const name = normalizeSlug(rawName ?? "");
+  const declaredText = ` ${slug} ${name} `;
+  const declaredFamilies = algorithmModuleDefinitions.filter((definition) =>
+    definition.aliases.some((alias) => declaredText.includes(` ${normalizeSlug(alias)} `)),
+  );
+  if (declaredFamilies.length > 1) return "";
+
+  // Identify the same module as the permission editor/runtime, including
+  // descriptive catalogue names. Inactive modules remain visible here, but
+  // their enable controls stay disabled; this is not an authorization check.
+  const family = permissionModuleFamily({
+    slug: "",
+    module: { id: "", slug: rawSlug ?? "", name: rawName ?? "", active: true },
+  });
+  if (family) return family;
+  // Conflicting metadata must not fall back to whichever alias comes first.
+  if (
+    permissionModuleFamily({ slug: rawSlug ?? "" }) ||
+    permissionModuleFamily({ slug: rawName ?? "" })
+  ) return "";
 
   for (const definition of algorithmModuleDefinitions) {
     const aliases = definition.aliases.map(normalizeSlug);

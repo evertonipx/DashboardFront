@@ -831,7 +831,7 @@ test("gestão Master apresenta o terceiro módulo do catálogo com nome e ordem 
   assert.match(source, /type AlgorithmModuleFamily =[^;]*"demographics"/s);
   assert.match(
     source,
-    /family: "demographics",\s*label: "Demographics"/,
+    /family: "demographics",\s*label: "Demográfico"/,
   );
   assert.match(
     source,
@@ -884,6 +884,34 @@ test("gestão Master apresenta o terceiro módulo do catálogo com nome e ordem 
     source.indexOf("function workerIsOnline"),
   );
   assert.match(enabledCountSource, /!algorithmModuleFamily\(catalogModule\)/);
+});
+
+test("Master reconhece Demográfico pelos mesmos metadados usados nas permissões", () => {
+  const { selectVisibleProductModules, algorithmModuleLabel } = loadMasterModulePresentation();
+  const counting = { id: "counting-id", name: "Contagem", slug: "people-counting", active: true };
+  const occupancy = { id: "occupancy-id", name: "Ocupação", slug: "occupancy", active: true };
+  const demographic = { id: "demographic-id", name: "People Demographic Analysis", slug: "people-demographic", active: true };
+  const rows = selectVisibleProductModules([demographic, occupancy, counting]);
+  assert.deepEqual(rows.map((row) => row.id), [counting.id, occupancy.id, demographic.id]);
+  assert.equal(rows[2], demographic, "o controle conserva a identidade real do catálogo");
+  assert.equal(algorithmModuleLabel(rows[2]), "Demográfico");
+  assert.equal(permissions.permissionModuleFamily({ slug: "", module: rows[2] }), "demographics");
+});
+
+test("Master não fabrica módulo ausente nem ativa módulo inativo ou conflitante", () => {
+  const { selectVisibleProductModules } = loadMasterModulePresentation();
+  const demographic = { id: "demographic-id", name: "Demográfico", slug: "demographics", active: false };
+  assert.deepEqual(selectVisibleProductModules([]), []);
+  assert.deepEqual(selectVisibleProductModules([demographic]), [demographic]);
+  assert.deepEqual(selectVisibleProductModules([
+    { ...demographic, name: "Ocupação", active: true },
+    { ...demographic, name: "Ocupação e Demographics", active: true },
+    { ...demographic, name: "count", slug: "demographics occupancy", active: true },
+    { ...demographic, id: "", active: true },
+    { id: "analytics-id", name: "Analytics", slug: "analytics", active: true },
+  ]), []);
+  const active = { ...demographic, id: "active-id", active: true };
+  assert.deepEqual(selectVisibleProductModules([demographic, active]), [active]);
 });
 
 test("Workers mantém nomenclatura, rota e autorização coerentes em toda a área administrativa", () => {
@@ -1018,6 +1046,20 @@ function permission(overrides = {}) {
     slug: "counting_view",
     ...overrides,
   };
+}
+
+function loadMasterModulePresentation() {
+  const path = resolve(projectRoot, "components/app/super-admin-dashboard.tsx");
+  const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const names = new Set(["normalizeSlug", "algorithmModuleFamily", "algorithmFamilyOrder", "algorithmModuleLabel", "selectVisibleProductModules"]);
+  const statements = source.statements.filter((node) =>
+    (ts.isFunctionDeclaration(node) && names.has(node.name?.text)) ||
+    (ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => declaration.name.getText(source) === "algorithmModuleDefinitions")),
+  );
+  const compiled = ts.transpileModule(statements.map((node) => node.getText(source)).join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  return new Function("permissionModuleFamily", `${compiled}\nreturn { selectVisibleProductModules, algorithmModuleLabel };`)(permissions.permissionModuleFamily);
 }
 
 function loadTypeScriptModule(relativePath) {

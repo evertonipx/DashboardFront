@@ -31,6 +31,21 @@ test("todas as paletas, inclusive pastel e Cyber, vão de branco a escuro nos do
   }
 });
 
+test("somente a cor das células recebe a suavização de 78%, composta em HEX opaco", () => {
+  for (const color of colors) {
+    const previous = originalHeatmapStops(color);
+    const softened = palette.monochromeHeatmapPalette(color);
+    const expected = previous.map((stop) => stop.map((channel) => Math.round(255 + (channel - 255) * 0.78)));
+    softened.forEach((stop, index) => {
+      const actual = echarts.color.parse(stop);
+      assert.deepEqual(actual.slice(0, 3), expected[index], `${color}: parada ${index}`);
+      assert.equal(actual[3], 1, "a suavização não depende da superfície abaixo nem torna a célula transparente");
+      assert.ok(luminance(stop) >= luminance(`rgb(${previous[index].join(",")})`), `${color}: a célula não deve escurecer`);
+    });
+    assert.equal(softened[0].toLowerCase(), "#ffffff", "zero observado permanece branco puro");
+  }
+});
+
 test("cores inválidas preservam a escala branca-escura de fallback, sem NaN", () => {
   for (const color of ["", "invalid", "#12345G", "#12", "transparent", "var(--color)"]) {
     for (const theme of ["light", "dark"]) {
@@ -148,6 +163,7 @@ test("Demographics aplica a escala comum e escolhe rótulos pelo fundo real", ()
   });
   const builder = standalone(filename, "buildAgeEmotionHeatmapOption", {
     HEATMAP_COLORS: scale, heatmapPercentageLabel: formatLabel, heatmapTooltip: () => "",
+    formatDecimal: standalone(filename, "formatDecimal", {}),
   });
   const summary = { crossings: { ageByEmotion: { columns: [{ key: "happy", label: "Feliz" }, { key: "neutral", label: "Neutro" }, { key: "sad", label: "Triste" }], rows: [{ key: "20-29", label: "20–29", cells: [0, 10, 100].map((percentage) => ({ count: percentage * 25, percentage })) }] } } };
   for (const theme of ["light", "dark"]) {
@@ -225,8 +241,16 @@ function assertWhiteToDark(scale, context) {
     return luminance(color);
   });
   values.slice(1).forEach((value, index) => assert.ok(value <= values[index], `${context}: intensidade ${index + 1} não pode ficar mais clara`));
-  assert.ok(values.at(-1) < 0.31, `${context}: até cores brancas/neon devem terminar escuras`);
+  assert.ok(values.at(-1) < 0.42, `${context}: até cores brancas/neon devem conservar um máximo forte após suavização`);
   assert.ok(values[0] > values.at(-1));
+}
+
+function originalHeatmapStops(color) {
+  const source = echarts.color.parse(color).slice(0, 3);
+  const mix = (target, weight) => source.map((channel, index) => Math.round(channel + (target[index] - channel) * weight));
+  const white = [255, 255, 255];
+  const black = [0, 0, 0];
+  return [white, mix(white, 0.7), mix(white, 0.48), mix(white, 0.26), mix(black, 0.02), mix(black, 0.2), mix(black, 0.42)];
 }
 
 function luminance(color) {

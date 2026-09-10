@@ -11,6 +11,7 @@ import {
   Grid3X3,
   Pencil,
   Plus,
+  RefreshCw,
   Route,
   Settings2,
   Sigma,
@@ -290,6 +291,7 @@ type RealtimeDashboardProps = {
 
 type LoadOptions = {
   force?: boolean;
+  refreshData?: boolean;
   silent?: boolean;
 };
 
@@ -316,6 +318,8 @@ type RealtimeNativeAggregateQuery = Readonly<{
 
 type RealtimeHourlyCoverageCache = {
   cacheScope: string;
+  dayRevision?: string;
+  hourRevision?: string;
   ranges: Array<{ from: Date; to: Date }>;
   rows: AggregateEventRow[];
 };
@@ -1186,7 +1190,7 @@ export function RealtimeDashboard({
   ]);
 
   const loadCharts = React.useCallback(
-    async ({ force = false, silent = false }: LoadOptions = {}) => {
+    async ({ force = false, refreshData = false, silent = false }: LoadOptions = {}) => {
       if (!realtimeDataPlanKey) return;
 
       if (companyScopeCertificationError) {
@@ -1256,12 +1260,22 @@ export function RealtimeDashboard({
         requestRef.current?.abort();
       }
 
+      // A new visible-widget plan may reuse certified coverage. An explicit
+      // refresh must fetch it again, including closed buckets corrected later.
+      if (refreshData) {
+        clearHourlyAggregateCache(hourlyAggregateCacheRef.current);
+        clearRealtimeHourlyCoverageCache(hourlyCoverageCacheRef.current);
+        nativeAggregateCacheRef.current.clear();
+        clearRealtimeRollingMinuteCache(rollingMinuteCacheRef.current);
+        clearMinuteDayAggregateCache(minuteDayAggregateCacheRef.current);
+      }
+
       const controller = new AbortController();
       requestRef.current = controller;
       runningRef.current = true;
 
       const silentLoad = silent || hasLoadedChartsRef.current;
-      if (!silentLoad) setLoadingCharts(true);
+      if (!silentLoad || refreshData) setLoadingCharts(true);
 
       const now = new Date();
       const definitions = buildRealtimeChartDefinitions(now);
@@ -1351,6 +1365,7 @@ export function RealtimeDashboard({
           cache: nativeAggregateCacheRef.current,
           cacheScope: `live-native:${companyScopeId}:${companyTimeZone}`,
           companyScopeId,
+          now,
           query,
           signal: controller.signal,
         }),
@@ -1489,10 +1504,19 @@ export function RealtimeDashboard({
           Object.fromEntries(entries),
           allDefinitions,
           now,
+          canonicalHourRanges,
         );
         const rollingMinuteState = nextData.live_chart_minute;
         let minuteDayRows = minuteDayBootstrapState.rows;
         let minuteDayError = minuteDayBootstrapState.error;
+        if (realtimeDataPlan.minuteDay && (
+          !rollingMinuteState || rollingMinuteState.error ||
+          rollingMinuteState.granularity !== "minute"
+        )) {
+          minuteDayError = minuteDayError ?? rollingMinuteState?.error ??
+            "Não foi possível atualizar os minutos do dia.";
+          minuteDayRows = [];
+        }
         if (
           realtimeDataPlan.minuteDay &&
           !minuteDayError &&
@@ -4736,6 +4760,21 @@ export function RealtimeDashboard({
                   className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1"
                   role="group"
                 >
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-8 w-8 shrink-0"
+                    disabled={loadingCharts || loadingAnnualHistory || !realtimeDataPlanKey}
+                    onClick={() => {
+                      void loadCharts({ force: true, refreshData: true });
+                      if (annualHistoryRequested) void loadAnnualHistory();
+                    }}
+                    aria-label="Atualizar dados do Ao Vivo"
+                    title="Atualizar dados do Ao Vivo"
+                  >
+                    <RefreshCw className={cn("h-4 w-4", loadingCharts && "animate-spin")} />
+                  </Button>
                   <ReportExportActions
                     compact
                     disabled={
@@ -7715,12 +7754,14 @@ async function loadCachedRealtimeNativeQuery({
   cache,
   cacheScope,
   companyScopeId,
+  now = new Date(),
   query,
   signal,
 }: {
   cache: Map<string, readonly AggregateEventRow[]>;
   cacheScope: string;
   companyScopeId: string;
+  now?: Date;
   query: RealtimeNativeAggregateQuery;
   signal: AbortSignal;
 }) {
@@ -7731,6 +7772,12 @@ async function loadCachedRealtimeNativeQuery({
     aggregateQueryIso(query.from, query.granularity),
     aggregateQueryIso(query.to, query.granularity),
     DEFAULT_METRIC_TYPE,
+    // Closed civil buckets can still receive late events. Recent data is
+    // revalidated hourly; older history daily, never on each live tick.
+    startOfAggregateBucket(
+      now,
+      query.to > addDays(startOfDay(now), -1) ? "hour" : "day",
+    ).toISOString(),
   ]);
   const cached = cache.get(key);
   if (cached) return [...cached];
@@ -7789,6 +7836,33 @@ async function fetchIncrementalRealtimeHourlyRanges({
   const requestedRanges = mergeRealtimeQueryRanges(ranges);
   const currentHourFrom = startOfHour(now);
   const currentHourTo = endOfAggregateBucket(currentHourFrom, "hour");
+  const hourRevision = currentHourFrom.toISOString();
+  const dayRevision = startOfAggregateBucket(now, "day").toISOString();
+  let validClosedRanges = coverageCache.ranges;
+  let validClosedRows = coverageCache.rows;
+  if (coverageCache.dayRevision !== dayRevision) {
+    // Historical coverage still needs a daily revision. The query cache below
+    // determines which physical partitions must actually be downloaded.
+    validClosedRanges = [];
+    validClosedRows = [];
+  } else if (coverageCache.hourRevision !== hourRevision) {
+    // Closed hours are not immutable: delayed ingestion and corrections can
+    // change today's/yesterday's totals. Revalidate this bounded civil window
+    // once per hour without downloading the multi-year history on every tick.
+    const recentFrom = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - 1,
+    );
+    validClosedRanges = subtractRealtimeQueryRanges(coverageCache.ranges, [
+      { from: recentFrom, to: currentHourFrom },
+    ]);
+    validClosedRows = filterRealtimeRowsToRanges(
+      coverageCache.rows,
+      "hour",
+      validClosedRanges,
+    );
+  }
   const closedRanges = mergeRealtimeQueryRanges(
     requestedRanges.flatMap((range) => {
       const to = new Date(
@@ -7799,7 +7873,7 @@ async function fetchIncrementalRealtimeHourlyRanges({
   );
   const missingClosedRanges = subtractRealtimeQueryRanges(
     closedRanges,
-    coverageCache.ranges,
+    validClosedRanges,
   );
   const openRanges = includeOpenHour
     ? mergeRealtimeQueryRanges(
@@ -7840,19 +7914,22 @@ async function fetchIncrementalRealtimeHourlyRanges({
   ]);
   signal.throwIfAborted();
 
-  if (missingClosedRanges.length) {
-    coverageCache.rows.push(
-      ...filterRealtimeRowsToRanges(
-        fetchedClosedRows,
-        "hour",
-        missingClosedRanges,
-      ),
-    );
-    coverageCache.ranges = mergeRealtimeQueryRanges([
-      ...coverageCache.ranges,
-      ...missingClosedRanges,
-    ]);
-  }
+  // Commit only after every requested source succeeds. Replacing invalidated
+  // rows (rather than appending) also propagates deletions and corrections to 0.
+  coverageCache.rows = [
+    ...validClosedRows,
+    ...filterRealtimeRowsToRanges(
+      fetchedClosedRows,
+      "hour",
+      missingClosedRanges,
+    ),
+  ];
+  coverageCache.ranges = mergeRealtimeQueryRanges([
+    ...validClosedRanges,
+    ...missingClosedRanges,
+  ]);
+  coverageCache.dayRevision = dayRevision;
+  coverageCache.hourRevision = hourRevision;
 
   const openRows = filterRealtimeRowsToRanges(
     fetchedOpenRows,
@@ -7924,9 +8001,12 @@ async function fetchIncrementalRealtimeMinuteWindow({
     cache.cacheScope = cacheScope;
   }
 
-  const currentMinuteFrom = startOfMinute(now);
+  // The whole open hour is mutable, not only its last minute. This is the
+  // same authoritative minute window used by Análises, including late rows,
+  // revised totals and successful empty responses.
+  const currentHourFrom = startOfAggregateBucket(now, "hour");
   const closedTo = new Date(
-    Math.min(definition.to.getTime(), currentMinuteFrom.getTime()),
+    Math.min(definition.to.getTime(), currentHourFrom.getTime()),
   );
   const cacheCannotCoverWindow = Boolean(
     !cache.coveredFrom ||
@@ -7934,15 +8014,12 @@ async function fetchIncrementalRealtimeMinuteWindow({
       definition.from < cache.coveredFrom ||
       cache.coveredTo > closedTo,
   );
-  if (cacheCannotCoverWindow) {
-    cache.coveredFrom = null;
-    cache.coveredTo = null;
-    cache.rows = [];
-  }
+  let closedRows = cacheCannotCoverWindow ? [] : cache.rows;
+  const coveredTo = cacheCannotCoverWindow ? null : cache.coveredTo;
 
   const catchUpFrom = new Date(
     Math.max(
-      cache.coveredTo?.getTime() ?? definition.from.getTime(),
+      coveredTo?.getTime() ?? definition.from.getTime(),
       definition.from.getTime(),
     ),
   );
@@ -7956,19 +8033,17 @@ async function fetchIncrementalRealtimeMinuteWindow({
       to: closedTo,
     });
     signal.throwIfAborted();
-    cache.rows = reconcileAggregateRows(
-      cache.rows,
+    closedRows = reconcileAggregateRows(
+      closedRows,
       "minute",
       catchUpRows,
       "minute",
       catchUpFrom,
       closedTo,
     );
-    cache.coveredFrom = cache.coveredFrom ?? new Date(definition.from);
-    cache.coveredTo = new Date(closedTo);
   }
 
-  cache.rows = cache.rows.filter((row) =>
+  closedRows = closedRows.filter((row) =>
     aggregateBucketInRange(
       row.bucket,
       "minute",
@@ -7976,10 +8051,8 @@ async function fetchIncrementalRealtimeMinuteWindow({
       closedTo,
     ),
   );
-  cache.coveredFrom = new Date(definition.from);
-
   const openFrom = new Date(
-    Math.max(definition.from.getTime(), currentMinuteFrom.getTime()),
+    Math.max(definition.from.getTime(), currentHourFrom.getTime()),
   );
   const openRows = openFrom < definition.to
     ? await fetchCompleteAggregateRange({
@@ -7992,6 +8065,10 @@ async function fetchIncrementalRealtimeMinuteWindow({
       })
     : [];
   signal.throwIfAborted();
+
+  cache.rows = closedRows;
+  cache.coveredFrom = new Date(definition.from);
+  cache.coveredTo = new Date(closedTo);
 
   return filterRealtimeRowsToRanges(
     [...cache.rows, ...openRows],
@@ -8305,6 +8382,7 @@ function hydrateRealtimeOpenBuckets(
   data: Record<string, RealtimeChartState>,
   definitions: RealtimeChartDefinition[],
   now: Date,
+  canonicalRanges: readonly { from: Date; to: Date }[] = [],
 ) {
   const next = Object.fromEntries(
     Object.entries(data).map(([id, state]) => [
@@ -8347,6 +8425,11 @@ function hydrateRealtimeOpenBuckets(
     }
   }
 
+  if (canonicalState && minuteState?.error) {
+    canonicalState.error = minuteState.error;
+    canonicalState.rows = [];
+  }
+
   if (
     canonicalDefinition &&
     canonicalState &&
@@ -8373,6 +8456,18 @@ function hydrateRealtimeOpenBuckets(
     canonicalState.error ||
     canonicalState.granularity !== "hour"
   ) {
+    if (canonicalState?.error) {
+      definitions.forEach((definition) => {
+        if (
+          !CANONICAL_HOUR_DERIVED_IDS.has(definition.id) &&
+          !realtimeNativeOpenBoundaryRange(definition, now)
+        ) return;
+        const target = next[definition.id];
+        if (!target) return;
+        target.error = canonicalState.error;
+        target.rows = [];
+      });
+    }
     return next;
   }
 
@@ -8409,20 +8504,39 @@ function hydrateRealtimeOpenBuckets(
       if (
         !target ||
         target.error ||
-        target.granularity !== definition.granularity ||
-        !boundary
+        target.granularity !== definition.granularity
       ) {
         return;
       }
 
-      target.rows = reconcileAggregateRows(
-        target.rows,
-        definition.granularity,
-        canonicalState.rows,
-        "hour",
-        boundary.from,
-        boundary.to,
-      );
+      // Match Analysis: detailed hours are authoritative for complete civil
+      // days we actually queried. The envelope may contain gaps and partial
+      // historical days; neither is evidence of a zero/full daily total.
+      const completeDays = mergeRealtimeQueryRanges(canonicalRanges).flatMap((range) => {
+        const firstDay = startOfDay(range.from);
+        const from = new Date(Math.max(
+          definition.from.getTime(),
+          (firstDay < range.from ? addDays(firstDay, 1) : firstDay).getTime(),
+        ));
+        const to = new Date(Math.min(
+          definition.to.getTime(),
+          startOfDay(range.to).getTime(),
+        ));
+        return from < to ? [{ from, to }] : [];
+      });
+      mergeRealtimeQueryRanges([
+        ...completeDays,
+        ...(boundary ? [boundary] : []),
+      ]).forEach((range) => {
+        target.rows = reconcileAggregateRows(
+          target.rows,
+          definition.granularity,
+          canonicalState.rows,
+          "hour",
+          range.from,
+          range.to,
+        );
+      });
     });
 
   const openCoarseDayState = next[OPEN_COARSE_DAYS_ID];

@@ -19,13 +19,15 @@ import {
   type LayoutCard,
 } from "@/components/app/card-layout";
 import { CompactMetricCard } from "@/components/app/compact-metric-card";
+import { DemographicsWidgetControls } from "@/components/app/demographics-widget-controls";
+import { DemographicsTemporalControls } from "@/components/app/demographics-temporal-controls";
+import { DemographicsTemporalWidget } from "@/components/app/demographics-temporal-widget";
 import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
 import { AnalysisDateRangePicker } from "@/components/app/occupancy-date-range-picker";
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { useTheme } from "@/components/app/theme-provider";
 import {
   WidgetTitleText,
-  useWidgetColor,
 } from "@/components/app/widget-appearance";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,6 +61,26 @@ import {
   MAX_DEMOGRAPHICS_DATE_RANGE_DAYS,
   saveDemographicsDateRange,
 } from "@/lib/demographics-date-range";
+import { buildDemographicDistributionOption, fitDemographicCompositionOption } from "@/lib/demographics-chart-options";
+import { buildDemographicCrossingOption, demographicHeatmapColors } from "@/lib/demographics-crossing-options";
+import { buildDemographicComparisonWindow } from "@/lib/demographics-comparison-window";
+import { buildDemographicTemporalModel } from "@/lib/demographics-temporal-chart-options";
+import {
+  DEMOGRAPHICS_TEMPORAL_WIDGET_IDS,
+  isDemographicTemporalWidgetId,
+  normalizeDemographicTemporalSettings,
+  type DemographicTemporalSettings,
+  type DemographicTemporalWidgetId,
+} from "@/lib/demographics-temporal-preferences";
+import {
+  demographicCategoryColor,
+  demographicCategoryLabel,
+  demographicDimensionForCard,
+  demographicPalettePreviewColors,
+  getDemographicPalette,
+  normalizeDemographicPresentation,
+  type DemographicPresentation,
+} from "@/lib/demographics-presentation";
 import {
   useEffectiveCompanyScopeId,
   useEffectiveCompanyTimeZoneResolution,
@@ -76,6 +98,7 @@ import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import { cn, formatNumber } from "@/lib/utils";
 import {
   loadScopedCardPreferences,
+  saveCardPreferences,
   type CardMenuKey,
   type CardPreference,
 } from "@/lib/view-preferences";
@@ -95,6 +118,7 @@ export const DEMOGRAPHICS_CARD_IDS = [
   "demographics_emotion_distribution",
   "demographics_age_gender_pyramid",
   "demographics_age_emotion_heatmap",
+  ...DEMOGRAPHICS_TEMPORAL_WIDGET_IDS,
 ] as const;
 
 const DEMOGRAPHICS_MENU_KEY = "demographics" as CardMenuKey;
@@ -103,18 +127,20 @@ const LIVE_TAIL_MINUTES = 5;
 // fica rara e o botão Atualizar continua disponível para reconciliação manual.
 const LIVE_FULL_REFRESH_MS = 6 * 60 * 60 * 1_000;
 const MINUTE_MS = 60_000;
-const MAX_DEMOGRAPHIC_PARTITION_CACHE_ENTRIES = 96;
+const MAX_DEMOGRAPHIC_PARTITION_CACHE_ENTRIES = 400;
 const GENDER_COLORS: Record<DemographicGender, string> = {
-  Woman: "#E85D9E",
-  Man: "#2D7FF9",
-  unknown: "#94A3B8",
+  Woman: "#DB2777",
+  Man: "#2563EB",
+  unknown: "#8A99AF",
 };
 const HEATMAP_BASE_COLOR = "#2563EB";
 const HEATMAP_COLORS = monochromeHeatmapPalette(HEATMAP_BASE_COLOR);
 
 type DashboardDataState = {
   key: string;
+  refreshVersion: number;
   summary: DemographicAggregation;
+  through: number;
 };
 
 type DemographicRequestWindow = {
@@ -148,6 +174,7 @@ export function DemographicsDashboard({
   surface,
 }: DemographicsDashboardProps) {
   const { user } = useAuth();
+  const { effectiveTheme } = useTheme();
   const companyScopeId = useEffectiveCompanyScopeId(user);
   const timeZoneResolution = useEffectiveCompanyTimeZoneResolution(user);
   const timeZone = timeZoneResolution.timeZone;
@@ -188,9 +215,51 @@ export function DemographicsDashboard({
       ),
     });
   }, [companyScopeId, preferenceIdentityKey, preferenceScopeId, user?.id]);
+  const widgetPresentations = React.useMemo(() => {
+    const result: Partial<Record<string, DemographicPresentation>> = {};
+    for (const id of DEMOGRAPHICS_CARD_IDS) {
+      const dimension = demographicDimensionForCard(id);
+      if (dimension) {
+        result[id] = normalizeDemographicPresentation(
+          preferences.find((preference) => preference.id === id)?.demographics,
+          dimension,
+        );
+      }
+    }
+    return result;
+  }, [preferences]);
+  const updateWidgetPresentation = React.useCallback((id: string, value: DemographicPresentation) => {
+    const dimension = demographicDimensionForCard(id);
+    if (!dimension || !canEditVisual || !companyScopeId || !user?.id) return;
+    // Read the latest layout before merging: changing a chart must not revert
+    // a concurrent resize, title edit, saved view or another widget's settings.
+    const latest = loadScopedCardPreferences(
+      DEMOGRAPHICS_MENU_KEY, [...DEMOGRAPHICS_CARD_IDS], companyScopeId, user.id, preferenceScopeId,
+    );
+    const updated = latest.map((preference) => preference.id === id
+      ? { ...preference, demographics: normalizeDemographicPresentation(value, dimension) }
+      : preference);
+    saveCardPreferences(
+      DEMOGRAPHICS_MENU_KEY, updated, [...DEMOGRAPHICS_CARD_IDS], companyScopeId, user.id, preferenceScopeId,
+    );
+    setPreferenceState({ key: preferenceIdentityKey, value: updated });
+  }, [canEditVisual, companyScopeId, preferenceIdentityKey, preferenceScopeId, user]);
+  const temporalSettings = React.useMemo(() => Object.fromEntries(
+    DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.map((id) => [id, normalizeDemographicTemporalSettings(
+      preferences.find((preference) => preference.id === id)?.demographicsTemporal, id,
+    )]),
+  ) as Record<DemographicTemporalWidgetId, DemographicTemporalSettings>, [preferences]);
+  const updateTemporalSettings = React.useCallback((id: DemographicTemporalWidgetId, value: DemographicTemporalSettings) => {
+    if (!isDemographicTemporalWidgetId(id) || !canEditVisual || !companyScopeId || !user?.id) return;
+    const latest = loadScopedCardPreferences(DEMOGRAPHICS_MENU_KEY, [...DEMOGRAPHICS_CARD_IDS], companyScopeId, user.id, preferenceScopeId);
+    const updated = latest.map((preference) => preference.id === id
+      ? { ...preference, demographicsTemporal: normalizeDemographicTemporalSettings(value, id) } : preference);
+    saveCardPreferences(DEMOGRAPHICS_MENU_KEY, updated, [...DEMOGRAPHICS_CARD_IDS], companyScopeId, user.id, preferenceScopeId);
+    setPreferenceState({ key: preferenceIdentityKey, value: updated });
+  }, [canEditVisual, companyScopeId, preferenceIdentityKey, preferenceScopeId, user]);
   const [clock, setClock] = React.useState(() => new Date());
   const todayInput = companyDateKey(clock, timeZone);
-  const rangeScopeKey = `${companyScopeId}|${user?.id ?? ""}|${surface}|${todayInput}`;
+  const rangeScopeKey = `${companyScopeId}|${user?.id ?? ""}|${surface}`;
   const historicalQueryIdentityKey = `${companyScopeId}|${user?.id ?? ""}|${surface}`;
   const fallbackRange = React.useMemo(
     () => defaultRangeForSurface(surface, todayInput),
@@ -198,6 +267,8 @@ export function DemographicsDashboard({
   );
   const [rangeState, setRangeState] = React.useState<{
     key: string;
+    source: "default" | "applied" | "saved";
+    timeZone: string;
     value: OccupancyAnalysisDateRangeInput;
   } | null>(null);
   const appliedRange =
@@ -223,6 +294,8 @@ export function DemographicsDashboard({
   const [organizerOpen, setOrganizerOpen] = React.useState(false);
   const [reorderMode, setReorderMode] = React.useState(false);
   const requestSequenceRef = React.useRef(0);
+  const activeRequestRef = React.useRef<AbortController | null>(null);
+  const comparisonRequestRef = React.useRef<AbortController | null>(null);
   const dashboardAttachedRef = React.useRef(false);
   const dashboardDetachTimerRef = React.useRef<number | null>(null);
   const liveCacheRef = React.useRef<LiveAggregationCache | null>(null);
@@ -290,11 +363,20 @@ export function DemographicsDashboard({
     const publishRange = (nextRange: OccupancyAnalysisDateRangeInput) => {
       setRangeState({
         key: rangeScopeKey,
+        source: "saved",
+        timeZone,
         value: nextRange,
       });
     };
     if (surface === "analysis") {
-      publishRange(fallbackRange);
+      // Re-anchor the initial default if company timezone metadata hydrates.
+      // A later clock tick or an explicitly applied selection must not reset it.
+      setRangeState((current) =>
+        current?.key === rangeScopeKey &&
+        (current.source !== "default" || current.timeZone === timeZone)
+          ? current
+          : { key: rangeScopeKey, source: "default", timeZone, value: fallbackRange },
+      );
       setHistoricalQueryScopeKey(historicalQueryIdentityKey);
       return;
     }
@@ -316,6 +398,7 @@ export function DemographicsDashboard({
     historicalQueryIdentityKey,
     rangeScopeKey,
     surface,
+    timeZone,
     todayInput,
     user?.id,
   ]);
@@ -362,6 +445,7 @@ export function DemographicsDashboard({
   React.useEffect(() => {
     const sequence = ++requestSequenceRef.current;
     const controller = new AbortController();
+    activeRequestRef.current = controller;
     let disposed = false;
     const isCurrent = () =>
       !disposed &&
@@ -369,6 +453,7 @@ export function DemographicsDashboard({
       sequence === requestSequenceRef.current;
 
     async function load() {
+      if (!isCurrent()) return;
       // Analysis opens automatically with the latest fully closed day.
       // Reports and later picker edits still wait for Apply/Refresh.
       if (!queryRequested) {
@@ -413,6 +498,13 @@ export function DemographicsDashboard({
       setLoadProgress(null);
       setError("");
       try {
+        const cachedHistoricalResult =
+          surface !== "live" &&
+          requestWindow.partitions.every((partition) =>
+            partitionCacheRef.current.has(
+              demographicPartitionCacheKey(partition, companyScopeId, timeZone),
+            ),
+          );
         const publishProgress = (completed: number, total: number) => {
           if (isCurrent()) setLoadProgress({ completed, total });
         };
@@ -426,6 +518,7 @@ export function DemographicsDashboard({
                 partitionCache: partitionCacheRef.current,
                 refreshVersion,
                 scopeKey: liveCacheScopeKey,
+                timeZone,
                 window: requestWindow,
               })
             : await loadPartitionedDemographicAggregation({
@@ -434,12 +527,14 @@ export function DemographicsDashboard({
                 onProgress: publishProgress,
                 partitions: requestWindow.partitions,
                 signal: controller.signal,
+                timeZone,
               });
         if (!isCurrent()) return;
-        const nextDataState = { key: dataScopeKey, summary };
+        const nextDataState = { key: dataScopeKey, refreshVersion, summary, through: requestWindow.to.getTime() };
         dataStateRef.current = nextDataState;
         setDataState(nextDataState);
-        setLastUpdated(new Date());
+        if (!cachedHistoricalResult) setLastUpdated(new Date());
+        else if (blockingLoad) setLastUpdated(null);
       } catch (requestError) {
         if (isAbortError(requestError, controller.signal) || !isCurrent())
           return;
@@ -464,6 +559,9 @@ export function DemographicsDashboard({
         controller,
         "A consulta demográfica anterior ficou obsoleta.",
       );
+      if (activeRequestRef.current === controller) {
+        activeRequestRef.current = null;
+      }
     };
   }, [
     companyScopeId,
@@ -475,11 +573,68 @@ export function DemographicsDashboard({
     refreshVersion,
     requestWindow,
     surface,
+    timeZone,
   ]);
 
   const emptySummary = React.useMemo(() => aggregateDemographicBuckets([]), []);
   const summary =
     dataState?.key === dataScopeKey ? dataState.summary : emptySummary;
+  const displayStartInput = surface === "live" ? todayInput : appliedRange.startInput;
+  const displayEndInput = surface === "live" ? todayInput : appliedRange.endInput;
+  const temporalBounds = React.useMemo(() => ({
+    from: civilDayStart(displayStartInput, timeZone),
+    to: civilDayStart(shiftCivilDateKey(displayEndInput, 1), timeZone),
+  }), [displayEndInput, displayStartInput, timeZone]);
+  const comparisonVisible = preferences.some((preference) => preference.id === "demographics_period_comparison" && preference.visible !== false);
+  const comparisonMode = temporalSettings.demographics_period_comparison.comparison ?? "previous-period";
+  const comparisonWindow = React.useMemo(() => buildDemographicComparisonWindow({
+    startInput: displayStartInput, endInput: displayEndInput, mode: comparisonMode, timeZone, cutoff: requestWindow.to,
+  }), [comparisonMode, displayEndInput, displayStartInput, requestWindow.to, timeZone]);
+  const comparisonKey = `${dataScopeKey}|${comparisonMode}|${comparisonWindow.from.toISOString()}|${comparisonWindow.to.toISOString()}|${refreshVersion}`;
+  const [comparisonState, setComparisonState] = React.useState<{
+    key: string; summary?: DemographicAggregation; error?: string;
+  } | null>(null);
+  const comparisonReady = dataState?.key === dataScopeKey && dataState.refreshVersion === refreshVersion &&
+    dataState.through === requestWindow.to.getTime() && summary.hasData && !loading && !refreshing && !error;
+  React.useEffect(() => {
+    if (!comparisonVisible || !queryRequested || !rangeReady || !comparisonReady || !companyScopeId || comparisonState?.key === comparisonKey) return;
+    const controller = new AbortController();
+    comparisonRequestRef.current = controller;
+    let disposed = false;
+    const timer = window.setTimeout(() => {
+      // Wait for the primary period so overlapping civil-day partitions are
+      // already cached; all five temporal widgets share that same dataset.
+      void loadPartitionedDemographicAggregation({
+        cache: partitionCacheRef.current,
+        companyScopeId,
+        partitions: buildCivilDayPartitions(comparisonWindow.startInput, comparisonWindow.endInput, timeZone, comparisonWindow.to),
+        signal: controller.signal,
+        timeZone,
+      }).then((baseline) => {
+        if (!disposed && !controller.signal.aborted) setComparisonState({ key: comparisonKey, summary: baseline });
+      }).catch((requestError: unknown) => {
+        if (!disposed && !isAbortError(requestError, controller.signal)) setComparisonState({
+          key: comparisonKey,
+          error: userFacingErrorMessage(requestError, "Não foi possível carregar o período de comparação. Atualize para tentar novamente."),
+        });
+      });
+    }, 0);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      abortRequest(controller, "A comparação demográfica anterior ficou obsoleta.");
+      if (comparisonRequestRef.current === controller) comparisonRequestRef.current = null;
+    };
+  }, [companyScopeId, comparisonKey, comparisonReady, comparisonState?.key, comparisonVisible, comparisonWindow, queryRequested, rangeReady, timeZone]);
+  const comparisonSummary = comparisonState?.key === comparisonKey ? comparisonState.summary : undefined;
+  const comparisonError = error || (comparisonState?.key === comparisonKey ? comparisonState.error : undefined);
+  const comparisonLoading = queryRequested && comparisonVisible && summary.hasData && !error && comparisonState?.key !== comparisonKey;
+  const temporalModels = React.useMemo(() => Object.fromEntries(DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.map((id) => [id,
+    buildDemographicTemporalModel({ id, summary, comparisonSummary, comparisonLabel: comparisonWindow.label,
+      settings: temporalSettings[id], ...temporalBounds, timeZone, now: requestWindow.to, theme: effectiveTheme,
+      enabled: preferences.some((preference) => preference.id === id && preference.visible !== false) }),
+  ])) as Record<DemographicTemporalWidgetId, ReturnType<typeof buildDemographicTemporalModel>>,
+  [comparisonSummary, comparisonWindow.label, effectiveTheme, preferences, requestWindow.to, summary, temporalBounds, temporalSettings, timeZone]);
   const genderLeader = leadingDistributionItem(summary.gender);
   const ageLeader = leadingDistributionItem(summary.age);
   const emotionLeader = leadingDistributionItem(summary.emotion);
@@ -488,13 +643,20 @@ export function DemographicsDashboard({
     surface === "live" ? todayInput : appliedRange.endInput,
   );
   function buildDemographicsReportPayload() {
-    return buildDemographicsReport({
+    const report = buildDemographicsReport({
       audience: manager ? "Visão gerencial" : "Visão operacional",
       rangeLabel,
       summary,
       surface,
       timeZone,
+      presentations: widgetPresentations,
     });
+    const temporalCharts = DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.filter((id) => preferences.some((preference) => preference.id === id && preference.visible !== false))
+      .map((id) => buildDemographicTemporalModel({ id, summary, comparisonSummary, comparisonLabel: comparisonWindow.label,
+        settings: temporalSettings[id], ...temporalBounds, timeZone, now: requestWindow.to, theme: "light" }))
+      .filter((model) => model.hasData)
+      .map((model) => ({ title: model.title, description: model.description, option: model.option, table: model.table }));
+    return { ...report, charts: [...(report.charts ?? []), ...temporalCharts] };
   }
   const cards = React.useMemo<LayoutCard[]>(
     () => [
@@ -507,7 +669,7 @@ export function DemographicsDashboard({
         label: "Detecções classificadas",
         node: (
           <DemographicMetricCard
-            description="Total de classificações recebidas no período; não representa visitantes únicos."
+            description="Classificações no período, não visitantes únicos."
             icon={UsersRound}
             label="Detecções classificadas"
             loading={loading}
@@ -527,7 +689,7 @@ export function DemographicsDashboard({
         label: "Gênero predominante",
         node: (
           <DemographicMetricCard
-            description="Participação sobre todas as detecções classificadas."
+            description="Participação no total de classificações."
             icon={Activity}
             label="Gênero predominante"
             loading={loading}
@@ -562,7 +724,7 @@ export function DemographicsDashboard({
         label: "Faixa etária predominante",
         node: (
           <DemographicMetricCard
-            description="Faixa com maior participação no intervalo selecionado."
+            description="Faixa com maior participação no período."
             icon={CalendarRange}
             label="Faixa etária predominante"
             loading={loading}
@@ -595,7 +757,7 @@ export function DemographicsDashboard({
         label: "Emoção predominante",
         node: (
           <DemographicMetricCard
-            description="Expressão classificada com maior participação no período."
+            description="Expressão mais frequente nas classificações."
             icon={HeartPulse}
             label="Emoção predominante"
             loading={loading}
@@ -623,70 +785,91 @@ export function DemographicsDashboard({
       },
       {
         colorEditable: false,
-        defaultHeightLevel: 2,
+        defaultHeightLevel: 1,
         defaultWidthLevel: 6,
         id: "demographics_gender_mix",
         label: "Composição por gênero",
-        node: <GenderCompositionCard loading={loading} summary={summary} />,
-        previewColors: Object.values(GENDER_COLORS),
-        previewKind: "composition",
+        configurationContent: <DemographicsWidgetControls dimension="gender" value={widgetPresentations.demographics_gender_mix} onChange={(value) => updateWidgetPresentation("demographics_gender_mix", value)} />,
+        node: <GenderCompositionCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_gender_mix} />,
+        previewColors: [...demographicPalettePreviewColors(getDemographicPalette(widgetPresentations.demographics_gender_mix?.palette).id, "gender")],
+        ...demographicDistributionPreview(widgetPresentations.demographics_gender_mix, "gender"),
         titleEditable: true,
         zoomEnabled: true,
       },
       {
-        colorEditable: true,
+        colorEditable: false,
         defaultHeightLevel: 3,
         defaultWidthLevel: 3,
         id: "demographics_age_distribution",
         label: "Distribuição por faixa etária",
-        node: <AgeDistributionCard loading={loading} summary={summary} />,
-        previewChartType: "bar",
-        previewKind: "chart",
-        previewOrientation: "horizontal",
+        configurationContent: <DemographicsWidgetControls dimension="age" value={widgetPresentations.demographics_age_distribution} onChange={(value) => updateWidgetPresentation("demographics_age_distribution", value)} />,
+        node: <AgeDistributionCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_age_distribution} />,
+        previewColors: [...getDemographicPalette(widgetPresentations.demographics_age_distribution?.palette).colors],
+        ...demographicDistributionPreview(widgetPresentations.demographics_age_distribution, "age"),
         titleEditable: true,
         zoomEnabled: true,
       },
       {
-        colorEditable: true,
+        colorEditable: false,
         defaultHeightLevel: 3,
         defaultWidthLevel: 3,
         id: "demographics_emotion_distribution",
         label: "Ranking de emoções",
-        node: <EmotionDistributionCard loading={loading} summary={summary} />,
-        previewChartType: "bar",
-        previewKind: "ranking",
-        previewOrientation: "horizontal",
+        configurationContent: <DemographicsWidgetControls dimension="emotion" value={widgetPresentations.demographics_emotion_distribution} onChange={(value) => updateWidgetPresentation("demographics_emotion_distribution", value)} />,
+        node: <EmotionDistributionCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_emotion_distribution} />,
+        previewColors: [...getDemographicPalette(widgetPresentations.demographics_emotion_distribution?.palette).colors],
+        ...demographicDistributionPreview(widgetPresentations.demographics_emotion_distribution, "emotion"),
         titleEditable: true,
         zoomEnabled: true,
       },
       {
         colorEditable: false,
-        defaultHeightLevel: 4,
+        defaultHeightLevel: 3,
         defaultWidthLevel: 3,
         id: "demographics_age_gender_pyramid",
-        label: "Pirâmide etária por gênero",
-        node: <AgeGenderPyramidCard loading={loading} summary={summary} />,
-        previewColors: Object.values(GENDER_COLORS),
-        previewKind: "chart",
-        previewOrientation: "horizontal",
+        label: "Faixa etária por gênero",
+        configurationContent: <DemographicsWidgetControls dimension="age-gender" value={widgetPresentations.demographics_age_gender_pyramid} onChange={(value) => updateWidgetPresentation("demographics_age_gender_pyramid", value)} />,
+        node: <AgeGenderPyramidCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_age_gender_pyramid} />,
+        previewColors: [...demographicPalettePreviewColors(getDemographicPalette(widgetPresentations.demographics_age_gender_pyramid?.palette).id, "age-gender")],
+        previewKind: "heatmap",
         titleEditable: true,
         zoomEnabled: true,
       },
       {
         colorEditable: false,
-        defaultHeightLevel: 4,
+        defaultHeightLevel: 3,
         defaultWidthLevel: 3,
         id: "demographics_age_emotion_heatmap",
         label: "Faixa etária × emoção",
-        node: <AgeEmotionHeatmapCard loading={loading} summary={summary} />,
-        previewColors: [HEATMAP_BASE_COLOR],
+        configurationContent: <DemographicsWidgetControls dimension="age-emotion" value={widgetPresentations.demographics_age_emotion_heatmap} onChange={(value) => updateWidgetPresentation("demographics_age_emotion_heatmap", value)} />,
+        node: <AgeEmotionHeatmapCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_age_emotion_heatmap} />,
+        previewColors: demographicHeatmapColors(getDemographicPalette(widgetPresentations.demographics_age_emotion_heatmap?.palette).id, effectiveTheme),
         previewKind: "heatmap",
         titleEditable: true,
         zoomEnabled: true,
       },
     ],
-    [ageLeader, emotionLeader, genderLeader, loading, summary],
+    [ageLeader, effectiveTheme, emotionLeader, genderLeader, loading, summary, widgetPresentations, updateWidgetPresentation],
   );
+  const allCards = React.useMemo<LayoutCard[]>(() => [...cards, ...DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.map((id): LayoutCard => ({
+    id,
+    label: temporalModels[id].title,
+    titleEditable: true,
+    colorEditable: false,
+    chartTypeEnabled: false,
+    zoomEnabled: true,
+    defaultWidthLevel: 6,
+    defaultHeightLevel: 3,
+    previewKind: temporalSettings[id].chartType === "heatmap" ? "heatmap" : "chart",
+    previewChartType: temporalSettings[id].chartType === "bar" ? "bar" : "line",
+    previewColors: temporalSettings[id].chartType === "heatmap"
+      ? demographicHeatmapColors(temporalSettings[id].palette, effectiveTheme)
+      : id === "demographics_period_comparison" && temporalSettings[id].dimension === "gender"
+        ? ["#475569", "#CBD5E1"]
+        : [...demographicPalettePreviewColors(temporalSettings[id].palette, temporalSettings[id].dimension)],
+    configurationContent: <DemographicsTemporalControls widgetId={id} value={temporalSettings[id]} onChange={(value) => updateTemporalSettings(id, value)} />,
+    node: <DemographicsTemporalWidget model={temporalModels[id]} loading={loading || (id === "demographics_period_comparison" && comparisonLoading)} error={id === "demographics_period_comparison" ? comparisonError : undefined} />,
+  }))], [cards, comparisonError, comparisonLoading, effectiveTheme, loading, temporalModels, temporalSettings, updateTemporalSettings]);
 
   function applyRange(value: OccupancyAnalysisDateRangeInput) {
     if (surface === "live") return;
@@ -695,18 +878,37 @@ export function DemographicsDashboard({
     ) {
       return;
     }
+    const requestedAt = new Date();
     const persisted = saveDemographicsDateRange(value, {
       companyId: companyScopeId,
       fallback: fallbackRange,
       surface,
-      todayInput,
+      todayInput: companyDateKey(requestedAt, timeZone),
       userId: user?.id,
     });
-    setRangeState({ key: rangeScopeKey, value: persisted });
-    setHistoricalQueryScopeKey(historicalQueryIdentityKey);
+    setRangeState({ key: rangeScopeKey, source: "applied", timeZone, value: persisted });
+    requestFreshData(requestedAt);
   }
 
   function forceRefresh() {
+    requestFreshData(new Date());
+  }
+
+  function requestFreshData(requestedAt: Date) {
+    // Invalidate synchronously, before React commits the next effect, so an
+    // older response cannot repopulate this explicitly refreshed cache.
+    requestSequenceRef.current += 1;
+    if (activeRequestRef.current) {
+      abortRequest(
+        activeRequestRef.current,
+        "A atualização demográfica foi reiniciada.",
+      );
+      activeRequestRef.current = null;
+    }
+    if (comparisonRequestRef.current) {
+      abortRequest(comparisonRequestRef.current, "A comparação demográfica foi reiniciada.");
+      comparisonRequestRef.current = null;
+    }
     if (surface !== "live") {
       setHistoricalQueryScopeKey(historicalQueryIdentityKey);
     }
@@ -719,7 +921,7 @@ export function DemographicsDashboard({
     }
     liveCacheRef.current = null;
     partitionCacheRef.current.clear();
-    setClock(new Date());
+    setClock(requestedAt);
     setRefreshVersion((value) => value + 1);
   }
 
@@ -799,7 +1001,7 @@ export function DemographicsDashboard({
           >
             <ReportExportActions
               compact
-              disabled={loading || !summary.hasData}
+              disabled={loading || comparisonLoading || !summary.hasData}
               getPayload={buildDemographicsReportPayload}
             />
             {/* AiAnalysisAction será incluído quando AiInsightModule aceitar
@@ -866,11 +1068,34 @@ export function DemographicsDashboard({
             Não há dados demográficos disponíveis para {rangeLabel}. Ausência
             de informação não é exibida como zero.
           </p>
+          {surface === "analysis" && (
+            appliedRange.startInput !== todayInput ||
+            appliedRange.endInput !== todayInput
+          ) ? (
+            <div className="mt-4 flex flex-col items-center gap-2">
+              <p className="text-xs text-muted-foreground">
+                Se o envio começou hoje, consulte o dia atual.
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={loading || refreshing}
+                onClick={() => {
+                  const currentDay = companyDateKey(new Date(), timeZone);
+                  applyRange({ startInput: currentDay, endInput: currentDay });
+                }}
+              >
+                <CalendarRange className="h-4 w-4 shrink-0" />
+                Consultar hoje
+              </Button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
       <CardLayout
-        cards={cards}
+        cards={allCards}
         menuKey={DEMOGRAPHICS_MENU_KEY}
         onOrganizerOpenChange={setOrganizerOpen}
         onPreferencesChange={synchronizePreferences}
@@ -906,6 +1131,7 @@ function DemographicMetricCard({
   return (
     <CompactMetricCard
       comparison={comparison}
+      comparisonClassName="rounded bg-muted/60 px-1.5 py-0.5 text-foreground"
       description={description}
       icon={icon}
       label={label}
@@ -919,38 +1145,54 @@ function DemographicMetricCard({
 function GenderCompositionCard({
   loading,
   summary,
+  presentation,
 }: {
   loading: boolean;
   summary: DemographicAggregation;
+  presentation?: DemographicPresentation;
 }) {
-  const option = React.useMemo(() => buildGenderOption(summary), [summary]);
+  const { effectiveTheme } = useTheme();
+  const settings = React.useMemo(() => normalizeDemographicPresentation(presentation, "gender"), [presentation]);
+  const radial = isRadialDemographicPresentation(settings);
+  const option = React.useMemo(() => buildDemographicDistributionOption(summary.gender, settings, {
+    dimension: "gender", theme: effectiveTheme, showLegend: radial,
+  }), [effectiveTheme, radial, settings, summary]);
+  const legendItems = React.useMemo(() => orderedDemographicItems(summary.gender, settings.order), [settings.order, summary]);
   return (
     <DemographicChartCard
-      description="Percentual de Mulher, Homem e Não identificado sobre o total classificado."
+      description="Participação de cada gênero no total de classificações."
       hasData={summary.hasData}
-      kind="gender"
+      kind={radial ? "radial" : settings.type === "stacked" ? "gender" : "distribution"}
       loading={loading}
       option={option}
       title="Composição por gênero"
-      footer={
-        <div className="grid min-w-0 grid-cols-3 gap-1.5">
-          {summary.gender.map((item) => (
+      footer={settings.type !== "stacked" ? undefined :
+        <dl className="grid min-w-0 shrink-0 grid-cols-3 gap-2 @md:gap-4" data-demographics-legend>
+          {legendItems.map((item) => (
             <div
               key={item.key}
-              className="min-w-0 rounded-md border bg-background/70 px-1.5 py-1 text-center"
+              className="min-w-0"
             >
-              <div
-                className="flex min-h-6 items-center justify-center break-words text-[9px] leading-3 text-muted-foreground [overflow-wrap:anywhere]"
+              <dt
+                className="flex min-w-0 items-start gap-1.5 text-[11px] leading-4 text-muted-foreground"
                 title={item.label}
               >
-                {item.label}
-              </div>
-              <div className="text-xs font-semibold tabular-nums">
+                <span
+                  aria-hidden="true"
+                  className="mt-1 h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: demographicCategoryColor(item.key, 0, settings.palette, "gender") }}
+                />
+                <span className="min-w-0 break-words">{demographicCategoryLabel(item.label, item.key, "gender", settings.emojis)}</span>
+              </dt>
+              <dd className="mt-0.5 text-lg font-semibold leading-6 tabular-nums tracking-tight" data-demographics-legend-value>
                 {formatPercentage(item.percentage)}
-              </div>
+              </dd>
+              <dd className="hidden text-[11px] leading-4 text-muted-foreground @md:block" data-demographics-legend-count>
+                {formatNumber(item.count)} detecções
+              </dd>
             </div>
           ))}
-        </div>
+        </dl>
       }
     />
   );
@@ -959,20 +1201,23 @@ function GenderCompositionCard({
 function AgeDistributionCard({
   loading,
   summary,
+  presentation,
 }: {
   loading: boolean;
   summary: DemographicAggregation;
+  presentation?: DemographicPresentation;
 }) {
-  const color = useWidgetColor("#1267C4");
+  const { effectiveTheme } = useTheme();
+  const settings = React.useMemo(() => normalizeDemographicPresentation(presentation, "age"), [presentation]);
   const option = React.useMemo(
-    () => buildAgeOption(summary, color),
-    [color, summary],
+    () => buildDemographicDistributionOption(summary.age, settings, { dimension: "age", theme: effectiveTheme }),
+    [effectiveTheme, settings, summary],
   );
   return (
     <DemographicChartCard
-      description="As nove faixas aparecem sempre na mesma ordem, com percentual e volume."
+      description="Participação de cada faixa etária no total de classificações."
       hasData={summary.hasData}
-      kind="distribution"
+      kind={isRadialDemographicPresentation(settings) ? "radial" : settings.type === "stacked" ? "composition" : "distribution"}
       loading={loading}
       option={option}
       title="Distribuição por faixa etária"
@@ -983,20 +1228,23 @@ function AgeDistributionCard({
 function EmotionDistributionCard({
   loading,
   summary,
+  presentation,
 }: {
   loading: boolean;
   summary: DemographicAggregation;
+  presentation?: DemographicPresentation;
 }) {
-  const color = useWidgetColor("#7C3AED");
+  const { effectiveTheme } = useTheme();
+  const settings = React.useMemo(() => normalizeDemographicPresentation(presentation, "emotion"), [presentation]);
   const option = React.useMemo(
-    () => buildEmotionOption(summary, color),
-    [color, summary],
+    () => buildDemographicDistributionOption(summary.emotion, settings, { dimension: "emotion", theme: effectiveTheme }),
+    [effectiveTheme, settings, summary],
   );
   return (
     <DemographicChartCard
-      description="Ranking das oito expressões classificadas, ordenado por participação."
+      description="Participação de cada expressão no total de classificações."
       hasData={summary.hasData}
-      kind="distribution"
+      kind={isRadialDemographicPresentation(settings) ? "radial" : settings.type === "stacked" ? "composition" : "distribution"}
       loading={loading}
       option={option}
       title="Ranking de emoções"
@@ -1007,22 +1255,25 @@ function EmotionDistributionCard({
 function AgeGenderPyramidCard({
   loading,
   summary,
+  presentation,
 }: {
   loading: boolean;
   summary: DemographicAggregation;
+  presentation?: DemographicPresentation;
 }) {
+  const { effectiveTheme } = useTheme();
   const option = React.useMemo(
-    () => buildAgeGenderPyramidOption(summary),
-    [summary],
+    () => buildDemographicCrossingOption(summary, normalizeDemographicPresentation(presentation, "age-gender"), "age-gender", effectiveTheme),
+    [effectiveTheme, presentation, summary],
   );
   return (
     <DemographicChartCard
-      description="Participação de cada combinação no total classificado; os dois lados usam a mesma escala."
+      description="Participação de cada idade e gênero no total de classificações."
       hasData={summary.hasData}
-      kind="pyramid"
+      kind="matrix"
       loading={loading}
       option={option}
-      title="Pirâmide etária por gênero"
+      title="Faixa etária por gênero"
     />
   );
 }
@@ -1030,18 +1281,20 @@ function AgeGenderPyramidCard({
 function AgeEmotionHeatmapCard({
   loading,
   summary,
+  presentation,
 }: {
   loading: boolean;
   summary: DemographicAggregation;
+  presentation?: DemographicPresentation;
 }) {
   const { effectiveTheme } = useTheme();
   const option = React.useMemo(
-    () => buildAgeEmotionHeatmapOption(summary, effectiveTheme),
-    [effectiveTheme, summary],
+    () => buildDemographicCrossingOption(summary, normalizeDemographicPresentation(presentation, "age-emotion"), "age-emotion", effectiveTheme),
+    [effectiveTheme, presentation, summary],
   );
   return (
     <DemographicChartCard
-      description="Participação de cada combinação de faixa etária e emoção no total classificado."
+      description="Idades nas linhas, emoções nas colunas. Cor mais intensa indica maior participação."
       hasData={summary.hasData}
       kind="heatmap"
       loading={loading}
@@ -1063,43 +1316,75 @@ function DemographicChartCard({
   description: string;
   footer?: React.ReactNode;
   hasData: boolean;
-  kind: "distribution" | "gender" | "heatmap" | "pyramid";
+  kind: "distribution" | "gender" | "heatmap" | "matrix" | "radial" | "composition";
   loading: boolean;
   option: EnterpriseChartOption;
   title: string;
 }) {
   const rootRef = React.useRef<HTMLDivElement>(null);
-  const [compact, setCompact] = React.useState(false);
+  const plotRef = React.useRef<HTMLDivElement>(null);
+  const [{ compact, narrow, width, height }, setDensity] = React.useState({
+    compact: false,
+    narrow: false,
+    width: 640,
+    height: 280,
+  });
   React.useLayoutEffect(() => {
     const root = rootRef.current;
-    if (!root) return;
+    const plot = plotRef.current;
+    if (!root || !plot) return;
     const synchronizeDensity = () => {
-      const nextCompact = root.getBoundingClientRect().height < 220;
-      setCompact((current) =>
-        current === nextCompact ? current : nextCompact,
+      const card = root.getBoundingClientRect();
+      const bounds = plot.getBoundingClientRect();
+      const next = {
+        compact: card.height < 220,
+        narrow: card.width < 400,
+        width: Math.round(bounds.width),
+        height: Math.round(bounds.height),
+      };
+      setDensity((current) =>
+        current.compact === next.compact && current.narrow === next.narrow &&
+          ((kind !== "radial" && kind !== "composition") ||
+            (current.width === next.width && current.height === next.height))
+          ? current
+          : next,
       );
     };
     synchronizeDensity();
     const observer = new ResizeObserver(synchronizeDensity);
     observer.observe(root);
+    observer.observe(plot);
     return () => observer.disconnect();
-  }, []);
+  }, [kind]);
   const responsiveOption = React.useMemo(
-    () => (compact ? compactDemographicChartOption(option, kind) : option),
-    [compact, kind, option],
+    () => kind === "radial" || kind === "composition"
+      ? fitDemographicCompositionOption(option, { width, height })
+      : compact || narrow
+        ? compactDemographicChartOption(option, kind, { compact, narrow })
+        : option,
+    [compact, height, kind, narrow, option, width],
   );
 
   return (
     <Card
       ref={rootRef}
-      className="@container flex h-full min-w-0 flex-col overflow-hidden"
+      className={cn(
+        "@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden",
+        compact && "[&_[data-demographics-legend-count]]:hidden [&_[data-demographics-legend-value]]:text-sm [&_[data-demographics-legend-value]]:leading-5",
+      )}
       data-demographics-density={compact ? "compact" : "regular"}
+      data-demographics-width={narrow ? "narrow" : "regular"}
     >
       <CardHeader
         className={cn("min-w-0 gap-0.5", compact ? "p-2 pb-0.5" : "p-3 pb-1")}
       >
-        <CardTitle className={cn("leading-5", compact ? "text-xs" : "text-sm")}>
+        <CardTitle className={cn(
+          "leading-5",
+          kind === "heatmap" ? "flex items-baseline gap-1" : "line-clamp-2",
+          compact ? "text-xs" : "text-sm",
+        )}>
           <WidgetTitleText fallback={title} />
+          {kind === "heatmap" ? <span className="shrink-0 font-normal text-muted-foreground">(%)</span> : null}
         </CardTitle>
         <CardDescription
           className={cn("line-clamp-2 text-xs leading-4", compact && "sr-only")}
@@ -1113,26 +1398,29 @@ function DemographicChartCard({
           compact ? "gap-1 p-2 pt-0" : "gap-1.5 p-3 pt-0",
         )}
       >
-        {loading ? (
-          <div className="flex min-h-0 flex-1 flex-col gap-2">
-            <Skeleton className="h-3 w-1/2" />
-            <Skeleton className="min-h-0 flex-1 w-full" />
-          </div>
-        ) : !hasData ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed px-3 text-center text-xs text-muted-foreground">
-            Sem dados demográficos no intervalo.
-          </div>
-        ) : (
-          <div className="min-h-0 min-w-0 flex-1">
-            <EChart
-              ariaDescription={description}
-              ariaLabel={title}
-              className="h-full min-h-0 w-full"
-              option={responsiveOption}
-              valueLabels="always"
-            />
-          </div>
-        )}
+        <div ref={plotRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {loading ? (
+            <div className="flex min-h-0 flex-1 flex-col gap-2">
+              <Skeleton className="h-3 w-1/2" />
+              <Skeleton className="min-h-0 flex-1 w-full" />
+            </div>
+          ) : !hasData ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center px-3 text-center text-xs text-muted-foreground">
+              Sem dados demográficos no intervalo.
+            </div>
+          ) : (
+            <div className="min-h-0 min-w-0 flex-1">
+              <EChart
+                ariaDescription={description}
+                ariaLabel={title}
+                className="h-full min-h-0 w-full"
+                option={responsiveOption}
+                themeMode="explicit"
+                valueLabels="always"
+              />
+            </div>
+          )}
+        </div>
         {!loading && hasData && footer ? footer : null}
         {!loading && hasData ? (
           <p className="sr-only">{demographicTextAlternative(title)}</p>
@@ -1144,23 +1432,58 @@ function DemographicChartCard({
 
 function compactDemographicChartOption(
   option: EnterpriseChartOption,
-  kind: "distribution" | "gender" | "heatmap" | "pyramid",
+  kind: "distribution" | "gender" | "heatmap" | "matrix" | "radial" | "composition",
+  { compact = true, narrow = false } = {},
 ): EnterpriseChartOption {
   const source = option as Record<string, unknown>;
+  // Circular charts own their radius, label layout and legend viewport.
+  // Cartesian density rules must not collapse those viewports into a grid.
+  if (kind === "radial" || kind === "composition") return option;
+  const verticalDistribution = kind === "distribution" &&
+    isRecord(source.xAxis) && source.xAxis.type === "category";
+  const compactHeatmap = kind === "heatmap" && (compact || narrow);
+  const emotionAxisLabels: Record<string, string> = {
+    Neutro: "Neu.", Feliz: "Fel.", Surpresa: "Sur.", Triste: "Tri.",
+    Raiva: "Rai.", Nojo: "Noj.", Medo: "Med.", Desprezo: "Des.",
+  };
   const grid = mapChartOptionCollection(source.grid, (candidate) => ({
     ...candidate,
-    bottom: kind === "gender" ? 2 : kind === "heatmap" ? 4 : 8,
-    left: kind === "pyramid" ? 8 : 4,
-    right: kind === "distribution" ? 42 : 8,
-    top: kind === "pyramid" ? 22 : kind === "gender" ? 2 : 4,
+    ...(compact ? {
+      bottom: kind === "gender" ? 0 : 6,
+      top: verticalDistribution ? 32 : 4,
+    } : {}),
+    left: 4,
+    right: kind === "distribution" ? verticalDistribution ? 16 : 48 : 4,
   }));
   const xAxis = mapChartOptionCollection(source.xAxis, (candidate) => ({
     ...candidate,
     ...(kind === "gender" ? { show: false } : {}),
     axisLabel: {
       ...(isRecord(candidate.axisLabel) ? candidate.axisLabel : {}),
-      fontSize: kind === "heatmap" ? 7 : 8,
-      ...(kind === "heatmap" ? { rotate: 42 } : {}),
+      fontSize: kind === "heatmap" || (verticalDistribution && narrow) ? 9 : 10,
+      ...(verticalDistribution && narrow ? { rotate: 45, interval: 0, margin: 8 } : {}),
+      ...(compactHeatmap ? {
+        formatter: (label: string) => {
+          const words = label.split(" ");
+          const name = words[0];
+          const short = emotionAxisLabels[name];
+          if (!short) return label;
+          // Keep the trailing emoji after the name; a shorter word leaves its
+          // own space even in the smallest heatmap's eight columns.
+          return words.length > 1
+            ? [`${short.slice(0, 2)}.`, ...words.slice(1)].join(" ")
+            : short;
+        },
+        interval: 0,
+        rotate: 0,
+        margin: 8,
+      } : {}),
+      ...(kind === "matrix" ? {
+        formatter: (label: string) => label.replace("Não identificado", "Não ident."),
+        interval: 0,
+        rotate: 0,
+        margin: 8,
+      } : {}),
     },
   }));
   const yAxis = mapChartOptionCollection(source.yAxis, (candidate) => ({
@@ -1168,31 +1491,43 @@ function compactDemographicChartOption(
     ...(kind === "gender" ? { show: false } : {}),
     axisLabel: {
       ...(isRecord(candidate.axisLabel) ? candidate.axisLabel : {}),
-      fontSize: kind === "heatmap" ? 7 : 8,
-      ...(kind === "distribution" ? { width: 66 } : {}),
+      fontSize: kind === "heatmap" ? 9 : 10,
+      interval: 0,
+      ...(kind === "distribution" && !verticalDistribution ? { width: narrow ? 72 : 86 } : {}),
     },
   }));
   const series = mapChartOptionCollection(source.series, (candidate) => ({
     ...candidate,
-    ...(kind === "distribution" || kind === "pyramid"
-      ? { barMaxWidth: 12 }
+    ...(compact && kind === "distribution"
+      ? { barMaxWidth: 10 }
       : {}),
     label: {
       ...(isRecord(candidate.label) ? candidate.label : {}),
-      fontSize: kind === "heatmap" ? 7 : 8,
+      fontSize: kind === "heatmap" || (verticalDistribution && narrow) ? 9 : 10,
+      ...(verticalDistribution && narrow ? { rotate: 45, align: "left", verticalAlign: "middle", distance: 4 } : {}),
+      ...(compactHeatmap && isRecord(candidate.label) && typeof candidate.label.formatter === "function"
+        ? {
+            // The card title supplies the percent unit; keep exact values and
+            // contrast styles without repeating a symbol in every narrow cell.
+            formatter: (parameters: unknown) => String(
+              (candidate.label as { formatter: (parameters: unknown) => unknown }).formatter(parameters),
+            ).replace(/%/g, ""),
+          }
+        : {}),
     },
   }));
   const legend = mapChartOptionCollection(source.legend, (candidate) => ({
     ...candidate,
-    itemHeight: 6,
+    itemHeight: 8,
     itemWidth: 8,
+    itemGap: narrow ? 8 : 12,
     textStyle: {
       ...(isRecord(candidate.textStyle) ? candidate.textStyle : {}),
-      fontSize: 8,
+      fontSize: 10,
     },
   }));
   const visualMap =
-    kind === "heatmap"
+    kind === "heatmap" && compact
       ? mapChartOptionCollection(source.visualMap, (candidate) => ({
           ...candidate,
           show: false,
@@ -1204,7 +1539,7 @@ function compactDemographicChartOption(
     grid,
     legend,
     series,
-    visualMap,
+    ...(visualMap === undefined ? {} : { visualMap }),
     xAxis,
     yAxis,
   } as EnterpriseChartOption;
@@ -1222,21 +1557,54 @@ function mapChartOptionCollection(
   return isRecord(value) ? transform(value) : value;
 }
 
+function isRadialDemographicPresentation(presentation: DemographicPresentation) {
+  return presentation.type === "pie" || presentation.type === "donut" ||
+    presentation.type === "half-donut" || presentation.type === "rose";
+}
+
+function demographicDistributionPreview(
+  presentation: DemographicPresentation | undefined,
+  dimension: "gender" | "age" | "emotion",
+): Pick<LayoutCard, "previewKind" | "previewChartType" | "previewOrientation" | "previewOrder"> {
+  const settings = normalizeDemographicPresentation(presentation, dimension);
+  return {
+    previewKind: settings.type === "bar" ? "chart" : "composition",
+    previewChartType: settings.type === "rose" ? "rose" : settings.type === "bar" ? "bar" : undefined,
+    previewOrientation: settings.orientation,
+    previewOrder: settings.order === "default" ? undefined : settings.order === "ascending" ? "asc" : "desc",
+  };
+}
+
+function orderedDemographicItems<T extends { count: number }>(
+  items: readonly T[],
+  order: DemographicPresentation["order"],
+): T[] {
+  const result = [...items];
+  if (order !== "default") result.sort((left, right) =>
+    (order === "ascending" ? 1 : -1) * (left.count - right.count));
+  return result;
+}
+
 async function loadPartitionedDemographicAggregation({
   cache,
   companyScopeId,
   onProgress,
   partitions,
+  revalidate = false,
   signal,
+  timeZone,
 }: {
   cache: Map<string, DemographicAggregation>;
   companyScopeId: string;
   onProgress?: (completed: number, total: number) => void;
   partitions: DemographicRequestPartition[];
+  revalidate?: boolean;
   signal: AbortSignal;
+  timeZone?: string;
 }) {
-  if (!partitions.length) return aggregateDemographicBuckets([]);
-  let combined = aggregateDemographicBuckets([]);
+  signal.throwIfAborted();
+  if (!partitions.length) return aggregateDemographicBuckets([], { timeZone });
+  const summaries: DemographicAggregation[] = [];
   let failed = false;
   let failure: unknown;
   let cursor = 0;
@@ -1252,23 +1620,27 @@ async function loadPartitionedDemographicAggregation({
         const cacheKey = demographicPartitionCacheKey(
           partition,
           companyScopeId,
+          timeZone,
         );
-        const cached = cache.get(cacheKey);
+        // A full refresh must observe corrections to closed partitions too.
+        // Bypass only these exact tenant/range entries; unrelated cached
+        // periods remain available to their consumers.
+        const cached = revalidate ? undefined : cache.get(cacheKey);
         const summary =
           cached ??
           (await fetchDemographicSummary(
             partition,
             companyScopeId,
             signal,
+            timeZone,
           ));
         signal.throwIfAborted();
         if (!cached) {
           cacheDemographicPartition(cache, cacheKey, summary);
         }
-        // Cada dia é descartado logo após entrar no acumulador. Assim um
-        // intervalo de 31 dias nunca mantém todas as linhas brutas
-        // simultaneamente no navegador.
-        combined = combineDemographicAggregations([combined, summary]);
+        // Keep only compact distributions/hourly marginals. Combine once at
+        // the end instead of repeatedly copying a growing annual timeline.
+        summaries.push(summary);
         completed += 1;
         if (completed === partitions.length || completed % progressStep === 0) {
           onProgress?.(completed, partitions.length);
@@ -1284,7 +1656,7 @@ async function loadPartitionedDemographicAggregation({
   );
   if (failed) throw failure;
   signal.throwIfAborted();
-  return combined;
+  return combineDemographicAggregations(summaries);
 }
 
 function liveDemographicRequestKey({
@@ -1326,6 +1698,7 @@ async function loadSharedLiveDemographicAggregation({
   pendingRef,
   refreshVersion,
   scopeKey,
+  timeZone,
   window,
 }: {
   cacheRef: React.MutableRefObject<LiveAggregationCache | null>;
@@ -1335,6 +1708,7 @@ async function loadSharedLiveDemographicAggregation({
   pendingRef: React.MutableRefObject<PendingLiveAggregation | null>;
   refreshVersion: number;
   scopeKey: string;
+  timeZone?: string;
   window: DemographicRequestWindow;
 }) {
   const key = liveDemographicRequestKey({
@@ -1363,6 +1737,7 @@ async function loadSharedLiveDemographicAggregation({
     partitionCache,
     scopeKey,
     signal: controller.signal,
+    timeZone,
     window,
   }).finally(() => {
     if (pendingRef.current?.controller === controller) {
@@ -1380,6 +1755,7 @@ async function loadLiveDemographicAggregation({
   partitionCache,
   scopeKey,
   signal,
+  timeZone,
   window,
 }: {
   cacheRef: React.MutableRefObject<LiveAggregationCache | null>;
@@ -1388,12 +1764,14 @@ async function loadLiveDemographicAggregation({
   partitionCache: Map<string, DemographicAggregation>;
   scopeKey: string;
   signal: AbortSignal;
+  timeZone?: string;
   window: DemographicRequestWindow;
 }) {
+  signal.throwIfAborted();
   const now = Date.now();
   const fromMs = window.from.getTime();
   const toMs = window.to.getTime();
-  if (toMs <= fromMs) return aggregateDemographicBuckets([]);
+  if (toMs <= fromMs) return aggregateDemographicBuckets([], { timeZone });
   const cached = cacheRef.current;
   const needsFullRefresh =
     !cached ||
@@ -1413,7 +1791,9 @@ async function loadLiveDemographicAggregation({
       onProgress: (completed) =>
         onProgress?.(completed, stablePartitions.length + 1),
       partitions: stablePartitions,
+      revalidate: true,
       signal,
+      timeZone,
     });
     const tailRows = await fetchDemographicRows(
       { from: new Date(tailFrom), to: new Date(toMs) },
@@ -1432,14 +1812,14 @@ async function loadLiveDemographicAggregation({
     };
     return combineDemographicAggregations([
       stableSummary,
-      aggregateDemographicBuckets(tailRows),
+      aggregateDemographicBuckets(tailRows, { timeZone }),
     ]);
   }
 
   if (cached.to === toMs) {
     return combineDemographicAggregations([
       cached.stableSummary,
-      aggregateDemographicBuckets(cached.tailRows),
+      aggregateDemographicBuckets(cached.tailRows, { timeZone }),
     ]);
   }
 
@@ -1455,6 +1835,7 @@ async function loadLiveDemographicAggregation({
     onProgress,
     partitions: buildInstantPartitions(new Date(gapFrom), new Date(gapTo)),
     signal,
+    timeZone,
   });
   const nextTailRows = await fetchDemographicRows(
     { from: new Date(nextTailFrom), to: new Date(toMs) },
@@ -1464,7 +1845,7 @@ async function loadLiveDemographicAggregation({
   signal.throwIfAborted();
   const stableSummary = combineDemographicAggregations([
     cached.stableSummary,
-    aggregateDemographicBuckets(promotedRows),
+    aggregateDemographicBuckets(promotedRows, { timeZone }),
     gapSummary,
   ]);
   cacheRef.current = {
@@ -1476,7 +1857,7 @@ async function loadLiveDemographicAggregation({
   };
   return combineDemographicAggregations([
     stableSummary,
-    aggregateDemographicBuckets(nextTailRows),
+    aggregateDemographicBuckets(nextTailRows, { timeZone }),
   ]);
 }
 
@@ -1484,8 +1865,9 @@ async function fetchDemographicSummary(
   partition: DemographicRequestPartition,
   companyScopeId: string,
   signal: AbortSignal,
+  timeZone?: string,
 ) {
-  if (partition.to <= partition.from) return aggregateDemographicBuckets([]);
+  if (partition.to <= partition.from) return aggregateDemographicBuckets([], { timeZone });
   const response = await fetchDemographicResponse(
     partition,
     companyScopeId,
@@ -1494,17 +1876,19 @@ async function fetchDemographicSummary(
   return summarizeDemographicBuckets(response, {
     from: partition.from,
     to: partition.to,
-  });
+  }, { timeZone });
 }
 
 function demographicPartitionCacheKey(
   partition: DemographicRequestPartition,
   companyScopeId: string,
+  timeZone?: string,
 ) {
   return JSON.stringify([
     companyScopeId,
     partition.from.toISOString(),
     partition.to.toISOString(),
+    ...(timeZone ? [timeZone] : []),
   ]);
 }
 
@@ -1588,7 +1972,9 @@ function buildCivilDayPartitions(
 ) {
   const partitions: DemographicRequestPartition[] = [];
   let cursor = startInput;
-  for (let day = 0; day < MAX_DEMOGRAPHICS_DATE_RANGE_DAYS; day += 1) {
+  // Shifting an annual selection by a calendar month may change its length.
+  // Keep that complete baseline while the selectable main range stays bounded.
+  for (let day = 0; day < MAX_DEMOGRAPHICS_DATE_RANGE_DAYS + 31; day += 1) {
     const from = civilDayStart(cursor, timeZone);
     const dayTo = civilDayStart(shiftCivilDateKey(cursor, 1), timeZone);
     const to = dayTo > maximumTo ? maximumTo : dayTo;
@@ -1673,28 +2059,53 @@ function leadingDistributionItem<Key extends string>(
 
 function buildGenderOption(
   summary: DemographicAggregation,
+  showLegend = false,
 ): EnterpriseChartOption {
+  const visibleIndexes = summary.gender.flatMap((item, index) =>
+    (item.percentage ?? 0) > 0 ? [index] : [],
+  );
+  const firstVisibleIndex = visibleIndexes[0];
+  const lastVisibleIndex = visibleIndexes[visibleIndexes.length - 1];
   return {
     animationDuration: 350,
     aria: {
       enabled: true,
-      decal: { show: true },
+      decal: { show: false },
       description:
         "Barra de cem por cento com a participação das classificações Mulher, Homem e Não identificado.",
     },
-    grid: { bottom: 8, containLabel: true, left: 8, right: 8, top: 12 },
-    legend: { show: false },
+    grid: {
+      bottom: 4,
+      containLabel: false,
+      left: 0,
+      right: 0,
+      top: showLegend ? 36 : 4,
+    },
+    legend: {
+      data: summary.gender.map((item) => item.label),
+      formatter: (name: string) => {
+        const item = summary.gender.find((candidate) => candidate.label === name);
+        return item ? `${name} · ${formatPercentage(item.percentage)}` : name;
+      },
+      icon: "roundRect",
+      itemGap: 18,
+      itemHeight: 10,
+      itemWidth: 10,
+      show: showLegend,
+      textStyle: { color: "#526477", fontSize: 12 },
+      top: 0,
+    },
     tooltip: { formatter: genderTooltip, trigger: "item" },
     xAxis: {
-      axisLabel: { formatter: "{value}%" },
       max: 100,
       min: 0,
-      splitLine: { lineStyle: { opacity: 0.15 } },
+      show: false,
+      splitLine: { show: false },
       type: "value",
     },
-    yAxis: { data: ["Detecções"], type: "category" },
+    yAxis: { data: ["Detecções"], show: false, type: "category" },
     series: summary.gender.map((item, index) => ({
-      barMaxWidth: 46,
+      barMaxWidth: 32,
       data: [
         {
           count: item.count,
@@ -1704,23 +2115,27 @@ function buildGenderOption(
       ],
       emphasis: { focus: "series" },
       itemStyle: {
-        borderRadius:
-          index === 0
-            ? [7, 0, 0, 7]
-            : index === summary.gender.length - 1
-              ? [0, 7, 7, 0]
-              : 0,
+        borderRadius: [
+          index === firstVisibleIndex ? 6 : 0,
+          index === lastVisibleIndex ? 6 : 0,
+          index === lastVisibleIndex ? 6 : 0,
+          index === firstVisibleIndex ? 6 : 0,
+        ],
         color: GENDER_COLORS[item.key],
       },
       label: {
+        align: "center",
         color: item.key === "unknown" ? "#101828" : "#F9FAFB",
-        formatter: percentageChartLabel,
+        formatter: (parameters: unknown) =>
+          (chartParameterNumber(parameters) ?? 0) > 0
+            ? percentageChartLabel(parameters)
+            : "",
         fontSize: 11,
-        fontWeight: 700,
+        fontWeight: 600,
         position: "inside",
         show: (item.percentage ?? 0) >= 7,
       },
-      name: `${item.label} · ${formatPercentage(item.percentage)} · ${formatNumber(item.count)}`,
+      name: item.label,
       stack: "gender",
       type: "bar",
     })),
@@ -1763,20 +2178,54 @@ function horizontalDistributionOption<Key extends string>({
   color: string;
   items: readonly DemographicDistributionItem<Key>[];
 }): EnterpriseChartOption {
+  const largestPercentage = Math.max(
+    0,
+    ...items.map((item) => item.percentage ?? 0),
+  );
+  const maximum = Math.min(
+    100,
+    Math.max(10, Math.ceil((largestPercentage * 1.15) / 10) * 10),
+  );
   return {
     animationDuration: 350,
-    aria: { enabled: true, description: ariaDescription },
-    grid: { bottom: 24, containLabel: true, left: 8, right: 54, top: 8 },
-    tooltip: { formatter: distributionTooltip, trigger: "axis" },
+    aria: {
+      enabled: true,
+      decal: { show: false },
+      description: ariaDescription,
+    },
+    grid: { bottom: 12, containLabel: true, left: 0, right: 48, top: 8 },
+    tooltip: {
+      axisPointer: { type: "none" },
+      formatter: distributionTooltip,
+      trigger: "axis",
+    },
     xAxis: {
-      axisLabel: { formatter: "{value}%" },
-      max: 100,
+      axisLabel: {
+        color: "#526477",
+        fontSize: 10,
+        formatter: "{value}%",
+        hideOverlap: true,
+        showMaxLabel: true,
+        showMinLabel: true,
+      },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      max: maximum,
       min: 0,
-      splitLine: { lineStyle: { opacity: 0.15 } },
+      splitLine: { lineStyle: { opacity: 0.1, type: "dashed" } },
+      splitNumber: 4,
       type: "value",
     },
     yAxis: {
-      axisLabel: { overflow: "truncate", width: 92 },
+      axisLabel: {
+        color: "#526477",
+        fontSize: 11,
+        interval: 0,
+        margin: 10,
+        overflow: "truncate",
+        width: 100,
+      },
+      axisLine: { show: false },
       axisTick: { show: false },
       data: items.map((item) => item.label),
       inverse: true,
@@ -1784,17 +2233,20 @@ function horizontalDistributionOption<Key extends string>({
     },
     series: [
       {
-        barMaxWidth: 22,
+        barMaxWidth: 20,
         data: items.map((item) => ({
           count: item.count,
           value: item.percentage ?? 0,
         })),
-        itemStyle: { borderRadius: [0, 5, 5, 0], color },
+        itemStyle: { borderRadius: [0, 4, 4, 0], color },
         label: {
-          color: "#526477",
-          formatter: percentageChartLabel,
-          fontSize: 10,
-          fontWeight: 700,
+          distance: 8,
+          formatter: (parameters: unknown) =>
+            (chartParameterNumber(parameters) ?? 0) > 0
+              ? percentageChartLabel(parameters)
+              : "",
+          fontSize: 11,
+          fontWeight: 600,
           position: "right",
           show: true,
         },
@@ -1805,92 +2257,108 @@ function horizontalDistributionOption<Key extends string>({
   } as EnterpriseChartOption;
 }
 
+// Keep the historical identifier so existing widget layouts remain compatible.
+// The presentation is now a directly readable age-by-gender matrix.
 function buildAgeGenderPyramidOption(
   summary: DemographicAggregation,
+  theme: "light" | "dark" = "light",
 ): EnterpriseChartOption {
   const crossing = summary.crossings.ageByGender;
-  const women = crossing.rows.map((row) => {
-    const cell = row.cells.find((candidate) => candidate.columnKey === "Woman");
-    return { count: cell?.count ?? 0, value: -(cell?.percentage ?? 0) };
-  });
-  const men = crossing.rows.map((row) => {
-    const cell = row.cells.find((candidate) => candidate.columnKey === "Man");
-    return { count: cell?.count ?? 0, value: cell?.percentage ?? 0 };
-  });
-  const unknown = crossing.rows.map((row) => {
-    const cell = row.cells.find(
-      (candidate) => candidate.columnKey === "unknown",
-    );
-    return { count: cell?.count ?? 0, value: cell?.percentage ?? 0 };
-  });
-  const maximum = Math.max(
-    1,
-    ...women.map((item) => Math.abs(item.value)),
-    ...men.map((item) => item.value),
-    ...unknown.map((item, index) => item.value + men[index].value),
-  );
+  const dark = theme === "dark";
+  const axisTextColor = dark ? "#CBD5E1" : "#526477";
+  const labelColor = dark ? "#E2E8F0" : "#334155";
+  const cellBorderColor = dark ? "#3F3F46" : "#E2E8F0";
+  // Column colors identify gender only. Percentages are read from the cells,
+  // so a small positive value never disappears into an imperceptible bar.
+  const columnColors: Record<DemographicGender, string> = dark
+    ? { Woman: "#302344", Man: "#1D304F", unknown: "#2B3039" }
+    : { Woman: "#F0EAFE", Man: "#E9F1FE", unknown: "#EDF0F5" };
   return {
     animationDuration: 350,
     aria: {
       enabled: true,
-      decal: { show: true },
+      decal: { show: false },
       description:
-        "Pirâmide etária com a participação de cada combinação no total: Mulher à esquerda e Homem e Não identificado à direita.",
+        "Matriz com faixas etárias nas linhas e Mulher, Homem e Não identificado nas colunas. Cada célula mostra a participação dessa combinação no total de detecções.",
     },
-    grid: { bottom: 30, containLabel: true, left: 20, right: 20, top: 32 },
-    legend: { data: ["Mulher", "Homem", "Não identificado"], top: 0 },
-    tooltip: { formatter: pyramidTooltip, trigger: "axis" },
+    grid: { bottom: 4, containLabel: true, left: 0, right: 8, top: 8 },
+    legend: { show: false },
+    tooltip: {
+      formatter: (parameters: unknown) =>
+        ageGenderMatrixTooltip(parameters, crossing.rows, crossing.columns),
+      position: "top",
+      trigger: "item",
+    },
+    visualMap: {
+      dimension: 0,
+      pieces: crossing.columns.map((column, columnIndex) => ({
+        color: columnColors[column.key],
+        label: column.label,
+        value: columnIndex,
+      })),
+      seriesIndex: crossing.columns.map((_, columnIndex) => columnIndex),
+      show: false,
+      type: "piecewise",
+    },
     xAxis: {
-      axisLabel: { formatter: absoluteAxisPercentage },
-      max: Math.ceil(maximum * 1.2),
-      min: -Math.ceil(maximum * 1.2),
-      splitLine: { lineStyle: { opacity: 0.15 } },
-      type: "value",
-    },
-    yAxis: {
+      axisLabel: {
+        color: axisTextColor,
+        fontSize: 11,
+        formatter: (label: string) =>
+          label === "Não identificado" ? "Não\nidentificado" : label,
+        interval: 0,
+        lineHeight: 14,
+        margin: 10,
+      },
+      axisLine: { show: false },
       axisTick: { show: false },
-      data: crossing.rows.map((row) => row.label),
+      data: crossing.columns.map((column) => column.label),
+      position: "top",
+      splitArea: { show: false },
       type: "category",
     },
-    series: [
-      pyramidSeries("Mulher", women, GENDER_COLORS.Woman, "left"),
-      pyramidSeries("Homem", men, GENDER_COLORS.Man, "right", "right-gender"),
-      pyramidSeries(
-        "Não identificado",
-        unknown,
-        GENDER_COLORS.unknown,
-        "right",
-        "right-gender",
-      ),
-    ],
+    yAxis: {
+      axisLabel: { color: axisTextColor, fontSize: 11, interval: 0, margin: 10 },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      data: crossing.rows.map((row) => row.label),
+      inverse: true,
+      splitArea: { show: false },
+      type: "category",
+    },
+    series: crossing.columns.map((column, columnIndex) => ({
+      data: crossing.rows.map((row, rowIndex) => {
+        const cell = row.cells.find(
+          (candidate) => candidate.columnKey === column.key,
+        );
+        return [columnIndex, rowIndex, cell?.percentage ?? 0, cell?.count ?? 0];
+      }),
+      emphasis: {
+        focus: "none",
+        itemStyle: { borderColor: GENDER_COLORS[column.key], borderWidth: 1.5 },
+      },
+      itemStyle: {
+        borderColor: cellBorderColor,
+        borderWidth: 1,
+        color: columnColors[column.key],
+      },
+      label: {
+        color: labelColor,
+        formatter: (parameters: unknown) => {
+          if (!isRecord(parameters) || !Array.isArray(parameters.value)) return "";
+          const percentage = Number(parameters.value[2]);
+          return Number.isFinite(percentage) && percentage > 0
+            ? `${formatDecimal(percentage)}%`
+            : "";
+        },
+        fontSize: 11,
+        fontWeight: 600,
+        show: true,
+      },
+      name: column.label,
+      type: "heatmap",
+    })),
   } as EnterpriseChartOption;
-}
-
-function pyramidSeries(
-  name: string,
-  data: Array<{ count: number; value: number }>,
-  color: string,
-  labelPosition: "left" | "right",
-  stack?: string,
-) {
-  return {
-    barMaxWidth: 18,
-    data,
-    itemStyle: {
-      borderRadius: labelPosition === "left" ? [4, 0, 0, 4] : [0, 4, 4, 0],
-      color,
-    },
-    label: {
-      color: "#526477",
-      formatter: absolutePercentageLabel,
-      fontSize: 9,
-      position: labelPosition,
-      show: true,
-    },
-    name,
-    stack,
-    type: "bar",
-  };
 }
 
 function buildAgeEmotionHeatmapOption(
@@ -1900,16 +2368,12 @@ function buildAgeEmotionHeatmapOption(
   const axisTextColor = theme === "dark" ? "#CBD5E1" : "#526477";
   const cellBorderColor =
     theme === "dark"
-      ? "rgba(226, 232, 240, 0.12)"
-      : "rgba(15, 23, 42, 0.09)";
+      ? "rgba(226, 232, 240, 0.08)"
+      : "rgba(15, 23, 42, 0.06)";
   const activeCellBorderColor =
     theme === "dark"
       ? "rgba(248, 250, 252, 0.24)"
       : "rgba(15, 23, 42, 0.20)";
-  const activeCellShadowColor =
-    theme === "dark"
-      ? "rgba(248, 250, 252, 0.12)"
-      : "rgba(15, 23, 42, 0.14)";
   const crossing = summary.crossings.ageByEmotion;
   const data = crossing.rows.flatMap((row, rowIndex) =>
     row.cells.map((cell, columnIndex) => [
@@ -1924,11 +2388,11 @@ function buildAgeEmotionHeatmapOption(
     animationDuration: 350,
     aria: {
       enabled: true,
-      decal: { show: true },
+      decal: { show: false },
       description:
         "Mapa de calor com faixas etárias nas linhas, emoções nas colunas e percentual do total em cada célula.",
     },
-    grid: { bottom: 62, containLabel: true, left: 8, right: 58, top: 10 },
+    grid: { bottom: 44, containLabel: true, left: 0, right: 8, top: 8 },
     tooltip: {
       formatter: (parameters: unknown) =>
         heatmapTooltip(parameters, crossing.rows, crossing.columns),
@@ -1936,30 +2400,35 @@ function buildAgeEmotionHeatmapOption(
     },
     visualMap: {
       calculable: false,
+      bottom: 0,
       dimension: 2,
       inRange: { color: HEATMAP_COLORS },
+      itemHeight: 120,
+      itemWidth: 8,
+      left: "center",
       max: maximum,
       min: 0,
-      orient: "vertical",
-      right: 0,
+      orient: "horizontal",
       seriesIndex: 0,
-      text: ["%", ""],
-      textStyle: { color: axisTextColor },
-      top: "middle",
+      text: [`${formatDecimal(maximum)}%`, "0%"],
+      textGap: 8,
+      textStyle: { color: axisTextColor, fontSize: 10 },
     },
     xAxis: {
-      axisLabel: { color: axisTextColor, interval: 0, rotate: 38 },
+      axisLabel: { color: axisTextColor, fontSize: 11, interval: 0, rotate: 38 },
+      axisLine: { show: false },
       axisTick: { show: false },
       data: crossing.columns.map((column) => column.label),
-      splitArea: { show: true },
+      splitArea: { show: false },
       type: "category",
     },
     yAxis: {
-      axisLabel: { color: axisTextColor },
+      axisLabel: { color: axisTextColor, fontSize: 11, interval: 0, margin: 10 },
+      axisLine: { show: false },
       axisTick: { show: false },
       data: crossing.rows.map((row) => row.label),
       inverse: true,
-      splitArea: { show: true },
+      splitArea: { show: false },
       type: "category",
     },
     series: [
@@ -1969,8 +2438,6 @@ function buildAgeEmotionHeatmapOption(
           itemStyle: {
             borderColor: activeCellBorderColor,
             borderWidth: 1,
-            shadowBlur: 4,
-            shadowColor: activeCellShadowColor,
           },
         },
         itemStyle: {
@@ -1980,11 +2447,11 @@ function buildAgeEmotionHeatmapOption(
         label: {
           formatter: (parameters: unknown) =>
             heatmapPercentageLabel(parameters, maximum),
-          fontSize: 9,
-          fontWeight: 700,
+          fontSize: 10,
+          fontWeight: 600,
           rich: {
-            dark: { color: "#0F172A", fontWeight: 700 },
-            light: { color: "#FFFFFF", fontWeight: 700 },
+            dark: { color: "#0F172A", fontWeight: 600 },
+            light: { color: "#FFFFFF", fontWeight: 600 },
           },
           show: true,
         },
@@ -2001,44 +2468,57 @@ function buildDemographicsReport({
   summary,
   surface,
   timeZone,
+  presentations,
 }: {
   audience: string;
   rangeLabel: string;
   summary: DemographicAggregation;
   surface: DemographicsDashboardProps["surface"];
   timeZone: string;
+  presentations?: Partial<Record<string, DemographicPresentation>>;
 }): ReportPayload {
   const genderLeader = leadingDistributionItem(summary.gender);
   const ageLeader = leadingDistributionItem(summary.age);
   const emotionLeader = leadingDistributionItem(summary.emotion);
+  // Use the same saved visual options in exports. Text labels stay explicit;
+  // PDF fonts do not reliably support the optional emoji glyphs.
+  const presentationFor = (id: string) => {
+    const dimension = demographicDimensionForCard(id);
+    return dimension ? { ...normalizeDemographicPresentation(presentations?.[id], dimension), emojis: false } : undefined;
+  };
+  const gender = presentations ? presentationFor("demographics_gender_mix") : undefined;
+  const age = presentations ? presentationFor("demographics_age_distribution") : undefined;
+  const emotion = presentations ? presentationFor("demographics_emotion_distribution") : undefined;
+  const ageGender = presentations ? presentationFor("demographics_age_gender_pyramid") : undefined;
+  const ageEmotion = presentations ? presentationFor("demographics_age_emotion_heatmap") : undefined;
   const charts: ReportChart[] = [
     {
       description: "Participação por gênero no total classificado.",
-      option: buildGenderOption(summary),
+      option: gender ? buildDemographicDistributionOption(summary.gender, gender, { dimension: "gender", showLegend: true }) : buildGenderOption(summary, true),
       table: distributionReportTable("Gênero", summary.gender),
       title: "Composição por gênero",
     },
     {
-      description: "Participação por faixa etária em ordem crescente.",
-      option: buildAgeOption(summary, "#1267C4"),
+      description: "Participação por faixa etária no total classificado.",
+      option: age ? buildDemographicDistributionOption(summary.age, age, { dimension: "age", showLegend: true }) : buildAgeOption(summary, "#1267C4"),
       table: distributionReportTable("Faixas etárias", summary.age),
       title: "Distribuição por faixa etária",
     },
     {
       description: "Ranking das emoções classificadas.",
-      option: buildEmotionOption(summary, "#7C3AED"),
+      option: emotion ? buildDemographicDistributionOption(summary.emotion, emotion, { dimension: "emotion", showLegend: true }) : buildEmotionOption(summary, "#7C3AED"),
       table: distributionReportTable("Emoções", summary.emotion),
       title: "Ranking de emoções",
     },
     {
       description: "Cruzamento entre faixa etária e gênero.",
-      option: buildAgeGenderPyramidOption(summary),
+      option: ageGender ? buildDemographicCrossingOption(summary, ageGender, "age-gender", "light") : buildAgeGenderPyramidOption(summary),
       table: ageGenderReportTable(summary),
-      title: "Pirâmide etária por gênero",
+      title: "Faixa etária por gênero",
     },
     {
       description: "Cruzamento entre faixa etária e emoção.",
-      option: buildAgeEmotionHeatmapOption(summary),
+      option: ageEmotion ? buildDemographicCrossingOption(summary, ageEmotion, "age-emotion", "light") : buildAgeEmotionHeatmapOption(summary),
       table: ageEmotionReportTable(summary),
       title: "Faixa etária × emoção",
     },
@@ -2175,23 +2655,24 @@ function distributionTooltip(parameters: unknown) {
   );
 }
 
-function pyramidTooltip(parameters: unknown) {
-  const entries = Array.isArray(parameters) ? parameters : [parameters];
-  const validEntries = entries.filter(isRecord);
-  const age =
-    validEntries.find((entry) => typeof entry.axisValueLabel === "string")
-      ?.axisValueLabel ?? "Faixa etária";
-  const lines = validEntries.map((entry) => {
-    const data = isRecord(entry.data) ? entry.data : null;
-    const name =
-      typeof entry.seriesName === "string" ? entry.seriesName : "Categoria";
-    const percentage = chartDataNumber(data, "value");
-    const count = chartDataNumber(data, "count");
-    return `${escapeTooltipHtml(name)}: ${
-      percentage === null ? "—" : `${formatDecimal(Math.abs(percentage))}%`
-    } · ${count === null ? "—" : formatNumber(count)} detecções`;
-  });
-  return `<strong>${escapeTooltipHtml(String(age))}</strong><br/>${lines.join("<br/>")}`;
+function ageGenderMatrixTooltip(
+  parameters: unknown,
+  rows: DemographicAggregation["crossings"]["ageByGender"]["rows"],
+  columns: DemographicAggregation["crossings"]["ageByGender"]["columns"],
+) {
+  const parameter = firstTooltipParameter(parameters);
+  if (!parameter || !Array.isArray(parameter.value)) return "Sem valor";
+  const columnIndex = Number(parameter.value[0]);
+  const rowIndex = Number(parameter.value[1]);
+  const percentage = Number(parameter.value[2]);
+  const count = Number(parameter.value[3]);
+  const age = rows[rowIndex]?.label ?? "Faixa etária";
+  const gender = columns[columnIndex]?.label ?? "Gênero";
+  return tooltipBlock(
+    `${age} · ${gender}`,
+    Number.isFinite(percentage) ? percentage : null,
+    Number.isFinite(count) ? count : null,
+  );
 }
 
 function heatmapTooltip(
@@ -2245,18 +2726,9 @@ function escapeTooltipHtml(value: string) {
     .replaceAll("'", "&#039;");
 }
 
-function absoluteAxisPercentage(value: number) {
-  return `${formatDecimal(Math.abs(value))}%`;
-}
-
 function percentageChartLabel(parameters: unknown) {
   const value = chartParameterNumber(parameters);
   return value === null ? "—" : `${formatDecimal(value)}%`;
-}
-
-function absolutePercentageLabel(parameters: unknown) {
-  const value = chartParameterNumber(parameters);
-  return value === null ? "—" : `${formatDecimal(Math.abs(value))}%`;
 }
 
 function heatmapPercentageLabel(parameters: unknown, maximum: number) {

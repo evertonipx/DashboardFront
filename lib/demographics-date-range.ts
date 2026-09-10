@@ -6,7 +6,9 @@ import { writeUserGridPreference } from "@/lib/user-grid-local";
 
 export const DEMOGRAPHICS_DATE_RANGE_STORAGE_KEY =
   "ipxdata.demographics-range.v1";
-export const MAX_DEMOGRAPHICS_DATE_RANGE_DAYS = 31;
+// A full annual cycle, including leap years. Requests remain partitioned by
+// civil day; the dashboard retains compact hourly summaries, not raw rows.
+export const MAX_DEMOGRAPHICS_DATE_RANGE_DAYS = 366;
 
 export type DemographicsDateRange = {
   endInput: string;
