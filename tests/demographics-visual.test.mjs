@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { circularLegendIssues, clippedYAxisLabels, collectCircularLayout, collectYAxisLabels, demographicCircularFixtureCases, demographicFixtureCases, demographicFixtureParts, demographicFixturePresets, demographicFixtureRows, overlappingTexts } from "../tools/verify-demographics.mjs";
+import { ageCategoryColorIssues, chartTextContrast, circularLabelFitsSector, circularLegendIssues, circularSliceLabelIssues, clippedYAxisLabels, collectAgeCategoryColors, collectCircularLayout, collectGenderCategoryColors, collectYAxisLabels, demographicCircularFixtureCases, demographicFixtureCases, demographicFixtureParts, demographicFixturePresets, demographicFixtureRows, genderCategoryColorIssues, overlappingTexts } from "../tools/verify-demographics.mjs";
 
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
@@ -30,7 +30,9 @@ const presentation = loadModule("lib/demographics-presentation.ts");
 const chartOptions = loadModule("lib/demographics-chart-options.ts");
 const crossingOptions = loadModule("lib/demographics-crossing-options.ts");
 const temporalPreferences = loadModule("lib/demographics-temporal-preferences.ts");
-const bindings = { ...demographics, ...palette, ...utils, ...presentation, ...chartOptions, ...crossingOptions, ...temporalPreferences };
+const temporalOptions = loadModule("lib/demographics-temporal-chart-options.ts");
+const visibleCategories = loadModule("lib/demographics-visible-categories.ts");
+const bindings = { ...demographics, ...palette, ...utils, ...presentation, ...chartOptions, ...crossingOptions, ...temporalPreferences, ...visibleCategories };
 const functionNames = ["buildGenderOption", "buildAgeOption", "buildEmotionOption", "buildAgeGenderPyramidOption", "buildAgeEmotionHeatmapOption", "compactDemographicChartOption"];
 const output = ts.transpileModule(`${parts.declarations}\nmodule.exports = {${functionNames.join(",")}};`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
@@ -47,7 +49,7 @@ function renderPresentationControls(dimension, value) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   const controlsBindings = {
-    ...presentation, ...utils,
+    ...presentation, ...utils, demographicHeatmapColors: crossingOptions.demographicHeatmapColors,
     Button: "button", Checkbox: "checkbox", Select: "select", SelectContent: "select-content",
     SelectItem: "option", SelectTrigger: "select-trigger", SelectValue: "select-value",
     BarChart3: "icon", ChartNoAxesColumnIncreasing: "icon", ChartPie: "icon", Donut: "icon", RotateCcw: "icon", Smile: "icon",
@@ -191,7 +193,42 @@ test("legenda circular real mantém correspondência por nome e cor após reorde
     assert.deepEqual(layout.legendItems.map((item) => item.name), ["Homem 👨", "Mulher 👩"]);
     assert.deepEqual(layout.legendItems.map((item) => item.color), ["#2563EB", "#DB2777"]);
     assert.deepEqual(circularLegendIssues(layout, chart.getWidth(), chart.getHeight()), []);
+    assert.equal(circularSliceLabelIssues(layout, chart.getWidth(), chart.getHeight()).filter((issue) => issue.includes("lacks its visible exact")).length, 2, "percentuais na legenda não substituem os rótulos das fatias");
   } finally { chart.dispose(); }
+});
+
+test("percentuais reais são associados à própria fatia e linhas-guia acompanham somente rótulos externos", () => {
+  const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 360, height: 240 });
+  try {
+    chart.setOption({
+      animation: false, backgroundColor: "#FFFFFF",
+      series: [{ type: "pie", center: ["50%", "50%"], radius: [0, 80], label: { show: true, position: "inside", fontSize: 11, color: "#FFFFFF", formatter: "{d}%" }, data: [
+        { name: "Principal", value: 95, count: 95, percentage: 95, itemStyle: { color: "#1D4ED8" } },
+        { name: "Pequena", value: 5, count: 5, percentage: 5, itemStyle: { color: "#9D174D" }, label: { position: "outside", color: "#172033" }, labelLine: { show: true, length: 12, length2: 8 } },
+      ] }],
+    });
+    chart.renderToSVGString();
+    const layout = collectCircularLayout(chart);
+    const [inside, outside] = layout.series[0].slices;
+    assert.equal(inside.labelText, "95%");
+    assert.equal(outside.labelText, "5%");
+    assert.equal(inside.guideVisible, false);
+    assert.equal(outside.guideVisible, true);
+    assert.ok(outside.guidePoints.length >= 2);
+    assert.deepEqual(circularSliceLabelIssues(layout, chart.getWidth(), chart.getHeight()), []);
+    outside.guideVisible = false;
+    assert.ok(circularSliceLabelIssues(layout, chart.getWidth(), chart.getHeight()).some((issue) => issue.includes("no visible attached guide")));
+  } finally { chart.dispose(); }
+});
+
+test("contenção circular considera o furo da rosca e contraste de texto pequeno", () => {
+  const ring = { centerX: 0, centerY: 0, radius: 60, innerRadius: 30, startAngle: 0, endAngle: Math.PI * 2, clockwise: true };
+  assert.equal(circularLabelFitsSector({ x: -10, y: -10, right: 10, bottom: 10 }, ring), false);
+  assert.equal(circularLabelFitsSector({ x: 35, y: -3, right: 45, bottom: 3 }, ring), true);
+  assert.equal(circularLabelFitsSector({ x: 57, y: -8, right: 67, bottom: 8 }, ring), false);
+  assert.equal(chartTextContrast("#fff", "rgb(0, 0, 0)"), 21);
+  assert.ok(chartTextContrast("#FFFFFF", "#8A99AF") < 4.5);
+  assert.ok(chartTextContrast("#172033", "#8A99AF") >= 4.5);
 });
 
 test("detector circular reprova legendas truncadas, cores/percentuais trocados e setores minúsculos", () => {
@@ -201,6 +238,10 @@ test("detector circular reprova legendas truncadas, cores/percentuais trocados e
     legendItems: [{ name: "Mulher 👩", color: "#DB2777", expectedText: "Mulher 👩\n40%", renderedText: "Mulher 👩\n40%", spans: [{ x: 10, y: 80, right: 80, bottom: 100 }] }],
   };
   assert.deepEqual(circularLegendIssues(valid, 200, 120), []);
+  const namesOnly = structuredClone(valid);
+  namesOnly.legendItems[0].expectedText = namesOnly.legendItems[0].renderedText = "Mulher 👩";
+  assert.deepEqual(circularLegendIssues(namesOnly, 200, 120), [], "legenda radial pode exibir somente o nome");
+  assert.ok(circularSliceLabelIssues(namesOnly, 200, 120).some((issue) => issue.includes("lacks its visible exact")), "a fatia ainda deve ter o percentual visível");
   const corrupted = structuredClone(valid);
   corrupted.series[0].diameter = 24;
   corrupted.legendItems[0].color = "#2563EB";
@@ -248,8 +289,9 @@ for (const theme of ["light", "dark"]) {
           if (["pie", "donut", "half-donut", "rose"].includes(settings.type)) {
             const series = option.series[0];
             assert.equal(series.type, "pie");
-            assert.equal(series.data.reduce((total, item) => total + item.value, 0), summary.total);
-            assert.equal(series.data.length, summary[dimension].length, "meia-rosca não adiciona uma fatia artificial");
+            const visible = visibleCategories.visibleDemographicDistribution(summary[dimension], dimension);
+            assert.equal(series.data.reduce((total, item) => total + item.value, 0), visible.reduce((total, item) => total + item.count, 0));
+            assert.equal(series.data.length, visible.length, "meia-rosca não adiciona uma fatia artificial");
             for (const item of series.data) assert.ok(item.value >= 0);
             if (settings.type === "half-donut") {
               assert.equal(series.startAngle, 180);
@@ -274,6 +316,70 @@ test("a paleta padrão associa rosa e azul à categoria, independentemente da or
   const neutral = presentation.demographicCategoryColor("unknown", 2, "pink-blue", "gender");
   assert.notEqual(neutral, pink);
   assert.notEqual(neutral, blue);
+});
+
+test("cores etárias reais seguem nove tons monotônicos por chave em toda paleta, formato e ordenação", () => {
+  const summary = demographics.aggregateDemographicBuckets(demographicFixtureRows);
+  for (const { id } of presentation.DEMOGRAPHICS_PALETTES) {
+    const expected = Object.fromEntries(demographics.AGE_LABELS.map((key, index) => [key, presentation.demographicCategoryColor(key, index, id, "age")]));
+    assert.equal(new Set(Object.values(expected)).size, 9);
+    for (const order of ["default", "ascending", "descending"]) {
+      for (const type of ["bar", "stacked", "pie"]) {
+        const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 480, height: 320 });
+        try {
+          const settings = presentation.normalizeDemographicPresentation({ palette: id, order, type }, "age");
+          chart.setOption({ ...chartOptions.buildDemographicDistributionOption(summary.age, settings, { dimension: "age" }), animation: false });
+          chart.renderToSVGString();
+          const actual = collectAgeCategoryColors(chart);
+          assert.equal(actual.length, 9, `${id}/${order}/${type}: nove marcas reais`);
+          assert.deepEqual(ageCategoryColorIssues(actual, expected), [], `${id}/${order}/${type}`);
+        } finally { chart.dispose(); }
+      }
+    }
+    const filtered = summary.age.filter((_, index) => index % 3 === 1).reverse();
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 400, height: 240 });
+    try {
+      const settings = presentation.normalizeDemographicPresentation({ palette: id, order: "ascending" }, "age");
+      chart.setOption({ ...chartOptions.buildDemographicDistributionOption(filtered, settings, { dimension: "age" }), animation: false });
+      chart.renderToSVGString();
+      assert.equal(collectAgeCategoryColors(chart).length, filtered.length);
+      assert.deepEqual(ageCategoryColorIssues(collectAgeCategoryColors(chart), expected), [], `${id}: filtro não renumera as cores`);
+    } finally { chart.dispose(); }
+  }
+});
+
+test("detector etário reprova troca de cor por índice mesmo quando a sequência visual parece válida", () => {
+  const expected = { "0-2": "#DDEEFF", "3-9": "#88AACC", "10-19": "#224466" };
+  const actual = Object.entries(expected).map(([key, color]) => ({ key, color }));
+  assert.deepEqual(ageCategoryColorIssues(actual.toReversed(), expected), []);
+  const swapped = actual.map((item, index) => ({ ...item, color: actual[actual.length - index - 1].color }));
+  assert.ok(ageCategoryColorIssues(swapped, expected).some((issue) => issue.includes("stable category color")));
+  assert.ok(ageCategoryColorIssues(swapped, expected).some((issue) => issue.includes("light-to-dark")));
+  assert.ok(ageCategoryColorIssues([...actual, { key: "3-9", color: "#224466" }], expected).some((issue) => issue.includes("between rendered marks")));
+});
+
+test("séries temporais etárias mantêm a mesma cor por idade após ocultar categorias", () => {
+  const summary = demographics.aggregateDemographicBuckets(demographicFixtureRows, { timeZone: "America/Sao_Paulo" });
+  for (const paletteId of ["pink-blue", "cyber"]) {
+    for (const categoryKeys of [[], ["60-69", "3-9", "20-29"]]) {
+      const expected = Object.fromEntries(demographics.AGE_LABELS.map((key, index) => [key, presentation.demographicCategoryColor(key, index, paletteId, "age")]));
+      for (const chartType of ["bar", "line", "area"]) {
+        const model = temporalOptions.buildDemographicTemporalModel({
+          id: "demographics_age_hourly", summary,
+          settings: { dimension: "age", chartType, categoryKeys, palette: paletteId },
+          from: "2026-09-10T03:00:00Z", to: "2026-09-11T03:00:00Z", now: "2026-09-11T03:00:00Z", timeZone: "America/Sao_Paulo",
+        });
+        const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 600, height: 320 });
+        try {
+          chart.setOption({ ...model.option, animation: false });
+          chart.renderToSVGString();
+          const actual = collectAgeCategoryColors(chart);
+          assert.equal(new Set(actual.map((item) => item.key)).size, categoryKeys.length || 9);
+          assert.deepEqual(ageCategoryColorIssues(actual, expected), [], `${paletteId}/${chartType}/${categoryKeys}`);
+        } finally { chart.dispose(); }
+      }
+    }
+  }
 });
 
 test("controles reais aplicam formatos, orientação, ordem, paleta e emojis apenas na apresentação", () => {
@@ -390,4 +496,49 @@ test("rótulos internos permanecem ancorados no segmento e rótulos externos man
   assert.equal(option.series[0].labelLayout({}).moveOverlap, undefined);
   assert.equal(option.series[0].labelLayout({}).hideOverlap, true);
   assert.equal(option.series[1].labelLayout({}).moveOverlap, "shiftY");
+});
+
+test("detector compara cores reais de gênero, opacidade e prévias sem hardcode rosa/azul", () => {
+  const summary = demographics.aggregateDemographicBuckets(demographicFixtureRows);
+  for (const id of ["ocean", "aurora", "pastel", "forest", "cyber"]) {
+    const expected = presentation.getDemographicGenderPalette(id);
+    const preview = presentation.demographicPalettePreviewColors(id, "age-gender");
+    const option = crossingOptions.buildDemographicCrossingOption(summary, { ...presentation.defaultDemographicPresentation("age-gender"), palette: id }, "age-gender", "dark");
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 640, height: 340 });
+    try {
+      chart.setOption(option);
+      const actual = collectGenderCategoryColors(chart);
+      assert.equal(new Set(actual.marks.map((mark) => mark.key)).size, 2);
+      assert.deepEqual(genderCategoryColorIssues(actual, expected, preview), [], id);
+      const faded = { ...actual, marks: actual.marks.map((mark) => ({ ...mark, opacity: 0.23 })) };
+      assert.ok(genderCategoryColorIssues(faded, expected, preview).some((issue) => issue.includes("opacity")));
+      assert.ok(genderCategoryColorIssues(actual, { Woman: expected.Man, Man: expected.Woman }, preview).some((issue) => issue.includes("instead of")));
+    } finally { chart.dispose(); }
+  }
+});
+
+test("detector exige contraste dos números sobre a área e cor sólida da legenda", () => {
+  const expected = { Woman: "#D0ACDD", Man: "#8DCEC2" };
+  const actual = { marks: [], areas: [{ key: "Woman", color: expected.Woman, opacity: 1 }], legends: [{ key: "Woman", color: expected.Woman, opacity: 1 }], labels: [{ text: "60%", color: "#FFFFFF", background: expected.Woman }] };
+  const issues = genderCategoryColorIssues(actual, expected, Object.values(expected));
+  assert.ok(issues.some((issue) => issue.includes("contrast")));
+  assert.deepEqual(genderCategoryColorIssues({ ...actual, labels: [{ ...actual.labels[0], color: "#000000" }] }, expected, Object.values(expected)), []);
+});
+
+test("detector lê o traço da legenda de linha e o fundo real dos percentuais", () => {
+  const expected = presentation.getDemographicGenderPalette("ocean");
+  const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 640, height: 340 });
+  try {
+    chart.setOption({ animation: false, legend: {}, xAxis: { type: "category", data: ["00h", "01h"] }, yAxis: { type: "value" }, series: [
+      { name: "Mulher", type: "line", stack: "gender", areaStyle: { opacity: 1 }, itemStyle: { color: expected.Woman }, label: { show: true, color: "#FFFFFF", backgroundColor: "#111827", padding: [2, 3], formatter: "47%" }, data: [{ value: 47, count: 47 }, { value: 47, count: 47 }] },
+      { name: "Homem", type: "line", stack: "gender", areaStyle: { opacity: 1 }, itemStyle: { color: expected.Man }, data: [{ value: 53, count: 53 }, { value: 53, count: 53 }] },
+    ] });
+    chart.renderToSVGString();
+    const actual = collectGenderCategoryColors(chart);
+    assert.equal(actual.legends.length, 2);
+    const percentages = actual.labels.filter((label) => label.text === "47%");
+    assert.equal(percentages.length, 2);
+    assert.ok(percentages.every((label) => label.backplate && label.background === "#111827"));
+    assert.deepEqual(genderCategoryColorIssues(actual, expected, Object.values(expected)), []);
+  } finally { chart.dispose(); }
 });

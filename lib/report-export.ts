@@ -47,6 +47,11 @@ export type ReportChart = {
   description?: string;
   comparison?: string;
   option: EnterpriseChartOption;
+  /** Final presentation adjustment after export styles, at the render size. */
+  fitOption?: (
+    option: EnterpriseChartOption,
+    size: { width: number; height: number },
+  ) => EnterpriseChartOption;
   table: ReportTable;
 };
 
@@ -188,9 +193,10 @@ export async function exportReportToExcel(
       exportCell.value = `Arquivo exportado em ${formatReportDateTime(payload, exportedAt)}`;
       exportCell.font = { color: { argb: `FF${MUTED_TEXT}` }, size: 9 };
 
+      const chartDimensions = { height: 400, signal: options.signal, width: 900 };
       const dataUrl = await renderEChartToDataUrl(
-        withExportBarValueLabels(chart.option),
-        { height: 400, signal: options.signal, width: 900 },
+        prepareReportChartOption(chart, chartDimensions),
+        chartDimensions,
       );
       options.signal?.throwIfAborted();
       const imageId = workbook.addImage({
@@ -333,13 +339,10 @@ export async function exportReportToPdf(
         chartTop += drawPdfNoteBox(doc, chart.comparison, 42, chartTop) + 10;
       }
 
+      const chartDimensions = { height: 400, signal: options.signal, width: 900 };
       const image = await renderEChartToDataUrl(
-        withExportBarValueLabels(chart.option),
-        {
-          height: 400,
-          signal: options.signal,
-          width: 900,
-        },
+        prepareReportChartOption(chart, chartDimensions),
+        chartDimensions,
       );
       options.signal?.throwIfAborted();
       drawPdfChartImage(doc, image, chartTop);
@@ -1697,6 +1700,14 @@ function measurePdfNoteBoxHeight(
   doc.setFontSize(8);
   const lines = limitPdfLines(doc, text, width - 20, maxLines);
   return Math.max(24, 12 + lines.length * 11);
+}
+
+function prepareReportChartOption(
+  chart: ReportChart,
+  size: { width: number; height: number },
+): EnterpriseChartOption {
+  const option = withExportBarValueLabels(chart.option);
+  return chart.fitOption?.(option, size) ?? option;
 }
 
 function withExportBarValueLabels(

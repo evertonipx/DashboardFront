@@ -65,6 +65,8 @@ type AppliedStorageChange = {
 export type UserGridSyncStatus =
   "idle" | "loading" | "ready" | "saving" | "saved" | "error";
 
+export type UserGridReadiness = "pending" | "ready" | "fallback";
+
 export type UserGridSyncStatusDetail = {
   status: UserGridSyncStatus;
   userId: string | null;
@@ -72,6 +74,7 @@ export type UserGridSyncStatusDetail = {
 
 export const USER_GRID_HYDRATED_EVENT = "ipxdata:user-grid-hydrated";
 export const USER_GRID_SYNC_STATUS_EVENT = "ipxdata:user-grid-sync-status";
+export const USER_GRID_READINESS_EVENT = "ipxdata:user-grid-readiness";
 
 const GRID_FORMAT = "ipxdata-user-grid";
 const GRID_VERSION = 2;
@@ -128,6 +131,7 @@ let activeDocument: UserGridDocument | null = null;
 let activeHydrationOptions: UserGridHydrationOptions = {};
 let hasSafeRead = false;
 let hydrated = false;
+let initialHydrationFailed = false;
 let needsRemoteRepair = false;
 let generation = 0;
 let localRevision = 0;
@@ -140,6 +144,17 @@ let reconciliationPromise: Promise<boolean> | null = null;
 let activeListenerCleanup: (() => void) | null = null;
 let localSnapshot = new Map<string, string>();
 const pendingChanges = new Map<string, PendingChange>();
+
+/** Preference readiness only; this does not grant access to any user or module. */
+export function getUserGridReadiness(
+  userId?: string | null,
+): UserGridReadiness {
+  const cleanUserId = userId?.trim();
+  if (!cleanUserId || cleanUserId !== activeUserId) return "pending";
+  if (hydrated && hasSafeRead) return "ready";
+  // After an initial failure, retries must not repeatedly block local defaults.
+  return initialHydrationFailed ? "fallback" : "pending";
+}
 
 export async function hydrateUserGridFromServer(
   userId: string,
@@ -166,6 +181,7 @@ export async function hydrateUserGridFromServer(
     activeDocument = null;
     hasSafeRead = false;
     hydrated = false;
+    initialHydrationFailed = false;
     needsRemoteRepair = false;
     pendingChanges.clear();
     lastEntryTimestamp = 0;
@@ -233,6 +249,25 @@ export async function hydrateUserGridFromServer(
     emitStatus("error");
     scheduleHydrationRetry();
     return false;
+  } finally {
+    // A token rotation can obsolete the initial read without starting a new
+    // hydration (for example, when the next /auth/me request is unavailable).
+    // Release local preferences only; stale data must not authorize grid writes
+    // or change readiness owned by a newer generation or a logged-out user.
+    if (
+      currentGeneration === generation &&
+      activeUserId === cleanUserId &&
+      (!hydrated || !hasSafeRead) &&
+      !initialHydrationFailed &&
+      !isCurrentContext(currentGeneration, cleanUserId, options)
+    ) {
+      initialHydrationFailed = true;
+      window.dispatchEvent(
+        new CustomEvent(USER_GRID_READINESS_EVENT, {
+          detail: { userId: cleanUserId },
+        }),
+      );
+    }
   }
 }
 
@@ -317,6 +352,7 @@ export function clearUserGridSync() {
   activeHydrationOptions = {};
   hasSafeRead = false;
   hydrated = false;
+  initialHydrationFailed = false;
   needsRemoteRepair = false;
   retryAttempt = 0;
   flushPromise = null;
@@ -1222,6 +1258,9 @@ function emitHydrated() {
 }
 
 function emitStatus(status: UserGridSyncStatus) {
+  if (status === "error" && (!hydrated || !hasSafeRead)) {
+    initialHydrationFailed = true;
+  }
   if (typeof window === "undefined") return;
   window.dispatchEvent(
     new CustomEvent(USER_GRID_SYNC_STATUS_EVENT, {

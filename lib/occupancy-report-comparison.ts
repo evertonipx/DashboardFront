@@ -1,6 +1,14 @@
 import type { IntradayComparisonMode } from "@/lib/live-dashboard-settings";
 import { endOfAggregateBucket } from "@/lib/aggregate-time";
 import type { AggregateGranularity } from "@/lib/types";
+import {
+  companyCalendarDate,
+  companyDateKey,
+  companyZonedDateParts,
+  listCompanyTimeZoneHourBuckets,
+  startOfCompanyTimeZoneHour,
+} from "@/lib/company-time-zone";
+import { occupancyCalendarBoundaryInstant, shiftOccupancyCalendarDate } from "@/lib/occupancy-calendar";
 
 export type OccupancyReportGranularity = Extract<
   AggregateGranularity,
@@ -11,15 +19,32 @@ export function occupancyComparisonBucketStarts({
   bucketStarts,
   granularity,
   intradayComparison,
+  timeZone,
 }: {
   bucketStarts: readonly Date[];
   granularity: OccupancyReportGranularity;
   intradayComparison: IntradayComparisonMode;
+  timeZone?: string;
 }) {
   bucketStarts.forEach((bucketStart) => {
     requireValidDate(bucketStart);
-    requireAlignedBucket(bucketStart, granularity);
+    if (timeZone && (granularity === "minute" || granularity === "hour")) {
+      const aligned = granularity === "minute"
+        ? bucketStart.getTime() % 60_000 === 0
+        : startOfCompanyTimeZoneHour(bucketStart, timeZone).getTime() === bucketStart.getTime();
+      if (!aligned) throw new RangeError("O bucket do comparativo não está alinhado à hora da empresa.");
+    } else requireAlignedBucket(bucketStart, granularity);
   });
+
+  // Build target-day buckets in chronological order, rather than shifting each
+  // instant with setDate. A fallback minute window can run 01:30 -> 01:29;
+  // shifting those endpoints independently reverses the previous-day query.
+  if (granularity === "minute" || (granularity === "hour" && timeZone)) {
+    return comparisonInstantBucketStarts(
+      bucketStarts, granularity, intradayComparison === "last_week" ? -7 : -1,
+      timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+    );
+  }
 
   if (granularity === "hour") {
     return comparisonHourlyBucketStarts(
@@ -35,6 +60,45 @@ export function occupancyComparisonBucketStarts({
       intradayComparison,
     ),
   );
+}
+
+function comparisonInstantBucketStarts(
+  bucketStarts: readonly Date[],
+  granularity: "minute" | "hour",
+  dayOffset: number,
+  timeZone: string,
+) {
+  const days = new Map<string, { first: Date; slots: Set<number> }>();
+  for (const bucket of bucketStarts) {
+    const key = companyDateKey(bucket, timeZone);
+    const parts = companyZonedDateParts(bucket, timeZone);
+    const existing = days.get(key) ?? { first: bucket, slots: new Set<number>() };
+    existing.slots.add(granularity === "hour" ? parts.hour : parts.hour * 60 + parts.minute);
+    days.set(key, existing);
+  }
+  const result = new Map<number, Date>();
+  for (const { first, slots } of days.values()) {
+    const targetDay = shiftOccupancyCalendarDate(companyCalendarDate(first, timeZone, "day"), dayOffset);
+    const from = occupancyCalendarBoundaryInstant(targetDay, timeZone);
+    const to = occupancyCalendarBoundaryInstant(shiftOccupancyCalendarDate(targetDay, 1), timeZone);
+    const hours = listCompanyTimeZoneHourBuckets(from, to, timeZone);
+    for (let index = 0; index < hours.length; index += 1) {
+      const hour = hours[index];
+      const hourValue = companyZonedDateParts(hour, timeZone).hour;
+      if (granularity === "hour") {
+        if (hourValue >= Math.min(...slots) && hourValue <= Math.max(...slots)) result.set(hour.getTime(), hour);
+        continue;
+      }
+      if (![...slots].some((slot) => Math.floor(slot / 60) === hourValue)) continue;
+      const end = hours[index + 1] ?? to;
+      for (let instant = hour.getTime(); instant < end.getTime(); instant += 60_000) {
+        const bucket = new Date(instant);
+        const parts = companyZonedDateParts(bucket, timeZone);
+        if (slots.has(parts.hour * 60 + parts.minute)) result.set(instant, bucket);
+      }
+    }
+  }
+  return [...result.values()].sort((a, b) => a.getTime() - b.getTime());
 }
 
 function comparisonHourlyBucketStarts(
@@ -87,7 +151,9 @@ export function occupancyComparisonBucketStart(
   requireAlignedBucket(bucketStart, granularity);
 
   if (granularity === "minute" || granularity === "hour") {
-    return addDays(bucketStart, intradayComparison === "last_week" ? -7 : -1);
+    const shifted = new Date(bucketStart);
+    shifted.setDate(shifted.getDate() + (intradayComparison === "last_week" ? -7 : -1));
+    return shifted;
   }
   if (granularity === "day") return addDays(bucketStart, -7);
   if (granularity === "week") return addDays(bucketStart, -28);
@@ -95,9 +161,7 @@ export function occupancyComparisonBucketStart(
 }
 
 function addDays(date: Date, days: number) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
+  return shiftOccupancyCalendarDate(date, days);
 }
 
 function shiftLocalDay(date: Date, days: number) {
@@ -141,9 +205,7 @@ function localDayIdentity(date: Date) {
 }
 
 function addYears(date: Date, years: number) {
-  const next = new Date(date);
-  next.setFullYear(next.getFullYear() + years);
-  return next;
+  return shiftOccupancyCalendarDate(date, 0, 0, years);
 }
 
 function requireValidDate(date: Date) {
@@ -156,11 +218,7 @@ function requireAlignedBucket(
   date: Date,
   granularity: OccupancyReportGranularity,
 ) {
-  const atMidnight =
-    date.getHours() === 0 &&
-    date.getMinutes() === 0 &&
-    date.getSeconds() === 0 &&
-    date.getMilliseconds() === 0;
+  const atMidnight = date.getTime() === new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
   const aligned =
     granularity === "minute"
       ? date.getSeconds() === 0 && date.getMilliseconds() === 0

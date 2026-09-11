@@ -13,10 +13,12 @@ const source = readFileSync(resolve(root, filename), "utf8");
 const ast = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const functions = new Map();
 const effects = [];
+const initializers = new Map();
 visit(ast);
 
 function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name) functions.set(node.name.text, node.getText(ast));
+  if (ts.isVariableDeclaration(node) && node.initializer) initializers.set(node.name.getText(ast), node.initializer.getText(ast));
   if (ts.isCallExpression(node) && node.expression.getText(ast) === "React.useEffect") {
     effects.push(node.arguments[0].getText(ast));
   }
@@ -47,6 +49,7 @@ function loadModule(path, mocks = {}) {
 const demographics = loadModule("lib/demographics.ts");
 const time = loadModule("lib/company-time-zone.ts");
 const cancellation = loadModule("lib/request-cancellation.ts");
+const refreshPolicy = loadModule("lib/demographics-refresh-policy.ts");
 const dateRanges = loadModule("lib/demographics-date-range.ts", {
   "@/lib/master-company-scope": {
     getUserViewScopedStorageKey: () => "fixture:date-range",
@@ -55,7 +58,7 @@ const dateRanges = loadModule("lib/demographics-date-range.ts", {
   "@/lib/user-grid-local": { writeUserGridPreference: () => true },
 });
 
-function createFixture({ visible = true } = {}) {
+function createFixture({ visible = true, preferencesReady = true, pageVisible = true, online = true } = {}) {
   const state = {
     now: new Date("2026-09-10T15:15:42Z"),
     clock: new Date("2026-09-10T13:00:00Z"),
@@ -66,6 +69,7 @@ function createFixture({ visible = true } = {}) {
     requestedKey: "",
     refreshVersion: 0,
     serverTotal: 100,
+    serverError: null,
     calls: [],
     data: null,
     lastUpdated: null,
@@ -75,10 +79,17 @@ function createFixture({ visible = true } = {}) {
     hold: false,
     releases: [],
     visible,
+    preferencesReady,
+    pageVisible,
+    online,
   };
   const refs = {
     activeRequestRef: { current: null },
     comparisonRequestRef: { current: null },
+    comparisonCacheRef: { current: null },
+    comparisonRetryRef: { current: null },
+    liveRetryRef: { current: null },
+    settledRequestKeyRef: { current: "" },
     requestSequenceRef: { current: 0 },
     pendingLiveAggregationRef: { current: null },
     liveCacheRef: { current: null },
@@ -87,6 +98,7 @@ function createFixture({ visible = true } = {}) {
   };
   class FixtureDate extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
+    static now() { return state.now.getTime(); }
   }
   const timers = new Map();
   let timerId = 0;
@@ -107,11 +119,13 @@ function createFixture({ visible = true } = {}) {
       ...demographics, ...time, ...cancellation,
       MINUTE_MS: 60_000,
       MAX_DEMOGRAPHICS_DATE_RANGE_DAYS: dateRanges.MAX_DEMOGRAPHICS_DATE_RANGE_DAYS,
-      MAX_DEMOGRAPHIC_PARTITION_CACHE_ENTRIES: 96,
+      MAX_DEMOGRAPHIC_PARTITION_CACHE_ENTRIES: 400,
       apiFetch: async (path, options) => {
         const total = state.serverTotal;
+        const error = state.serverError;
         state.calls.push({ path, ...options });
         if (state.hold) await new Promise((resolve) => { state.releases.push(resolve); });
+        if (error) throw error;
         const from = new URL(path, "https://fixture.invalid").searchParams.get("from");
         return { data: total === null ? [] : [{
           bucket: from, camera_id: "fixture-camera", age_bucket: "20-29",
@@ -125,8 +139,19 @@ function createFixture({ visible = true } = {}) {
   const fallback = () => helpers.defaultRangeForSurface("analysis", time.companyDateKey(state.clock, state.timeZone));
   function bindings() {
     const selectedRange = state.rangeState?.key === identity() ? state.rangeState.value : fallback();
+    const requestWindow = helpers.buildDemographicRequestWindow({
+      ...selectedRange, clock: state.clock, timeZone: state.timeZone,
+    });
+    const keyBindings = {
+      user: { id: state.userId }, companyScopeId: state.companyId,
+      timeZone: state.timeZone, surface: "analysis", appliedRange: selectedRange,
+      todayInput: time.companyDateKey(state.clock, state.timeZone),
+    };
+    const dataScopeKey = compile(`return ${initializers.get("dataScopeKey")};`, {
+      ...keyBindings, React: { useMemo: (factory) => factory() },
+    });
     return {
-      ...demographics, ...time, ...dateRanges, ...cancellation, ...helpers, ...refs,
+      ...demographics, ...time, ...dateRanges, ...cancellation, ...refreshPolicy, ...helpers, ...refs,
       Date: FixtureDate,
       window: fakeWindow,
       surface: "analysis",
@@ -135,17 +160,19 @@ function createFixture({ visible = true } = {}) {
       user: { id: state.userId },
       todayInput: time.companyDateKey(state.clock, state.timeZone),
       fallbackRange: fallback(),
+      appliedRange: selectedRange,
       rangeScopeKey: identity(),
       historicalQueryIdentityKey: identity(),
       queryRequested: state.requestedKey === identity(),
       rangeReady: state.rangeState?.key === identity(),
       hasVisibleWidgets: state.visible,
+      preferencesReady: state.preferencesReady,
+      pageActive: state.pageVisible && state.online,
       refreshVersion: state.refreshVersion,
       liveCacheScopeKey: "unused-analysis-live-key",
-      requestWindow: helpers.buildDemographicRequestWindow({
-        ...selectedRange, clock: state.clock, timeZone: state.timeZone,
-      }),
-      dataScopeKey: [state.companyId, state.timeZone, "analysis", selectedRange.startInput, selectedRange.endInput].join("|"),
+      requestWindow,
+      dataScopeKey,
+      requestKey: compile(`return ${initializers.get("requestKey")};`, { dataScopeKey, requestWindow, refreshVersion: state.refreshVersion }),
       setRangeState: (update) => { state.rangeState = typeof update === "function" ? update(state.rangeState) : update; },
       setHistoricalQueryScopeKey: (key) => { state.requestedKey = key; },
       setClock: (clock) => { state.clock = clock; },
@@ -159,7 +186,17 @@ function createFixture({ visible = true } = {}) {
       demographicRequestErrorMessage: (error) => error.message,
     };
   }
+  let cacheIdentity;
+  function synchronizeIdentity() {
+    const nextIdentity = `${state.userId}|${state.companyId}|${state.timeZone}`;
+    if (cacheIdentity === nextIdentity) return;
+    const effect = effects.find((candidate) => candidate.includes("partitionCacheRef.current = new Map()"));
+    assert.ok(effect, "reset de identidade precisa descartar a referência do cache anterior");
+    compile(`return (${effect});`, bindings())();
+    cacheIdentity = nextIdentity;
+  }
   function initialize() {
+    synchronizeIdentity();
     const effect = effects.find((candidate) => candidate.includes("const loadSavedRange"));
     compile(`return (${effect});`, bindings())();
   }
@@ -171,6 +208,7 @@ function createFixture({ visible = true } = {}) {
     );
   }
   function setup() {
+    synchronizeIdentity();
     const effect = effects.find((candidate) => candidate.includes("const sequence = ++requestSequenceRef.current"));
     return compile(`return (${effect});`, bindings())();
   }
@@ -329,7 +367,7 @@ test("reexibir cache não produz GET nem inventa novo horário de recebimento", 
   assert.equal(fixture.state.lastUpdated, received);
 });
 
-test("retornar ao cache de outra empresa não herda o horário de recebimento da empresa anterior", async () => {
+test("retornar a outra empresa exige nova consulta e não restaura o cache da identidade anterior", async () => {
   const fixture = createFixture();
   await fixture.run();
   fixture.state.companyId = "company-b";
@@ -338,10 +376,14 @@ test("retornar ao cache de outra empresa não herda o horário de recebimento da
   await fixture.run();
   assert.equal(fixture.state.lastUpdated.toISOString(), "2026-09-10T16:15:42.000Z");
   fixture.state.companyId = "company-a";
+  fixture.state.serverTotal = 40;
+  fixture.state.now = new Date("2026-09-10T17:15:42Z");
   fixture.initialize();
   await fixture.run();
-  assert.equal(fixture.state.calls.length, 2);
-  assert.equal(fixture.state.lastUpdated, null);
+  assert.equal(fixture.state.calls.length, 3);
+  assert.deepEqual(fixture.state.calls.map(({ companyScopeId }) => companyScopeId), ["company-a", "company-b", "company-a"]);
+  assert.equal(fixture.state.data.summary.total, 40);
+  assert.equal(fixture.state.lastUpdated.toISOString(), "2026-09-10T17:15:42.000Z");
 });
 
 test("hidratar o fuso real reancora ontem somente quando ainda é a seleção padrão", async () => {
@@ -389,7 +431,164 @@ test("sem widgets visíveis não consulta e o histórico continua sem polling", 
   await fixture.run();
   assert.equal(fixture.state.calls.length, 0);
   assert.equal(fixture.state.loading, false);
-  assert.match(source, /if \(surface !== "live" \|\| !hasVisibleWidgets\) return;/);
+  assert.match(source, /if \(surface !== "live" \|\| !hasVisibleWidgets \|\| !preferencesReady \|\| !pageActive\) return;/);
   assert.doesNotMatch(source, /const rangeScopeKey = .*todayInput/);
   assert.doesNotMatch(source, /\[\s*preferences,[\s\S]*?requestWindow,[\s\S]*?surface,[\s\S]*?\]\);/);
+});
+
+for (const [reason, paused] of [
+  ["preferências pendentes", { preferencesReady: false }],
+  ["aba inativa", { pageVisible: false }],
+  ["offline", { online: false }],
+]) {
+  test(`${reason}: nenhuma consulta antes de retomar a elegibilidade`, async () => {
+    const fixture = createFixture(paused);
+    await fixture.run();
+    assert.equal(fixture.state.calls.length, 0);
+    assert.equal(fixture.state.data, null);
+    assert.equal(fixture.refs.settledRequestKeyRef.current, "", "pausar não marca a consulta como concluída");
+    Object.assign(fixture.state, { preferencesReady: true, pageVisible: true, online: true });
+    await fixture.run();
+    assert.equal(fixture.state.calls.length, 1);
+    assert.equal(fixture.state.data.summary.total, 100);
+  });
+}
+
+test("retomar um histórico concluído da aba inativa ou offline não refaz GET nem altera snapshot", async () => {
+  const fixture = createFixture();
+  await fixture.run();
+  const data = fixture.state.data;
+  const received = fixture.state.lastUpdated;
+  for (const key of ["pageVisible", "online", "preferencesReady"]) {
+    fixture.state[key] = false;
+    await fixture.run();
+    fixture.state.now = new Date(fixture.state.now.getTime() + 60_000);
+    fixture.state[key] = true;
+    await fixture.run();
+    assert.equal(fixture.state.calls.length, 1);
+    assert.equal(fixture.state.data, data);
+    assert.equal(fixture.state.lastUpdated, received);
+    assert.equal(fixture.state.loading, false);
+    assert.equal(fixture.state.refreshing, false);
+  }
+});
+
+test("aplicar outro intervalo reaproveita dias sobrepostos; reaplicar o mesmo renova todos os dias", async () => {
+  const fixture = createFixture();
+  fixture.apply({ startInput: "2026-09-01", endInput: "2026-09-03" });
+  await fixture.run();
+  assert.equal(fixture.state.calls.length, 3);
+  assert.equal(fixture.state.data.summary.total, 300);
+  fixture.apply({ startInput: "2026-09-02", endInput: "2026-09-04" });
+  assert.equal(fixture.refs.partitionCacheRef.current.size, 3);
+  await fixture.run();
+  assert.equal(fixture.state.calls.length, 4);
+  assert.equal(new URL(fixture.state.calls.at(-1).path, "https://fixture.invalid").searchParams.get("from"), "2026-09-04T03:00:00.000Z");
+  assert.equal(fixture.state.data.summary.total, 300);
+  fixture.state.serverTotal = 20;
+  fixture.apply();
+  assert.equal(fixture.refs.partitionCacheRef.current.size, 0);
+  await fixture.run();
+  assert.equal(fixture.state.calls.length, 7);
+  assert.equal(fixture.state.data.summary.total, 60);
+});
+
+test("falha histórica só repete por atualização explícita, não por retomar a aba ou a conexão", async () => {
+  const fixture = createFixture();
+  fixture.state.serverError = new Error("fixture unavailable");
+  await fixture.run();
+  assert.equal(fixture.state.calls.length, 1);
+  assert.equal(fixture.state.error, "fixture unavailable");
+  assert.equal(fixture.state.loading, false);
+  assert.equal(fixture.refs.liveRetryRef.current, null, "histórico não agenda polling de retry");
+  const settled = fixture.refs.settledRequestKeyRef.current;
+  assert.ok(settled);
+  fixture.state.serverError = null;
+  for (const key of ["pageVisible", "online"]) {
+    fixture.state[key] = false;
+    await fixture.run();
+    fixture.state.now = new Date(fixture.state.now.getTime() + 3_600_000);
+    fixture.state[key] = true;
+    await fixture.run();
+    assert.equal(fixture.state.calls.length, 1);
+    assert.equal(fixture.state.error, "fixture unavailable");
+    assert.equal(fixture.refs.settledRequestKeyRef.current, settled);
+  }
+  fixture.refresh();
+  await fixture.run();
+  assert.equal(fixture.state.calls.length, 2);
+  assert.equal(fixture.state.data.summary.total, 100);
+  assert.equal(fixture.state.error, "");
+});
+
+test("falha histórica permanece ao ocultar e reexibir todos os widgets até atualização explícita", async () => {
+  const fixture = createFixture();
+  fixture.state.serverError = new Error("fixture unavailable");
+  await fixture.run();
+  const settled = fixture.refs.settledRequestKeyRef.current;
+  assert.equal(fixture.state.error, "fixture unavailable");
+  fixture.state.serverError = null;
+  for (const visible of [false, true, false, true]) {
+    fixture.state.visible = visible;
+    await fixture.run();
+    assert.equal(fixture.state.calls.length, 1);
+    assert.equal(fixture.state.error, "fixture unavailable", "ocultar widgets não transforma a falha em ausência de dados");
+    assert.equal(fixture.refs.settledRequestKeyRef.current, settled);
+    assert.equal(fixture.state.loading, false);
+    assert.equal(fixture.state.refreshing, false);
+  }
+  fixture.refresh();
+  await fixture.run();
+  assert.equal(fixture.state.calls.length, 2);
+  assert.equal(fixture.state.data.summary.total, 100);
+  assert.equal(fixture.state.error, "");
+});
+
+for (const [property, next] of [["userId", "user-b"], ["companyId", "company-b"], ["timeZone", "UTC"]]) {
+  test(`mudar ${property} descarta caches, retentativas e chave concluída antes de consultar`, async () => {
+    const fixture = createFixture();
+    await fixture.run();
+    const previousCache = fixture.refs.partitionCacheRef.current;
+    const previousDataKey = fixture.state.data.key;
+    fixture.refs.comparisonCacheRef.current = { sentinel: true };
+    fixture.refs.liveCacheRef.current = { sentinel: true };
+    fixture.refs.comparisonRetryRef.current = { failures: 2, retryAt: Infinity };
+    fixture.refs.liveRetryRef.current = { failures: 2, retryAt: Infinity };
+    fixture.state[property] = next;
+    fixture.state.serverTotal = 40;
+    fixture.initialize();
+    assert.notEqual(fixture.refs.partitionCacheRef.current, previousCache);
+    assert.equal(fixture.refs.partitionCacheRef.current.size, 0);
+    assert.equal(fixture.refs.comparisonCacheRef.current, null);
+    assert.equal(fixture.refs.liveCacheRef.current, null);
+    assert.equal(fixture.refs.comparisonRetryRef.current, null);
+    assert.equal(fixture.refs.liveRetryRef.current, null);
+    assert.equal(fixture.refs.settledRequestKeyRef.current, "");
+    await fixture.run();
+    assert.equal(fixture.state.calls.length, 2);
+    assert.equal(fixture.state.data.summary.total, 40);
+    assert.notEqual(fixture.state.data.key, previousDataKey);
+    assert.ok(fixture.state.data.key.startsWith(`${fixture.state.userId}|${fixture.state.companyId}|${fixture.state.timeZone}|`));
+    assert.equal(fixture.state.data.summary.temporal.timeZone, fixture.state.timeZone);
+  });
+}
+
+test("resposta retida da identidade anterior não repovoa o mapa novo nem substitui dados do novo usuário", async () => {
+  const fixture = createFixture();
+  fixture.state.hold = true;
+  await fixture.run();
+  const oldController = fixture.refs.activeRequestRef.current;
+  const oldCache = fixture.refs.partitionCacheRef.current;
+  fixture.state.userId = "user-b";
+  fixture.initialize();
+  fixture.state.hold = false;
+  fixture.state.serverTotal = 40;
+  await fixture.run();
+  fixture.state.releases.splice(0).forEach((release) => release());
+  await fixture.flush();
+  assert.equal(oldController.signal.aborted, true);
+  assert.notEqual(fixture.refs.partitionCacheRef.current, oldCache);
+  assert.equal(fixture.state.data.summary.total, 40);
+  assert.ok(fixture.state.data.key.startsWith("user-b|company-a|"));
+  assert.deepEqual([...fixture.refs.partitionCacheRef.current.values()].map(({ total }) => total), [40]);
 });

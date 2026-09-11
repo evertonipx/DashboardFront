@@ -5,13 +5,17 @@ import { BarChart3, ChartNoAxesColumnIncreasing, ChartPie, Donut, RotateCcw, Smi
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { demographicHeatmapColors } from "@/lib/demographics-crossing-options";
 import {
   DEMOGRAPHICS_PALETTES,
   defaultDemographicPresentation,
+  demographicPaletteLabel,
   demographicPalettePreviewColors,
+  getDemographicGenderPalette,
   getDemographicPalette,
   normalizeDemographicPresentation,
   type DemographicDimension,
+  type DemographicPaletteId,
   type DemographicPresentation,
 } from "@/lib/demographics-presentation";
 import { cn } from "@/lib/utils";
@@ -25,14 +29,22 @@ const FORMATS = [
   { value: "rose", label: "Rosa polar", icon: ChartPie },
 ] as const;
 
-export function DemographicsWidgetControls({ dimension, value, onChange }: {
+export function DemographicsWidgetControls({ dimension, value, onChange, theme = "light" }: {
   dimension: DemographicDimension;
   value?: DemographicPresentation;
   onChange: (value: DemographicPresentation) => void;
+  theme?: "light" | "dark";
 }) {
   const settings = normalizeDemographicPresentation(value, dimension);
   const palette = getDemographicPalette(settings.palette);
   const distribution = dimension === "gender" || dimension === "age" || dimension === "emotion";
+  const heatmap = dimension === "age-emotion";
+  const genderColors = dimension === "gender" || dimension === "age-gender"
+    ? getDemographicGenderPalette(palette.id) : null;
+  const paletteColors = (id: DemographicPaletteId) => heatmap
+    ? demographicHeatmapColors(id, theme) : demographicPalettePreviewColors(id, dimension);
+  const paletteLabel = (id: DemographicPaletteId) =>
+    demographicPaletteLabel(id, dimension, heatmap ? "intensity" : "category");
   const update = (patch: Partial<DemographicPresentation>) =>
     onChange(normalizeDemographicPresentation({ ...settings, ...patch }, dimension));
   return (
@@ -77,17 +89,23 @@ export function DemographicsWidgetControls({ dimension, value, onChange }: {
       <div className="grid min-w-0 gap-2">
         <span className="text-xs font-medium">Paleta de cores</span>
         <Select value={palette.id} onValueChange={(next) => update({ palette: getDemographicPalette(next).id })}>
-          <SelectTrigger aria-label={`Paleta de cores: ${palette.label}`} className="h-9 w-full min-w-0 text-xs">
-            <span className="flex min-w-0 items-center gap-2"><PaletteSwatches colors={demographicPalettePreviewColors(palette.id, dimension)} /><span className="truncate">{palette.label}</span></span>
+          <SelectTrigger aria-label={`Paleta de cores: ${paletteLabel(palette.id)}`} className="h-9 w-full min-w-0 text-xs">
+            <span className="flex min-w-0 items-center gap-2"><PaletteSwatches colors={paletteColors(palette.id)} complete={dimension === "age" || heatmap} /><span className="truncate">{paletteLabel(palette.id)}</span></span>
           </SelectTrigger>
           <SelectContent className="max-h-72">
             {DEMOGRAPHICS_PALETTES.map((option) => (
-              <SelectItem key={option.id} value={option.id} textValue={option.label}>
-                <span className="flex min-w-0 items-center gap-2"><PaletteSwatches colors={demographicPalettePreviewColors(option.id, dimension)} /><span>{option.label}</span></span>
+              <SelectItem key={option.id} value={option.id} textValue={paletteLabel(option.id)}>
+                <span className="flex min-w-0 items-center gap-2"><PaletteSwatches colors={paletteColors(option.id)} complete={dimension === "age" || heatmap} /><span>{paletteLabel(option.id)}</span></span>
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
+        {dimension === "age" ? <p className="text-xs leading-5 text-muted-foreground">Mais jovens → mais velhos · claro → escuro</p> : null}
+        {heatmap ? <p className="text-xs leading-5 text-muted-foreground">As cores representam a intensidade dos valores, não as categorias.</p> : null}
+        {genderColors ? <div className="flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground" aria-label="Cores por gênero">
+          <span className="inline-flex items-center gap-1.5"><span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: genderColors.Woman }} />Mulher</span>
+          <span className="inline-flex items-center gap-1.5"><span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: genderColors.Man }} />Homem</span>
+        </div> : null}
       </div>
       <label className="flex min-w-0 cursor-pointer items-start gap-2 text-xs leading-5">
         <Checkbox className="mt-0.5 shrink-0" checked={settings.emojis} onCheckedChange={(checked) => update({ emojis: checked === true })} />
@@ -102,9 +120,9 @@ export function DemographicsWidgetControls({ dimension, value, onChange }: {
   );
 }
 
-function PaletteSwatches({ colors }: { colors: readonly string[] }) {
+function PaletteSwatches({ colors, complete = false }: { colors: readonly string[]; complete?: boolean }) {
   return <span aria-hidden="true" className="inline-flex shrink-0 overflow-hidden rounded-sm ring-1 ring-border/60">
-    {colors.slice(0, 5).map((color, index) => <span key={`${color}-${index}`} className="h-3 w-2" style={{ backgroundColor: color }} />)}
+    {(complete ? colors : colors.slice(0, 5)).map((color, index) => <span key={`${color}-${index}`} className="h-3 w-2" style={{ backgroundColor: color }} />)}
   </span>;
 }
 

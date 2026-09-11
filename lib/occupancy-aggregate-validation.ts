@@ -7,6 +7,12 @@ import {
 import {
   normalizeOccupancyInstantBucketInTimeZone,
 } from "@/lib/occupancy-bucket-time";
+import {
+  companyZonedDateParts,
+  endOfCompanyTimeZoneHour,
+  startOfCompanyTimeZoneHour,
+  startOfCompanyTimeZoneCivilDay,
+} from "@/lib/company-time-zone";
 import type {
   AggregateGranularity,
   OccupancyScenarioAggregateResponse,
@@ -32,12 +38,22 @@ export type OccupancyCertifiedCutoffSource = {
 };
 
 export type OccupancyAggregateValidationOptions = {
+  /** Accept the documented aggregate schema without inventing certification. */
+  allowDocumentedAggregateResponse?: boolean;
   allowLegacyUncertifiedInstantBuckets?: boolean;
   expectedTimezone?: string;
   openBucket?: Date;
   requestedAt?: Date;
   requireCertification?: boolean;
 };
+
+/** A valid instant that cannot represent the requested company's civil bucket. */
+export class OccupancyCivilBucketAlignmentError extends Error {
+  constructor(bucket: string, timeZone: string) {
+    super(`O bucket de ocupação "${bucket}" não está alinhado ao calendário de ${timeZone}.`);
+    this.name = "OccupancyCivilBucketAlignmentError";
+  }
+}
 
 type ValidatedOccupancyRow = {
   area: OccupancyAggregateMetric | null;
@@ -69,7 +85,7 @@ export function requireOccupancyAggregateRows(
     openBucket !== undefined &&
     (!(openBucket instanceof Date) ||
       Number.isNaN(openBucket.getTime()) ||
-      !isAggregateBucketAligned(openBucket, requestedGranularity))
+      !isOccupancyBucketAligned(openBucket, requestedGranularity, expectedTimezone ?? options.expectedTimezone))
   ) {
     throw new Error("O bucket aberto esperado de ocupação é inválido.");
   }
@@ -96,12 +112,16 @@ export function requireOccupancyAggregateRows(
     "as_of da resposta agregada de ocupação",
     validationOptions.requireCertification,
   );
-  if (openBucket !== undefined && validationOptions.requireCertification) {
+  if (
+    openBucket !== undefined &&
+    (validationOptions.requireCertification || responseAsOf !== undefined)
+  ) {
     requireOccupancyOpenBucketAsOf(
       responseAsOf,
       requestedGranularity,
       openBucket,
       options.requestedAt,
+      expectedTimezone ?? options.expectedTimezone,
     );
   }
   const returnedTimezone = requireOptionalTimeZone(
@@ -155,6 +175,7 @@ export function requireOccupancyAggregateRows(
     response.data,
     requestedGranularity,
     canonicalExpectedTimezone,
+    validationOptions.allowDocumentedAggregateResponse,
   );
   const rows = validateOccupancyRows(
     normalizedRows,
@@ -165,7 +186,6 @@ export function requireOccupancyAggregateRows(
     },
   );
   requireScenarioTotalsForAreaBuckets(rows, requestedGranularity);
-  rejectIndependentlySummedAreaAggregates(rows, requestedGranularity);
   return normalizedRows;
 }
 
@@ -187,6 +207,7 @@ export function aggregateOccupancyRowsByBucket(
     rows,
     granularity,
     validationOptions.expectedTimezone,
+    validationOptions.allowDocumentedAggregateResponse,
   );
   const validatedRows = validateOccupancyRows(
     normalizedRows,
@@ -246,7 +267,7 @@ export function aggregateOccupancyRowsForRequestedBuckets(
     if (
       !(bucket instanceof Date) ||
       Number.isNaN(bucket.getTime()) ||
-      !isAggregateBucketAligned(bucket, granularity)
+      !isOccupancyBucketAligned(bucket, granularity, options.expectedTimezone)
     ) {
       throw new Error(
         `O bucket solicitado de ocupação na posição ${index} é inválido.`,
@@ -384,6 +405,9 @@ function resolveResponseValidationOptions(
   granularity: AggregateGranularity,
   options: OccupancyAggregateValidationOptions,
 ): OccupancyAggregateValidationOptions {
+  if (acceptsDocumentedAggregate(granularity, options)) {
+    return { ...options, requireCertification: false };
+  }
   if (
     !canRelaxLegacyInstantCertification(
       response.data,
@@ -406,9 +430,19 @@ function resolveRowValidationOptions(
   granularity: AggregateGranularity,
   options: OccupancyAggregateValidationOptions,
 ): OccupancyAggregateValidationOptions {
-  return canRelaxLegacyInstantCertification(rows, granularity, options)
+  return acceptsDocumentedAggregate(granularity, options) ||
+    canRelaxLegacyInstantCertification(rows, granularity, options)
     ? { ...options, requireCertification: false }
     : options;
+}
+
+function acceptsDocumentedAggregate(
+  granularity: AggregateGranularity,
+  options: OccupancyAggregateValidationOptions,
+) {
+  return options.allowDocumentedAggregateResponse === true &&
+    (granularity === "minute" || granularity === "hour" ||
+      granularity === "day" || granularity === "week" || granularity === "month");
 }
 
 function canRelaxLegacyInstantCertification(
@@ -447,25 +481,65 @@ function normalizeOccupancyInstantBucketRows(
   rows: OccupancyScenarioBucketRow[],
   granularity: AggregateGranularity,
   expectedTimezone?: string,
+  allowDocumentedAggregateResponse = false,
 ) {
-  if (granularity !== "minute" && granularity !== "hour") return rows;
+  const instant = granularity === "minute" || granularity === "hour";
+  const civil = granularity === "day" || granularity === "week" || granularity === "month";
+  if (!instant && !(civil && allowDocumentedAggregateResponse)) return rows;
+  if (!instant) {
+    // Invalid metrics must fail before an alignment fallback can be considered.
+    rows.forEach((row, index) => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) throw invalidRowError(index);
+      const area = requireMetricTuple(row.area_avg, row.area_min, row.area_max, row.area_final, index);
+      const total = requireMetricTuple(row.scenario_total_avg, row.scenario_total_min,
+        row.scenario_total_max, row.scenario_total_final, index);
+      if (!area && !total) throw invalidRowError(index);
+      requireOptionalTrimmedId(row.area_id, "area_id", index);
+      requireOptionalTrimmedId(row.camera_id, "camera_id", index);
+      if (area && (!row.area_id || !row.camera_id)) throw invalidRowError(index);
+    });
+  }
 
   let changed = false;
   const normalizedRows = rows.map((row) => {
     if (!row || typeof row !== "object" || Array.isArray(row)) return row;
     if (typeof row.bucket !== "string") return row;
 
-    const bucket = normalizeOccupancyInstantBucketInTimeZone(
-      row.bucket,
-      granularity,
-      expectedTimezone,
-    );
+    const bucket = instant
+      ? normalizeOccupancyInstantBucketInTimeZone(row.bucket, granularity, expectedTimezone)
+      : normalizeDocumentedCivilBucket(row.bucket, granularity, expectedTimezone);
     if (bucket === null || bucket === row.bucket) return row;
     changed = true;
     return { ...row, bucket };
   });
 
   return changed ? normalizedRows : rows;
+}
+
+function normalizeDocumentedCivilBucket(
+  value: string,
+  granularity: AggregateGranularity,
+  timeZone?: string,
+) {
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return value;
+  if (!isExplicitRfc3339Bucket(value)) {
+    throw new Error("A API retornou um bucket civil RFC3339 de ocupação inválido.");
+  }
+  if (!timeZone) {
+    throw new Error("O timezone esperado é obrigatório para interpretar um bucket civil RFC3339 de ocupação.");
+  }
+  const instant = new Date(value);
+  const parts = companyZonedDateParts(instant, timeZone);
+  const start = startOfCompanyTimeZoneCivilDay(parts, timeZone);
+  const weekday = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
+  if (
+    start.getTime() !== instant.getTime() ||
+    (granularity === "week" && weekday !== 1) ||
+    (granularity === "month" && parts.day !== 1)
+  ) {
+    throw new OccupancyCivilBucketAlignmentError(value, timeZone);
+  }
+  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 }
 
 function validateOccupancyRows(
@@ -483,7 +557,7 @@ function validateOccupancyRows(
 
     if (
       typeof row.bucket !== "string" ||
-      !isAggregateBucketAligned(row.bucket, granularity)
+      !isOccupancyBucketAligned(row.bucket, granularity, options.expectedTimezone)
     ) {
       throw invalidRowError(index);
     }
@@ -729,6 +803,7 @@ export function requireOccupancyOpenBucketAsOf(
   granularity: AggregateGranularity,
   openBucket: Date,
   requestedAt: Date | undefined,
+  timeZone?: string,
 ) {
   const asOf =
     value instanceof Date
@@ -738,13 +813,18 @@ export function requireOccupancyOpenBucketAsOf(
           "as_of da resposta agregada de ocupação",
           true,
         )!;
-  const bucketStart = requireValidDate(
+  const providedStart = requireValidDate(
     openBucket,
     "início do bucket aberto de ocupação",
   );
-  if (!isAggregateBucketAligned(bucketStart, granularity)) {
+  if (!isOccupancyBucketAligned(providedStart, granularity, timeZone)) {
     throw new Error("O bucket aberto esperado de ocupação é inválido.");
   }
+  const civil = granularity !== "minute" && granularity !== "hour";
+  const bucketStart = timeZone && civil
+    ? startOfCompanyTimeZoneCivilDay({ year: providedStart.getFullYear(),
+        month: providedStart.getMonth() + 1, day: providedStart.getDate() }, timeZone)
+    : providedStart;
   if (requestedAt === undefined) {
     throw new Error(
       "O instante solicitado é obrigatório para certificar o bucket aberto de ocupação.",
@@ -754,7 +834,11 @@ export function requireOccupancyOpenBucketAsOf(
     requestedAt,
     "instante solicitado do agregado de ocupação",
   );
-  const bucketEnd = endOfAggregateBucket(bucketStart, granularity);
+  const bucketEnd = timeZone && granularity === "hour"
+    ? endOfCompanyTimeZoneHour(bucketStart, timeZone)
+    : timeZone && civil
+      ? civilBucketEnd(providedStart, granularity, timeZone)
+      : endOfAggregateBucket(bucketStart, granularity);
   if (requestCutoff < bucketStart || requestCutoff >= bucketEnd) {
     throw new Error(
       "O instante solicitado não pertence ao bucket aberto de ocupação.",
@@ -767,6 +851,32 @@ export function requireOccupancyOpenBucketAsOf(
   }
 
   return asOf;
+}
+
+function isOccupancyBucketAligned(
+  value: string | Date,
+  granularity: AggregateGranularity,
+  timeZone?: string,
+) {
+  if (isAggregateBucketAligned(value, granularity)) return true;
+  if (timeZone && granularity === "hour" &&
+      (value instanceof Date || isExplicitRfc3339Bucket(value))) {
+    const date = new Date(value);
+    if (Number.isFinite(date.getTime()) &&
+        startOfCompanyTimeZoneHour(date, timeZone).getTime() === date.getTime()) return true;
+  }
+  return false;
+}
+
+function civilBucketEnd(marker: Date, granularity: AggregateGranularity, timeZone: string) {
+  const next = new Date(0);
+  next.setUTCFullYear(marker.getFullYear(), marker.getMonth(), marker.getDate());
+  next.setUTCHours(0, 0, 0, 0);
+  if (granularity === "day" || granularity === "week") {
+    next.setUTCDate(next.getUTCDate() + (granularity === "week" ? 7 : 1));
+  } else next.setUTCMonth(next.getUTCMonth() + (granularity === "month" ? 1 : granularity === "semester" ? 6 : 12));
+  return startOfCompanyTimeZoneCivilDay({ year: next.getUTCFullYear(),
+    month: next.getUTCMonth() + 1, day: next.getUTCDate() }, timeZone);
 }
 
 function requireValidDate(value: Date, context: string) {
@@ -833,81 +943,6 @@ function requireScenarioTotalsForAreaBuckets(
       ).toISOString()}; mínimos e máximos das áreas não podem ser somados com segurança.`,
     );
   }
-}
-
-/**
- * Detects the formula used by the current remote API for multi-area scenarios:
- * it adds AVG/MIN/MAX calculated independently for each area. Peaks and
- * minimums from different instants cannot be added, so publishing that tuple
- * as the scenario total would be mathematically incorrect. A future backend
- * that rebuilds the simultaneous scenario timeline will normally return a
- * tuple different from this component-wise sum and will pass this guard.
- */
-function rejectIndependentlySummedAreaAggregates(
-  rows: ValidatedOccupancyRow[],
-  granularity: AggregateGranularity,
-) {
-  const buckets = new Map<
-    number,
-    {
-      areaCount: number;
-      areaSum: OccupancyAggregateMetric;
-      bucket: Date;
-      scenarioTotal: OccupancyAggregateMetric | null;
-    }
-  >();
-
-  rows.forEach((row) => {
-    const key = occupancyAggregateBucketKey(row.bucket, granularity);
-    const bucket = buckets.get(key) ?? {
-      areaCount: 0,
-      areaSum: { average: 0, minimum: 0, peak: 0 },
-      bucket: row.bucket,
-      scenarioTotal: null,
-    };
-
-    if (row.area) {
-      bucket.areaCount += 1;
-      bucket.areaSum.average += row.area.average;
-      bucket.areaSum.minimum += row.area.minimum;
-      bucket.areaSum.peak += row.area.peak;
-    }
-    bucket.scenarioTotal ??= row.scenarioTotal;
-    buckets.set(key, bucket);
-  });
-
-  for (const bucket of buckets.values()) {
-    if (
-      bucket.areaCount > 1 &&
-      bucket.scenarioTotal &&
-      !isZeroMetric(bucket.scenarioTotal) &&
-      sameMetricWithinTolerance(bucket.areaSum, bucket.scenarioTotal)
-    ) {
-      throw new Error(
-        `A API retornou scenario_total_* do bucket ${bucket.bucket.toISOString()} como soma de AVG/MIN/MAX independentes de ${bucket.areaCount} áreas; o total simultâneo do cenário não pode ser certificado.`,
-      );
-    }
-  }
-}
-
-function isZeroMetric(metric: OccupancyAggregateMetric) {
-  return metric.average === 0 && metric.minimum === 0 && metric.peak === 0;
-}
-
-function sameMetricWithinTolerance(
-  left: OccupancyAggregateMetric,
-  right: OccupancyAggregateMetric,
-) {
-  return (
-    nearlyEqual(left.average, right.average) &&
-    nearlyEqual(left.minimum, right.minimum) &&
-    nearlyEqual(left.peak, right.peak)
-  );
-}
-
-function nearlyEqual(left: number, right: number) {
-  const scale = Math.max(1, Math.abs(left), Math.abs(right));
-  return Math.abs(left - right) <= Number.EPSILON * scale * 16;
 }
 
 function sameMetric(

@@ -265,6 +265,7 @@ export function OccupancyScenarioManager() {
       const catalog = await fetchOccupancyAreaCatalog({
         companyId: companyScopeId,
         from: new Date(now.getTime() - 4 * HOUR_MS),
+        masterCrossCompanyScope,
         request: <T,>(path: string) =>
           apiFetch<T>(path, { companyScopeId }),
         to: now,
@@ -297,7 +298,7 @@ export function OccupancyScenarioManager() {
         setLoadingAreas(false);
       }
     }
-  }, [companyScopeId]);
+  }, [companyScopeId, masterCrossCompanyScope]);
 
   React.useLayoutEffect(() => {
     companyScopeIdRef.current = companyScopeId;

@@ -156,7 +156,7 @@ test("dashboard consulta segmentos por granularidade e só cacheia cobertura fec
   assert.match(source, /buildOccupancyAnalysisResolutionPlan/);
   assert.match(
     source,
-    /comparisonSegments = listDefinitionQuerySegments\(definition\)\.map\([\s\S]*?granularity: segment\.granularity/,
+    /comparisonSegments = listDefinitionQuerySegments\(definition\)\.flatMap\([\s\S]*?granularity: segment\.granularity/,
   );
   assert.match(
     source,
@@ -169,11 +169,11 @@ test("dashboard consulta segmentos por granularidade e só cacheia cobertura fec
   );
   assert.match(
     source,
-    /listDefinitionBucketDescriptors\(definition\)[\s\S]*?bucketLabel\(bucketStart, granularity\)/,
+    /listDefinitionBucketDescriptors\(definition\)[\s\S]*?bucketLabel\(bucketStart, granularity, definition\.timeZone\)/,
   );
   assert.match(
     source,
-    /segment\.openBucket \|\|[\s\S]*?state\.warning \|\|[\s\S]*?!state\.points\.every/,
+    /segment\.openBucket \|\|[\s\S]*?state\.incomplete \|\|[\s\S]*?!state\.points\.every/,
     "ausência/parcial nunca deve entrar no cache de segmentos fechados",
   );
   assert.match(
@@ -182,7 +182,7 @@ test("dashboard consulta segmentos por granularidade e só cacheia cobertura fec
     "refresh deve reutilizar segmentos históricos certificados",
   );
   assert.match(source, /occupancyAnalysisClosedSegmentRevision/);
-  assert.match(source, /startOfCompanyTimeZoneHour\(openAt, companyTimeZone\)/);
+  assert.match(source, /startOfCompanyTimeZoneHour\(candidate, companyTimeZone\)/);
   assert.match(source, /endOfCompanyTimeZoneHour\(reference, companyTimeZone\)/);
   assert.match(
     source,
@@ -196,12 +196,12 @@ test("dashboard consulta segmentos por granularidade e só cacheia cobertura fec
   );
   assert.match(
     source,
-    /const completeCoverage =[\s\S]*?average: completeCoverage \? latest\.average : null[\s\S]*?current: completeCoverage \? latest\.current : null/,
+    /const completeCoverage =[\s\S]*?average: completeCoverage \? latest\.average : null[\s\S]*?current: completeCurrent \? latest\.current : null/,
     "KPIs não podem publicar final/média do último chunk com lacunas no intervalo",
   );
   assert.match(
     source,
-    /function buildScenarioPoints[\s\S]*?return \{\s*\/\/ Os segmentos fechado e aberto[\s\S]*?points,\s*warning:/,
+    /function buildScenarioPoints[\s\S]*?return \{\s*\/\/ Os segmentos fechado e aberto[\s\S]*?points,\s*incomplete: missingBuckets\.length > 0,\s*warning:/,
     "cada segmento horário deve permanecer cru até a união final",
   );
   assert.match(

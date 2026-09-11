@@ -98,6 +98,46 @@ test("rosa e azul é primeira e todas as paletas de Ocupação são reutilizadas
   assert.equal(presentation.getDemographicPalette("unknown"), palettes[0]);
 });
 
+test("nomes demográficos descrevem os pares reais sem renomear paletas compartilhadas ou IDs salvos", () => {
+  const expected = {
+    "pink-blue": ["Rosa e azul", "#DB2777", "#2563EB"],
+    enterprise: ["Rosé e marinho", "#B85C7A", "#486F9E"],
+    ocean: ["Coral e turquesa", "#E88078", "#008D9A"],
+    aurora: ["Lavanda e esmeralda", "#AB7DE0", "#159A8C"],
+    cyber: ["Orquídea e ciano", "#EF4FC8", "#00C5E0"],
+    sunset: ["Pêssego e índigo", "#F08D68", "#5C65C6"],
+    forest: ["Ameixa e verde-petróleo", "#A16BA9", "#248373"],
+    berry: ["Framboesa e denim", "#B72E62", "#537BA5"],
+    terracotta: ["Terracota e petróleo", "#CB776D", "#3B7C8D"],
+    pastel: ["Lilás e menta", "#D0ACDD", "#8DCEC2"],
+    high_contrast: ["Magenta e azul intenso", "#AD1457", "#005EB8"],
+    colorblind: ["Malva e azul", "#CC79A7", "#0072B2"],
+  };
+  const before = structuredClone(presentation.DEMOGRAPHICS_PALETTES);
+  assert.deepEqual(presentation.DEMOGRAPHICS_PALETTES.map(({ id }) => id), Object.keys(expected));
+  assert.equal(new Set(Object.values(expected).map(([label]) => label)).size, 12);
+  for (const { id: palette, label: originalLabel } of presentation.DEMOGRAPHICS_PALETTES) {
+    const [label, Woman, Man] = expected[palette];
+    for (const [id, dimension] of [["demographics_gender_mix", "gender"], ["demographics_age_gender_pyramid", "age-gender"]]) {
+      assert.equal(presentation.demographicPaletteLabel(palette, dimension), label);
+      assert.equal(presentation.demographicPaletteLabel(palette, dimension, "category"), label);
+      assert.deepEqual(presentation.demographicPalettePreviewColors(palette, dimension), [Woman, Man]);
+      assert.equal(presentation.demographicCategoryColor("Woman", 9, palette, dimension), Woman);
+      assert.equal(presentation.demographicCategoryColor("Man", 0, palette, dimension), Man);
+      if (palette !== "pink-blue") assert.notEqual(label, originalLabel, "nomes de gênero descrevem o par, não a paleta genérica de Ocupação");
+      const demographics = { ...presentation.defaultDemographicPresentation(dimension), palette };
+      const [restored] = preferences.normalizeCardPreferences("demographics", JSON.parse(JSON.stringify([{ id, visible: true, demographics }])), [id]);
+      assert.deepEqual(restored.demographics, demographics);
+      assert.equal(restored.demographics.palette, palette);
+    }
+    assert.equal(presentation.demographicPaletteLabel(palette, "emotion"), originalLabel);
+    assert.equal(presentation.demographicPaletteLabel(palette, "age-emotion"), originalLabel);
+    assert.equal(presentation.getDemographicPalette(palette).label, originalLabel);
+  }
+  assert.deepEqual(presentation.DEMOGRAPHICS_PALETTES, before);
+  assert.deepEqual(presentation.DEMOGRAPHICS_PALETTES.slice(1), occupancy.OCCUPANCY_COLOR_PALETTES);
+});
+
 test("cores de categorias permanecem estáveis após ordenação e não dependem dos valores", () => {
   const categorySets = {
     gender: ["Woman", "Man", "unknown"],

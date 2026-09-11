@@ -269,8 +269,9 @@ test("exportação não transforma corte temporal ausente no relógio do navegad
   );
   assert.match(
     occupancyReportsSource,
-    /reportDataCompleteUntil === null/,
+    /dataCompleteUntil: reportDataCompleteUntil,/,
   );
+  assert.doesNotMatch(occupancyReportsSource, /dataCompleteUntil:\s*reportDataCompleteUntil\s*\?\?/);
 });
 
 test("comparação de ocupação distingue zero certificado de ausência", () => {
@@ -1463,7 +1464,7 @@ test("bar race ao vivo usa snapshots, preserva zero e não transforma ausência 
   );
 });
 
-test("máximos por cenário usam recortes civis ordenados de hoje, 12 meses e 5 anos", () => {
+test("máximos por cenário usam recortes civis ordenados de hoje, 12 meses e 4 anos", () => {
   const ranges = occupancyComparison.buildOccupancyMaximumTrendRanges(
     new Date(2026, 7, 7, 15, 37, 42, 123),
   );
@@ -1501,15 +1502,15 @@ test("máximos por cenário usam recortes civis ordenados de hoje, 12 meses e 5 
       ranges.annual.buckets,
       "year",
     ),
-    ["2022", "2023", "2024", "2025", "2026"],
+    ["2023", "2024", "2025", "2026"],
   );
-  assert.equal(ranges.monthlySource.buckets.length, 56);
+  assert.equal(ranges.monthlySource.buckets.length, 44);
   assert.equal(
     occupancyComparison.occupancyMaximumTrendBucketLabel(
       ranges.monthlySource.buckets[0],
       "month",
     ),
-    "jan/22",
+    "jan/23",
   );
   assert.equal(
     occupancyComparison.occupancyMaximumTrendBucketLabel(
@@ -1731,17 +1732,17 @@ test("janelas mensal e anual avançam sem carregar meses ou anos removidos", () 
       december.annual.buckets,
       "year",
     ),
-    ["2022", "2023", "2024", "2025", "2026"],
+    ["2023", "2024", "2025", "2026"],
   );
   assert.deepEqual(
     occupancyComparison.occupancyMaximumTrendBucketLabels(
       january.annual.buckets,
       "year",
     ),
-    ["2023", "2024", "2025", "2026", "2027"],
+    ["2024", "2025", "2026", "2027"],
   );
-  assert.equal(december.monthlySource.buckets.length, 60);
-  assert.equal(january.monthlySource.buckets.length, 49);
+  assert.equal(december.monthlySource.buckets.length, 48);
+  assert.equal(january.monthlySource.buckets.length, 37);
   assert.equal(
     occupancyComparison.occupancyMaximumTrendBucketLabel(
       january.monthlySource.buckets.at(-1),
@@ -1904,7 +1905,7 @@ test("comparativos máximos substituem séries ao trocar cenário ou empresa", (
   );
   assert.match(
     source,
-    /async function refreshCurrentHourMaximum[\s\S]*?buildOccupancyCurrentHourRange\(requestedAt\)[\s\S]*?buildOccupancyClosedMinuteRange\(requestedAt\)[\s\S]*?"minute"/,
+    /async function refreshCurrentHourMaximum[\s\S]*?buildOccupancyCurrentHourRange\(requestedAt, timeZone\)[\s\S]*?buildOccupancyClosedMinuteRange\(requestedAt, timeZone\)[\s\S]*?"minute"/,
     "a hora aberta deve usar o bucket horário quando existir e recompô-lo com minutos fechados quando a API o omitir",
   );
   assert.match(
@@ -1914,7 +1915,7 @@ test("comparativos máximos substituem séries ao trocar cenário ou empresa", (
   );
   assert.match(
     source,
-    /latestMinuteRange = buildOccupancyClosedMinuteRange\(completedAt\)[\s\S]*?!sameOccupancyRange\(minuteRange, latestMinuteRange\)/,
+    /latestMinuteRange = buildOccupancyClosedMinuteRange\(completedAt, timeZone\)[\s\S]*?!sameOccupancyRange\(minuteRange, latestMinuteRange\)/,
     "uma resposta que cruza a virada do minuto deve ser refeita imediatamente",
   );
   assert.match(
@@ -1966,7 +1967,7 @@ test("dashboards de ocupação isolam o bucket aberto e descartam respostas de o
   );
   assert.match(
     liveSource,
-    /DefinitionsWindowKey[\s\S]*?buildOccupancyChartDefinitions\(new Date\(\)\)/,
+    /DefinitionsWindowKey[\s\S]*?buildOccupancyChartDefinitions\(new Date\(\), companyTimeZone\)/,
     "a janela ao vivo deve ser revalidada antes de publicar a resposta",
   );
   assert.match(
@@ -2126,7 +2127,7 @@ test("Ocupação Ao Vivo consulta somente as fontes exigidas pelos widgets visí
   );
 });
 
-test("comparativos de Ocupação desligam fontes ocultas e não atualizam cinco anos em cinco segundos", () => {
+test("comparativos de Ocupação desligam fontes ocultas e não atualizam quatro anos em cinco segundos", () => {
   const source = readFileSync(
     resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
     "utf8",
@@ -2249,7 +2250,7 @@ test("Ocupação estabiliza o fuso e executa uma única carga após atualizar me
   );
   assert.match(
     loader,
-    /requireCertifiedRuntimeCompanyTimeZone\(\s*certifiedCompanyTimeZoneResolution/,
+    /requireCertifiedCompanyTimeZone\(\s*certifiedCompanyTimeZoneResolution/,
   );
   assert.match(
     refresh,
@@ -3686,13 +3687,13 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
     "os nomes devem permanecer acessíveis sem comprimir os swatches",
   );
   assert.doesNotMatch(
-    dashboardSource.slice(dashboardSource.indexOf("{operationalSettingsOpen ? (")),
+    dashboardSource.slice(dashboardSource.indexOf("{canEditVisual && operationalSettingsOpen ? (")),
     /<OccupancyPaletteSelect|<OccupancyStatusColorsDialog/,
     "os seletores visuais não devem voltar ao painel colapsado",
   );
   const compactToolbarSource = dashboardSource.slice(
     dashboardSource.indexOf('aria-label="Controles da visão de ocupação"'),
-    dashboardSource.indexOf("{operationalSettingsOpen ? ("),
+    dashboardSource.indexOf("{canEditVisual && operationalSettingsOpen ? ("),
   );
   assert.match(
     compactToolbarSource,
@@ -3725,7 +3726,7 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   );
   assert.match(
     compactToolbarSource,
-    /Última atualização às \$\{formatTime\(lastUpdated\)\}/,
+    /Última atualização às \$\{formatTime\(lastUpdated, companyTimeZone\)\}/,
     "somente o horário da última atualização deve permanecer junto das ações",
   );
   assert.match(
@@ -4242,7 +4243,7 @@ test("Análises oferece Ocupação com seletor de intervalo civil aplicado", () 
     />\s*Período da análise|Intervalo inclusivo no dia civil da empresa/,
     "a barra não deve reintroduzir um cabeçalho explicativo que consome outra linha",
   );
-  assert.match(reports, /analysisIncludesToday \? clock : undefined/);
+  assert.match(reports, /analysisIncludesToday \? clock : null/);
   assert.match(reports, /companyDateKey\(clock, companyTimeZone\)/);
   assert.match(reports, /openBucket: definition\.openBucket/);
   assert.match(picker, /<Dialog[\s\S]*?<DialogTrigger[\s\S]*?<DialogContent/);
@@ -4889,8 +4890,8 @@ test("dataset de ocupação muda com empresa, cenário, intervalo e comparação
   assert.match(reports, /if \(windowRetry < 1\) await execute\(windowRetry \+ 1\)/);
   assert.match(
     reports,
-    /function summarizeOccupancyRangeMetrics[\s\S]*?const completeCoverage =[\s\S]*?average: completeCoverage \? latest\.average : null[\s\S]*?current: completeCoverage \? latest\.current : null[\s\S]*?minimum: completeMinimum[\s\S]*?peak: completePeak/,
-    "média e fechamento só podem ser publicados com cobertura integral; mínimo e máximo preservam seus próprios gates",
+    /function summarizeOccupancyRangeMetrics[\s\S]*?const completeCoverage =[\s\S]*?const completeCurrent = completeCoverage && currentValues\.every\(isCertifiedMetricValue\)[\s\S]*?average: completeCoverage \? latest\.average : null[\s\S]*?current: completeCurrent \? latest\.current : null[\s\S]*?minimum: completeMinimum[\s\S]*?peak: completePeak/,
+    "média depende da cobertura AVG/MIN/MAX e fechamento exige também current; ausência de final não pode apagar uma média disponível",
   );
   assert.match(
     reports,
@@ -7689,13 +7690,13 @@ test("falha de uma série de ocupação não derruba o snapshot ao vivo nem libe
   );
   assert.match(
     source,
-    /const hasIncompleteOccupancyCoverage = Object\.values\([\s\S]*?state\.error \|\| state\.warning/,
+    /const hasIncompleteOccupancyCoverage = occupancyDataPlan\.granularities\.some\([\s\S]*?return !state \|\| Boolean\(state.error \|\| state.incomplete\)/,
     "erro ou lacuna de uma série deve permanecer rastreado localmente",
   );
   assert.match(
     source,
     /<ReportExportActions[\s\S]*?disabled=\{[\s\S]*?hasIncompleteOccupancyCoverage/,
-    "dados provisórios podem ser vistos, mas não exportados como certificados",
+    "séries com erros ou lacunas não podem liberar uma exportação completa",
   );
 });
 
@@ -7737,7 +7738,7 @@ test("totais de cenário repetidos precisam ser idênticos no mesmo bucket", () 
   );
 });
 
-test("agregado rejeita soma independente de máximos de várias áreas", () => {
+test("igualdade entre totais e soma das áreas não prova máximos independentes", () => {
   const bucket = "2026-08-07T13:15:00Z";
   const repeatedWrongTotal = {
     scenario_total_avg: 12.04884,
@@ -7765,7 +7766,7 @@ test("agregado rejeita soma independente de máximos de várias áreas", () => {
     },
   ];
 
-  assert.throws(
+  assert.doesNotThrow(
     () =>
       occupancyAggregateValidation.requireOccupancyAggregateRows(
         {
@@ -7776,7 +7777,6 @@ test("agregado rejeita soma independente de máximos de várias áreas", () => {
         "minute",
         "scenario-a",
       ),
-    /soma de AVG\/MIN\/MAX independentes de 2 áreas.*não pode ser certificado/,
   );
 });
 
@@ -9562,7 +9562,7 @@ test("Cenário e Relatórios fixam o eixo depois da consulta horária parcial", 
   ]) {
     const source = readFileSync(resolve(projectRoot, relativePath), "utf8");
     assert.match(source, /to: hourEnd/);
-    assert.match(source, /buildFixedOccupancyHourlyPoints\(definition\.from, points\)/);
+    assert.match(source, /buildFixedOccupancyHourlyPoints\(definition\.from, points, definition\.timeZone\)/);
   }
 });
 
@@ -11980,71 +11980,91 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
     resolve(projectRoot, "components/app/demographics-dashboard.tsx"),
     "utf8",
   );
-  const heatmapColors = chartPalette.monochromeHeatmapPalette("#2563EB");
-  assert.match(source, /HEATMAP_COLORS\s*=\s*monochromeHeatmapPalette\(HEATMAP_BASE_COLOR\)/);
-  assert.match(source, /heatmapLabelColor\(HEATMAP_COLORS, value \/ maximum\)/);
+  const crossing = loadTypeScriptModule("lib/demographics-crossing-options.ts");
+  const presentation = loadTypeScriptModule("lib/demographics-presentation.ts");
+  const demographics = loadTypeScriptModule("lib/demographics.ts");
   const buildAgeEmotionHeatmapOption = loadStandaloneFunction(
     "components/app/demographics-dashboard.tsx",
     "buildAgeEmotionHeatmapOption",
     {
-      HEATMAP_COLORS: heatmapColors,
-      formatDecimal: loadStandaloneFunction(
-        "components/app/demographics-dashboard.tsx",
-        "formatDecimal",
-      ),
-      heatmapPercentageLabel: () => "",
-      heatmapTooltip: () => "",
+      buildDemographicCrossingOption: crossing.buildDemographicCrossingOption,
+      normalizeDemographicPresentation: presentation.normalizeDemographicPresentation,
     },
   );
-  const summary = {
-    crossings: {
-      ageByEmotion: {
-        columns: [{ key: "happy", label: "Feliz" }],
-        rows: [
-          {
-            cells: [{ count: 3, percentage: 75 }],
-            key: "20-29",
-            label: "20–29",
-          },
-        ],
-      },
-    },
+  const summary = demographics.aggregateDemographicBuckets([
+    { emotion: "happy", count: 3 },
+    { emotion: "neutral", count: 1 },
+  ].map((row) => ({ bucket: "2026-09-10T13:00:00Z", camera_id: "fixture-camera", gender: "Woman", age_bucket: "20-29", ...row })));
+  const snapshot = structuredClone(summary);
+  const luminance = (color) => {
+    const channels = echarts.color.parse(color).slice(0, 3).map((channel) => {
+      const value = channel / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
   };
   const expectations = {
     dark: {
       activeBorder: "rgba(248, 250, 252, 0.24)",
-      border: "rgba(226, 232, 240, 0.08)",
+      border: "rgba(226, 232, 240, 0.12)",
+      shadow: "rgba(248, 250, 252, 0.12)",
     },
     light: {
       activeBorder: "rgba(15, 23, 42, 0.20)",
-      border: "rgba(15, 23, 42, 0.06)",
+      border: "rgba(15, 23, 42, 0.09)",
+      shadow: "rgba(15, 23, 42, 0.14)",
     },
   };
 
   for (const theme of ["light", "dark"]) {
     const option = buildAgeEmotionHeatmapOption(summary, theme);
     const series = option.series[0];
+    const heatmapColors = crossing.demographicHeatmapColors("pink-blue", theme);
 
     assert.equal(series.type, "heatmap");
-    assert.equal(series.itemStyle.borderWidth, 1);
+    assert.equal(series.itemStyle.borderWidth, 0.5);
     assert.equal(series.itemStyle.borderColor, expectations[theme].border);
     assert.equal(series.emphasis.itemStyle.borderWidth, 1);
     assert.equal(
       series.emphasis.itemStyle.borderColor,
       expectations[theme].activeBorder,
     );
-    assert.equal(series.emphasis.itemStyle.shadowBlur, undefined);
-    assert.equal(series.emphasis.itemStyle.shadowColor, undefined);
+    assert.equal(series.emphasis.itemStyle.shadowBlur, 4);
+    assert.equal(series.emphasis.itemStyle.shadowColor, expectations[theme].shadow);
     assert.equal(option.aria.decal.show, false);
     assert.equal(option.visualMap.orient, "horizontal");
     assert.deepEqual(option.visualMap.text, ["75%", "0%"]);
     assert.deepEqual(option.visualMap.inRange.color, heatmapColors);
+    assert.equal(option.visualMap.dimension, 2);
+    assert.equal(option.visualMap.min, 0);
+    assert.equal(option.visualMap.max, 75);
+    assert.ok(luminance(heatmapColors[0]) > luminance(heatmapColors.at(-1)), "maior valor deve permanecer mais escuro nos dois temas");
+    heatmapColors.forEach((color, index) => {
+      if (index > 0) assert.ok(luminance(color) <= luminance(heatmapColors[index - 1]), "a escala não pode inverter intensidades intermediárias");
+    });
+    for (const value of series.data) {
+      const raw = summary.crossings.ageByEmotion.rows[value[1]].cells[value[0]];
+      assert.deepEqual(value.slice(2), [raw.percentage, raw.count]);
+      if (value[2] > 0) {
+        const color = crossing.demographicHeatmapLabelColor(heatmapColors, value[2] / option.visualMap.max);
+        const token = color === "#FFFFFF" ? "light" : "dark";
+        assert.match(series.label.formatter({ value }), new RegExp(`^\\{${token}\\|`));
+        assert.equal(series.label.rich[token].color, color);
+        const background = echarts.color.lerp(value[2] / option.visualMap.max, heatmapColors);
+        const contrast = [luminance(color), luminance(background)].sort((a, b) => b - a);
+        assert.ok((contrast[0] + 0.05) / (contrast[1] + 0.05) >= 4.5);
+      } else assert.equal(series.label.formatter({ value }), "");
+    }
+    assert.equal(series.data.reduce((total, value) => total + value[3], 0), 4);
   }
+  assert.deepEqual(summary, snapshot);
+  assert.notDeepEqual(crossing.demographicHeatmapColors("pink-blue", "dark"), crossing.demographicHeatmapColors("pink-blue", "light"), "o helper compartilhado precisa respeitar o tema recebido");
   assert.equal(
     buildAgeEmotionHeatmapOption(summary).series[0].itemStyle.borderColor,
     expectations.light.border,
     "sem tema explícito, o gráfico exportável deve permanecer light",
   );
+  assert.deepEqual(buildAgeEmotionHeatmapOption(summary).visualMap.inRange.color, crossing.demographicHeatmapColors("pink-blue", "light"));
 
   const cardStart = source.indexOf("function AgeEmotionHeatmapCard");
   const cardEnd = source.indexOf("function DemographicChartCard", cardStart);
@@ -17148,7 +17168,7 @@ test("réguas principais preservam controles compactos sem forçar overflow em t
   const occupancyToolbar = toolbarSection(
     occupancySource,
     "Controles da visão de ocupação",
-    "{operationalSettingsOpen ? (",
+    "{canEditVisual && operationalSettingsOpen ? (",
   );
 
   for (const toolbar of [analysisToolbar, realtimeToolbar, occupancyToolbar]) {

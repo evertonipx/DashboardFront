@@ -3,6 +3,18 @@ import {
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
+  companyCalendarDate,
+  companyDateKey,
+  companyTimeZoneHour,
+  companyTimeZoneOffsetLabel,
+  companyZonedDateParts,
+  endOfCompanyTimeZoneHour,
+  listCompanyTimeZoneHourBuckets,
+  startOfCompanyTimeZoneDay,
+  startOfCompanyTimeZoneHour,
+} from "@/lib/company-time-zone";
+import { shiftOccupancyCompanyDay } from "@/lib/occupancy-calendar";
+import {
   occupancyAggregateBucketKey,
   type OccupancyAggregateMetric,
 } from "@/lib/occupancy-aggregate-validation";
@@ -119,19 +131,25 @@ export type OccupancyLiveRaceEntry = {
   value: number | null;
 };
 
-export function buildOccupancyHourlyRange(now: Date, dayCount: number) {
+export function buildOccupancyHourlyRange(
+  now: Date,
+  dayCount: number,
+  timeZone?: string,
+) {
   requireValidDate(now, "instante da comparação");
   if (!Number.isSafeInteger(dayCount) || dayCount < 1 || dayCount > 31) {
     throw new RangeError("A comparação aceita de 1 a 31 dias.");
   }
 
-  const currentHour = startOfAggregateBucket(now, "hour");
-  const to = endOfAggregateBucket(currentHour, "hour");
-  const from = startOfAggregateBucket(now, "day");
-  from.setDate(from.getDate() - (dayCount - 1));
+  const currentHour = startOfOccupancyHour(now, timeZone);
+  const to = endOfOccupancyHour(currentHour, timeZone);
+  const from = timeZone
+    ? shiftOccupancyCompanyDay(now, -(dayCount - 1), timeZone)
+    : startOfAggregateBucket(now, "day");
+  if (!timeZone) from.setDate(from.getDate() - (dayCount - 1));
 
   return {
-    buckets: listOccupancyHourBuckets(from, to),
+    buckets: listOccupancyHourBuckets(from, to, timeZone),
     from,
     to,
   };
@@ -139,42 +157,50 @@ export function buildOccupancyHourlyRange(now: Date, dayCount: number) {
 
 export function buildOccupancyCurrentHourRange(
   now: Date,
+  timeZone?: string,
 ): OccupancyMaximumTrendRange {
   requireValidDate(now, "instante da hora aberta");
-  const from = startOfAggregateBucket(now, "hour");
-  const to = endOfAggregateBucket(from, "hour");
+  const from = startOfOccupancyHour(now, timeZone);
+  const to = endOfOccupancyHour(from, timeZone);
   return { buckets: [from], from, to };
 }
 
 export function buildOccupancyClosedMinuteRange(
   now: Date,
+  timeZone?: string,
 ): OccupancyMaximumTrendRange {
   requireValidDate(now, "instante dos minutos fechados");
-  const from = startOfAggregateBucket(now, "hour");
-  const to = startOfAggregateBucket(now, "minute");
+  const from = startOfOccupancyHour(now, timeZone);
+  const to = new Date(Math.floor(now.getTime() / 60_000) * 60_000);
   const buckets: Date[] = [];
   let cursor = new Date(from);
   while (cursor < to) {
     buckets.push(new Date(cursor));
-    cursor = endOfAggregateBucket(cursor, "minute");
+    cursor = new Date(cursor.getTime() + 60_000);
   }
   return { buckets, from, to };
 }
 
 export function buildOccupancyMaximumTrendRanges(
   now: Date,
+  timeZone?: string,
 ): OccupancyMaximumTrendRanges {
   requireValidDate(now, "instante dos máximos por cenário");
 
-  const currentHour = startOfAggregateBucket(now, "hour");
-  const hourlyFrom = startOfAggregateBucket(now, "day");
-  const hourlyTo = endOfAggregateBucket(currentHour, "hour");
-  const currentMonth = startOfAggregateBucket(now, "month");
+  const currentHour = startOfOccupancyHour(now, timeZone);
+  const hourlyFrom = timeZone
+    ? startOfCompanyTimeZoneDay(now, timeZone)
+    : startOfAggregateBucket(now, "day");
+  const hourlyTo = endOfOccupancyHour(currentHour, timeZone);
+  // Month/year buckets remain floating civil dates for the aggregate API.
+  const currentMonth = timeZone
+    ? companyCalendarDate(now, timeZone, "month")
+    : startOfAggregateBucket(now, "month");
   const monthlyTo = endOfAggregateBucket(currentMonth, "month");
   const monthlyFrom = new Date(currentMonth);
   monthlyFrom.setMonth(monthlyFrom.getMonth() - 11);
-  const annualFrom = new Date(now.getFullYear() - 4, 0, 1);
-  const annualTo = new Date(now.getFullYear() + 1, 0, 1);
+  const annualFrom = new Date(currentMonth.getFullYear() - 3, 0, 1);
+  const annualTo = new Date(currentMonth.getFullYear() + 1, 0, 1);
 
   return {
     annual: {
@@ -183,7 +209,7 @@ export function buildOccupancyMaximumTrendRanges(
       to: annualTo,
     },
     hourly: {
-      buckets: listOccupancyHourBuckets(hourlyFrom, hourlyTo),
+      buckets: listOccupancyHourBuckets(hourlyFrom, hourlyTo, timeZone),
       from: hourlyFrom,
       to: hourlyTo,
     },
@@ -219,6 +245,7 @@ export function buildOccupancyFixedHourlyPeakValues({
   openMetric,
   openPeak,
   openPeakMode = "replace",
+  timeZone,
 }: {
   buckets: readonly Date[];
   metrics: ReadonlyMap<number, OccupancyAggregateMetric>;
@@ -226,6 +253,7 @@ export function buildOccupancyFixedHourlyPeakValues({
   openMetric?: OccupancyAggregateMetric | null;
   openPeak?: number | null;
   openPeakMode?: "maximum" | "replace";
+  timeZone?: string;
 }) {
   if (
     openPeak !== undefined &&
@@ -276,7 +304,7 @@ export function buildOccupancyFixedHourlyPeakValues({
 
   const expectedByCivilHour = new Map<number, Date[]>();
   bucketsByKey.forEach((bucket) => {
-    const hour = bucket.getHours();
+    const hour = timeZone ? companyTimeZoneHour(bucket, timeZone) : bucket.getHours();
     const expected = expectedByCivilHour.get(hour) ?? [];
     expected.push(bucket);
     expectedByCivilHour.set(hour, expected);
@@ -309,6 +337,7 @@ export function buildOccupancyAnnualMaximumValues({
   livePeak,
   metrics,
   monthlyBuckets,
+  timeZone,
 }: {
   annualBuckets: readonly Date[];
   coverageFrom?: Date | null;
@@ -316,6 +345,7 @@ export function buildOccupancyAnnualMaximumValues({
   livePeak?: number | null;
   metrics: ReadonlyMap<number, OccupancyAggregateMetric>;
   monthlyBuckets: readonly Date[];
+  timeZone?: string;
 }) {
   return buildOccupancyAnnualMaximumPoints({
     annualBuckets,
@@ -324,6 +354,7 @@ export function buildOccupancyAnnualMaximumValues({
     livePeak,
     metrics,
     monthlyBuckets,
+    timeZone,
   }).map((point) => point.value);
 }
 
@@ -334,6 +365,7 @@ export function buildOccupancyAnnualMaximumPoints({
   livePeak,
   metrics,
   monthlyBuckets,
+  timeZone,
 }: {
   annualBuckets: readonly Date[];
   coverageFrom?: Date | null;
@@ -341,6 +373,7 @@ export function buildOccupancyAnnualMaximumPoints({
   livePeak?: number | null;
   metrics: ReadonlyMap<number, OccupancyAggregateMetric>;
   monthlyBuckets: readonly Date[];
+  timeZone?: string;
 }): OccupancyAnnualMaximumPoint[] {
   annualBuckets.forEach((bucket) =>
     requireValidDate(bucket, "bucket anual exibido"),
@@ -363,10 +396,17 @@ export function buildOccupancyAnnualMaximumPoints({
   }
 
   const coverageMonth = coverageFrom
-    ? startOfAggregateBucket(coverageFrom, "month")
+    ? timeZone
+      ? companyCalendarDate(coverageFrom, timeZone, "month")
+      : startOfAggregateBucket(coverageFrom, "month")
     : null;
+  const liveYear = liveBucket
+    ? timeZone
+      ? companyZonedDateParts(liveBucket, timeZone).year
+      : liveBucket.getFullYear()
+    : undefined;
   const openYear =
-    liveBucket?.getFullYear() ?? monthlyBuckets.at(-1)?.getFullYear();
+    liveYear ?? monthlyBuckets.at(-1)?.getFullYear();
 
   return annualBuckets.map((yearBucket) => {
     const year = yearBucket.getFullYear();
@@ -382,7 +422,7 @@ export function buildOccupancyAnnualMaximumPoints({
       return metric ? [metric.peak] : [];
     });
     if (
-      liveBucket?.getFullYear() === year &&
+      liveYear === year &&
       livePeak !== undefined &&
       livePeak !== null
     ) {
@@ -406,10 +446,11 @@ export function buildOccupancyAnnualMaximumPoints({
 export function occupancyMaximumTrendBucketLabel(
   bucket: Date,
   granularity: "hour" | "month" | "year",
+  timeZone?: string,
 ) {
   requireValidDate(bucket, "bucket do máximo por cenário");
   if (granularity === "hour") {
-    return `${String(bucket.getHours()).padStart(2, "0")}h`;
+    return `${String(timeZone ? companyTimeZoneHour(bucket, timeZone) : bucket.getHours()).padStart(2, "0")}h`;
   }
   if (granularity === "month") {
     return `${OCCUPANCY_MONTH_SHORT_LABELS[bucket.getMonth()]}/${String(
@@ -422,9 +463,10 @@ export function occupancyMaximumTrendBucketLabel(
 export function occupancyMaximumTrendBucketLabels(
   buckets: readonly Date[],
   granularity: "hour" | "month" | "year",
+  timeZone?: string,
 ) {
   const labels = buckets.map((bucket) =>
-    occupancyMaximumTrendBucketLabel(bucket, granularity),
+    occupancyMaximumTrendBucketLabel(bucket, granularity, timeZone),
   );
   if (granularity !== "hour") return labels;
 
@@ -434,12 +476,13 @@ export function occupancyMaximumTrendBucketLabels(
   );
   return labels.map((label, index) =>
     (occurrences.get(label) ?? 0) > 1
-      ? `${label} (${utcOffsetLabel(buckets[index])})`
+      ? `${label} (${timeZone ? companyTimeZoneOffsetLabel(buckets[index], timeZone) : utcOffsetLabel(buckets[index])})`
       : label,
   );
 }
 
-export function listOccupancyHourBuckets(from: Date, to: Date) {
+export function listOccupancyHourBuckets(from: Date, to: Date, timeZone?: string) {
+  if (timeZone) return listCompanyTimeZoneHourBuckets(from, to, timeZone);
   requireValidDate(from, "início da série horária");
   requireValidDate(to, "fim da série horária");
   if (
@@ -531,6 +574,7 @@ export function classifyOccupancyTotal(
 export function occupancySnapshotTotalWithinHour(
   snapshot: Pick<OccupancyScenarioSnapshot, "asOf" | "total">,
   bucket: Date,
+  timeZone?: string,
 ) {
   requireValidDate(bucket, "bucket horário do snapshot");
   if (
@@ -542,7 +586,7 @@ export function occupancySnapshotTotalWithinHour(
     return undefined;
   }
   const asOf = new Date(snapshot.asOf);
-  const to = endOfAggregateBucket(bucket, "hour");
+  const to = endOfOccupancyHour(bucket, timeZone);
   if (Number.isNaN(asOf.getTime()) || asOf < bucket || asOf >= to) {
     return undefined;
   }
@@ -628,15 +672,17 @@ export function buildDaysHoursOccupancyCells({
   buckets,
   metric,
   scenario,
+  timeZone,
 }: {
   buckets: readonly Date[];
   metric: OccupancyComparisonMetricKey;
   scenario: OccupancyScenarioHourlySeries;
+  timeZone?: string;
 }) {
   const dayKeys: string[] = [];
   const dayIndexByKey = new Map<string, number>();
   buckets.forEach((bucket) => {
-    const key = localDateKey(bucket);
+    const key = localDateKey(bucket, timeZone);
     if (dayIndexByKey.has(key)) return;
     dayIndexByKey.set(key, dayKeys.length);
     dayKeys.push(key);
@@ -648,8 +694,8 @@ export function buildDaysHoursOccupancyCells({
       bucket: new Date(bucket),
       scenarioId: scenario.scenarioId,
       value: occupancyMetricValue(scenario.metrics.get(key), metric),
-      x: dayIndexByKey.get(localDateKey(bucket))!,
-      y: bucket.getHours(),
+      x: dayIndexByKey.get(localDateKey(bucket, timeZone))!,
+      y: timeZone ? companyTimeZoneHour(bucket, timeZone) : bucket.getHours(),
     };
   });
 
@@ -661,17 +707,19 @@ export function buildScenariosHoursOccupancyCells({
   dateKey,
   metric,
   series,
+  timeZone,
 }: {
   buckets: readonly Date[];
   dateKey: string;
   metric: OccupancyComparisonMetricKey;
   series: readonly OccupancyScenarioHourlySeries[];
+  timeZone?: string;
 }) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
     throw new RangeError("A data do mapa de calor é inválida.");
   }
   const selectedBuckets = buckets.filter(
-    (bucket) => localDateKey(bucket) === dateKey,
+    (bucket) => localDateKey(bucket, timeZone) === dateKey,
   );
   const cells = series.flatMap((scenario, scenarioIndex) =>
     selectedBuckets.map((bucket): OccupancyHeatmapCell => {
@@ -681,7 +729,7 @@ export function buildScenariosHoursOccupancyCells({
         scenarioId: scenario.scenarioId,
         value: occupancyMetricValue(scenario.metrics.get(key), metric),
         x: scenarioIndex,
-        y: bucket.getHours(),
+        y: timeZone ? companyTimeZoneHour(bucket, timeZone) : bucket.getHours(),
       };
     }),
   );
@@ -792,13 +840,26 @@ export function normalizeOccupancyCapacity(
   return null;
 }
 
-export function localDateKey(date: Date) {
+export function localDateKey(date: Date, timeZone?: string) {
   requireValidDate(date, "data local");
+  if (timeZone) return companyDateKey(date, timeZone);
   return [
     String(date.getFullYear()).padStart(4, "0"),
     String(date.getMonth() + 1).padStart(2, "0"),
     String(date.getDate()).padStart(2, "0"),
   ].join("-");
+}
+
+function startOfOccupancyHour(date: Date, timeZone?: string) {
+  return timeZone
+    ? startOfCompanyTimeZoneHour(date, timeZone)
+    : startOfAggregateBucket(date, "hour");
+}
+
+function endOfOccupancyHour(date: Date, timeZone?: string) {
+  return timeZone
+    ? endOfCompanyTimeZoneHour(date, timeZone)
+    : endOfAggregateBucket(date, "hour");
 }
 
 function occupancyHexCoordinates(

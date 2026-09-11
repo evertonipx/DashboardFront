@@ -100,37 +100,9 @@ export function buildDemographicTemporalPlan(
   summary: DemographicAggregation,
   options: DemographicTemporalPlanOptions,
 ): DemographicTemporalPlan {
-  const clock = zonedClock(options.timeZone);
-  const from = instant(options.from);
-  const to = instant(options.to);
-  const now = options.now === undefined ? Date.now() : instant(options.now);
-  if (from >= to) throw new RangeError("O início do período demográfico deve ser anterior ao fim.");
-  const maximum = options.maxPoints ?? 366;
-  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 10_000) {
-    throw new RangeError("O limite temporal deve estar entre 1 e 10000 pontos.");
-  }
+  const { clock, from, to, now, firstDay, lastDay, interval, boundaries } = resolveTemporalPlanWindow(options);
   if (summary.temporal && summary.temporal.timeZone !== clock.timeZone) {
     throw new Error("O fuso dos dados demográficos difere do fuso do período.");
-  }
-  const firstDay = clock.parts(from).dateKey;
-  const lastDay = clock.parts(to - 1).dateKey;
-  const civilDays = Math.round((Date.parse(`${lastDay}T00:00:00Z`) - Date.parse(`${firstDay}T00:00:00Z`)) / DAY_MS) + 1;
-  let interval: DemographicTemporalInterval = options.interval && options.interval !== "auto"
-    ? options.interval
-    : civilDays <= 7 ? "hour" : civilDays <= 366 ? "day" : "month";
-  let boundaries = intervalBoundaries(from, to, interval, clock, maximum);
-  if (boundaries.length > maximum && interval === "hour") {
-    interval = "day";
-    boundaries = intervalBoundaries(from, to, interval, clock, maximum);
-  }
-  if (boundaries.length > maximum && interval === "day") {
-    interval = "month";
-    boundaries = intervalBoundaries(from, to, interval, clock, maximum);
-  }
-  if (boundaries.length > maximum) {
-    const stride = Math.ceil(boundaries.length / maximum);
-    boundaries = boundaries.filter((_, index) => index % stride === 0)
-      .map((point, index, selected) => ({ ...point, to: selected[index + 1]?.from ?? boundaries[boundaries.length - 1].to }));
   }
   const totals: Array<DemographicTemporalBin | undefined> = boundaries.map(() => undefined);
   const profile: Array<DemographicTemporalBin | undefined> = Array.from({ length: 24 });
@@ -171,6 +143,50 @@ export function buildDemographicTemporalPlan(
       label: `${String(hour).padStart(2, "0")}h`,
     })),
   };
+}
+
+/** The cache follows the effective resolution, not a requested resolution
+ * that was promoted. A closed period does not change as wall-clock time moves. */
+export function resolveDemographicTemporalPlanCacheKey(options: DemographicTemporalPlanOptions) {
+  const { clock, from, to, now, interval, maximum } = resolveTemporalPlanWindow(options);
+  return JSON.stringify([clock.timeZone, from, to, now, interval, maximum]);
+}
+
+function resolveTemporalPlanWindow(options: DemographicTemporalPlanOptions) {
+  const clock = zonedClock(options.timeZone);
+  const from = instant(options.from);
+  const to = instant(options.to);
+  const now = Math.min(options.now === undefined ? Date.now() : instant(options.now), to);
+  if (from >= to) throw new RangeError("O início do período demográfico deve ser anterior ao fim.");
+  const maximum = options.maxPoints ?? 366;
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 10_000) {
+    throw new RangeError("O limite temporal deve estar entre 1 e 10000 pontos.");
+  }
+  const firstDay = clock.parts(from).dateKey;
+  const lastDay = clock.parts(to - 1).dateKey;
+  const civilDays = Math.round((Date.parse(`${lastDay}T00:00:00Z`) - Date.parse(`${firstDay}T00:00:00Z`)) / DAY_MS) + 1;
+  let interval: DemographicTemporalInterval = options.interval && options.interval !== "auto"
+    ? options.interval
+    : civilDays <= 7 ? "hour" : civilDays <= 366 ? "day" : "month";
+  // Civil-hour occurrences are never longer than one real hour. This lower
+  // bound proves an hourly request exceeds the cap without enumerating 745
+  // throw-away boundaries. Partial/DST hours still use the exact path below.
+  if (interval === "hour" && to - from > maximum * HOUR_MS) interval = "day";
+  let boundaries = intervalBoundaries(from, to, interval, clock, maximum);
+  if (boundaries.length > maximum && interval === "hour") {
+    interval = "day";
+    boundaries = intervalBoundaries(from, to, interval, clock, maximum);
+  }
+  if (boundaries.length > maximum && interval === "day") {
+    interval = "month";
+    boundaries = intervalBoundaries(from, to, interval, clock, maximum);
+  }
+  if (boundaries.length > maximum) {
+    const stride = Math.ceil(boundaries.length / maximum);
+    boundaries = boundaries.filter((_, index) => index % stride === 0)
+      .map((point, index, selected) => ({ ...point, to: selected[index + 1]?.from ?? boundaries[boundaries.length - 1].to }));
+  }
+  return { clock, from, to, now, firstDay, lastDay, interval, boundaries, maximum };
 }
 
 type Clock = ReturnType<typeof createZonedClock>;

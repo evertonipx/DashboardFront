@@ -10,7 +10,7 @@ const ts = require("typescript");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const modules = new Map();
 const { aggregateDemographicBuckets: aggregate, summarizeDemographicBuckets: summarize, combineDemographicAggregations: combine } = load("lib/demographics.ts");
-const { buildDemographicTemporalPlan: plan } = load("lib/demographics-temporal.ts");
+const { buildDemographicTemporalPlan: plan, resolveDemographicTemporalPlanCacheKey: cacheKey } = load("lib/demographics-temporal.ts");
 const zone = "America/Sao_Paulo";
 const day = { from: "2026-09-10T03:00:00Z", to: "2026-09-11T03:00:00Z", now: "2026-09-10T15:30:00Z", timeZone: zone };
 
@@ -269,6 +269,30 @@ test("plano anual frio usa milhares, não dezenas de milhares, de formatações;
     assert.ok(formatted - before < 400, `fronteiras repetidas: ${formatted - before} formatações`);
     context.diagnostic(`Plano anual frio: ${elapsed.toFixed(1)}ms; reuso hour→day: ${formatted - before} formatações.`);
   } finally { Intl.DateTimeFormat = NativeDateTimeFormat; }
+});
+
+test("chave do plano usa resolução efetiva, limites reais, fuso e corte aberto ou fechado", () => {
+  const annual = { ...day, from: "2025-09-11T03:00:00Z", to: "2026-09-11T03:00:00Z", now: "2026-10-01T03:00:00Z", maxPoints: 744 };
+  assert.equal(cacheKey({ ...annual, interval: "auto" }), cacheKey({ ...annual, interval: "hour" }));
+  assert.equal(cacheKey({ ...annual, interval: "hour" }), cacheKey({ ...annual, interval: "day" }));
+  assert.equal(cacheKey(annual), cacheKey({ ...annual, now: "2027-01-01T00:00:00Z" }));
+  assert.notEqual(cacheKey(annual), cacheKey({ ...annual, now: "2026-09-10T03:00:00Z" }));
+  assert.notEqual(cacheKey(annual), cacheKey({ ...annual, from: "2025-09-12T03:00:00Z" }));
+  assert.notEqual(cacheKey(annual), cacheKey({ ...annual, timeZone: "America/New_York" }));
+  assert.notEqual(cacheKey(annual), cacheKey({ ...annual, maxPoints: 12 }));
+  assert.notEqual(cacheKey({ ...day, interval: "hour" }), cacheKey({ ...day, interval: "day" }));
+  assert.equal(cacheKey(day), cacheKey({ ...day, from: new Date(day.from), to: new Date(day.to), now: new Date(day.now) }));
+});
+
+test("corte posterior ao fim mantém dados e futuro idênticos, inclusive em dias DST", () => {
+  for (const window of [
+    { from: "2026-03-08T05:00:00Z", to: "2026-03-09T04:00:00Z" },
+    { from: "2026-11-01T04:00:00Z", to: "2026-11-02T05:00:00Z" },
+  ]) {
+    const source = aggregate([row(window.from, 3)], { timeZone: "America/New_York" });
+    const options = { ...window, timeZone: "America/New_York", interval: "hour" };
+    assert.deepEqual(plan(source, { ...options, now: window.to }), plan(source, { ...options, now: "2027-01-01T00:00:00Z" }));
+  }
 });
 
 function freeze(value) {

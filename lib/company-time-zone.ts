@@ -41,17 +41,25 @@ export type CompanyZonedDateParts = {
 
 const zonedPartsFormatters = new Map<string, Intl.DateTimeFormat>();
 const dayStartCache = new Map<string, number>();
+const canonicalTimeZones = new Map<string, string | null>();
+const hourStartCache = new Map<string, number>();
+const hourEndCache = new Map<string, number>();
 
 export function canonicalCompanyTimeZone(value: unknown) {
   if (typeof value !== "string" || !value.trim()) return null;
-
+  const key = value.trim();
+  if (canonicalTimeZones.has(key)) return canonicalTimeZones.get(key)!;
+  let canonical: string | null;
   try {
-    return new Intl.DateTimeFormat("en-US", {
-      timeZone: value.trim(),
+    canonical = new Intl.DateTimeFormat("en-US", {
+      timeZone: key,
     }).resolvedOptions().timeZone;
   } catch {
-    return null;
+    canonical = null;
   }
+  if (canonicalTimeZones.size >= 128) canonicalTimeZones.clear();
+  canonicalTimeZones.set(key, canonical);
+  return canonical;
 }
 
 export function resolveCompanyTimeZone(
@@ -143,10 +151,15 @@ export function startOfCompanyTimeZoneHour(date: Date, timeZone: string) {
     Math.floor(date.getTime() / 60_000) * 60_000,
   );
   const signature = companyHourSignature(cursor, canonicalTimeZone);
+  const cacheKey = `${canonicalTimeZone}|${signature}`;
+  const cached = hourStartCache.get(cacheKey);
+  if (cached !== undefined) return new Date(cached);
 
   for (let minute = 0; minute <= 3 * 60; minute += 1) {
     const previous = new Date(cursor.getTime() - 60_000);
     if (companyHourSignature(previous, canonicalTimeZone) !== signature) {
+      if (hourStartCache.size >= 4096) hourStartCache.clear();
+      hourStartCache.set(cacheKey, cursor.getTime());
       return cursor;
     }
     cursor = previous;
@@ -159,10 +172,15 @@ export function endOfCompanyTimeZoneHour(date: Date, timeZone: string) {
   const canonicalTimeZone = requireCompanyTimeZone(timeZone);
   const start = startOfCompanyTimeZoneHour(date, canonicalTimeZone);
   const signature = companyHourSignature(start, canonicalTimeZone);
+  const cacheKey = `${canonicalTimeZone}|${signature}`;
+  const cached = hourEndCache.get(cacheKey);
+  if (cached !== undefined) return new Date(cached);
 
   for (let minute = 1; minute <= 3 * 60; minute += 1) {
     const candidate = new Date(start.getTime() + minute * 60_000);
     if (companyHourSignature(candidate, canonicalTimeZone) !== signature) {
+      if (hourEndCache.size >= 4096) hourEndCache.clear();
+      hourEndCache.set(cacheKey, candidate.getTime());
       return candidate;
     }
   }

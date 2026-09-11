@@ -246,7 +246,7 @@ function buildDailyProfileOption({ model, scenarioNames, theme, widgetColor = "#
     media: [
       { query: { maxWidth: 950 }, option: { series: STATE_KEYS.map((key) => ({ id: `duration-profile-${key}`, label: { formatter: (params: unknown) => dailyProfileLabel(params, true) } })) } },
       { query: { maxWidth: 460 }, option: { grid: { bottom: 70 }, legend: { itemGap: 8, textStyle: { fontSize: 9 } }, xAxis: { axisLabel: { fontSize: 9 } } } },
-      { query: { maxHeight: 230 }, option: { grid: { top: 4, bottom: 50 }, yAxis: { interval: 50 }, legend: { textStyle: { fontSize: 9 }, itemGap: 6 } } },
+      { query: { maxHeight: 230 }, option: { grid: { top: 6, bottom: 50 }, yAxis: { interval: 50 }, legend: { textStyle: { fontSize: 9 }, itemGap: 6 } } },
     ],
   };
 }

@@ -1,6 +1,7 @@
 import type { EnterpriseChartOption } from "@/components/app/echart";
 import { heatmapLabelColor } from "@/lib/chart-palette";
 import type { DemographicDistributionItem } from "@/lib/demographics";
+import { visibleDemographicDistribution } from "@/lib/demographics-visible-categories";
 import {
   demographicCategoryColor,
   demographicCategoryLabel,
@@ -25,14 +26,14 @@ const percentFormat = new Intl.NumberFormat("pt-BR", {
 });
 const countFormat = new Intl.NumberFormat("pt-BR");
 
-/** Changes presentation only; the supplied counts and total percentages win. */
+/** Gender excludes unclassified detections; other dimensions retain their base. */
 export function buildDemographicDistributionOption(
   items: readonly DemographicDistributionItem<string>[],
   settings: DemographicPresentation,
   context: DistributionContext,
 ): EnterpriseChartOption {
   const presentation = normalizeDemographicPresentation(settings, context.dimension);
-  const entries: PresentedItem[] = items.map((item, originalIndex) => ({
+  const entries: PresentedItem[] = visibleDemographicDistribution(items, context.dimension).map((item, originalIndex) => ({
     ...item,
     color: demographicCategoryColor(
       item.key, originalIndex, presentation.palette, context.dimension,
@@ -55,11 +56,13 @@ export function buildDemographicDistributionOption(
     aria: {
       enabled: true,
       decal: { show: false },
-      description: "Distribuição demográfica. Os percentuais são a participação de cada categoria no total de detecções classificadas, não pessoas únicas.",
+      description: context.dimension === "gender"
+        ? "Distribuição entre gêneros identificados: Mulher e Homem. Detecções, não pessoas únicas."
+        : "Distribuição demográfica. Os percentuais são a participação de cada categoria no total de detecções classificadas, não pessoas únicas.",
     },
     color: entries.map((item) => item.color),
     textStyle: { color: textColor },
-    tooltip: { formatter: distributionTooltip, trigger: "item" },
+    tooltip: { formatter: (parameters: unknown) => distributionTooltip(parameters, context.dimension === "gender"), trigger: "item" },
   };
   if (presentation.type === "bar") {
     return buildBars(entries, presentation, base, textColor);
@@ -72,7 +75,7 @@ export function buildDemographicDistributionOption(
     formatter: (name: string) => {
       const entry = entries.find((item) => item.name === name);
       const percentage = positivePercentage(entry?.percentage);
-      return percentage ? `${name} · ${percentage}` : name;
+      return presentation.type === "stacked" && percentage ? `${name} · ${percentage}` : name;
     },
     icon: "roundRect",
     itemGap: 12,
@@ -149,7 +152,7 @@ function buildBars(
     },
     // A bar category is identified by its axis, not by a one-series legend.
     legend: { show: false },
-    tooltip: { axisPointer: { type: "none" }, formatter: distributionTooltip, trigger: "axis" },
+    tooltip: { ...base.tooltip, axisPointer: { type: "none" }, trigger: "axis" },
     xAxis: horizontal ? valueAxis : categoryAxis,
     yAxis: horizontal ? categoryAxis : valueAxis,
     series: [{
@@ -238,6 +241,7 @@ function buildCircular(
     legend,
     series: [{
       avoidLabelOverlap: true,
+      labelLayout: { hideOverlap: false },
       bottom: legendHeight + 4,
       center: ["50%", half ? "75%" : "50%"],
       clockwise: true,
@@ -254,6 +258,7 @@ function buildCircular(
         edgeDistance: 8,
         fontSize: 11,
         fontWeight: 600,
+        position: "outside",
         formatter: (parameters: unknown) => {
           const percentage = percentageLabel(parameters);
           if (!percentage) return "";
@@ -276,7 +281,7 @@ function buildCircular(
   } as EnterpriseChartOption;
 }
 
-/** Compact cards read their exact percentages in a fixed-width legend grid. */
+/** Stacked compact cards keep percentages in their aligned legend grid. */
 function responsiveDistributionOption(
   option: EnterpriseChartOption,
   entries: PresentedItem[],
@@ -288,6 +293,9 @@ function responsiveDistributionOption(
   // A caller that supplies its own legend must retain the chart's labels.
   if (!showLegend) return option;
   const stacked = settings.type === "stacked";
+  // Circular labels are fitted from real canvas dimensions by the card and
+  // export renderer. A media fallback must never hide their percentages.
+  if (!stacked) return option;
   const legendHeight = Math.ceil(entries.length / 3) * 24;
   const compactLegend = {
     ...legend,
@@ -368,10 +376,7 @@ function chartDatum(item: PresentedItem, value: number) {
   };
 }
 
-/** Fit compositions to the actual canvas, not the card's outer dimensions.
- * Names, swatches and canonical percentages share one aligned legend; tiny
- * sectors never have to compete with a second set of outside labels.
- */
+/** Fit compositions to the actual canvas, not the card's outer dimensions. */
 export function fitDemographicCompositionOption(
   option: EnterpriseChartOption,
   size: { width: number; height: number },
@@ -385,6 +390,7 @@ export function fitDemographicCompositionOption(
     size.width <= 0 || size.height <= 0) return option;
   const entries = series.flatMap((item) => Array.isArray(item.data) ? item.data : []) as ReturnType<typeof chartDatum>[];
   if (!entries.length) return option;
+  if (circular) return fitCircularComposition(option, series[0], entries, size);
 
   const width = Math.floor(size.width);
   const height = Math.floor(size.height);
@@ -503,6 +509,218 @@ export function fitDemographicCompositionOption(
   } as EnterpriseChartOption;
 }
 
+type CircularDatum = ReturnType<typeof chartDatum>;
+
+/** Percentages belong to their sectors. The legend identifies categories only. */
+function fitCircularComposition(
+  option: EnterpriseChartOption,
+  series: Record<string, unknown>,
+  entries: CircularDatum[],
+  size: { width: number; height: number },
+): EnterpriseChartOption {
+  const width = Math.floor(size.width);
+  const height = Math.floor(size.height);
+  const compact = height < 180 || width < 360;
+  const fontSize = compact ? 10 : 11;
+  const lineHeight = compact ? 12 : 16;
+  const iconWidth = compact ? 8 : 9;
+  const nameWidth = compact ? 80 : 110;
+  const itemWidth = iconWidth + 5 + nameWidth;
+  const gap = compact ? 8 : 20;
+  const inset = 4;
+  const originalLegend = option.legend!;
+  const textColor = String(originalLegend.textStyle?.color ?? "#526477");
+  const half = series.startAngle === 180 && series.endAngle === 0;
+  const rose = Boolean(series.roseType);
+  const ring = Array.isArray(series.radius) && series.radius[0] !== 0;
+  const sum = entries.reduce((total, entry) => total + Math.max(0, entry.count), 0);
+  const maximum = Math.max(0, ...entries.map((entry) => entry.count));
+  const gutter = Math.ceil(Math.max(0, ...entries.map((entry) =>
+    percentageTextWidth(positivePercentage(entry.percentage), fontSize))) + 7);
+  const sideGap = Math.max(0, Math.min(compact ? 1 : 5,
+    Math.floor((height - 4 - entries.length * lineHeight) / Math.max(1, entries.length - 1))));
+  const sideHeight = entries.length * lineHeight + (entries.length - 1) * sideGap;
+  const columns = Math.max(1, Math.min(3, Math.floor((width - inset * 2) / 95)));
+  const columnGap = compact ? 4 : 10;
+  const rows = Math.ceil(entries.length / columns);
+  const cellWidth = Math.floor((width - inset * 2 - columnGap * (columns - 1)) / columns);
+  const bottomHeight = rows * lineHeight + (rows - 1) * columnGap;
+
+  function geometry(radius: number) {
+    const inner = ring ? radius * (rose ? 0.14 : 0.48) : 0;
+    let angle = half ? -Math.PI : -Math.PI / 2;
+    return entries.map((entry) => {
+      const start = angle;
+      angle += sum > 0 ? Math.max(0, entry.count) / sum * (half ? Math.PI : Math.PI * 2) : 0;
+      const outer = rose && maximum > 0 ? inner + (radius - inner) * entry.count / maximum : radius;
+      const percentage = positivePercentage(entry.percentage);
+      const inside = Boolean(percentage) && entry.count > 0 && percentageFitsSector(
+        start, angle, inner, outer, percentageTextWidth(percentage, fontSize), fontSize + 3,
+      );
+      return { inside, start, end: angle, inner, outer, percentage };
+    });
+  }
+
+  function candidate(plotWidth: number, plotHeight: number) {
+    // First try the full canvas. Only reserve callout gutters when a value
+    // cannot fit inside; re-evaluate after the resulting radius changes.
+    let radius = Math.max(1, Math.min(180, plotWidth / 2 - 2, plotHeight / (half ? 1 : 2) - 2));
+    let slices = geometry(radius);
+    const external = slices.some((slice) => slice.percentage && !slice.inside);
+    if (external) {
+      radius = Math.max(1, Math.min(180, (plotWidth - gutter * 2) / 2,
+        (plotHeight - lineHeight * 2) / (half ? 1 : 2)));
+      slices = geometry(radius);
+    }
+    return { radius, slices, external, plotWidth, plotHeight };
+  }
+
+  const side = candidate(width - inset * 2 - itemWidth - gap, height - inset * 2);
+  const bottom = candidate(width - inset * 2, height - inset * 2 - gap - bottomHeight);
+  const oneSided = width < 240 && height < 180 && entries.length > 5;
+  const bottomExternalRows = Math.max(...[-1, 1].map((direction) => bottom.slices.filter((slice) =>
+    slice.percentage && !slice.inside && (Math.cos((slice.start + slice.end) / 2) < 0 ? -1 : 1) === direction).length));
+  const below = !oneSided && bottom.plotHeight >= bottomExternalRows * lineHeight &&
+    (bottom.radius > side.radius * 1.2 || (sideHeight > height - 4 && bottom.radius > side.radius));
+  const layout = below ? bottom : side;
+  if (oneSided) {
+    // In the narrowest cards the external values share the legend's rows.
+    // One callout column leaves a readable circle instead of a tiny dot.
+    layout.radius = Math.max(1, Math.min(180, (layout.plotWidth - gutter) / 2,
+      (layout.plotHeight - lineHeight * 2) / (half ? 1 : 2)));
+    layout.slices = geometry(layout.radius);
+  }
+  const plotWidth = Math.max(1, Math.min(layout.plotWidth,
+    layout.radius * 2 + (oneSided ? gutter : layout.external ? gutter * 2 : 4)));
+  const plotHeight = Math.max(1, layout.plotHeight);
+  const plotX = below ? (width - plotWidth) / 2 : (width - plotWidth - gap - itemWidth) / 2;
+  const plotY = inset;
+  const cx = plotX + (oneSided ? layout.radius : plotWidth / 2);
+  const cy = plotY + plotHeight / 2 + (half ? layout.radius / 2 : 0);
+  const names = new Map(entries.map((entry) => [entry.name, entry]));
+  return {
+    ...option,
+    media: [],
+    legend: {
+      ...originalLegend,
+      align: "left", bottom: "auto", right: "auto",
+      left: below ? inset : plotX + plotWidth + gap,
+      top: below ? plotY + plotHeight + gap : Math.max(2, (height - sideHeight) / 2),
+      width: below ? width - inset * 2 : itemWidth,
+      height: undefined,
+      orient: below ? "horizontal" : "vertical",
+      itemGap: below ? columnGap : sideGap,
+      itemWidth: iconWidth, itemHeight: iconWidth, selectedMode: false,
+      formatter: (name: string) => {
+        const caption = compact && names.get(name)?.key === "unknown"
+          ? name.replace("Não identificado", "Não ident.") : name;
+        return `{category|${caption.replace(/[{}|]/g, "")}}`;
+      },
+      textStyle: {
+        color: textColor, fontSize, lineHeight, width: undefined, overflow: "none",
+        rich: { category: {
+          color: textColor, fontSize, lineHeight, align: "left",
+          width: below ? cellWidth - iconWidth - 5 : nameWidth,
+        } },
+      },
+    },
+    series: [{
+      ...series,
+      left: plotX, top: plotY, right: "auto", bottom: "auto",
+      width: plotWidth, height: plotHeight,
+      center: [cx - plotX, cy - plotY],
+      radius: [layout.slices[0]?.inner ?? 0, layout.radius],
+      avoidLabelOverlap: true,
+      minShowLabelAngle: 0,
+      labelLayout: oneSided ? (parameters: { dataIndex: number; labelRect: { width: number } }) => {
+        const slice = layout.slices[parameters.dataIndex];
+        if (!slice || slice.inside || !slice.percentage) return { hideOverlap: false };
+        const middle = (slice.start + slice.end) / 2;
+        const labelX = plotX + plotWidth;
+        const labelY = Math.max(2, (height - sideHeight) / 2) +
+          parameters.dataIndex * (lineHeight + sideGap) + lineHeight / 2;
+        const lineEnd = labelX - parameters.labelRect.width - 3;
+        return {
+          hideOverlap: false, x: labelX, y: labelY, align: "right", verticalAlign: "middle",
+          labelLinePoints: [
+            [cx + Math.cos(middle) * slice.outer, cy + Math.sin(middle) * slice.outer],
+            [lineEnd - 3, labelY], [lineEnd, labelY],
+          ],
+        };
+      } : { hideOverlap: false },
+      label: {
+        show: true, position: "outside", color: textColor,
+        fontSize, fontWeight: 600, lineHeight,
+        formatter: percentageLabel, rotate: 0,
+        alignTo: "edge", edgeDistance: 0, distanceToLabelLine: 3,
+        bleedMargin: 0, overflow: "none",
+      },
+      labelLine: {
+        show: true, length: 6, length2: 4,
+        lineStyle: { color: textColor, opacity: 0.45, width: 1 },
+      },
+      emphasis: { scale: false, label: { show: true } },
+      data: entries.map((entry, index) => {
+        const slice = layout.slices[index];
+        const show = Boolean(slice.percentage) && entry.count > 0;
+        return {
+          ...entry,
+          label: {
+            show, position: slice.inside ? "inside" : "outside",
+            color: slice.inside ? circularLabelColor(entry.itemStyle.color) : textColor,
+          },
+          labelLine: { show: show && !slice.inside },
+          emphasis: { label: { show } },
+        };
+      }),
+    }],
+  } as EnterpriseChartOption;
+}
+
+function percentageTextWidth(text: string, fontSize: number) {
+  // Conservative width for the numeric, horizontal label in the chart font.
+  // Never shrink the type to force a label into a narrow sector.
+  return [...text].reduce((width, character) => width +
+    (character === "%" ? 0.95 : character === "," || character === "." ? 0.3 : 0.6) * fontSize, 2);
+}
+
+function circularLabelColor(color: string) {
+  if (!/^#[\da-f]{6}$/i.test(color)) return heatmapLabelColor([color], 0);
+  const channels = [1, 3, 5].map((offset) => {
+    const value = Number.parseInt(color.slice(offset, offset + 2), 16) / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  const luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  // Choose the greater WCAG contrast; pure black/white guarantees at least
+  // 4.5:1 even for midtone palettes where slate text would fall short.
+  return (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? "#000000" : "#FFFFFF";
+}
+
+function percentageFitsSector(
+  start: number, end: number, inner: number, outer: number, width: number, height: number,
+) {
+  if (end <= start || outer <= inner) return false;
+  const middle = (start + end) / 2;
+  // This is the inside-label anchor used by ECharts' pie label layout.
+  const distance = (inner + outer) / 2 + 3;
+  const x = Math.cos(middle) * distance;
+  const y = Math.sin(middle) * distance;
+  const halfWidth = width / 2 + 2;
+  const halfHeight = height / 2 + 2;
+  // The nearest point on the rectangle must not intersect the donut hole.
+  const nearest = Math.hypot(Math.max(0, Math.abs(x) - halfWidth), Math.max(0, Math.abs(y) - halfHeight));
+  if (inner > 0 && nearest < inner + 2) return false;
+  if (distance <= Math.hypot(halfWidth, halfHeight) && end - start < Math.PI * 2 - 1e-6) return false;
+  return [-halfWidth, halfWidth].every((dx) => [-halfHeight, halfHeight].every((dy) => {
+    const px = x + dx;
+    const py = y + dy;
+    if (Math.hypot(px, py) > outer - 2) return false;
+    if (end - start >= Math.PI * 2 - 1e-6) return true;
+    const delta = ((Math.atan2(py, px) - start) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+    return delta <= end - start;
+  }));
+}
+
 function positivePercentage(value: number | null | undefined) {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? `${percentFormat.format(value)}%`
@@ -514,13 +732,13 @@ function percentageLabel(parameters: unknown) {
   return positivePercentage(datum?.percentage);
 }
 
-function distributionTooltip(parameters: unknown) {
+function distributionTooltip(parameters: unknown, identifiedGender = false) {
   const datum = tooltipDatum(parameters);
   if (!datum) return "Sem valor";
   const percentage = datum.percentage === null ? "—" : `${percentFormat.format(datum.percentage)}%`;
   return [
     `<strong>${escapeTooltipHtml(datum.name)}</strong>`,
-    `Participação no total: ${percentage}`,
+    `${identifiedGender ? "Participação entre gêneros identificados" : "Participação no total"}: ${percentage}`,
     `Detecções: ${countFormat.format(datum.count)}`,
   ].join("<br/>");
 }

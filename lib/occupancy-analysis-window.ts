@@ -3,6 +3,7 @@ import {
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
 import { writeUserGridPreference } from "@/lib/user-grid-local";
+import { occupancyCalendarBoundaryInstant, shiftOccupancyCalendarDate } from "@/lib/occupancy-calendar";
 
 export type ClosedOccupancyHistoricalGranularity = "week" | "month";
 
@@ -17,6 +18,8 @@ export type ResolvedOccupancyAnalysisRange = OccupancyAnalysisDateRangeInput & {
   includesToday: boolean;
   reference: Date;
   to: Date;
+  instantFrom?: Date;
+  instantTo?: Date;
 };
 
 export const MAX_OCCUPANCY_ANALYSIS_RANGE_DAYS = 366;
@@ -83,6 +86,7 @@ export function resolveOccupancyAnalysisRange(
   endInput: string,
   analysis: boolean,
   maximumInput = formatOccupancyAnalysisDateInput(clock),
+  timeZone?: string,
 ): ResolvedOccupancyAnalysisRange {
   requireValidDate(clock);
   const todayInput = resolveMaximumDateInput(maximumInput);
@@ -108,8 +112,9 @@ export function resolveOccupancyAnalysisRange(
   }
 
   const from = startOfLocalDay(selectedStart);
-  const to = startOfLocalDay(selectedEnd);
-  to.setDate(to.getDate() + 1);
+  const to = shiftOccupancyCalendarDate(selectedEnd, 1);
+  const instantFrom = timeZone ? occupancyCalendarBoundaryInstant(from, timeZone) : from;
+  const instantTo = timeZone ? occupancyCalendarBoundaryInstant(to, timeZone) : to;
   const includesToday = normalized.endInput === todayInput;
 
   return {
@@ -117,7 +122,8 @@ export function resolveOccupancyAnalysisRange(
     dayCount,
     from,
     includesToday,
-    reference: includesToday ? new Date(clock) : new Date(to.getTime() - 1),
+    reference: includesToday ? new Date(clock) : new Date(instantTo.getTime() - 1),
+    ...(timeZone ? { instantFrom, instantTo } : {}),
     to,
   };
 }
@@ -174,7 +180,7 @@ export function occupancyAnalysisClosedBucketCutoff(
   range: ResolvedOccupancyAnalysisRange,
 ) {
   return range.includesToday
-    ? startOfLocalDay(range.reference)
+    ? startOfLocalDay(parseOccupancyAnalysisDateInput(range.endInput)!)
     : new Date(range.to);
 }
 
@@ -262,12 +268,9 @@ export function buildClosedOccupancyHistoricalRange(
     granularity === "week"
       ? startOfLocalWeek(reference)
       : startOfLocalMonth(reference);
-  const from = new Date(to);
-  if (granularity === "week") {
-    from.setDate(from.getDate() - bucketCount * 7);
-  } else {
-    from.setMonth(from.getMonth() - bucketCount);
-  }
+  const from = granularity === "week"
+    ? shiftOccupancyCalendarDate(to, -bucketCount * 7)
+    : shiftOccupancyCalendarDate(to, 0, -bucketCount);
 
   return { from, to };
 }
@@ -305,8 +308,7 @@ export function resolveOccupancyAnalysisReference(
   if (!selected || isSameOccupancyAnalysisDay(selected, clock)) return clock;
 
   const dayStart = startOfLocalDay(selected);
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
+  const dayEnd = shiftOccupancyCalendarDate(dayStart, 1);
   return new Date(dayEnd.getTime() - 1);
 }
 
@@ -346,8 +348,7 @@ export function shiftOccupancyAnalysisDateInput(
   }
   const date = parseOccupancyAnalysisDateInput(value);
   if (!date) return value;
-  date.setDate(date.getDate() + amount);
-  return formatOccupancyAnalysisDateInput(date);
+  return formatOccupancyAnalysisDateInput(shiftOccupancyCalendarDate(date, amount));
 }
 
 export function isSameOccupancyAnalysisDay(left: Date, right: Date) {
@@ -358,16 +359,13 @@ export function isSameOccupancyAnalysisDay(left: Date, right: Date) {
 }
 
 function startOfLocalDay(date: Date) {
-  const next = new Date(date);
-  next.setHours(0, 0, 0, 0);
-  return next;
+  return shiftOccupancyCalendarDate(date);
 }
 
 function startOfLocalWeek(date: Date) {
   const next = startOfLocalDay(date);
   const day = next.getDay();
-  next.setDate(next.getDate() + (day === 0 ? -6 : 1 - day));
-  return next;
+  return shiftOccupancyCalendarDate(next, day === 0 ? -6 : 1 - day);
 }
 
 function startOfLocalMonth(date: Date) {
@@ -378,10 +376,9 @@ function addHistoricalBucket(
   date: Date,
   granularity: ClosedOccupancyHistoricalGranularity,
 ) {
-  const next = new Date(date);
-  if (granularity === "week") next.setDate(next.getDate() + 7);
-  else next.setMonth(next.getMonth() + 1);
-  return next;
+  return granularity === "week"
+    ? shiftOccupancyCalendarDate(date, 7)
+    : shiftOccupancyCalendarDate(date, 0, 1);
 }
 
 function occupancyAnalysisDateRangeStorageKey(

@@ -1,6 +1,6 @@
 import {
   AGE_LABELS,
-  DEMOGRAPHIC_GENDERS,
+  GENDER_LABELS,
   EMOTION_LABELS,
 } from "@/lib/demographics";
 import { OCCUPANCY_COLOR_PALETTES } from "@/lib/occupancy-color-palettes";
@@ -16,7 +16,7 @@ export const DEMOGRAPHICS_PALETTES = [
   {
     id: "pink-blue",
     label: "Rosa e azul",
-    description: "Rosa, azul e neutro para gênero, com tons complementares nas demais categorias.",
+    description: "Rosa e azul para gênero; progressão de azuis para faixas etárias.",
     colors: [
       "#DB2777", "#2563EB", "#8A99AF", "#9D174D", "#1D4ED8",
       "#EC4899", "#0284C7", "#BE185D", "#6366F1", "#0E7490",
@@ -102,26 +102,95 @@ export function normalizeDemographicPresentation(
   };
 }
 
-// Gender is semantic rather than a generic palette position. Each theme may
-// vary its accents, but never swaps the pink/magenta and blue/cyan meanings.
+// Gender is semantic rather than a generic palette position. The first color
+// stays in the rose/coral/lilac family, the second in blue/teal/mint. Labels
+// remain explicit: colors reinforce identity, never replace it.
 const GENDER_PALETTE_ACCENTS = {
   "pink-blue": ["#DB2777", "#2563EB"],
-  enterprise: ["#BE185D", "#2563EB"],
-  ocean: ["#DB2777", "#0077B6"],
-  aurora: ["#C026D3", "#118AB2"],
-  cyber: ["#FF2A9D", "#00E5FF"],
-  sunset: ["#E11D48", "#2563EB"],
-  forest: ["#BE185D", "#0369A1"],
-  berry: ["#A21CAF", "#2563EB"],
-  terracotta: ["#9D174D", "#075985"],
-  pastel: ["#D46A8C", "#5B8DEF"],
-  high_contrast: ["#C00070", "#0057B8"],
+  enterprise: ["#B85C7A", "#486F9E"],
+  ocean: ["#E88078", "#008D9A"],
+  aurora: ["#AB7DE0", "#159A8C"],
+  cyber: ["#EF4FC8", "#00C5E0"],
+  sunset: ["#F08D68", "#5C65C6"],
+  forest: ["#A16BA9", "#248373"],
+  berry: ["#B72E62", "#537BA5"],
+  terracotta: ["#CB776D", "#3B7C8D"],
+  pastel: ["#D0ACDD", "#8DCEC2"],
+  high_contrast: ["#AD1457", "#005EB8"],
   colorblind: ["#CC79A7", "#0072B2"],
 } as const satisfies Record<DemographicPaletteId, readonly [string, string]>;
+
+const GENDER_PALETTE_LABELS = {
+  "pink-blue": "Rosa e azul",
+  enterprise: "Rosé e marinho",
+  ocean: "Coral e turquesa",
+  aurora: "Lavanda e esmeralda",
+  cyber: "Orquídea e ciano",
+  sunset: "Pêssego e índigo",
+  forest: "Ameixa e verde-petróleo",
+  berry: "Framboesa e denim",
+  terracotta: "Terracota e petróleo",
+  pastel: "Lilás e menta",
+  high_contrast: "Magenta e azul intenso",
+  colorblind: "Malva e azul",
+} as const satisfies Record<DemographicPaletteId, string>;
 
 export function getDemographicGenderPalette(value: unknown) {
   const [Woman, Man] = GENDER_PALETTE_ACCENTS[getDemographicPalette(value).id];
   return { Woman, Man, unknown: "#8A99AF" } as const;
+}
+
+// Age is ordinal: each palette uses one continuous light-to-deep family,
+// never the unrelated categorical accents used for emotions or genders.
+// Every channel decreases, so luminance preserves age order in both themes.
+const AGE_PALETTE_ENDPOINTS = {
+  "pink-blue": ["#BFD9F5", "#1E40AF"],
+  enterprise: ["#B5D3F0", "#1E3A8A"],
+  ocean: ["#A5DFEC", "#075985"],
+  aurora: ["#D7C9F5", "#5B21B6"],
+  cyber: ["#A5F3FC", "#0E7490"],
+  sunset: ["#F9D6A5", "#9A3412"],
+  forest: ["#BBE4C6", "#166534"],
+  berry: ["#ECC7E4", "#86198F"],
+  terracotta: ["#E9C9B5", "#7C2D12"],
+  pastel: ["#CDDDF7", "#4B63AD"],
+  high_contrast: ["#D7EAF8", "#123A6F"],
+  colorblind: ["#BCE1F3", "#005580"],
+} as const satisfies Record<DemographicPaletteId, readonly [string, string]>;
+
+const AGE_PALETTE_COLORS = Object.fromEntries(
+  DEMOGRAPHICS_PALETTES.map(({ id }) => {
+    const [light, deep] = AGE_PALETTE_ENDPOINTS[id];
+    const stops = AGE_LABELS.map((_, index) => {
+      const weight = index / (AGE_LABELS.length - 1);
+      return `#${[1, 3, 5].map((offset) => {
+        const start = Number.parseInt(light.slice(offset, offset + 2), 16);
+        const end = Number.parseInt(deep.slice(offset, offset + 2), 16);
+        return Math.round(start + (end - start) * weight).toString(16).padStart(2, "0");
+      }).join("")}`;
+    });
+    return [id, Object.freeze(stops)];
+  }),
+) as Record<DemographicPaletteId, readonly string[]>;
+
+export function getDemographicAgePalette(value: unknown): readonly string[] {
+  return AGE_PALETTE_COLORS[getDemographicPalette(value).id];
+}
+
+/** Labels may adapt to the data; persisted palette IDs never change. */
+export function demographicPaletteLabel(
+  value: unknown,
+  dimension: DemographicDimension,
+  encoding: "category" | "intensity" | "period" = "category",
+) {
+  const palette = getDemographicPalette(value);
+  if (encoding === "category" && (dimension === "gender" || dimension === "age-gender")) {
+    return GENDER_PALETTE_LABELS[palette.id];
+  }
+  if (palette.id !== "pink-blue") return palette.label;
+  if (encoding === "intensity") return "Azul sequencial";
+  if (encoding === "period") return dimension === "gender" ? "Neutros" : "Rosa e neutro";
+  return dimension === "age" ? "Azul sequencial" : palette.label;
 }
 
 /** Swatches reflect the effective colors of the selected dimension. */
@@ -131,8 +200,9 @@ export function demographicPalettePreviewColors(
 ): readonly string[] {
   if (dimension === "gender" || dimension === "age-gender") {
     const colors = getDemographicGenderPalette(palette);
-    return DEMOGRAPHIC_GENDERS.map((key) => colors[key]);
+    return GENDER_LABELS.map((key) => colors[key]);
   }
+  if (dimension === "age") return getDemographicAgePalette(palette);
   return getDemographicPalette(palette).colors;
 }
 
@@ -147,7 +217,12 @@ export function demographicCategoryColor(
     const colors = getDemographicGenderPalette(palette);
     return key === "Woman" ? colors.Woman : key === "Man" ? colors.Man : colors.unknown;
   }
-  const keys: readonly string[] = dimension === "age" ? AGE_LABELS : EMOTION_LABELS;
+  if (dimension === "age") {
+    const canonicalIndex = (AGE_LABELS as readonly string[]).indexOf(key);
+    // Missing/unrecognized age must not look like the youngest bracket.
+    return canonicalIndex >= 0 ? getDemographicAgePalette(palette)[canonicalIndex] : "#8A99AF";
+  }
+  const keys: readonly string[] = EMOTION_LABELS;
   const canonicalIndex = keys.indexOf(key);
   const originalIndex = canonicalIndex >= 0
     ? canonicalIndex

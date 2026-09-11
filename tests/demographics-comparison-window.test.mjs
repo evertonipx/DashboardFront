@@ -19,6 +19,8 @@ function load(path) {
 }
 const time = load("lib/company-time-zone.ts");
 const cancellation = load("lib/request-cancellation.ts");
+const comparisonQuery = load("lib/demographics-comparison-query.ts");
+const refreshPolicy = load("lib/demographics-refresh-policy.ts");
 const { buildDemographicComparisonWindow: build } = load("lib/demographics-comparison-window.ts");
 const windowFor = (values) => build({ timeZone: "America/Sao_Paulo", mode: "previous-period", startInput: "2026-09-10", endInput: "2026-09-10", cutoff: new Date("2026-09-11T03:00:00Z"), ...values });
 
@@ -98,21 +100,23 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(ast);
-const effect = effects.find((node) => node.arguments[0].getText(ast).includes("if (!comparisonVisible"));
+const effect = effects.find((node) => node.arguments[0].getText(ast).includes("loadDemographicComparisonAggregation"));
 assert.ok(effect, "comparison effect exists");
 assert.ok(comparisonReadyExpression, "comparison readiness guard exists");
-const names = new Set(["buildCivilDayPartitions", "civilDayStart", "shiftCivilDateKey", "parseCivilDateKey"]);
-const helpers = compile(ast.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text)).map((node) => node.getText(ast)).join("\n") + "\nreturn {buildCivilDayPartitions};", { ...time, MAX_DEMOGRAPHICS_DATE_RANGE_DAYS: 366 });
+const names = new Set(["buildCivilDayPartitions", "buildInstantPartitions", "civilDayStart", "shiftCivilDateKey", "parseCivilDateKey"]);
+const helpers = compile(ast.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text)).map((node) => node.getText(ast)).join("\n") + "\nreturn {buildCivilDayPartitions,buildInstantPartitions};", { ...time, MAX_DEMOGRAPHICS_DATE_RANGE_DAYS: 366, MINUTE_MS: 60_000 });
 function harness(overrides = {}) {
   const requests = [];
   const states = [];
   const timers = new Map();
   const releases = [];
   const comparisonRequestRef = { current: null };
+  const comparisonCacheRef = { current: null };
+  const comparisonRetryRef = { current: null };
   let timerId = 0;
-  const state = { comparisonVisible: true, queryRequested: true, rangeReady: true, comparisonReady: true, companyScopeId: "company-a", comparisonState: null, comparisonKey: "comparison-a", comparisonWindow: windowFor({}), timeZone: "America/Sao_Paulo", pending: false, error: null, ...overrides };
+  const state = { pageActive: true, preferencesReady: true, surface: "analysis", comparisonVisible: true, queryRequested: true, rangeReady: true, comparisonReady: true, companyScopeId: "company-a", comparisonState: null, comparisonKey: "comparison-a", comparisonCacheScopeKey: "comparison-scope-a", comparisonWindow: windowFor({}), timeZone: "America/Sao_Paulo", pending: false, error: null, ...overrides };
   const run = () => compile(`return (${effect.arguments[0].getText(ast)});`, {
-    ...state, ...helpers, ...cancellation, comparisonRequestRef,
+    ...state, ...helpers, ...cancellation, ...comparisonQuery, ...refreshPolicy, comparisonRequestRef, comparisonCacheRef, comparisonRetryRef,
     window: { setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; }, clearTimeout: (id) => timers.delete(id) },
     partitionCacheRef: { current: new Map() },
     userFacingErrorMessage: (error) => error.message,
@@ -124,11 +128,11 @@ function harness(overrides = {}) {
     setComparisonState: (value) => { state.comparisonState = value; states.push(value); },
   })();
   const flush = async () => { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach((callback) => callback()); await new Promise((resolve) => setImmediate(resolve)); };
-  return { run, flush, state, requests, states, releases, comparisonRequestRef };
+  return { run, flush, state, requests, states, releases, comparisonRequestRef, comparisonCacheRef, comparisonRetryRef };
 }
 
 test("comparativo só consulta quando visível, solicitado, com período e dados primários prontos", async () => {
-  for (const blocked of [{ comparisonVisible: false }, { queryRequested: false }, { rangeReady: false }, { comparisonReady: false }, { companyScopeId: "" }, { comparisonState: { key: "comparison-a" } }]) {
+  for (const blocked of [{ pageActive: false }, { preferencesReady: false }, { comparisonVisible: false }, { queryRequested: false }, { rangeReady: false }, { comparisonReady: false }, { companyScopeId: "" }, { comparisonState: { key: "comparison-a" } }]) {
     const testHarness = harness(blocked);
     testHarness.run();
     await testHarness.flush();
@@ -140,20 +144,26 @@ test("comparativo só consulta quando visível, solicitado, com período e dados
   assert.equal(ready.requests[0].companyScopeId, "company-a");
   assert.equal(ready.requests[0].timeZone, "America/Sao_Paulo");
   assert.equal(ready.requests[0].partitions[0].from.toISOString(), "2026-09-09T03:00:00.000Z");
-  assert.deepEqual(ready.states, [{ key: "comparison-a", summary: { total: 17 } }]);
+  assert.deepEqual(ready.states, [{ key: "comparison-a", scopeKey: "comparison-scope-a", summary: { total: 17 } }]);
 });
 
 test("falha no período principal encerra o carregamento do comparativo e apresenta o erro", () => {
-  const current = (overrides = {}) => compile(`return {loading: ${comparisonPresentationExpressions.comparisonLoading}, error: ${comparisonPresentationExpressions.comparisonError}};`, {
+  const current = (overrides = {}) => compile(`const comparisonError = ${comparisonPresentationExpressions.comparisonError}; return {loading: ${comparisonPresentationExpressions.comparisonLoading}, error: comparisonError};`, {
     queryRequested: true, comparisonVisible: true, summary: { hasData: true },
-    comparisonKey: "new-period", comparisonState: { key: "old-period" }, error: "", ...overrides,
+    comparisonKey: "new-period", comparisonCacheScopeKey: "comparison-scope-a", comparisonState: { key: "old-period" }, error: "", ...overrides,
   });
   assert.deepEqual(current(), { loading: true, error: undefined });
   assert.deepEqual(current({ error: "Não foi possível atualizar o período." }), {
     loading: false, error: "Não foi possível atualizar o período.",
   });
-  assert.deepEqual(current({ comparisonState: { key: "new-period", error: "Comparação indisponível." } }), {
+  assert.deepEqual(current({ comparisonState: { key: "new-period", scopeKey: "comparison-scope-a", error: "Comparação indisponível." } }), {
     loading: false, error: "Comparação indisponível.",
+  });
+  assert.deepEqual(current({ comparisonState: { key: "old-period", scopeKey: "comparison-scope-a", error: "Aguardando nova tentativa." } }), {
+    loading: false, error: "Aguardando nova tentativa.",
+  });
+  assert.deepEqual(current({ comparisonState: { key: "old-period", scopeKey: "other-scope", error: "Erro de outra empresa." } }), {
+    loading: true, error: undefined,
   });
 });
 
@@ -205,10 +215,30 @@ test("replay de Strict Mode e descarte de resposta obsoleta não duplicam nem pu
 test("falha não vira dado completo e alteração apenas visual não dispara outra comparação", async () => {
   const failed = harness({ error: new Error("fixture unavailable") });
   failed.run(); await failed.flush();
-  assert.deepEqual(failed.states, [{ key: "comparison-a", error: "fixture unavailable" }]);
+  assert.deepEqual(failed.states, [{ key: "comparison-a", scopeKey: "comparison-scope-a", error: "fixture unavailable" }]);
+  assert.equal(failed.comparisonRetryRef.current, null, "histórico não programa retentativas automáticas");
   const ready = harness(); ready.run(); await ready.flush();
   ready.state.temporalSettings = { palette: "cyber" };
   ready.run(); await ready.flush();
   assert.equal(ready.requests.length, 1);
   assert.doesNotMatch(effect.arguments[1].getText(ast), /temporalSettings|palette|dimension|chartType|metric|categoryKeys/);
+});
+
+test("falha do comparativo Ao Vivo respeita espera progressiva e limpa a espera depois do sucesso", async () => {
+  const live = harness({ surface: "live", error: new Error("temporary") });
+  live.run(); await live.flush();
+  assert.equal(live.requests.length, 1);
+  assert.equal(live.comparisonRetryRef.current.failures, 1);
+  assert.ok(live.comparisonRetryRef.current.retryAt > Date.now());
+  assert.equal(live.comparisonRequestRef.current, null);
+  live.state.comparisonKey = "comparison-next-minute";
+  live.state.error = null;
+  live.run(); await live.flush();
+  assert.equal(live.requests.length, 1, "um novo minuto não pode furar a espera da falha");
+  live.comparisonRetryRef.current.retryAt = 0;
+  live.run(); await live.flush();
+  assert.equal(live.requests.length, 2);
+  assert.equal(live.comparisonRetryRef.current, null);
+  assert.equal(live.states.at(-1).summary.total, 17);
+  assert.equal(live.states.at(-1).scopeKey, "comparison-scope-a");
 });

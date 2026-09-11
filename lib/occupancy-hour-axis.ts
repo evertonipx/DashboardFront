@@ -16,9 +16,10 @@ export type OccupancyHourlyAxisPoint = {
 export function buildFixedOccupancyHourlyPoints(
   day: Date,
   sourcePoints: readonly OccupancyHourlyAxisPoint[],
+  timeZone?: string,
 ): OccupancyHourlyAxisPoint[] {
   requireValidDay(day);
-  const dayIdentity = localDayIdentity(day);
+  const dayIdentity = timeZone ? companyDateKey(day, timeZone) : localDayIdentity(day);
   const pointsByHour = Array.from(
     { length: OCCUPANCY_FIXED_HOUR_LABELS.length },
     () => [] as Array<{ bucket: Date; point: OccupancyHourlyAxisPoint }>,
@@ -28,17 +29,17 @@ export function buildFixedOccupancyHourlyPoints(
     const bucket = new Date(point.bucket);
     if (
       Number.isNaN(bucket.getTime()) ||
-      localDayIdentity(bucket) !== dayIdentity
+      (timeZone ? companyDateKey(bucket, timeZone) : localDayIdentity(bucket)) !== dayIdentity
     ) {
       throw new RangeError(
         `O ponto horário de ocupação na posição ${index} não pertence ao dia exibido.`,
       );
     }
-    pointsByHour[bucket.getHours()].push({ bucket, point });
+    pointsByHour[timeZone ? companyZonedDateParts(bucket, timeZone).hour : bucket.getHours()].push({ bucket, point });
   });
 
   return pointsByHour.map((entries, hour) => {
-    if (!entries.length) return emptyHourPoint(day, hour);
+    if (!entries.length) return emptyHourPoint(day, hour, timeZone);
 
     entries.sort((left, right) => left.bucket.getTime() - right.bucket.getTime());
     const latest = entries.at(-1)!;
@@ -52,7 +53,7 @@ export function buildFixedOccupancyHourlyPoints(
     const completeMetrics = entries.every(({ point }) =>
       hasCompleteOccupancyMetric(point),
     );
-    if (!completeMetrics) return emptyHourPoint(day, hour);
+    if (!completeMetrics) return emptyHourPoint(day, hour, timeZone);
 
     return {
       // A repeated civil hour has more than one absolute bucket. Min/max are
@@ -72,10 +73,12 @@ export function occupancyFixedHourLabelInterval(index: number) {
   return index % 3 === 0 || index === 23;
 }
 
-function emptyHourPoint(day: Date, hour: number): OccupancyHourlyAxisPoint {
+function emptyHourPoint(day: Date, hour: number, timeZone?: string): OccupancyHourlyAxisPoint {
   return {
     average: null,
-    bucket: localHourSlotIdentity(day, hour),
+    bucket: timeZone
+      ? `${companyDateKey(day, timeZone)}T${String(hour).padStart(2, "0")}:00:00`
+      : localHourSlotIdentity(day, hour),
     current: null,
     label: OCCUPANCY_FIXED_HOUR_LABELS[hour],
     minimum: null,
@@ -113,3 +116,4 @@ function requireValidDay(day: Date) {
     throw new RangeError("O dia do eixo horário de ocupação é inválido.");
   }
 }
+import { companyDateKey, companyZonedDateParts } from "@/lib/company-time-zone";

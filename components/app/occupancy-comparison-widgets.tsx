@@ -56,7 +56,10 @@ import {
   aggregateQueryIso,
   endOfAggregateBucket,
 } from "@/lib/aggregate-time";
-import { requireRuntimeCompanyTimeZone } from "@/lib/company-time-zone";
+import { companyTimeZoneHour, requireCompanyTimeZone } from "@/lib/company-time-zone";
+import { fetchOccupancyCivilAggregate } from "@/lib/occupancy-civil-aggregate-query";
+import { createOccupancyQueryScheduler } from "@/lib/occupancy-dashboard-query";
+import { occupancyCalendarBoundaryInstant } from "@/lib/occupancy-calendar";
 import { getOccupancyColorPalette } from "@/lib/occupancy-color-palettes";
 import {
   buildOccupancyHeatmapVisualMaps,
@@ -729,6 +732,7 @@ export function useOccupancyComparisonCards({
       const range = buildOccupancyHourlyRange(
         requestedAt,
         hourlyAggregateDayCount,
+        timeZone,
       );
       const requestedIds = new Set(
         comparisonSelectionKey.split(",").filter(Boolean),
@@ -821,7 +825,7 @@ export function useOccupancyComparisonCards({
             return sharedFocus.series;
           }
           try {
-            requireRuntimeCompanyTimeZone(timeZone);
+            requireCompanyTimeZone(timeZone);
             const response =
               await apiFetch<OccupancyScenarioAggregateResponse>(
                 occupancyAggregatePath(scenario.id, range.from, range.to),
@@ -833,7 +837,8 @@ export function useOccupancyComparisonCards({
               scenario.id,
               timeZone,
               {
-                allowLegacyUncertifiedInstantBuckets: true,
+                allowDocumentedAggregateResponse: true,
+                expectedTimezone: timeZone,
                 openBucket: range.buckets.at(-1),
                 requestedAt,
                 requireCertification: true,
@@ -844,7 +849,8 @@ export function useOccupancyComparisonCards({
               "hour",
               range.buckets,
               {
-                allowLegacyUncertifiedInstantBuckets: true,
+                allowDocumentedAggregateResponse: true,
+                expectedTimezone: timeZone,
                 openBucket: range.buckets.at(-1),
                 requireCertification: true,
               },
@@ -878,6 +884,7 @@ export function useOccupancyComparisonCards({
       const latestRange = buildOccupancyHourlyRange(
         new Date(),
         hourlyAggregateDayCount,
+        timeZone,
       );
       if (
         disposed ||
@@ -980,7 +987,7 @@ export function useOccupancyComparisonCards({
         return;
       }
       try {
-        requireRuntimeCompanyTimeZone(timeZone);
+        requireCompanyTimeZone(timeZone);
       } catch (error) {
         setCurrentHourMaximumDataset({
           bucket: null,
@@ -1001,8 +1008,8 @@ export function useOccupancyComparisonCards({
         return;
       }
       const requestedAt = new Date();
-      const range = buildOccupancyCurrentHourRange(requestedAt);
-      const minuteRange = buildOccupancyClosedMinuteRange(requestedAt);
+      const range = buildOccupancyCurrentHourRange(requestedAt, timeZone);
+      const minuteRange = buildOccupancyClosedMinuteRange(requestedAt, timeZone);
       const aggregateCoversCurrentHour = Boolean(
         needsHourlyAggregate &&
           !aggregateDataset.loading &&
@@ -1109,7 +1116,8 @@ export function useOccupancyComparisonCards({
                 scenario.id,
                 timeZone,
                 {
-                  allowLegacyUncertifiedInstantBuckets: true,
+                  allowDocumentedAggregateResponse: true,
+                  expectedTimezone: timeZone,
                   openBucket: range.from,
                   requestedAt,
                   requireCertification: true,
@@ -1120,7 +1128,8 @@ export function useOccupancyComparisonCards({
                 "hour",
                 range.buckets,
                 {
-                  allowLegacyUncertifiedInstantBuckets: true,
+                  allowDocumentedAggregateResponse: true,
+                  expectedTimezone: timeZone,
                   openBucket: range.from,
                   requireCertification: true,
                 },
@@ -1198,7 +1207,8 @@ export function useOccupancyComparisonCards({
               scenario.id,
               timeZone,
               {
-                allowLegacyUncertifiedInstantBuckets: true,
+                allowDocumentedAggregateResponse: true,
+                expectedTimezone: timeZone,
                 requireCertification: true,
               },
             );
@@ -1207,7 +1217,8 @@ export function useOccupancyComparisonCards({
               "minute",
               minuteRange.buckets,
               {
-                allowLegacyUncertifiedInstantBuckets: true,
+                allowDocumentedAggregateResponse: true,
+                expectedTimezone: timeZone,
                 requireCertification: true,
               },
             );
@@ -1252,8 +1263,8 @@ export function useOccupancyComparisonCards({
       );
 
       const completedAt = new Date();
-      const latestRange = buildOccupancyCurrentHourRange(completedAt);
-      const latestMinuteRange = buildOccupancyClosedMinuteRange(completedAt);
+      const latestRange = buildOccupancyCurrentHourRange(completedAt, timeZone);
+      const latestMinuteRange = buildOccupancyClosedMinuteRange(completedAt, timeZone);
       if (
         disposed ||
         requestController.signal.aborted ||
@@ -1349,7 +1360,8 @@ export function useOccupancyComparisonCards({
     async function refreshMaximumTrends() {
       if (disposed || !settingsReady) return;
       const requestedAt = new Date();
-      const ranges = buildOccupancyMaximumTrendRanges(requestedAt);
+      const ranges = buildOccupancyMaximumTrendRanges(requestedAt, timeZone);
+      const nextMonthlyBoundary = occupancyCalendarBoundaryInstant(ranges.monthlySource.to, timeZone);
       const requestedIds = new Set(
         maximumTrendSelectionKey.split(",").filter(Boolean),
       );
@@ -1366,7 +1378,7 @@ export function useOccupancyComparisonCards({
         return;
       }
       if (document.visibilityState !== "visible") {
-        scheduleNext(ranges.monthlySource.to);
+        scheduleNext(nextMonthlyBoundary);
         return;
       }
       const windowKey = occupancyMaximumTrendRangeKey(ranges);
@@ -1382,7 +1394,7 @@ export function useOccupancyComparisonCards({
       );
       if (freshnessRemainingMs > 0) {
         scheduleNext(
-          ranges.monthlySource.to,
+          nextMonthlyBoundary,
           false,
           freshnessRemainingMs,
         );
@@ -1405,31 +1417,38 @@ export function useOccupancyComparisonCards({
               series: [],
             },
       );
+      const scheduleQuery = createOccupancyQueryScheduler(requestController.signal);
       const series = await mapWithConcurrency(
         requestedScenarios,
         MAX_PARALLEL_REQUESTS,
         async (scenario): Promise<OccupancyScenarioHourlySeries> => {
           try {
-            requireRuntimeCompanyTimeZone(timeZone);
+            requireCompanyTimeZone(timeZone);
             // The occupancy API does not accept year. One certified monthly
             // source feeds both the 12-month chart and the exact annual max.
-            const response =
-              await apiFetch<OccupancyScenarioAggregateResponse>(
-                occupancyAggregatePath(
-                  scenario.id,
-                  ranges.monthlySource.from,
-                  ranges.monthlySource.to,
-                  "month",
-                ),
-                { companyScopeId, signal: requestController.signal },
-              );
+            const response = await fetchOccupancyCivilAggregate({
+              scenarioId: scenario.id,
+              granularity: "month",
+              from: ranges.monthlySource.from,
+              to: ranges.monthlySource.to,
+              timeZone,
+              companyScopeId,
+              signal: requestController.signal,
+              requestedAt,
+              openBucket: ranges.monthlySource.buckets.at(-1),
+              fetchResponse: (path) => scheduleQuery(path, () =>
+                apiFetch<OccupancyScenarioAggregateResponse>(path, {
+                  companyScopeId, signal: requestController.signal,
+                })),
+            });
             const rows = requireOccupancyAggregateRows(
               response,
               "month",
               scenario.id,
               timeZone,
               {
-                allowLegacyUncertifiedInstantBuckets: true,
+                allowDocumentedAggregateResponse: true,
+                expectedTimezone: timeZone,
                 openBucket: ranges.monthlySource.buckets.at(-1),
                 requestedAt,
                 requireCertification: true,
@@ -1440,7 +1459,8 @@ export function useOccupancyComparisonCards({
               "month",
               ranges.monthlySource.buckets,
               {
-                allowLegacyUncertifiedInstantBuckets: true,
+                allowDocumentedAggregateResponse: true,
+                expectedTimezone: timeZone,
                 openBucket: ranges.monthlySource.buckets.at(-1),
                 requireCertification: true,
               },
@@ -1471,7 +1491,7 @@ export function useOccupancyComparisonCards({
           }
         },
       );
-      const latestRanges = buildOccupancyMaximumTrendRanges(new Date());
+      const latestRanges = buildOccupancyMaximumTrendRanges(new Date(), timeZone);
       if (
         disposed ||
         requestController.signal.aborted ||
@@ -1496,7 +1516,7 @@ export function useOccupancyComparisonCards({
           maximumTrendScopeKey,
           windowKey,
         );
-      scheduleNext(ranges.monthlySource.to);
+      scheduleNext(nextMonthlyBoundary);
     }
 
     function handleVisibilityChange() {
@@ -1574,11 +1594,11 @@ export function useOccupancyComparisonCards({
     const anchorBucket =
       certifiedCurrentHourMaximum.bucket ?? certifiedAggregate.buckets.at(-1);
     if (!anchorBucket) return [];
-    const latestDayKey = localDateKey(anchorBucket);
+    const latestDayKey = localDateKey(anchorBucket, timeZone);
     return certifiedAggregate.buckets.filter(
-      (bucket) => localDateKey(bucket) === latestDayKey,
+      (bucket) => localDateKey(bucket, timeZone) === latestDayKey,
     );
-  }, [certifiedAggregate.buckets, certifiedCurrentHourMaximum.bucket]);
+  }, [certifiedAggregate.buckets, certifiedCurrentHourMaximum.bucket, timeZone]);
   const hourlyMaximumSeries = certifiedAggregate.series.length
     ? certifiedAggregate.series
     : certifiedCurrentHourMaximum.series.map((scenario) => ({
@@ -1590,8 +1610,8 @@ export function useOccupancyComparisonCards({
       }));
   const heatmapScenarioId = selectionPlan.byCard.get("occupancy_day_hour_heatmap")?.[0] ?? "";
   const scenarioHourHeatmapDateKeys = React.useMemo(
-    () => Array.from(new Set(certifiedAggregate.buckets.map(localDateKey))),
-    [certifiedAggregate.buckets],
+    () => Array.from(new Set(certifiedAggregate.buckets.map((bucket) => localDateKey(bucket, timeZone)))),
+    [certifiedAggregate.buckets, timeZone],
   );
   const scenarioHourHeatmapDateKey =
     scenarioHourHeatmapDateKeys.includes(settings.scenarioHourHeatmapDateKey)
@@ -1648,6 +1668,7 @@ export function useOccupancyComparisonCards({
         const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
         return (
         <OccupancyHalfDonutCard
+          timeZone={timeZone}
           chartType={settings.comparisonChartType}
           colorPalette={selectedColorPalette.colors}
           loading={snapshotLoading}
@@ -1676,6 +1697,7 @@ export function useOccupancyComparisonCards({
         const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
         return (
         <OccupancyBarRaceCard
+          timeZone={timeZone}
           loading={snapshotLoading}
           colorPalette={selectedColorPalette.colors}
           requestedAt={snapshotDataset.requestedAt}
@@ -1703,6 +1725,7 @@ export function useOccupancyComparisonCards({
         const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
         return (
         <OccupancyScenarioMaximumLineCard
+          timeZone={timeZone}
           allScenarios={scopedScenarios.filter((scenario) => scenarioIds.includes(scenario.id))}
           buckets={hourlyMaximumBuckets}
           colorPalette={selectedColorPalette.colors}
@@ -1735,6 +1758,7 @@ export function useOccupancyComparisonCards({
         const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
         return (
         <OccupancyScenarioMaximumLineCard
+          timeZone={timeZone}
           allScenarios={scopedScenarios.filter((scenario) => scenarioIds.includes(scenario.id))}
           buckets={certifiedMaximumTrend.ranges?.monthly.buckets ?? []}
           colorPalette={selectedColorPalette.colors}
@@ -1763,6 +1787,7 @@ export function useOccupancyComparisonCards({
         const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
         return (
         <OccupancyScenarioMaximumLineCard
+          timeZone={timeZone}
           allScenarios={scopedScenarios.filter((scenario) => scenarioIds.includes(scenario.id))}
           buckets={certifiedMaximumTrend.ranges?.annual.buckets ?? []}
           colorPalette={selectedColorPalette.colors}
@@ -1844,6 +1869,7 @@ export function useOccupancyComparisonCards({
         const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
         return (
         <OccupancyDayHourHeatmapCard
+          timeZone={timeZone}
           buckets={certifiedAggregate.buckets}
           colorPalette={selectedColorPalette.colors}
           dayCount={settings.dayCount}
@@ -1885,6 +1911,7 @@ export function useOccupancyComparisonCards({
         const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
         return (
         <OccupancyScenarioHourHeatmapCard
+          timeZone={timeZone}
           buckets={certifiedAggregate.buckets}
           colorPalette={selectedColorPalette.colors}
           loading={aggregateLoading}
@@ -1904,6 +1931,7 @@ export function useOccupancyComparisonCards({
   ];
 
   const reportAssets = buildOccupancyComparisonReportAssets({
+    timeZone,
     aggregateBuckets: certifiedAggregate.buckets,
     aggregateSeries: certifiedAggregate.series,
     currentHourBucket: certifiedCurrentHourMaximum.bucket,
@@ -1926,6 +1954,7 @@ export function useOccupancyComparisonCards({
 }
 
 function buildOccupancyComparisonReportAssets({
+  timeZone,
   aggregateBuckets,
   aggregateSeries,
   currentHourBucket,
@@ -1959,6 +1988,7 @@ function buildOccupancyComparisonReportAssets({
   selectedScenarioIds: string[];
   settings: OccupancyWidgetSettings;
   snapshots: OccupancyScenarioSnapshot[];
+  timeZone?: string;
 }): OccupancyComparisonReportAsset[] {
   const theme = "light" as const;
   const comparisonPalette = getOccupancyColorPalette(settings.colorPaletteId);
@@ -2045,6 +2075,7 @@ function buildOccupancyComparisonReportAssets({
     });
 
   const hourlyMaximum = buildMaximumLineSeries({
+    timeZone,
     buckets: hourlyMaximumBuckets,
     currentBucket: currentHourBucket,
     currentSnapshots: filterForCard("occupancy_scenario_max_hour", snapshots),
@@ -2056,6 +2087,7 @@ function buildOccupancyComparisonReportAssets({
   });
   const monthlyBuckets = maximumTrendRanges?.monthly.buckets ?? [];
   const monthlyMaximum = buildMaximumLineSeries({
+    timeZone,
     buckets: monthlyBuckets,
     currentBucket: null,
     currentSnapshots: [],
@@ -2067,6 +2099,7 @@ function buildOccupancyComparisonReportAssets({
   });
   const annualBuckets = maximumTrendRanges?.annual.buckets ?? [];
   const annualMaximum = buildMaximumLineSeries({
+    timeZone,
     buckets: annualBuckets,
     currentBucket: currentHourBucket,
     currentSnapshots: filterForCard("occupancy_scenario_max_year", snapshots),
@@ -2129,6 +2162,7 @@ function buildOccupancyComparisonReportAssets({
   const scenarioHourSeries = filterForCard("occupancy_scenario_hour_heatmap", aggregateSeries);
   const dayHourMatrix = dayHourSeries
     ? buildDaysHoursOccupancyCells({
+        timeZone,
         buckets: aggregateBuckets,
         metric: settings.metric,
         scenario: dayHourSeries,
@@ -2137,6 +2171,7 @@ function buildOccupancyComparisonReportAssets({
   const dayHourLabels = dayHourMatrix.dayKeys.map(formatHeatmapDateKey);
   const scenarioHourMatrix = scenarioHourHeatmapDateKey
     ? buildScenariosHoursOccupancyCells({
+        timeZone,
         buckets: aggregateBuckets,
         dateKey: scenarioHourHeatmapDateKey,
         metric: settings.metric,
@@ -2164,7 +2199,7 @@ function buildOccupancyComparisonReportAssets({
           rows: comparisonBarEntries.map((entry, index) => {
             const snapshot = currentSnapshots[index];
             return {
-              asOf: snapshot?.asOf ? formatDateTime(snapshot.asOf) : null,
+              asOf: snapshot?.asOf ? formatDateTime(snapshot.asOf, timeZone) : null,
               occupancy: entry.total,
               order: index + 1,
               scenario: entry.name,
@@ -2205,7 +2240,7 @@ function buildOccupancyComparisonReportAssets({
             "Ranking visual dos cenários no horário da última atualização.",
           rows: raceRows.map((entry, index) => ({
             asOf: raceSnapshots[entry.sourceIndex]?.asOf
-              ? formatDateTime(raceSnapshots[entry.sourceIndex].asOf!)
+              ? formatDateTime(raceSnapshots[entry.sourceIndex].asOf!, timeZone)
               : null,
             occupancy: entry.value,
             rank: entry.value === null ? null : index + 1,
@@ -2320,7 +2355,7 @@ function buildOccupancyComparisonReportAssets({
           rows: dayHourMatrix.cells.map((cell) => ({
             certification:
               cell.value === null ? "Sem dados" : "Disponível",
-            date: localDateKey(cell.bucket),
+            date: localDateKey(cell.bucket, timeZone),
             hour: OCCUPANCY_FIXED_HOUR_LABELS[cell.y] ?? `${cell.y}h`,
             metric: metricLabel(settings.metric),
             scenario: dayHourSeries?.name ?? null,
@@ -2544,6 +2579,7 @@ function OccupancyComparisonOptions({
 }
 
 function OccupancyHalfDonutCard({
+  timeZone,
   chartType,
   colorPalette,
   loading,
@@ -2553,6 +2589,7 @@ function OccupancyHalfDonutCard({
   statusColors,
 }: {
   chartType: OccupancyWidgetSettings["comparisonChartType"];
+  timeZone: string;
   colorPalette: readonly string[];
   loading: boolean;
   mode: OccupancyHalfDonutMode;
@@ -2759,7 +2796,7 @@ function OccupancyHalfDonutCard({
         )}
         {requestedAt ? (
           <div className="mt-1 text-[11px] text-muted-foreground">
-            Mesmo instante consultado: {formatDateTime(requestedAt)}.
+            Mesmo instante consultado: {formatDateTime(requestedAt, timeZone)}.
           </div>
         ) : null}
       </CardContent>
@@ -3230,6 +3267,7 @@ function colorContrastRatio(first: number, second: number) {
 }
 
 function OccupancyBarRaceCard({
+  timeZone,
   colorPalette,
   loading,
   requestedAt,
@@ -3240,6 +3278,7 @@ function OccupancyBarRaceCard({
   loading: boolean;
   requestedAt: Date | null;
   refreshSeconds: number;
+  timeZone: string;
   snapshots: OccupancyScenarioSnapshot[];
 }) {
   const widgetColor = useWidgetColor(colorPalette[0]);
@@ -3291,7 +3330,7 @@ function OccupancyBarRaceCard({
             />
             {requestedAt ? (
               <div className="text-[11px] text-muted-foreground">
-                Mesmo instante consultado: {formatDateTime(requestedAt)}.
+                Mesmo instante consultado: {formatDateTime(requestedAt, timeZone)}.
               </div>
             ) : null}
           </>
@@ -3304,6 +3343,7 @@ function OccupancyBarRaceCard({
 }
 
 function OccupancyScenarioMaximumLineCard({
+  timeZone,
   allScenarios,
   buckets,
   colorPalette,
@@ -3317,6 +3357,7 @@ function OccupancyScenarioMaximumLineCard({
   series,
 }: {
   allScenarios: OccupancyScenario[];
+  timeZone: string;
   buckets: Date[];
   colorPalette: readonly string[];
   currentBucket?: Date | null;
@@ -3340,6 +3381,7 @@ function OccupancyScenarioMaximumLineCard({
   const lineSeries = React.useMemo<OccupancyMaximumLineSeries[]>(
     () =>
       buildMaximumLineSeries({
+        timeZone,
         buckets,
         currentBucket,
         currentSnapshots,
@@ -3358,6 +3400,7 @@ function OccupancyScenarioMaximumLineCard({
       granularity,
       monthlySourceBuckets,
       series,
+      timeZone,
     ],
   );
   const option = React.useMemo(
@@ -3651,6 +3694,7 @@ function OccupancyHexLayoutCard({
 }
 
 function OccupancyDayHourHeatmapCard({
+  timeZone,
   buckets,
   colorPalette,
   dayCount,
@@ -3663,6 +3707,7 @@ function OccupancyDayHourHeatmapCard({
   buckets: Date[];
   colorPalette: readonly string[];
   dayCount: 7 | 14 | 30;
+  timeZone: string;
   loading: boolean;
   maximum: number;
   metric: OccupancyComparisonMetricKey;
@@ -3676,12 +3721,13 @@ function OccupancyDayHourHeatmapCard({
     () =>
       selectedSeries
         ? buildDaysHoursOccupancyCells({
+            timeZone,
             buckets,
             metric,
             scenario: selectedSeries,
           })
         : { cells: [], dayKeys: [] },
-    [buckets, metric, selectedSeries],
+    [buckets, metric, selectedSeries, timeZone],
   );
   const dayLabels = matrix.dayKeys.map(formatHeatmapDateKey);
   const option = React.useMemo(
@@ -3724,6 +3770,7 @@ function OccupancyDayHourHeatmapCard({
 }
 
 function OccupancyScenarioHourHeatmapCard({
+  timeZone,
   buckets,
   colorPalette,
   dateKey,
@@ -3736,6 +3783,7 @@ function OccupancyScenarioHourHeatmapCard({
   colorPalette: readonly string[];
   dateKey: string;
   loading: boolean;
+  timeZone: string;
   maximum: number;
   metric: OccupancyComparisonMetricKey;
   series: OccupancyScenarioHourlySeries[];
@@ -3746,13 +3794,14 @@ function OccupancyScenarioHourHeatmapCard({
     () =>
       dateKey
         ? buildScenariosHoursOccupancyCells({
+            timeZone,
             buckets,
             dateKey,
             metric,
             series,
           })
         : { cells: [], scenarioNames: [] },
-    [buckets, dateKey, metric, series],
+    [buckets, dateKey, metric, series, timeZone],
   );
   const option = React.useMemo(
     () =>
@@ -5015,6 +5064,7 @@ function buildLiveBarRaceOption(
 }
 
 function buildMaximumLineSeries({
+  timeZone,
   buckets,
   currentBucket,
   currentSnapshots,
@@ -5032,6 +5082,7 @@ function buildMaximumLineSeries({
   monthlySourceBuckets: Date[];
   scenarios: OccupancyScenario[];
   series: OccupancyScenarioHourlySeries[];
+  timeZone?: string;
 }): OccupancyMaximumLineSeries[] {
   const currentSeriesById = new Map(
     currentSeries.map((scenario) => [scenario.scenarioId, scenario]),
@@ -5054,7 +5105,7 @@ function buildMaximumLineSeries({
         : undefined;
     const snapshotPeak =
       currentBucket && currentSnapshot
-        ? occupancySnapshotTotalWithinHour(currentSnapshot, currentBucket)
+        ? occupancySnapshotTotalWithinHour(currentSnapshot, currentBucket, timeZone)
         : undefined;
     const observedCurrentPeaks = [aggregatePeak, snapshotPeak].filter(
       (value): value is number => value !== undefined,
@@ -5069,6 +5120,7 @@ function buildMaximumLineSeries({
     const annualPoints =
       granularity === "year"
         ? buildOccupancyAnnualMaximumPoints({
+            timeZone,
             annualBuckets: buckets,
             coverageFrom: occupancyScenarioCoverageStart(
               scenariosById.get(scenario.scenarioId)?.created_at,
@@ -5096,7 +5148,7 @@ function buildMaximumLineSeries({
               currentBucket &&
               currentPeak !== undefined &&
               currentPeak !== null
-            ? [currentBucket.getHours()]
+            ? [timeZone ? companyTimeZoneHour(currentBucket, timeZone) : currentBucket.getHours()]
             : granularity === "month" && buckets.length
               ? [buckets.length - 1]
               : [],
@@ -5106,6 +5158,7 @@ function buildMaximumLineSeries({
           ? (annualPoints?.map((point) => point.value) ?? [])
           : granularity === "hour"
             ? buildOccupancyFixedHourlyPeakValues({
+                timeZone,
                 buckets,
                 metrics: scenario.metrics,
                 openBucket: currentBucket,
@@ -5287,7 +5340,7 @@ function maximumLineDescription(
   if (granularity === "month") {
     return "Maior ocupação disponível de cada mês nos últimos 12 meses.";
   }
-  return "Maior pico observado em cada um dos últimos 5 anos; anos fechados exigem cobertura completa e o ano atual aparece como parcial.";
+  return "Maior pico observado em cada um dos últimos 4 anos; anos fechados exigem cobertura completa e o ano atual aparece como parcial.";
 }
 
 function buildHexLayoutOption(

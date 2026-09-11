@@ -26,9 +26,11 @@ const MAX_RESPONSE_ROWS = 1_000;
 const MAX_MINUTE_BATCH = 480;
 const OVERLAP_MS = 5 * MINUTE_MS;
 const RECONCILE_MS = 15 * MINUTE_MS;
+export const OCCUPANCY_DURATION_CLOSED_CACHE_TTL_MS = HOUR_MS;
 
 type CachedSpan = {
   asOf?: number;
+  cachedAt?: number;
   final: boolean;
   hours: OccupancyDurationInsightHour[];
   minuteMetrics?: Map<number, OccupancyAggregateMetric>;
@@ -84,7 +86,9 @@ type MinuteRefinement = {
  * Closed spans retain only small civil-hour summaries. The open span retains
  * at most one hour of minutes, with five-minute overlap and a full refresh of
  * that hour every fifteen minutes. Changing company or timezone cannot reuse
- * another scope's cache. All cache writes are committed only after success.
+ * another scope's cache. Closed summaries expire after one wall-clock hour,
+ * including fully covered hours, so later corrections are observed. All cache
+ * writes are committed only after success.
  */
 export async function fetchOccupancyDurationInsightScenario({
   cache,
@@ -105,8 +109,9 @@ export async function fetchOccupancyDurationInsightScenario({
   const canonicalTimeZone = requireCompanyTimeZone(timeZone);
   requireMonth(month, canonicalTimeZone);
   const context = { companyScopeId, scenarioId, signal, timeZone: canonicalTimeZone };
+  const cacheTime = Date.now();
   const pending = new Map<string, OccupancyDurationInsightDayCache>();
-  const spans = planSpans(context, month, cache, pending);
+  const spans = planSpans(context, month, cache, pending, cacheTime);
   const unresolved = spans.filter((span) => !span.cached?.final);
   const fullHours = unresolved.filter(
     (span) => span.final && span.from % HOUR_MS === 0 && span.to - span.from === HOUR_MS,
@@ -131,6 +136,7 @@ export async function fetchOccupancyDurationInsightScenario({
       }
       storeSpan(pending, span, {
         asOf: result.asOf,
+        cachedAt: cacheTime,
         final: true,
         hours: summarizeSpan(span, metrics, canonicalTimeZone),
         refreshedAt: month.to.getTime(),
@@ -179,6 +185,7 @@ export async function fetchOccupancyDurationInsightScenario({
           ? oldestCutoff([span.cached?.asOf, sourceAsOf])
           : sourceAsOf,
         final: span.final,
+        cachedAt: cacheTime,
         hours: summarizeSpan(span, merged, canonicalTimeZone),
         minuteMetrics: span.final ? undefined : merged,
         reconciledAt: requestFrom === span.from ? span.to : span.cached?.reconciledAt,
@@ -236,7 +243,7 @@ async function fetchAggregate(
     };
   }
   const options = {
-    allowLegacyUncertifiedInstantBuckets: true,
+    allowDocumentedAggregateResponse: true,
     expectedTimezone: context.timeZone,
     requireCertification: true,
   };
@@ -277,6 +284,7 @@ function planSpans(
   month: OccupancyDurationInsightMonth,
   cache: OccupancyDurationInsightQueryCache,
   pending: OccupancyDurationInsightQueryCache,
+  cacheTime: number,
 ) {
   const spans: Span[] = [];
   const boundaries = month.dateKeys.map((dateKey) => {
@@ -308,6 +316,13 @@ function planSpans(
       const end = Math.min(dayEnd, (Math.floor(cursor / HOUR_MS) + 1) * HOUR_MS);
       const to = Math.min(through, end);
       const cached = day.spans.get(cursor);
+      // A fixed historical cutoff cannot measure freshness. Revalidate legacy
+      // cache entries and a clock that moved backward as well as expired data.
+      const expiredClosed = Boolean(cached?.final && (
+        !Number.isFinite(cached.cachedAt) ||
+        cacheTime < cached.cachedAt! ||
+        cacheTime - cached.cachedAt! >= OCCUPANCY_DURATION_CLOSED_CACHE_TTL_MS
+      ));
       // Ingestion can lag behind the last closed hour. Revisit only recent
       // missing coverage at a bounded cadence, never the complete old month.
       const retryRecentGap = Boolean(cached?.final &&
@@ -316,7 +331,7 @@ function planSpans(
         month.to.getTime() - cached.refreshedAt >= RECONCILE_MS);
       spans.push({
         cacheKey,
-        cached: cached && cached.to <= to && !retryRecentGap ? cached : undefined,
+        cached: cached && cached.to <= to && !retryRecentGap && !expiredClosed ? cached : undefined,
         final: to === end,
         from: cursor,
         to,

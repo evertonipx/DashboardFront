@@ -5,6 +5,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Building2, Menu, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { IPXBrandMark } from "@/components/app/brand-mark";
 import { initials } from "@/lib/utils";
 
 type MobileNavigationProps = {
@@ -47,9 +48,7 @@ export function MobileNavigation({
       <header className="sticky top-0 z-30 border-b border-border bg-card/95 py-2 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(0.5rem,env(safe-area-inset-top))] backdrop-blur lg:hidden">
         <div className="flex min-w-0 items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2.5">
-            <div aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-black text-primary-foreground">
-              IPX
-            </div>
+            <IPXBrandMark className="h-9 w-9" decorative />
             <div className="min-w-0">
               <div className="text-sm font-semibold text-foreground">IPXData</div>
               <div className="text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]">
@@ -84,9 +83,7 @@ export function MobileNavigation({
         >
           <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border py-3 pl-[max(1rem,env(safe-area-inset-left))] pr-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
             <div className="flex min-w-0 items-center gap-3">
-              <div aria-hidden="true" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-black text-primary-foreground">
-                IPX
-              </div>
+              <IPXBrandMark className="h-10 w-10" decorative />
               <div className="min-w-0">
                 <div className="text-base font-semibold">IPXData</div>
                 <DialogPrimitive.Title className="text-xs font-medium text-muted-foreground">

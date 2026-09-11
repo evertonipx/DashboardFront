@@ -46,7 +46,12 @@ test("live scenario and location fields get readable width before individual act
   for (const file of ["realtime-dashboard.tsx", "occupancy-scenario-dashboard.tsx"]) {
     const component = source(`components/app/${file}`);
     const start = component.indexOf('aria-label="Controles da visão');
-    const end = component.indexOf("{operationalSettingsOpen ? (", start);
+    const end = component.indexOf(
+      file === "occupancy-scenario-dashboard.tsx"
+        ? "{canEditVisual && operationalSettingsOpen ? ("
+        : "{operationalSettingsOpen ? (",
+      start,
+    );
     assert.ok(start >= 0 && end > start);
     const toolbar = component.slice(start, end);
     assert.match(toolbar, /data-dashboard-toolbar/);

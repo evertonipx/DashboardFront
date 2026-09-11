@@ -786,7 +786,7 @@ test("dashboard consulta o endpoint bruto uma vez por dia civil, reutiliza parti
   assert.doesNotMatch(source, /(?:allRows|rows)\.push\(\.\.\./);
   assert.match(
     source,
-    /if \(surface !== "live" \|\| !hasVisibleWidgets\) return;/,
+    /if \(surface !== "live" \|\| !hasVisibleWidgets \|\| !preferencesReady \|\| !pageActive\) return;/,
   );
   assert.match(
     source,
@@ -847,7 +847,8 @@ test("dashboard preserva os nove widgets originais e integra cinco widgets tempo
   assert.match(dashboard, /<ReportExportActions/);
   assert.match(dashboard, /valueLabels="always"/);
   assert.match(dashboard, /max: 100/);
-  assert.match(dashboard, /Não identificado/);
+  assert.doesNotMatch(dashboard, /Não identificado/);
+  assert.match(dashboard, /visibleDemographicDistribution/);
   assert.match(
     userGrid,
     /widget-view-presets\\\.v1\\\.\(\?:analysis\|demographics\|/,

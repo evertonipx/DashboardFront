@@ -25,6 +25,7 @@ const temporalPreferences = load("lib/demographics-temporal-preferences.ts");
 const demographic = load("lib/demographics.ts");
 const distribution = load("lib/demographics-chart-options.ts");
 const crossing = load("lib/demographics-crossing-options.ts");
+const visibleCategories = load("lib/demographics-visible-categories.ts");
 const palette = load("lib/chart-palette.ts");
 const utils = load("lib/utils.ts");
 const access = load("lib/access.ts");
@@ -48,6 +49,36 @@ const cardIds = evaluate(`return ${variables.get("DEMOGRAPHICS_CARD_IDS").initia
 const menuKey = evaluate(`return ${variables.get("DEMOGRAPHICS_MENU_KEY").initializer.getText(ast)};`);
 const callbackSource = variables.get("updateWidgetPresentation").initializer.arguments[0].getText(ast);
 const selectedId = "demographics_gender_mix";
+
+test("preferências anteriores à hidratação não liberam consultas dos widgets padrão", () => {
+  const key = "company-selected|user-a|demographics-live";
+  const state = { readiness: "pending", preference: null, rows: [{ id: selectedId, visible: true }] };
+  const isReady = () => evaluate(`return ${variables.get("preferencesReady").initializer.getText(ast)};`, {
+    gridReadiness: state.readiness, preferenceState: state.preference, preferenceIdentityKey: key,
+  });
+  const synchronize = () => evaluate(`return (${variables.get("synchronizePreferences").initializer.arguments[0].getText(ast)});`, {
+    gridReadiness: state.readiness, preferenceIdentityKey: key, companyScopeId: "company-selected",
+    user: { id: "user-a" }, preferenceScopeId: "demographics-live",
+    DEMOGRAPHICS_MENU_KEY: menuKey, DEMOGRAPHICS_CARD_IDS: cardIds,
+    loadScopedCardPreferences: () => state.rows,
+    setPreferenceState: (value) => { state.preference = value; },
+  })();
+  // CardLayout may publish local defaults before remote user-grid arrives.
+  synchronize();
+  assert.equal(isReady(), false);
+  state.readiness = "ready";
+  state.rows = [{ id: selectedId, visible: false }];
+  assert.equal(isReady(), false, "same identity is insufficient: this render still contains pre-hydration defaults");
+  synchronize();
+  assert.equal(isReady(), true);
+  assert.equal(state.preference.value.some((item) => item.visible !== false), false);
+  state.readiness = "pending";
+  assert.equal(isReady(), false);
+  state.readiness = "fallback";
+  assert.equal(isReady(), false);
+  synchronize();
+  assert.equal(isReady(), true, "failed synchronization permits freshly read local preferences");
+});
 const settings = { ...presentation.defaultDemographicPresentation("gender"), type: "half-donut", palette: "cyber", emojis: true };
 const admin = { id: "admin-id", company_id: "company-jwt", role: "admin", is_master: false, permissions: [{ id: "permission-widget", slug: "dashboard_widgets_manage" }] };
 
@@ -64,7 +95,7 @@ function callbackHarness(options = {}) {
   const execute = evaluate(`return (${callbackSource});`, {
     ...presentation,
     canEditVisual: access.hasVisualAdminAccess(user), companyScopeId,
-    user, preferenceScopeId, preferenceIdentityKey,
+    user, preferenceScopeId, preferenceIdentityKey, gridReadiness: "ready",
     DEMOGRAPHICS_MENU_KEY: menuKey, DEMOGRAPHICS_CARD_IDS: cardIds,
     loadScopedCardPreferences: (...args) => { loaded.push(args); return latest; },
     saveCardPreferences: (...args) => { saved.push(args); latest = args[1]; },
@@ -116,7 +147,7 @@ test("callback busca preferências mais recentes e altera somente apresentação
   assert.equal(Object.hasOwn(target, "demographics"), false);
   assert.deepEqual(harness.loaded[0], [menuKey, cardIds, "company-selected", admin.id, "demographics-analysis"]);
   assert.deepEqual(harness.saved[0], [menuKey, updated, cardIds, "company-selected", admin.id, "demographics-analysis"]);
-  assert.deepEqual(harness.states[0], { key: `company-selected|${admin.id}|demographics-analysis`, value: updated });
+  assert.deepEqual(harness.states[0], { key: `company-selected|${admin.id}|demographics-analysis`, readiness: "ready", value: updated });
   assert.deepEqual(harness.refetches, []);
 });
 
@@ -147,7 +178,7 @@ test("normalização do callback é segura e preferências visuais não entram n
 });
 
 const declarations = ast.statements.filter((node) => ts.isVariableStatement(node) || (ts.isFunctionDeclaration(node) && node.name?.text !== "DemographicsDashboard")).map((node) => node.getText(ast).replace(/^export\s+/, "")).join("\n");
-const buildReport = evaluate(`${declarations}\nreturn buildDemographicsReport;`, { ...demographic, ...presentation, ...temporalPreferences, ...distribution, ...crossing, ...palette, ...utils });
+const buildReport = evaluate(`${declarations}\nreturn buildDemographicsReport;`, { ...demographic, ...presentation, ...temporalPreferences, ...distribution, ...crossing, ...palette, ...utils, ...visibleCategories });
 const summary = demographic.aggregateDemographicBuckets([
   { gender: "Woman", age_bucket: "0-2", emotion: "happy", count: 5 },
   { gender: "Man", age_bucket: "20-29", emotion: "neutral", count: 7 },
@@ -186,4 +217,23 @@ test("opções visuais do relatório não alteram tabelas, totais, métricas ou 
   assert.deepEqual(configured.context, legacy.context);
   assert.equal(configured.subtitle, legacy.subtitle);
   assert.equal(configured.timeZone, legacy.timeZone);
+});
+
+test("relatórios configurados e legados omitem gênero desconhecido sem apagar suas detecções", () => {
+  const mixed = demographic.aggregateDemographicBuckets([
+    { gender: "Woman", age_bucket: "20-29", emotion: "happy", count: 30 },
+    { gender: "Man", age_bucket: "20-29", emotion: "neutral", count: 20 },
+    { gender: "unknown", age_bucket: "30-39", emotion: "happy", count: 50 },
+  ].map((row) => ({ bucket: "2026-09-10T13:00:00Z", camera_id: "fixture-camera", ...row })));
+  const before = structuredClone(mixed);
+  for (const presentations of [undefined, { demographics_gender_mix: settings }]) {
+    const report = buildReport({ ...reportContext, summary: mixed, presentations });
+    assert.doesNotMatch(JSON.stringify(report), /Não identificado|"unknown"/);
+    assert.equal(report.metrics[0].value, 100);
+    assert.equal(report.metrics[1].value, "Mulher · 60%");
+    assert.deepEqual(report.charts[0].table.rows.map(({ count, percentage }) => [count, percentage]), [[30, "60%"], [20, "40%"]]);
+    assert.equal(report.charts[3].table.rows.reduce((total, row) => total + row.total, 0), 50);
+    for (const index of [1, 2]) assert.equal(report.charts[index].table.rows.reduce((total, row) => total + row.count, 0), 100);
+  }
+  assert.deepEqual(mixed, before);
 });

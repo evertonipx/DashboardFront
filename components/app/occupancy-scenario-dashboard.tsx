@@ -105,13 +105,23 @@ import {
 } from "@/lib/dashboard-focus";
 import {
   filterScopedApiRows,
+  usesMasterCrossCompanyScope,
   useEffectiveCompanyScopeId,
   useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
 import {
-  requireCertifiedRuntimeCompanyTimeZone,
+  companyCalendarDate,
+  companyDateKey,
+  companyTimeZoneHour,
+  endOfCompanyTimeZoneHour,
+  requireCertifiedCompanyTimeZone,
+  startOfCompanyTimeZoneDay,
+  startOfCompanyTimeZoneHour,
   type CompanyTimeZoneResolution,
 } from "@/lib/company-time-zone";
+import { shiftOccupancyCalendarDate } from "@/lib/occupancy-calendar";
+import { fetchOccupancyCivilAggregate } from "@/lib/occupancy-civil-aggregate-query";
+import { createOccupancyQueryScheduler } from "@/lib/occupancy-dashboard-query";
 import { ensureGraphicContrast } from "@/lib/occupancy-hex-palette";
 import { occupancyObjectClassLabel } from "@/lib/occupancy-object-class";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
@@ -147,11 +157,17 @@ import {
 } from "@/lib/occupancy-hour-axis";
 import { latestOccupancyMetric } from "@/lib/occupancy-metrics";
 import {
+  nextOccupancyLiveRetry,
+  occupancyLiveRetryReady,
+  type OccupancyLiveRetryState,
+} from "@/lib/occupancy-live-retry";
+import {
   requireOccupancyAlertRows,
   requireOccupancyHistoryResponse,
   requireOccupancyScenarioRows,
 } from "@/lib/occupancy-validation";
 import { canManageOccupancy } from "@/lib/permissions";
+import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type {
   ReportChart,
   ReportMetric,
@@ -179,6 +195,7 @@ type LoadOptions = {
 };
 
 type OccupancyChartDefinition = {
+  timeZone?: string;
   id: string;
   label: string;
   description: string;
@@ -193,6 +210,7 @@ type OccupancyChartDefinition = {
 type OccupancyChartState = {
   rows: OccupancyScenarioBucketRow[];
   points: OccupancyPoint[];
+  incomplete?: boolean;
   error?: string;
   warning?: string;
 };
@@ -243,6 +261,7 @@ type OccupancyLiveDataPlan = {
 };
 
 type OccupancyLiveDataFreshness = {
+  retries?: Partial<Record<"history" | "alerts" | OccupancyChartDefinition["granularity"], OccupancyLiveRetryState>>;
   alertsAt: number;
   chartAt: Partial<Record<OccupancyChartDefinition["granularity"], number>>;
   chartWindowKeys: Partial<
@@ -327,6 +346,7 @@ export function OccupancyScenarioDashboard() {
   const userId = user?.id;
   const { enterMonitorMode, exitMonitorMode, monitorMode } = useMonitorMode();
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const masterCrossCompanyScope = usesMasterCrossCompanyScope(user, companyScopeId);
   const companyTimeZoneResolution =
     useEffectiveCompanyTimeZoneResolution(user);
   const companyTimeZone = companyTimeZoneResolution.timeZone;
@@ -355,6 +375,7 @@ export function OccupancyScenarioDashboard() {
   const [history, setHistory] =
     React.useState<OccupancyScenarioHistoryResponse | null>(null);
   const [alerts, setAlerts] = React.useState<OccupancyAlertRow[]>([]);
+  const [alertsLoadedScopeKey, setAlertsLoadedScopeKey] = React.useState("");
   const [alertsError, setAlertsError] = React.useState("");
   const [loadingScenarios, setLoadingScenarios] = React.useState(true);
   const [loadingData, setLoadingData] = React.useState(false);
@@ -393,6 +414,7 @@ export function OccupancyScenarioDashboard() {
   const activeDataScopeKeyRef = React.useRef("");
   const loadedDataScopeKeyRef = React.useRef("");
   const dataPlanKeyRef = React.useRef("");
+  const civilAggregateCapabilitiesRef = React.useRef(new Map<string, boolean>());
   const dataFreshnessRef = React.useRef<OccupancyLiveDataFreshness>({
     alertsAt: 0,
     chartAt: {},
@@ -492,9 +514,10 @@ export function OccupancyScenarioDashboard() {
     dataPlanKeyRef.current = occupancyDataPlan.key;
     requestRef.current?.abort();
   }, [occupancyDataPlan.key]);
+  const chartClockMinute = Math.floor(clock.getTime() / MINUTE_MS) * MINUTE_MS;
   const chartDefinitions = React.useMemo(
-    () => buildOccupancyChartDefinitions(clock),
-    [clock],
+    () => buildOccupancyChartDefinitions(new Date(chartClockMinute), companyTimeZone),
+    [chartClockMinute, companyTimeZone],
   );
   const focusHourlyDefinition = chartDefinitions.find(
     (definition) => definition.id === "occupancy_chart_hour",
@@ -512,6 +535,7 @@ export function OccupancyScenarioDashboard() {
         name: selectedScenario?.name ?? "",
         scenarioId: selectedScenario?.id ?? "",
         state: focusHourlyState,
+        timeZone: companyTimeZone,
         to: focusHourlyTo,
       }),
     [
@@ -521,6 +545,7 @@ export function OccupancyScenarioDashboard() {
       focusHourlyTo,
       selectedScenario?.id,
       selectedScenario?.name,
+      companyTimeZone,
     ],
   );
   const sharedFocusSnapshot = React.useMemo(
@@ -614,6 +639,7 @@ export function OccupancyScenarioDashboard() {
     const metadataKey = JSON.stringify([
       companyScopeId,
       canManage,
+      masterCrossCompanyScope,
       userId ?? "",
     ]);
     if (
@@ -635,7 +661,14 @@ export function OccupancyScenarioDashboard() {
         signal: controller.signal,
       });
       const nextScenarios = filterScopedApiRows(
-        requireOccupancyScenarioRows(response, companyScopeId),
+        requireOccupancyScenarioRows(
+          masterCrossCompanyScope
+            ? selectExplicitCompanyScopedRows(response, companyScopeId, {
+                collectionKeys: ["data"], label: "cenários de ocupação",
+              }).rows
+            : response,
+          companyScopeId,
+        ),
         companyScopeId,
       );
 
@@ -710,7 +743,7 @@ export function OccupancyScenarioDashboard() {
         setLoadingScenarios(false);
       }
     }
-  }, [canManage, companyScopeId, userId]);
+  }, [canManage, companyScopeId, masterCrossCompanyScope, userId]);
 
   const loadScenarioData = React.useCallback(
     async (
@@ -733,13 +766,15 @@ export function OccupancyScenarioDashboard() {
       }
 
       const now = new Date();
-      const definitions = buildOccupancyChartDefinitions(now);
+      if (force) civilAggregateCapabilitiesRef.current.clear();
+      const definitions = buildOccupancyChartDefinitions(now, companyTimeZone);
       const freshness =
         dataFreshnessRef.current.scopeKey === requestedScopeKey
           ? dataFreshnessRef.current
           : emptyOccupancyLiveDataFreshness(requestedScopeKey);
       const dueHistory =
         occupancyDataPlan.history &&
+        occupancyLiveRetryReady(freshness.retries?.history, now.getTime(), force) &&
         occupancyLiveResourceIsDue(
           freshness.historyAt,
           OCCUPANCY_REFRESH_MS,
@@ -748,6 +783,7 @@ export function OccupancyScenarioDashboard() {
         );
       const dueAlerts =
         occupancyDataPlan.alerts &&
+        occupancyLiveRetryReady(freshness.retries?.alerts, now.getTime(), force) &&
         occupancyLiveResourceIsDue(
           freshness.alertsAt,
           OCCUPANCY_ALERTS_REFRESH_MS,
@@ -760,6 +796,9 @@ export function OccupancyScenarioDashboard() {
       const requestedPlanKey = occupancyDataPlan.key;
       const dueDefinitions = definitions.filter((definition) => {
         if (!requestedGranularities.has(definition.granularity)) return false;
+        if (!occupancyLiveRetryReady(
+          freshness.retries?.[definition.granularity], now.getTime(), force,
+        )) return false;
         const windowKey = occupancyChartDefinitionWindowKey(definition);
         return (
           force ||
@@ -792,6 +831,7 @@ export function OccupancyScenarioDashboard() {
       }
 
       const controller = new AbortController();
+      const scheduleQuery = createOccupancyQueryScheduler(controller.signal);
       requestRef.current = controller;
       runningRef.current = true;
 
@@ -814,13 +854,13 @@ export function OccupancyScenarioDashboard() {
           dataPlanKeyRef.current === requestedPlanKey &&
         definitionsWindowKey ===
           occupancyChartDefinitionsWindowKey(
-            buildOccupancyChartDefinitions(new Date()).filter((definition) =>
+            buildOccupancyChartDefinitions(new Date(), companyTimeZone).filter((definition) =>
               dueGranularities.has(definition.granularity),
             ),
           );
 
       try {
-        requireCertifiedRuntimeCompanyTimeZone(
+        requireCertifiedCompanyTimeZone(
           certifiedCompanyTimeZoneResolution,
         );
         const [historyResult, alertResult, chartEntries] = await Promise.all([
@@ -892,18 +932,33 @@ export function OccupancyScenarioDashboard() {
           Promise.all(
             dueDefinitions.map(async (definition) => {
               try {
-                const response =
-                  await apiFetch<OccupancyScenarioAggregateResponse>(
-                    occupancyScenarioAggregatePath(scenario.id, definition),
-                    { companyScopeId, signal: controller.signal },
-                  );
+                const fetchResponse = (path: string) => scheduleQuery(path, () =>
+                  apiFetch<OccupancyScenarioAggregateResponse>(path, {
+                    companyScopeId, signal: controller.signal,
+                  }),
+                );
+                const response = definition.granularity === "minute" || definition.granularity === "hour"
+                  ? await fetchResponse(occupancyScenarioAggregatePath(scenario.id, definition))
+                  : await fetchOccupancyCivilAggregate({
+                      capabilities: civilAggregateCapabilitiesRef.current,
+                      companyScopeId,
+                      fetchResponse,
+                      from: definition.from,
+                      granularity: definition.granularity,
+                      openBucket: listBucketStarts(definition).at(-1),
+                      requestedAt: now,
+                      scenarioId: scenario.id,
+                      signal: controller.signal,
+                      timeZone: companyTimeZone,
+                      to: definition.to,
+                    });
                 const rows = requireOccupancyAggregateRows(
                   response,
                   definition.granularity,
                   scenario.id,
                   companyTimeZone,
                   {
-                    allowLegacyUncertifiedInstantBuckets: true,
+                    allowDocumentedAggregateResponse: true,
                     openBucket: listBucketStarts(definition).at(-1),
                     requestedAt: now,
                     requireCertification: true,
@@ -967,12 +1022,16 @@ export function OccupancyScenarioDashboard() {
           }
         }
         if (alertResult.requested) {
-          if (alertResult.succeeded) setAlerts(alertResult.data);
+          if (alertResult.succeeded) {
+            setAlerts(alertResult.data);
+            setAlertsLoadedScopeKey(requestedScopeKey);
+          }
           setAlertsError(alertResult.error);
         }
         const completedAt = Date.now();
         const nextFreshness: OccupancyLiveDataFreshness = {
           ...freshness,
+          retries: { ...freshness.retries },
           alertsAt: alertResult.succeeded ? completedAt : freshness.alertsAt,
           chartAt: { ...freshness.chartAt },
           chartWindowKeys: { ...freshness.chartWindowKeys },
@@ -981,7 +1040,20 @@ export function OccupancyScenarioDashboard() {
             : freshness.historyAt,
           scopeKey: requestedScopeKey,
         };
+        if (historyResult.requested) {
+          nextFreshness.retries!.history = nextOccupancyLiveRetry(
+            freshness.retries?.history, historyResult.succeeded, completedAt,
+          );
+        }
+        if (alertResult.requested) {
+          nextFreshness.retries!.alerts = nextOccupancyLiveRetry(
+            freshness.retries?.alerts, alertResult.succeeded, completedAt,
+          );
+        }
         chartEntries.forEach((entry) => {
+          nextFreshness.retries![entry.definition.granularity] = nextOccupancyLiveRetry(
+            freshness.retries?.[entry.definition.granularity], entry.succeeded, completedAt,
+          );
           if (!entry.succeeded) return;
           nextFreshness.chartAt[entry.definition.granularity] = completedAt;
           nextFreshness.chartWindowKeys[entry.definition.granularity] =
@@ -1004,6 +1076,16 @@ export function OccupancyScenarioDashboard() {
 
       } catch (error) {
         if (!isAbortError(error) && isCurrentRequest()) {
+          const failedAt = Date.now();
+          const retries = { ...freshness.retries };
+          for (const key of [
+            ...(dueHistory ? ["history" as const] : []),
+            ...(dueAlerts ? ["alerts" as const] : []),
+            ...dueDefinitions.map((definition) => definition.granularity),
+          ]) {
+            retries[key] = nextOccupancyLiveRetry(retries[key], false, failedAt);
+          }
+          dataFreshnessRef.current = { ...freshness, retries };
           const message = occupancyDashboardErrorMessage(
             error,
             "Não foi possível carregar a ocupação.",
@@ -1057,6 +1139,7 @@ export function OccupancyScenarioDashboard() {
         | ((current: OccupancyDashboardSettings) =>
             Partial<OccupancyDashboardSettings>),
     ) => {
+      if (!canEditVisual) return;
       const base =
         dashboardSettingsState.scopeKey === dashboardSettingsScopeKey
           ? dashboardSettingsState.value
@@ -1084,6 +1167,7 @@ export function OccupancyScenarioDashboard() {
       }
     },
     [
+      canEditVisual,
       companyScopeId,
       dashboardSettingsScopeKey,
       dashboardSettingsState,
@@ -1105,6 +1189,8 @@ export function OccupancyScenarioDashboard() {
     requestRef.current?.abort();
 
     if (loadedDataScopeKeyRef.current !== activeDataScopeKey) {
+      civilAggregateCapabilitiesRef.current.clear();
+      setAlertsLoadedScopeKey("");
       dataFreshnessRef.current = emptyOccupancyLiveDataFreshness(
         activeDataScopeKey,
       );
@@ -1297,11 +1383,17 @@ export function OccupancyScenarioDashboard() {
   // Falhas de uma série agregada ficam no próprio widget. O catálogo e o
   // snapshot ao vivo continuam válidos e não devem derrubar todo o módulo.
   const occupancyCertificationError = metadataError || dataLoadError;
-  const hasIncompleteOccupancyCoverage = Object.values(
-    certifiedChartData,
-  ).some(
-    (state) => Boolean(state.error || state.warning),
-  ) || Boolean(certifiedHistoryError || certifiedAlertsError);
+  const hasIncompleteOccupancyCoverage = occupancyDataPlan.granularities.some(
+    (granularity) => {
+      const state = certifiedChartData[`occupancy_chart_${granularity}`];
+      return !state || Boolean(state.error || state.incomplete);
+    },
+  ) || Boolean(
+    (occupancyDataPlan.history && (!certifiedHistory || certifiedHistoryError)) ||
+    (occupancyDataPlan.alerts && (
+      alertsLoadedScopeKey !== activeDataScopeKey || certifiedAlertsError
+    )),
+  );
   const thresholdStatus = selectedScenario && currentTotal !== null
     ? occupancyThresholdStatus(currentTotal, selectedScenario)
     : null;
@@ -1531,7 +1623,7 @@ export function OccupancyScenarioDashboard() {
     node: selectedScenario ? (
       <OccupancyChartCard
         definition={definition}
-        loading={initialLoading}
+        loading={initialLoading || !certifiedChartData[definition.id]}
         metricVisibility={metricVisibility}
         scenario={selectedScenario}
         state={certifiedChartData[definition.id]}
@@ -1603,7 +1695,7 @@ export function OccupancyScenarioDashboard() {
         definition && selectedScenario ? (
           <OccupancyChartCard
             definition={definition}
-            loading={initialLoading}
+            loading={initialLoading || !sourceDefinition || !certifiedChartData[sourceDefinition.id]}
             metricVisibility={widget.series}
             scenario={selectedScenario}
             state={sourceDefinition ? certifiedChartData[sourceDefinition.id] : undefined}
@@ -1761,7 +1853,7 @@ export function OccupancyScenarioDashboard() {
             {lastUpdated ? (
               <Badge variant="outline" className="gap-1 bg-card">
                 <Clock3 className="h-3.5 w-3.5" />
-                {formatTime(lastUpdated)}
+                {formatTime(lastUpdated, companyTimeZone)}
               </Badge>
             ) : null}
           </div>
@@ -1811,7 +1903,7 @@ export function OccupancyScenarioDashboard() {
                   </Select>
                 </div>
 
-                <div
+                {canEditVisual ? <div
                   aria-label="Aparência dos comparativos desta visão"
                   className="flex w-[8.75rem] min-w-0 max-w-full items-center gap-2"
                   role="group"
@@ -1825,23 +1917,23 @@ export function OccupancyScenarioDashboard() {
                       updateOccupancyComparisonSettings({ colorPaletteId })
                     }
                   />
-                </div>
+                </div> : null}
               </div>
 
               <div data-toolbar-actions>
                 {lastUpdated ? (
                   <span
                     data-toolbar-status
-                    aria-label={`Última atualização às ${formatTime(lastUpdated)}`}
+                    aria-label={`Última atualização às ${formatTime(lastUpdated, companyTimeZone)}`}
                     className="hidden min-w-0 items-center gap-1 whitespace-nowrap text-[11px] tabular-nums text-muted-foreground @4xl:inline-flex"
-                    title={`Última atualização às ${formatTime(lastUpdated)}`}
+                    title={`Última atualização às ${formatTime(lastUpdated, companyTimeZone)}`}
                   >
                     <Clock3 className="h-3.5 w-3.5 shrink-0" />
                     <span className="hidden @lg:inline @xl:hidden">
-                      {formatTime(lastUpdated)}
+                      {formatTime(lastUpdated, companyTimeZone)}
                     </span>
                     <span className="hidden @xl:inline">
-                      Atualizado às {formatTime(lastUpdated)}
+                      Atualizado às {formatTime(lastUpdated, companyTimeZone)}
                     </span>
                   </span>
                 ) : null}
@@ -1895,7 +1987,7 @@ export function OccupancyScenarioDashboard() {
                       </Button>
                     </>
                   ) : null}
-                  <Button
+                  {canEditVisual ? <Button
                     type="button"
                     size="icon"
                     className="h-8 w-8 shrink-0"
@@ -1909,7 +2001,7 @@ export function OccupancyScenarioDashboard() {
                     title="Configurações operacionais"
                   >
                     <SlidersHorizontal className="h-4 w-4" />
-                  </Button>
+                  </Button> : null}
                   <Button
                     type="button"
                     size="icon"
@@ -1938,7 +2030,7 @@ export function OccupancyScenarioDashboard() {
               </div>
             </div>
 
-            {operationalSettingsOpen ? (
+            {canEditVisual && operationalSettingsOpen ? (
               <div
                 id="occupancy-operational-settings"
                 aria-label="Configurações operacionais da ocupação"
@@ -2926,12 +3018,12 @@ function occupancyChartDefinitionWindowKey(
   ]);
 }
 
-function buildOccupancyChartDefinitions(now: Date): OccupancyChartDefinition[] {
+function buildOccupancyChartDefinitions(now: Date, timeZone?: string): OccupancyChartDefinition[] {
   const minuteEnd = addMinutes(startOfMinute(now), 1);
-  const hourEnd = endOfAggregateBucket(startOfHour(now), "hour");
-  const todayStart = startOfDay(now);
-  const currentWeekStart = startOfWeek(now);
-  const currentMonthStart = startOfMonth(now);
+  const hourEnd = timeZone ? endOfCompanyTimeZoneHour(now, timeZone) : endOfAggregateBucket(startOfHour(now), "hour");
+  const todayStart = timeZone ? companyCalendarDate(now, timeZone, "day") : startOfDay(now);
+  const currentWeekStart = startOfWeek(todayStart);
+  const currentMonthStart = startOfMonth(todayStart);
 
   return [
     {
@@ -2939,6 +3031,7 @@ function buildOccupancyChartDefinitions(now: Date): OccupancyChartDefinition[] {
       label: "Minuto a minuto",
       description: "Últimos 60 minutos do cenário.",
       granularity: "minute",
+      timeZone,
       from: addMinutes(minuteEnd, -60),
       to: minuteEnd,
     },
@@ -2947,7 +3040,8 @@ function buildOccupancyChartDefinitions(now: Date): OccupancyChartDefinition[] {
       label: "Hora a hora",
       description: "Hoje por hora com mínimo, média, máximo e atual.",
       granularity: "hour",
-      from: todayStart,
+      timeZone,
+      from: timeZone ? startOfCompanyTimeZoneDay(now, timeZone) : todayStart,
       to: hourEnd,
     },
     {
@@ -2955,6 +3049,7 @@ function buildOccupancyChartDefinitions(now: Date): OccupancyChartDefinition[] {
       label: "Dia a dia",
       description: "Últimos 7 dias do cenário.",
       granularity: "day",
+      timeZone,
       from: addDays(todayStart, -6),
       to: addDays(todayStart, 1),
     },
@@ -2963,6 +3058,7 @@ function buildOccupancyChartDefinitions(now: Date): OccupancyChartDefinition[] {
       label: "Semana a semana",
       description: "Últimas 8 semanas do cenário.",
       granularity: "week",
+      timeZone,
       from: addDays(currentWeekStart, -7 * 7),
       to: addDays(currentWeekStart, 7),
     },
@@ -2971,6 +3067,7 @@ function buildOccupancyChartDefinitions(now: Date): OccupancyChartDefinition[] {
       label: "Mês a mês",
       description: "Últimos 12 meses do cenário.",
       granularity: "month",
+      timeZone,
       from: addMonths(currentMonthStart, -11),
       to: addMonths(currentMonthStart, 1),
     },
@@ -2989,6 +3086,7 @@ function buildSharedFocusHourlyAggregate({
   name,
   scenarioId,
   state,
+  timeZone,
   to,
 }: {
   enabled: boolean;
@@ -2996,6 +3094,7 @@ function buildSharedFocusHourlyAggregate({
   name: string;
   scenarioId: string;
   state?: OccupancyChartState;
+  timeZone?: string;
   to: number | null;
 }): OccupancySharedHourlyAggregate | null {
   if (!enabled || !scenarioId || from === null || to === null) return null;
@@ -3003,6 +3102,7 @@ function buildSharedFocusHourlyAggregate({
     description: "",
     from: new Date(from),
     granularity: "hour",
+    timeZone,
     id: "occupancy_chart_hour",
     label: "",
     to: new Date(to),
@@ -3023,7 +3123,8 @@ function buildSharedFocusHourlyAggregate({
       "hour",
       buckets,
       {
-        allowLegacyUncertifiedInstantBuckets: true,
+        allowDocumentedAggregateResponse: true,
+        expectedTimezone: timeZone,
         openBucket: buckets.at(-1),
         requireCertification: true,
       },
@@ -3080,6 +3181,7 @@ function buildOccupancyChartState(
   return {
     rows,
     points,
+    incomplete: missingBucketCount > 0,
     warning: joinOccupancyWarnings(
       metadataWarning,
       occupancyAggregateCoverageWarning(
@@ -3105,7 +3207,8 @@ function buildOccupancyPoints(
       definition.granularity,
       requestedBuckets,
       {
-        allowLegacyUncertifiedInstantBuckets: true,
+        allowDocumentedAggregateResponse: true,
+        expectedTimezone: definition.timeZone,
         openBucket: requestedBuckets.at(-1),
         requireCertification: true,
       },
@@ -3120,7 +3223,7 @@ function buildOccupancyPoints(
     if (!total) {
       return {
         bucket: bucketStart.toISOString(),
-        label: bucketLabel(bucketStart, definition.granularity),
+        label: bucketLabel(bucketStart, definition.granularity, definition.timeZone),
         average: null,
         current: null,
         minimum: null,
@@ -3130,7 +3233,7 @@ function buildOccupancyPoints(
 
     return {
       bucket: bucketStart.toISOString(),
-      label: bucketLabel(bucketStart, definition.granularity),
+      label: bucketLabel(bucketStart, definition.granularity, definition.timeZone),
       average: total.average,
       current: total.final ?? null,
       minimum: total.minimum,
@@ -3150,7 +3253,7 @@ function buildEmptyOccupancyPoints(
 ): OccupancyPoint[] {
   const points = listBucketStarts(definition).map((bucketStart) => ({
     bucket: bucketStart.toISOString(),
-    label: bucketLabel(bucketStart, definition.granularity),
+    label: bucketLabel(bucketStart, definition.granularity, definition.timeZone),
     average: null,
     current: null,
     minimum: null,
@@ -3164,7 +3267,7 @@ function occupancyDisplayPoints(
   points: OccupancyPoint[],
 ) {
   return definition.granularity === "hour"
-    ? buildFixedOccupancyHourlyPoints(definition.from, points)
+    ? buildFixedOccupancyHourlyPoints(definition.from, points, definition.timeZone)
     : points;
 }
 
@@ -3717,14 +3820,14 @@ function denseMarkerSize(
 
 function listBucketStarts(definition: OccupancyChartDefinition) {
   const starts: Date[] = [];
-  let cursor = alignToGranularity(definition.from, definition.granularity);
-  const end = alignEndToGranularity(definition.to, definition.granularity);
+  let cursor = alignToGranularity(definition.from, definition.granularity, definition.timeZone);
+  const end = alignEndToGranularity(definition.to, definition.granularity, definition.timeZone);
   let guard = 0;
 
   while (cursor < end && guard < 500) {
     const bucketStart = new Date(cursor);
     starts.push(bucketStart);
-    cursor = addGranularity(bucketStart, definition.granularity);
+    cursor = addGranularity(bucketStart, definition.granularity, definition.timeZone);
     guard += 1;
   }
 
@@ -4035,7 +4138,7 @@ function buildOccupancyDashboardReport({
       occupancyDurationDataCompleteUntil,
       occupancyDurationInsightDataCompleteUntil,
     ),
-    filename: `ipxdata-ocupacao-${reportDateSlug(generatedAt)}`,
+    filename: `ipxdata-ocupacao-${reportDateSlug(generatedAt, timeZone)}`,
     generatedAt,
     metrics: visibleCardIds.flatMap((cardId) => {
       const metric = metricByCardId.get(cardId);
@@ -4131,7 +4234,8 @@ function reportOccupancyValue(value: number | null) {
   return value === null ? "—" : formatOccupancyValue(value);
 }
 
-function reportDateSlug(date: Date) {
+function reportDateSlug(date: Date, timeZone?: string) {
+  if (timeZone) return companyDateKey(date, timeZone);
   return [
     date.getFullYear(),
     String(date.getMonth() + 1).padStart(2, "0"),
@@ -4271,9 +4375,10 @@ function occupancyDataScopeKey(
 function alignToGranularity(
   date: Date,
   granularity: OccupancyChartDefinition["granularity"],
+  timeZone?: string,
 ) {
   if (granularity === "minute") return startOfMinute(date);
-  if (granularity === "hour") return startOfHour(date);
+  if (granularity === "hour") return timeZone ? startOfCompanyTimeZoneHour(date, timeZone) : startOfHour(date);
   if (granularity === "day") return startOfDay(date);
   if (granularity === "week") return startOfWeek(date);
   return startOfMonth(date);
@@ -4282,18 +4387,20 @@ function alignToGranularity(
 function alignEndToGranularity(
   date: Date,
   granularity: OccupancyChartDefinition["granularity"],
+  timeZone?: string,
 ) {
-  const aligned = alignToGranularity(date, granularity);
+  const aligned = alignToGranularity(date, granularity, timeZone);
   if (aligned.getTime() === date.getTime()) return aligned;
-  return addGranularity(aligned, granularity);
+  return addGranularity(aligned, granularity, timeZone);
 }
 
 function addGranularity(
   date: Date,
   granularity: OccupancyChartDefinition["granularity"],
+  timeZone?: string,
 ) {
   if (granularity === "minute") return addMinutes(date, 1);
-  if (granularity === "hour") return endOfAggregateBucket(date, "hour");
+  if (granularity === "hour") return timeZone ? endOfCompanyTimeZoneHour(date, timeZone) : endOfAggregateBucket(date, "hour");
   if (granularity === "day") return addDays(date, 1);
   if (granularity === "week") return addDays(date, 7);
   return addMonths(date, 1);
@@ -4302,9 +4409,10 @@ function addGranularity(
 function bucketLabel(
   date: Date,
   granularity: OccupancyChartDefinition["granularity"],
+  timeZone?: string,
 ) {
-  if (granularity === "minute") return formatTime(date);
-  if (granularity === "hour") return `${String(date.getHours()).padStart(2, "0")}h`;
+  if (granularity === "minute") return formatTime(date, timeZone);
+  if (granularity === "hour") return `${String(timeZone ? companyTimeZoneHour(date, timeZone) : date.getHours()).padStart(2, "0")}h`;
   if (granularity === "day") {
     const dayMonth = new Intl.DateTimeFormat("pt-BR", {
       day: "2-digit",
@@ -4370,8 +4478,7 @@ function startOfWeek(date: Date) {
   const next = startOfDay(date);
   const day = next.getDay();
   const diff = day === 0 ? -6 : 1 - day;
-  next.setDate(next.getDate() + diff);
-  return next;
+  return shiftOccupancyCalendarDate(next, diff);
 }
 
 function startOfMonth(date: Date) {
@@ -4383,15 +4490,11 @@ function addMinutes(date: Date, minutes: number) {
 }
 
 function addDays(date: Date, days: number) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
+  return shiftOccupancyCalendarDate(date, days);
 }
 
 function addMonths(date: Date, months: number) {
-  const next = new Date(date);
-  next.setMonth(next.getMonth() + months);
-  return next;
+  return shiftOccupancyCalendarDate(date, 0, months);
 }
 
 function isAbortError(error: unknown) {

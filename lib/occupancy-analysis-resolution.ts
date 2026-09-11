@@ -145,15 +145,13 @@ function startOfBucket(
   date: Date,
   granularity: OccupancyAnalysisResolutionGranularity,
 ) {
-  const next = new Date(date);
-  next.setHours(0, 0, 0, 0);
+  let next = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   if (granularity === "month") {
-    next.setDate(1);
-    return next;
+    return new Date(date.getFullYear(), date.getMonth(), 1);
   }
   if (granularity === "week") {
     const weekday = next.getDay();
-    next.setDate(next.getDate() + (weekday === 0 ? -6 : 1 - weekday));
+    next = new Date(date.getFullYear(), date.getMonth(), date.getDate() + (weekday === 0 ? -6 : 1 - weekday));
   }
   return next;
 }
@@ -163,17 +161,13 @@ function addBucket(
   granularity: OccupancyAnalysisResolutionGranularity,
 ) {
   if (granularity === "month") {
-    const next = new Date(date);
-    next.setMonth(next.getMonth() + 1);
-    return next;
+    return new Date(date.getFullYear(), date.getMonth() + 1, date.getDate());
   }
   return addDays(date, granularity === "week" ? 7 : 1);
 }
 
 function addDays(date: Date, amount: number) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + amount);
-  return next;
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + amount);
 }
 
 function requireValidRange(from: Date, to: Date, dayCount: number) {
@@ -183,14 +177,8 @@ function requireValidRange(from: Date, to: Date, dayCount: number) {
     Number.isNaN(from.getTime()) ||
     Number.isNaN(to.getTime()) ||
     from >= to ||
-    from.getHours() !== 0 ||
-    from.getMinutes() !== 0 ||
-    from.getSeconds() !== 0 ||
-    from.getMilliseconds() !== 0 ||
-    to.getHours() !== 0 ||
-    to.getMinutes() !== 0 ||
-    to.getSeconds() !== 0 ||
-    to.getMilliseconds() !== 0 ||
+    from.getTime() !== new Date(from.getFullYear(), from.getMonth(), from.getDate()).getTime() ||
+    to.getTime() !== new Date(to.getFullYear(), to.getMonth(), to.getDate()).getTime() ||
     !Number.isSafeInteger(dayCount) ||
     dayCount < 1
   ) {

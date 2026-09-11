@@ -99,15 +99,22 @@ test("Atualizar aborta baseline sincronamente e resposta antiga não repovoa o c
     partitions: [{ from: new Date("2026-09-10T03:00:00Z"), to: new Date("2026-09-10T04:00:00Z") }],
   });
   const comparisonRequestRef = { current: controller };
+  const comparisonCacheRef = { current: { summary: "stale" } };
+  const liveRetryRef = { current: { failures: 2, retryAt: Date.now() + 60_000 } };
+  const comparisonRetryRef = { current: { failures: 1, retryAt: Date.now() + 60_000 } };
   const refresh = execute(`${functions.get("requestFreshData")}\nreturn requestFreshData;`, {
     requestSequenceRef: { current: 1 }, activeRequestRef: { current: null }, comparisonRequestRef,
     pendingLiveAggregationRef: { current: null }, liveCacheRef: { current: null }, partitionCacheRef: { current: cache },
+    comparisonCacheRef, liveRetryRef, comparisonRetryRef,
     surface: "analysis", historicalQueryIdentityKey: "identity", setHistoricalQueryScopeKey() {},
     abortRequest: (target) => target.abort(), setClock() {}, setRefreshVersion() {},
   });
   refresh(new Date("2026-09-10T04:00:00Z"));
   assert.equal(controller.signal.aborted, true);
   assert.equal(comparisonRequestRef.current, null);
+  assert.equal(comparisonCacheRef.current, null);
+  assert.equal(liveRetryRef.current, null);
+  assert.equal(comparisonRetryRef.current, null);
   release();
   await assert.rejects(request, { name: "AbortError" });
   assert.equal(cache.size, 0);

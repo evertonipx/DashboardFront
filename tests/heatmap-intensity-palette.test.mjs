@@ -150,39 +150,73 @@ for (const theme of ["light", "dark"]) {
   });
 }
 
-test("Demographics aplica a escala comum e escolhe rótulos pelo fundo real", () => {
+test("Demographics aplica a escala compartilhada por tema e escolhe rótulos pelo fundo real", () => {
   const filename = "components/app/demographics-dashboard.tsx";
   const source = readFileSync(resolve(projectRoot, filename), "utf8");
-  assert.match(source, /HEATMAP_COLORS\s*=\s*monochromeHeatmapPalette\(HEATMAP_BASE_COLOR\)/);
-  const scale = palette.monochromeHeatmapPalette("#2563EB");
-  const formatLabel = standalone(filename, "heatmapPercentageLabel", {
-    HEATMAP_COLORS: scale,
-    heatmapLabelColor: palette.heatmapLabelColor,
-    isRecord: (value) => value !== null && typeof value === "object",
-    formatDecimal: String,
-  });
+  const crossing = load("lib/demographics-crossing-options.ts");
+  const presentation = load("lib/demographics-presentation.ts");
+  const demographics = load("lib/demographics.ts");
   const builder = standalone(filename, "buildAgeEmotionHeatmapOption", {
-    HEATMAP_COLORS: scale, heatmapPercentageLabel: formatLabel, heatmapTooltip: () => "",
-    formatDecimal: standalone(filename, "formatDecimal", {}),
+    buildDemographicCrossingOption: crossing.buildDemographicCrossingOption,
+    normalizeDemographicPresentation: presentation.normalizeDemographicPresentation,
   });
-  const summary = { crossings: { ageByEmotion: { columns: [{ key: "happy", label: "Feliz" }, { key: "neutral", label: "Neutro" }, { key: "sad", label: "Triste" }], rows: [{ key: "20-29", label: "20–29", cells: [0, 10, 100].map((percentage) => ({ count: percentage * 25, percentage })) }] } } };
-  for (const theme of ["light", "dark"]) {
-    const option = builder(summary, theme);
-    assert.deepEqual(option.visualMap.inRange.color, scale);
-    assert.equal(option.visualMap.dimension, 2, "a intensidade representa a porcentagem, não a quantidade bruta na quarta posição");
-    assert.equal(option.visualMap.seriesIndex, 0);
-    withChart(option, (chart) => {
-      assertRgbEqual(fill(chart, 0, 0), "#FFFFFF");
-      assertRgbEqual(fill(chart, 0, 1), echarts.color.lerp(0.1, scale));
-      assertRgbEqual(fill(chart, 0, 2), scale.at(-1));
-      for (const [index, value] of [[1, 10], [2, 100]]) {
-        const label = chart.getModel().getSeriesByIndex(0).getData().getItemGraphicEl(index).getTextContent();
-        const token = /^\{([^|]+)\|/.exec(label.style.text)?.[1];
-        assert.ok(token);
-        assertRgbEqual(label.style.rich[token].fill, palette.heatmapLabelColor(scale, value / 100));
+  const summary = demographics.aggregateDemographicBuckets([
+    { emotion: "happy", count: 250 },
+    { emotion: "neutral", count: 2250 },
+  ].map((row) => ({ bucket: "2026-09-10T13:00:00Z", camera_id: "fixture-camera", gender: "Woman", age_bucket: "20-29", ...row })));
+  const snapshot = structuredClone(summary);
+  assert.match(source, /buildDemographicCrossingOption\(\s*summary, normalizeDemographicPresentation\(undefined, "age-emotion"\), "age-emotion", theme,?\s*\)/);
+  for (const paletteId of ["pink-blue", ...OCCUPANCY_COLOR_PALETTES.map((entry) => entry.id)]) {
+    for (const theme of ["light", "dark"]) {
+      const settings = presentation.normalizeDemographicPresentation({ palette: paletteId }, "age-emotion");
+      const option = crossing.buildDemographicCrossingOption(summary, settings, "age-emotion", theme);
+      const scale = crossing.demographicHeatmapColors(paletteId, theme);
+      if (paletteId === "pink-blue") {
+        assert.deepEqual(builder(summary, theme).series[0].data, option.series[0].data);
+        assert.deepEqual(builder(summary, theme).visualMap.inRange.color, scale);
       }
-    });
+      assert.deepEqual(option.visualMap.inRange.color, scale);
+      assert.equal(option.visualMap.dimension, 2, "a intensidade representa a porcentagem, não a quantidade bruta na quarta posição");
+      assert.equal(option.visualMap.seriesIndex, 0);
+      assert.equal(option.visualMap.min, 0);
+      assert.equal(option.visualMap.max, 90);
+      assert.deepEqual(option.visualMap.text, ["90%", "0%"]);
+      assert.equal(scale.length, 7);
+      scale.forEach((color, index) => {
+        assert.match(color, /^#[0-9a-f]{6}$/i, "a cor real não depende de transparência sobre outra superfície");
+        if (index > 0) assert.ok(luminance(color) < luminance(scale[index - 1]), `${paletteId} ${theme}: maior participação deve escurecer`);
+      });
+      assert.ok(luminance(crossing.demographicHeatmapColors(paletteId, "dark")[0]) < luminance(crossing.demographicHeatmapColors(paletteId, "light")[0]), "dark não deve recuperar o fundo branco da escala legada");
+      withChart(option, (chart) => {
+        const values = option.series[0].data;
+        assert.equal(values.reduce((total, value) => total + value[3], 0), 2500);
+        const zeroIndex = values.findIndex((value) => value[2] === 0);
+        const lowIndex = values.findIndex((value) => value[2] === 10);
+        const highIndex = values.findIndex((value) => value[2] === 90);
+        assert.ok(zeroIndex >= 0 && lowIndex >= 0 && highIndex >= 0);
+        assertRgbEqual(fill(chart, 0, zeroIndex), scale[0]);
+        assertRgbEqual(fill(chart, 0, lowIndex), echarts.color.lerp(10 / 90, scale));
+        assertRgbEqual(fill(chart, 0, highIndex), scale.at(-1));
+        values.forEach((value, index) => {
+          const raw = summary.crossings.ageByEmotion.rows[value[1]].cells[value[0]];
+          assert.deepEqual(value.slice(2), [raw.percentage, raw.count], "tema e paleta não alteram contagens nem percentuais");
+          if (value[2] <= 0) {
+            assert.equal(option.series[0].label.formatter({ value }), "");
+            return;
+          }
+          const label = chart.getModel().getSeriesByIndex(0).getData().getItemGraphicEl(index).getTextContent();
+          const token = /^\{([^|]+)\|/.exec(label.style.text)?.[1];
+          assert.ok(token, "o percentual precisa aparecer no primeiro frame, sem hover");
+          assert.equal(label.style.text, `{${token}|${value[2]}%}`);
+          const textColor = label.style.rich[token].fill;
+          assertRgbEqual(textColor, crossing.demographicHeatmapLabelColor(scale, value[2] / 90));
+          assert.ok(contrast(textColor, fill(chart, 0, index)) >= 4.5, `${paletteId} ${theme} ${value[2]}: contraste do rótulo renderizado`);
+        });
+      });
+    }
   }
+  assert.deepEqual(summary, snapshot, "renderizar os dois temas não modifica os dados da exportação");
+  assert.deepEqual(builder(summary).visualMap.inRange.color, crossing.demographicHeatmapColors("pink-blue", "light"), "o builder exportável sem tema explícito permanece light");
 });
 
 test("o tema automático do EChart preserva intensidade e rótulos, mas adapta superfícies e outros gráficos", () => {

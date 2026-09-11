@@ -1,9 +1,9 @@
 import type { EnterpriseChartOption } from "@/components/app/echart";
-import { heatmapLabelColor } from "@/lib/chart-palette";
 import type { DemographicAggregation } from "@/lib/demographics";
-import { demographicHeatmapColors } from "@/lib/demographics-crossing-options";
-import { demographicCategoryColor, getDemographicPalette } from "@/lib/demographics-presentation";
-import { buildDemographicTemporalPlan } from "@/lib/demographics-temporal";
+import { demographicComparisonColors } from "@/lib/demographics-comparison-colors";
+import { demographicHeatmapColors, demographicHeatmapLabelColor } from "@/lib/demographics-crossing-options";
+import { demographicCategoryColor } from "@/lib/demographics-presentation";
+import { buildDemographicTemporalPlan, resolveDemographicTemporalPlanCacheKey } from "@/lib/demographics-temporal";
 import {
   demographicTemporalCategories,
   isDemographicHourlyProfile,
@@ -11,6 +11,7 @@ import {
   type DemographicTemporalSettings,
   type DemographicTemporalWidgetId,
 } from "@/lib/demographics-temporal-preferences";
+import { DEMOGRAPHIC_VISIBLE_GENDER_KEYS, visibleDemographicDistribution } from "@/lib/demographics-visible-categories";
 import type { ReportTable, ReportTableRow } from "@/lib/report-export";
 
 type Theme = "light" | "dark";
@@ -37,6 +38,7 @@ type Datum = {
   periodLabel: string;
   future?: boolean;
   metric: DemographicTemporalSettings["metric"];
+  identifiedGenders?: boolean;
 };
 
 export type DemographicTemporalModel = {
@@ -70,9 +72,27 @@ const percentFormat = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 2 
 const compactPercentFormat = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
 const dimensionLabels = { gender: "Gênero", age: "Faixa etária", emotion: "Emoção" };
 const temporalPlanCache = new WeakMap<DemographicAggregation, Map<string, ReturnType<typeof buildDemographicTemporalPlan>>>();
+const temporalModelCache = new WeakMap<DemographicAggregation, Map<string, DemographicTemporalModel>>();
+const temporalViewCache = new WeakMap<ReturnType<typeof buildDemographicTemporalPlan>, Map<string, TemporalView>>();
+const comparisonViewCache = new WeakMap<DemographicAggregation, Map<string, TemporalView>>();
+const heatmapDataCache = new WeakMap<Datum[][], { available: Datum[]; unavailable: Datum[]; maximum: number }>();
+const genderPercentageCache = new WeakMap<Record<string, number>, Record<string, number | null>>();
+const summaryIdentities = new WeakMap<DemographicAggregation, number>();
+let nextSummaryIdentity = 1;
+const TEMPORAL_CACHE_LIMIT = 24;
 
-/** Consumes the bounded temporal aggregation. Filtering is presentation-only:
- * percentages always come from the complete interval, never a visible subtotal. */
+type TemporalView = {
+  title: string;
+  description: string;
+  points: TemporalPoint[];
+  datums: Datum[][];
+  table: ReportTable;
+  hasData: boolean;
+};
+
+/** Consumes the bounded temporal aggregation without changing its raw totals.
+ * Gender percentages use both identified genders; a user-selected subset never
+ * changes that base. Age and emotion retain the complete interval population. */
 export function buildDemographicTemporalModel(input: DemographicTemporalModelOptions): DemographicTemporalModel {
   const settings = normalizeDemographicTemporalSettings(input.settings, input.id);
   const categories = demographicTemporalCategories(settings.dimension).filter(({ key }) =>
@@ -90,37 +110,51 @@ export function buildDemographicTemporalModel(input: DemographicTemporalModelOpt
       metric: settings.metric, pointCount: 0, categoryCount: categories.length,
     };
   }
+  // One immutable aggregation is one data revision. Equal totals are not a
+  // cache identity: another tenant/window/correction receives a new snapshot.
+  const now = input.now ?? new Date(Math.floor(Date.now() / 60_000) * 60_000);
+  const prepared = { ...input, now };
+  const key = temporalModelKey(prepared, settings, theme);
+  const cache = cacheFor(temporalModelCache, input.summary);
+  const cached = readCached(cache, key);
+  if (cached) return cached;
+  const model = createTemporalModel(prepared, settings, categories, theme);
+  rememberCached(cache, key, model);
+  return model;
+}
+
+function createTemporalModel(
+  input: DemographicTemporalModelOptions, settings: DemographicTemporalSettings, categories: Category[], theme: Theme,
+): DemographicTemporalModel {
   if (input.id === "demographics_period_comparison") {
     return comparisonModel(input, settings, categories, theme);
   }
-  const profile = isDemographicHourlyProfile(input.id);
   const plan = cachedTemporalPlan(input, settings);
-  const points: TemporalPoint[] = profile ? plan.hourProfile : plan.points;
-  const title = temporalTitle(input.id, settings);
-  const description = temporalDescription(input.id, settings);
-  const table = timelineTable(title, description, points, categories, settings);
+  const view = cachedTemporalView(input.id, plan, categories, settings);
+  const { points, datums, title, description, table, hasData } = view;
   const heatmap = settings.chartType === "heatmap";
   return {
     title, description, table,
-    hasData: points.some((point) => point.total !== null && !point.future),
+    hasData,
     kind: heatmap ? "heatmap" : "series",
     metric: settings.metric,
     pointCount: points.length,
     categoryCount: categories.length,
     option: heatmap
-      ? heatmapOption(points, categories, settings, theme, description)
-      : timelineOption(points, categories, settings, theme, description),
+      ? heatmapOption(points, categories, datums, settings, theme, description)
+      : timelineOption(points, categories, datums, settings, theme, description),
   };
 }
 
 function timelineOption(
-  points: TemporalPoint[], categories: Category[], settings: DemographicTemporalSettings, theme: Theme, description: string,
+  points: TemporalPoint[], categories: Category[], datums: Datum[][], settings: DemographicTemporalSettings, theme: Theme, description: string,
 ): EnterpriseChartOption {
   // A single closed day has no temporal slope: separate bars expose every
   // category instead of placing unrelated line markers at the same x point.
   const singlePoint = points.length === 1;
   const bar = settings.chartType === "bar" || singlePoint;
   const stacked = !singlePoint && (settings.chartType === "area" || (bar && settings.metric === "percentage"));
+  const solidGenderArea = settings.dimension === "gender" && settings.chartType === "area" && !singlePoint;
   return {
     ...baseOption(theme, description),
     color: categories.map(({ key }, index) => demographicCategoryColor(key, index, settings.palette, settings.dimension)),
@@ -135,8 +169,8 @@ function timelineOption(
         name: category.label,
         type: bar ? "bar" : "line",
         ...(stacked ? { stack: "demographic-share" } : {}),
-        ...(settings.chartType === "area" && !singlePoint ? { areaStyle: { opacity: 0.32 } } : {}),
-        data: points.map((point) => pointDatum(point, category, settings)),
+        ...(settings.chartType === "area" && !singlePoint ? { areaStyle: { color, opacity: settings.dimension === "gender" ? 1 : 0.32 } } : {}),
+        data: datums[index],
         connectNulls: false,
         showSymbol: points.length <= 48,
         symbolSize: 5,
@@ -144,7 +178,17 @@ function timelineOption(
         barMaxWidth: 32,
         lineStyle: { width: 2, color },
         itemStyle: { color, ...(bar ? { borderRadius: [2, 2, 0, 0] } : {}) },
-        label: { show: points.length <= 24, fontSize: 10, formatter: datumValueLabel, position: "top" },
+        label: {
+          show: points.length <= 24, fontSize: 10, formatter: datumValueLabel, position: "top",
+          // A stacked curve's label can fall inside its neighboring area.
+          // An opaque, compact backplate keeps both category fills exact and
+          // the value readable regardless of the adjacent palette color.
+          ...(solidGenderArea ? {
+            backgroundColor: theme === "dark" ? "#18181B" : "#FFFFFF",
+            color: theme === "dark" ? "#F8FAFC" : "#0F172A",
+            padding: [1, 2], borderRadius: 2,
+          } : {}),
+        },
         emphasis: { focus: "series" },
       };
     }),
@@ -152,19 +196,11 @@ function timelineOption(
 }
 
 function heatmapOption(
-  points: TemporalPoint[], categories: Category[], settings: DemographicTemporalSettings, theme: Theme, description: string,
+  points: TemporalPoint[], categories: Category[], datums: Datum[][], settings: DemographicTemporalSettings, theme: Theme, description: string,
 ): EnterpriseChartOption {
   const colors = demographicHeatmapColors(settings.palette, theme);
-  const available: Datum[] = [];
-  const unavailable: Datum[] = [];
-  points.forEach((point, pointIndex) => categories.forEach((category, categoryIndex) => {
-    const datum = pointDatum(point, category, settings);
-    const numeric = typeof datum.value === "number" ? datum.value : null;
-    const cell = { ...datum, value: [pointIndex, categoryIndex, numeric ?? -1] };
-    (numeric === null ? unavailable : available).push(cell);
-  }));
-  const maximum = Math.max(1, ...available.map((datum) => (datum.value as number[])[2]));
-  const missingColor = theme === "dark" ? "#1E293B" : "#EEF2F6";
+  const { available, unavailable, maximum } = cachedHeatmapData(datums);
+  const missingColor = "transparent";
   const borderColor = theme === "dark" ? "rgba(226, 232, 240, 0.12)" : "rgba(15, 23, 42, 0.09)";
   const textColor = theme === "dark" ? "#CBD5E1" : "#526477";
   return {
@@ -203,10 +239,10 @@ function heatmapOption(
             const datum = parameterDatum(parameters);
             const value = Array.isArray(datum?.value) ? datum.value[2] : null;
             if (typeof value !== "number" || value <= 0) return "";
-            const contrast = heatmapLabelColor(colors, value / maximum) === "#FFFFFF" ? "light" : "dark";
+            const contrast = demographicHeatmapLabelColor(colors, value / maximum) === "#FFFFFF" ? "light" : "dark";
             return `{${contrast}|${formatValue(value, settings.metric, true)}}`;
           },
-          rich: { light: { color: "#FFFFFF", fontWeight: 600 }, dark: { color: "#0F172A", fontWeight: 600 } },
+          rich: { light: { color: "#FFFFFF", fontWeight: 600 }, dark: { color: "#000000", fontWeight: 600 } },
         },
       },
     ],
@@ -221,7 +257,10 @@ function comparisonModel(
   const description = temporalDescription(input.id, settings, referenceLabel);
   const sources = [input.summary, input.comparisonSummary];
   const periodLabels = ["Período analisado", referenceLabel];
-  const points: TemporalPoint[] = sources.map((summary, index) => ({
+  const cache = cacheFor(comparisonViewCache, input.summary);
+  const viewKey = JSON.stringify([summaryIdentity(input.comparisonSummary), referenceLabel, viewSettingsKey(input.id, settings)]);
+  const cachedView = readCached(cache, viewKey);
+  const points: TemporalPoint[] = cachedView?.points ?? sources.map((summary, index) => ({
     label: periodLabels[index],
     total: summary?.hasData ? summary.total : null,
     gender: summary?.hasData ? distributionCounts(summary.gender) : null,
@@ -234,21 +273,20 @@ function comparisonModel(
     },
     future: false,
   }));
+  const datums = cachedView?.datums ?? categoryDatums(points, categories, settings);
   const heatmap = settings.chartType === "heatmap";
-  const colors = getDemographicPalette(settings.palette).colors;
   // Here the legend represents periods, not gender. Neutral period colors
   // avoid giving all current-period categories (including Man) a pink fill.
-  const periodColors = settings.dimension === "gender"
-    ? theme === "dark" ? ["#CBD5E1", "#64748B"] : ["#475569", "#CBD5E1"]
-    : [colors[0], "#94A3B8"];
-  const table: ReportTable = {
+  const periodColors = demographicComparisonColors(settings.palette, settings.dimension, theme);
+  const participation = settings.dimension === "gender" ? "Participação entre gêneros identificados" : "Participação";
+  const table: ReportTable = cachedView?.table ?? {
     title, description,
     columns: [
       { key: "category", label: dimensionLabels[settings.dimension] },
       { key: "current_count", label: "Detecções · período analisado", numeric: true },
-      { key: "current_percentage", label: "Participação · período analisado (%)", numeric: true },
+      { key: "current_percentage", label: `${participation} · período analisado (%)`, numeric: true },
       { key: "reference_count", label: `Detecções · ${referenceLabel}`, numeric: true },
-      { key: "reference_percentage", label: `Participação · ${referenceLabel} (%)`, numeric: true },
+      { key: "reference_percentage", label: `${participation} · ${referenceLabel} (%)`, numeric: true },
       ...(settings.metric === "percentage"
         ? [{ key: "change_pp", label: "Variação (p.p.)", numeric: true }]
         : [
@@ -256,9 +294,9 @@ function comparisonModel(
             { key: "change_count_percentage", label: "Variação de detecções (%)", numeric: true },
           ]),
     ],
-    rows: categories.map((category) => {
-      const current = pointDatum(points[0], category, settings);
-      const reference = pointDatum(points[1], category, settings);
+    rows: categories.map((category, index) => {
+      const current = datums[index][0];
+      const reference = datums[index][1];
       return {
         category: category.label,
         current_count: current.count, current_percentage: current.percentage,
@@ -270,7 +308,9 @@ function comparisonModel(
       };
     }),
   };
-  const option = heatmap ? heatmapOption(points, categories, settings, theme, description) : {
+  const hasData = cachedView?.hasData ?? points.some((point) => pointHasData(point, settings));
+  if (!cachedView) rememberCached(cache, viewKey, { title, description, points, datums, table, hasData });
+  const option = heatmap ? heatmapOption(points, categories, datums, settings, theme, description) : {
     ...baseOption(theme, `${description} As cores distinguem os períodos; as categorias estão no eixo horizontal.`),
     color: periodColors,
     grid: { left: 4, right: 18, top: 42, bottom: 14, containLabel: false, outerBoundsMode: "same", outerBoundsContain: "axisLabel" },
@@ -281,7 +321,7 @@ function comparisonModel(
     series: points.map((point, index) => ({
       name: point.label,
       type: settings.chartType === "bar" ? "bar" : "line",
-      data: categories.map((category) => pointDatum(point, category, settings)),
+      data: datums.map((category) => category[index]),
       connectNulls: false, showSymbol: true, symbolSize: 6, smooth: false,
       symbol: index === 0 ? "circle" : "diamond",
       lineStyle: { color: periodColors[index], width: 2, type: index === 0 ? "solid" : "dashed" },
@@ -294,7 +334,7 @@ function comparisonModel(
   } as EnterpriseChartOption;
   return {
     title, description, table, option,
-    hasData: sources.some((summary) => summary?.hasData),
+    hasData,
     kind: heatmap ? "heatmap" : "comparison", metric: settings.metric,
     pointCount: heatmap ? 2 : categories.length,
     categoryCount: heatmap ? categories.length : 2,
@@ -305,20 +345,33 @@ function pointDatum(point: TemporalPoint, category: Category, settings: Demograp
   const counts = point[settings.dimension];
   const percentages = point.percentages[settings.dimension];
   const count = !point.future && counts ? counts[category.key] ?? 0 : null;
-  const percentage = !point.future && percentages ? percentages[category.key] ?? 0 : null;
+  const identifiedGenders = settings.dimension === "gender";
+  const visibleGender = identifiedGenders && !point.future && counts
+    ? identifiedGenderPercentages(counts)
+    : null;
+  const percentage = identifiedGenders
+    ? visibleGender?.[category.key] ?? null
+    : !point.future && percentages ? percentages[category.key] ?? 0 : null;
   return {
     value: settings.metric === "percentage" ? percentage : count,
     count, percentage, total: point.future ? null : point.total,
     categoryLabel: category.label, periodLabel: point.label, future: point.future,
     metric: settings.metric,
+    ...(identifiedGenders ? { identifiedGenders: true } : {}),
   };
 }
 
-function timelineTable(title: string, description: string, points: TemporalPoint[], categories: Category[], settings: DemographicTemporalSettings): ReportTable {
+function pointHasData(point: TemporalPoint, settings: DemographicTemporalSettings) {
+  if (point.future || point.total === null) return false;
+  if (settings.dimension !== "gender" || point.total === 0) return true;
+  return point.gender !== null && DEMOGRAPHIC_VISIBLE_GENDER_KEYS.some((key) => (point.gender?.[key] ?? 0) > 0);
+}
+
+function timelineTable(title: string, description: string, points: TemporalPoint[], categories: Category[], datums: Datum[][], settings: DemographicTemporalSettings): ReportTable {
   const rows: ReportTableRow[] = [];
-  for (const point of points) {
-    for (const category of categories) {
-      const datum = pointDatum(point, category, settings);
+  for (const [pointIndex, point] of points.entries()) {
+    for (const [categoryIndex, category] of categories.entries()) {
+      const datum = datums[categoryIndex][pointIndex];
       rows.push({ period: point.label, category: category.label, count: datum.count, percentage: datum.percentage, total: datum.total });
     }
   }
@@ -328,7 +381,7 @@ function timelineTable(title: string, description: string, points: TemporalPoint
       { key: "period", label: "Intervalo" },
       { key: "category", label: dimensionLabels[settings.dimension] },
       { key: "count", label: "Detecções", numeric: true },
-      { key: "percentage", label: "Participação no intervalo (%)", numeric: true },
+      { key: "percentage", label: settings.dimension === "gender" ? "Participação entre gêneros identificados (%)" : "Participação no intervalo (%)", numeric: true },
       { key: "total", label: "Total do intervalo", numeric: true },
     ],
     rows,
@@ -352,6 +405,11 @@ function temporalTitle(id: DemographicTemporalWidgetId, settings: DemographicTem
 }
 
 function temporalDescription(id: DemographicTemporalWidgetId, settings: DemographicTemporalSettings, referenceLabel = "Período anterior") {
+  if (settings.dimension === "gender") {
+    if (id === "demographics_period_comparison") return `Período analisado × ${referenceLabel}. Percentuais entre gêneros identificados de cada período.`;
+    const unit = settings.metric === "percentage" ? "Participação entre gêneros identificados em cada intervalo" : "Detecções classificadas por gênero em cada intervalo; percentuais entre gêneros identificados";
+    return `${isDemographicHourlyProfile(id) ? "Perfil das 24 horas, no fuso da empresa. " : ""}${unit}.`;
+  }
   if (id === "demographics_period_comparison") return `Período analisado × ${referenceLabel}. Percentuais calculados sobre o total de cada período.`;
   const unit = settings.metric === "percentage" ? "Participação no total de cada intervalo" : "Detecções classificadas em cada intervalo";
   return `${isDemographicHourlyProfile(id) ? "Perfil das 24 horas, no fuso da empresa. " : ""}${unit}.`;
@@ -390,7 +448,7 @@ function temporalTooltip(parameters: unknown) {
   return entries.map((datum) => [
     `<strong>${escapeHtml(`${datum.periodLabel} · ${datum.categoryLabel}`)}</strong>`,
     datum.future ? "Horário futuro" : datum.count === null ? "Sem dados neste intervalo"
-      : `Detecções: ${numberFormat.format(datum.count)}<br/>Participação: ${datum.percentage === null ? "—" : `${percentFormat.format(datum.percentage)}%`}`,
+      : `Detecções: ${numberFormat.format(datum.count)}<br/>Participação${datum.identifiedGenders ? " entre gêneros identificados" : ""}: ${datum.percentage === null ? "—" : `${percentFormat.format(datum.percentage)}%`}`,
   ].join("<br/>")).join("<br/><br/>");
 }
 
@@ -424,21 +482,130 @@ function escapeHtml(value: string) {
 }
 
 function cachedTemporalPlan(input: DemographicTemporalModelOptions, settings: DemographicTemporalSettings) {
-  const timestamp = (value: string | Date | undefined) => value instanceof Date ? value.toISOString() : value ?? "";
-  const now = input.now ?? new Date(Math.floor(Date.now() / 60_000) * 60_000);
-  const key = [input.timeZone, timestamp(input.from), timestamp(input.to), timestamp(now), settings.granularity].join("|");
-  let cache = temporalPlanCache.get(input.summary);
-  const cached = cache?.get(key);
-  if (cached) return cached;
-  const plan = buildDemographicTemporalPlan(input.summary, {
+  const options = {
     from: input.from, to: input.to, timeZone: input.timeZone,
-    now,
+    now: input.now,
     interval: settings.granularity, maxPoints: 744,
-  });
-  if (!cache) { cache = new Map(); temporalPlanCache.set(input.summary, cache); }
-  if (cache.size >= 24) cache.delete(cache.keys().next().value!);
-  cache.set(key, plan);
+  };
+  const key = resolveDemographicTemporalPlanCacheKey(options);
+  const cache = cacheFor(temporalPlanCache, input.summary);
+  const cached = readCached(cache, key);
+  if (cached) return cached;
+  const plan = buildDemographicTemporalPlan(input.summary, options);
+  rememberCached(cache, key, plan);
   return plan;
+}
+
+function cachedTemporalView(
+  id: DemographicTemporalWidgetId,
+  plan: ReturnType<typeof buildDemographicTemporalPlan>,
+  categories: Category[],
+  settings: DemographicTemporalSettings,
+): TemporalView {
+  const cache = cacheFor(temporalViewCache, plan);
+  const key = viewSettingsKey(id, settings);
+  const cached = readCached(cache, key);
+  if (cached) return cached;
+  const points = isDemographicHourlyProfile(id) ? plan.hourProfile : plan.points;
+  const title = temporalTitle(id, settings);
+  const description = temporalDescription(id, settings);
+  const datums = categoryDatums(points, categories, settings);
+  const view = {
+    title, description, points, datums,
+    table: timelineTable(title, description, points, categories, datums, settings),
+    hasData: points.some((point) => pointHasData(point, settings)),
+  };
+  rememberCached(cache, key, view);
+  return view;
+}
+
+function categoryDatums(points: TemporalPoint[], categories: Category[], settings: DemographicTemporalSettings) {
+  return categories.map((category) => points.map((point) => pointDatum(point, category, settings)));
+}
+
+function cachedHeatmapData(datums: Datum[][]) {
+  const cached = heatmapDataCache.get(datums);
+  if (cached) return cached;
+  const available: Datum[] = [];
+  const unavailable: Datum[] = [];
+  let maximum = 1;
+  for (let pointIndex = 0; pointIndex < (datums[0]?.length ?? 0); pointIndex += 1) {
+    datums.forEach((category, categoryIndex) => {
+      const datum = category[pointIndex];
+      const numeric = typeof datum.value === "number" ? datum.value : null;
+      const cell = { ...datum, value: [pointIndex, categoryIndex, numeric ?? -1] };
+      (numeric === null ? unavailable : available).push(cell);
+      if (numeric !== null) maximum = Math.max(maximum, numeric);
+    });
+  }
+  const value = { available, unavailable, maximum };
+  heatmapDataCache.set(datums, value);
+  return value;
+}
+
+function identifiedGenderPercentages(counts: Record<string, number>) {
+  const cached = genderPercentageCache.get(counts);
+  if (cached) return cached;
+  const percentages = Object.fromEntries(visibleDemographicDistribution(DEMOGRAPHIC_VISIBLE_GENDER_KEYS.map((key) => ({
+    key, label: key, count: counts[key] ?? 0, percentage: null, observed: true,
+  })), "gender").map((item) => [item.key, item.percentage]));
+  genderPercentageCache.set(counts, percentages);
+  return percentages;
+}
+
+function temporalModelKey(input: DemographicTemporalModelOptions, settings: DemographicTemporalSettings, theme: Theme) {
+  const from = instantKey(input.from);
+  const to = instantKey(input.to);
+  // The public builder resolves one closed-minute clock for both model and
+  // planner. Keep this fallback consistent with the planner if reused alone.
+  const now = instantKey(input.now ?? new Date(Date.now()));
+  const cutoff = typeof to === "number" && typeof now === "number" ? Math.min(now, to) : now;
+  const comparison = input.id === "demographics_period_comparison";
+  return JSON.stringify([
+    input.id, input.timeZone, from, to, cutoff, settings, theme,
+    comparison ? summaryIdentity(input.comparisonSummary) : null,
+    comparison ? input.comparisonLabel || "Período anterior" : null,
+  ]);
+}
+
+function viewSettingsKey(id: DemographicTemporalWidgetId, settings: DemographicTemporalSettings) {
+  return JSON.stringify([id, settings.dimension, settings.metric, settings.categoryKeys]);
+}
+
+function instantKey(value: string | Date) {
+  const timestamp = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : String(value);
+}
+
+function summaryIdentity(summary: DemographicAggregation | null | undefined) {
+  if (!summary) return 0;
+  let identity = summaryIdentities.get(summary);
+  if (identity === undefined) {
+    identity = nextSummaryIdentity++;
+    summaryIdentities.set(summary, identity);
+  }
+  return identity;
+}
+
+function cacheFor<Owner extends object, Value>(storage: WeakMap<Owner, Map<string, Value>>, owner: Owner) {
+  let cache = storage.get(owner);
+  if (!cache) { cache = new Map<string, Value>(); storage.set(owner, cache); }
+  return cache;
+}
+
+function readCached<Value>(cache: Map<string, Value>, key: string) {
+  const value = cache.get(key);
+  if (value !== undefined) {
+    cache.delete(key);
+    cache.set(key, value);
+  }
+  return value;
+}
+
+function rememberCached<Value>(cache: Map<string, Value>, key: string, value: Value) {
+  cache.delete(key);
+  if (cache.size >= TEMPORAL_CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+  cache.set(key, value);
 }
 
 /** Applies only drawing density. Canonical values, categories, and tooltips

@@ -85,7 +85,18 @@ test("seleções são limitadas à dimensão, deduplicadas e armazenadas por cha
     assert.ok(categories.length <= 9);
     assert.deepEqual(temporal.normalizeDemographicTemporalSettings({ dimension, categoryKeys: categories.map(({ key }) => key).reverse() }, ids[0]).categoryKeys, []);
   }
-  assert.ok(temporal.demographicTemporalCategories("gender").some(({ key, label }) => key === "unknown" && label === "Não identificado"));
+  assert.deepEqual(temporal.demographicTemporalCategories("gender"), [{ key: "Woman", label: "Mulher" }, { key: "Man", label: "Homem" }]);
+});
+
+test("seleções legadas de gênero removem unknown sem esconder os gêneros identificados", () => {
+  for (const id of ids) {
+    for (const [categoryKeys, expected] of [[['unknown'], []], [['Woman', 'unknown'], ['Woman']], [['Man', 'unknown'], ['Man']], [['unknown', 'Woman', 'Man'], []]]) {
+      const value = temporal.normalizeDemographicTemporalSettings({ dimension: "gender", categoryKeys, palette: "cyber", metric: "count" }, id);
+      assert.deepEqual(value.categoryKeys, expected);
+      assert.equal(value.palette, "cyber");
+      assert.equal(value.metric, "count");
+    }
+  }
 });
 
 test("persistência só aceita demographicsTemporal nos cinco IDs e não altera objetos legados", () => {
@@ -147,10 +158,10 @@ test("categorias vazias significam todas e UI não permite esconder a última ca
   const changes = [];
   const tree = Controls({ widgetId: ids[0], onChange: (value) => changes.push(value) });
   const boxes = allElements(tree, (node) => node.type === Checkbox);
-  assert.equal(boxes.length, 3);
+  assert.equal(boxes.length, 2);
   assert.ok(boxes.every((box) => box.props.checked));
   boxes[0].props.onCheckedChange(false);
-  assert.deepEqual(changes[0].categoryKeys, ["Man", "unknown"]);
+  assert.deepEqual(changes[0].categoryKeys, ["Man"]);
   const single = Controls({ widgetId: ids[0], value: { ...temporal.defaultDemographicTemporalSettings(ids[0]), categoryKeys: ["Woman"] }, onChange: (value) => changes.push(value) });
   const selected = allElements(single, (node) => node.type === Checkbox && node.props.checked)[0];
   assert.equal(selected.props.disabled, true);
@@ -166,7 +177,8 @@ test("SSR real fornece rótulos, contexto de percentuais e controles compatívei
     assert.match(html, /data-demographics-temporal-controls/);
     assert.match(html, /Dimensão demográfica/);
     assert.match(html, /Métrica do gráfico temporal/);
-    assert.match(html, /total de todas as categorias de cada intervalo/);
+    assert.match(html, temporal.defaultDemographicTemporalSettings(id).dimension === "gender" ? /(?:entre gêneros identificados|consideram Mulher e Homem em cada intervalo)/ : /total de todas as categorias de cada intervalo/);
+    assert.doesNotMatch(html, /Não identificado/);
     assert.match(html, /Categorias visíveis/);
     assert.doesNotMatch(html, /\b(?:Authorization|Bearer|company_id)\b/);
     if (temporal.isDemographicHourlyProfile(id)) {

@@ -25,7 +25,7 @@ export function formatDateTime(
   }).format(date);
 }
 
-export function formatTime(value: string | Date | null | undefined) {
+export function formatTime(value: string | Date | null | undefined, timeZone?: string) {
   if (!value) return "--:--";
 
   const date = value instanceof Date ? value : new Date(value);
@@ -34,6 +34,7 @@ export function formatTime(value: string | Date | null | undefined) {
   return new Intl.DateTimeFormat("pt-BR", {
     hour: "2-digit",
     minute: "2-digit",
+    ...(timeZone ? { timeZone } : {}),
   }).format(date);
 }
 

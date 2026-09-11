@@ -1,11 +1,11 @@
 import {
   AGE_LABELS,
-  DEMOGRAPHIC_GENDERS,
   DEMOGRAPHIC_GENDER_DISPLAY_LABELS,
   EMOTION_LABELS,
   DEMOGRAPHIC_EMOTION_DISPLAY_LABELS,
 } from "@/lib/demographics";
 import { getDemographicPalette, type DemographicPaletteId } from "@/lib/demographics-presentation";
+import { DEMOGRAPHIC_VISIBLE_GENDER_KEYS } from "@/lib/demographics-visible-categories";
 
 export const DEMOGRAPHICS_TEMPORAL_WIDGET_IDS = [
   "demographics_gender_timeline",
@@ -50,7 +50,7 @@ export function defaultDemographicTemporalSettings(widgetId: DemographicTemporal
 }
 
 export function demographicTemporalCategories(dimension: DemographicTemporalDimension): Array<{ key: string; label: string }> {
-  if (dimension === "gender") return DEMOGRAPHIC_GENDERS.map((key) => ({ key, label: DEMOGRAPHIC_GENDER_DISPLAY_LABELS[key] }));
+  if (dimension === "gender") return DEMOGRAPHIC_VISIBLE_GENDER_KEYS.map((key) => ({ key, label: DEMOGRAPHIC_GENDER_DISPLAY_LABELS[key] }));
   if (dimension === "emotion") return EMOTION_LABELS.map((key) => ({ key, label: DEMOGRAPHIC_EMOTION_DISPLAY_LABELS[key] }));
   return AGE_LABELS.map((key) => ({ key, label: key }));
 }
@@ -69,9 +69,9 @@ export function normalizeDemographicTemporalSettings(value: unknown, widgetId: D
     granularity: isDemographicHourlyProfile(widgetId) ? "hour" : widgetId === "demographics_period_comparison" ? "auto"
       : stored.granularity === "auto" || stored.granularity === "hour" || stored.granularity === "day" || stored.granularity === "month" ? stored.granularity : defaults.granularity,
     chartType: stored.chartType === "bar" || stored.chartType === "area" || stored.chartType === "line" || stored.chartType === "heatmap" ? stored.chartType : defaults.chartType,
-    // Empty is the persisted representation of all categories, including an
-    // explicit selection of every category. Filtering never changes the base
-    // used to calculate percentages in the chart/model layer.
+    // Empty represents all visible categories, including legacy selections
+    // containing only the removed unknown gender. Selecting a subset never
+    // changes the percentage base (both identified genders for gender views).
     categoryKeys: selected.length === categories.length ? [] : selected,
     palette: getDemographicPalette(stored.palette).id,
     ...(widgetId === "demographics_period_comparison" ? {

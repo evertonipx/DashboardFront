@@ -8,7 +8,10 @@ import {
   type OccupancyAreaOption,
 } from "@/lib/occupancy-areas";
 import { requireOccupancySnapshotRows } from "@/lib/occupancy-validation";
-import { createTenantCompanyIdResolver } from "@/lib/tenant-scope-validation";
+import {
+  createTenantCompanyIdResolver,
+  selectExplicitCompanyScopedRows,
+} from "@/lib/tenant-scope-validation";
 import type {
   Camera,
   CameraArea,
@@ -19,6 +22,8 @@ import type {
 type FetchOccupancyAreaOptionsInput = {
   companyId: string;
   from: Date;
+  /** Explicit attestation from the authenticated Master call site. */
+  masterCrossCompanyScope?: boolean;
   request?: OccupancyAreaRequest;
   to: Date;
 };
@@ -56,6 +61,7 @@ const RFC3339_TIMESTAMP_PATTERN =
 export async function fetchOccupancyAreaOptions({
   companyId,
   from,
+  masterCrossCompanyScope = false,
   request = apiFetch,
   to,
 }: FetchOccupancyAreaOptionsInput): Promise<OccupancyAreaOption[]> {
@@ -67,12 +73,18 @@ export async function fetchOccupancyAreaOptions({
 
   const cameraPayload = await request<unknown>("/cameras");
   const cameras = filterScopedApiRows(
-    requireCameraRows(cameraPayload, expectedCompanyId),
+    requireCameraRows(
+      masterCrossCompanyScope
+        ? selectExplicitCompanyScopedRows(cameraPayload, expectedCompanyId, { label: "câmeras" }).rows
+        : cameraPayload,
+      expectedCompanyId,
+    ),
     expectedCompanyId,
   );
 
   return fetchFallbackOccupancyAreaOptions({
     cameras,
+    cameraCompanies: masterCrossCompanyScope ? requireExplicitCameraCompanies(cameraPayload) : undefined,
     companyId: expectedCompanyId,
     from,
     request,
@@ -122,6 +134,7 @@ export function requireOccupancyAreaClassCompatibility({
 export async function fetchOccupancyAreaCatalog({
   companyId,
   from,
+  masterCrossCompanyScope = false,
   request = apiFetch,
   to,
 }: FetchOccupancyAreaOptionsInput): Promise<OccupancyAreaCatalogResult> {
@@ -136,7 +149,12 @@ export async function fetchOccupancyAreaCatalog({
     fetchOptionalOccupancyAreaCatalog(request),
   ]);
   const cameras = filterScopedApiRows(
-    requireCameraRows(cameraPayload, expectedCompanyId),
+    requireCameraRows(
+      masterCrossCompanyScope
+        ? selectExplicitCompanyScopedRows(cameraPayload, expectedCompanyId, { label: "câmeras" }).rows
+        : cameraPayload,
+      expectedCompanyId,
+    ),
     expectedCompanyId,
   );
   if (areaCatalogPayload !== null) {
@@ -147,6 +165,7 @@ export async function fetchOccupancyAreaCatalog({
           areaCatalogPayload,
           expectedCompanyId,
           cameras,
+          masterCrossCompanyScope,
         ),
       ),
     };
@@ -158,6 +177,7 @@ export async function fetchOccupancyAreaCatalog({
     authoritative: false,
     options: await fetchFallbackOccupancyAreaOptions({
       cameras,
+      cameraCompanies: masterCrossCompanyScope ? requireExplicitCameraCompanies(cameraPayload) : undefined,
       companyId: expectedCompanyId,
       from,
       request,
@@ -168,12 +188,14 @@ export async function fetchOccupancyAreaCatalog({
 
 async function fetchFallbackOccupancyAreaOptions({
   cameras,
+  cameraCompanies,
   companyId,
   from,
   request,
   to,
 }: {
   cameras: Camera[];
+  cameraCompanies?: ReadonlyMap<string, string>;
   companyId: string;
   from: Date;
   request: OccupancyAreaRequest;
@@ -185,11 +207,14 @@ async function fetchFallbackOccupancyAreaOptions({
     request<unknown>(occupancyDiscoveryPath(from, to)),
     fetchCameraAreaLineRows(cameras, companyId, request),
   ]);
+  const scopedSnapshotPayload = cameraCompanies
+    ? selectSnapshotsByCameraCompany(snapshotPayload, cameraCompanies, companyId)
+    : snapshotPayload;
   const snapshotCameraIds = requireSnapshotCameraIds(
-    snapshotPayload,
+    scopedSnapshotPayload,
     cameraIds,
   );
-  const snapshotRows = requireOccupancySnapshotRows(snapshotPayload, {
+  const snapshotRows = requireOccupancySnapshotRows(scopedSnapshotPayload, {
     expectedCameraIds: snapshotCameraIds,
     from,
     to,
@@ -229,6 +254,7 @@ function requireOccupancyAreaCatalogRows(
   value: unknown,
   companyId: string,
   cameras: Camera[],
+  masterCrossCompanyScope = false,
 ): OccupancyRow[] {
   const resolveCompanyId = createTenantCompanyIdResolver(companyId);
   const response = requireRecord(value, "catálogo de áreas de ocupação");
@@ -241,11 +267,16 @@ function requireOccupancyAreaCatalogRows(
       "A API ainda não concluiu o catálogo de áreas de ocupação.",
     );
   }
-  const rows = requireSingleArrayEnvelope(
+  const catalogRows = requireSingleArrayEnvelope(
     response,
     OCCUPANCY_AREA_CATALOG_COLLECTION_KEYS,
     "catálogo de áreas de ocupação",
   );
+  // Master catalogues must explicitly identify every tenant. Ordinary tenant
+  // responses still reject foreign rows instead of silently discarding them.
+  const rows = masterCrossCompanyScope
+    ? selectExplicitCompanyScopedRows(catalogRows, companyId, { label: "áreas de ocupação" }).rows
+    : catalogRows;
   const camerasById = new Map(cameras.map((camera) => [camera.id, camera]));
   const identities = new Set<string>();
 
@@ -567,6 +598,42 @@ function requireValidRange(from: Date, to: Date) {
       "O intervalo para descobrir áreas de ocupação é inválido.",
     );
   }
+}
+
+function requireExplicitCameraCompanies(value: unknown) {
+  const companies = new Map<string, string>();
+  requireArray(value, "catálogo de câmeras do Master").forEach((candidate, index) => {
+    const row = requireRecord(candidate, `câmera na posição ${index}`);
+    const cameraId = requireId(row.id, `id da câmera na posição ${index}`);
+    const companyId = requireId(row.company_id, `company_id da câmera na posição ${index}`);
+    if (companies.has(cameraId)) {
+      throw new Error(`O catálogo retornou a câmera duplicada "${cameraId}".`);
+    }
+    companies.set(cameraId, companyId);
+  });
+  return companies;
+}
+
+// Legacy snapshots omit company_id. Only the authenticated Master path may
+// partition them, using a unique, explicit camera→company catalogue relation.
+function selectSnapshotsByCameraCompany(
+  value: unknown,
+  companies: ReadonlyMap<string, string>,
+  companyId: string,
+) {
+  return requireSingleArrayEnvelope(value, OCCUPANCY_DISCOVERY_COLLECTION_KEYS,
+    "snapshots usados para descobrir áreas de ocupação").filter((candidate, index) => {
+    const row = requireRecord(candidate, `snapshot na posição ${index}`);
+    const cameraId = requireId(row.camera_id, `camera_id do snapshot na posição ${index}`);
+    const cameraCompanyId = companies.get(cameraId);
+    if (!cameraCompanyId) {
+      throw new Error(`O snapshot de ocupação referencia a câmera desconhecida "${cameraId}".`);
+    }
+    if (row.company_id !== undefined && requireId(row.company_id, `company_id do snapshot na posição ${index}`) !== cameraCompanyId) {
+      throw new Error(`O snapshot da câmera "${cameraId}" contradiz a empresa do catálogo.`);
+    }
+    return cameraCompanyId === companyId;
+  });
 }
 
 function requireSnapshotCameraIds(

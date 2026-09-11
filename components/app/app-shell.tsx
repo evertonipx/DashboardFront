@@ -24,6 +24,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { useAuth } from "@/components/app/auth-provider";
+import { IPXBrandMark } from "@/components/app/brand-mark";
 import { MobileNavigation } from "@/components/app/mobile-navigation";
 import { ThemeToggle } from "@/components/app/theme-provider";
 import { usePremiumShellMotion } from "@/components/app/use-premium-motion";
@@ -420,9 +421,7 @@ export function AppShell({
             !sidebarCollapsed && "lg:justify-start lg:px-4",
           )}
         >
-          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary text-sm font-black text-primary-foreground shadow-sm">
-            IPX
-          </div>
+          <IPXBrandMark className="h-10 w-10" decorative={!sidebarCollapsed} />
           <div
             className={cn(
               "hidden min-w-0",

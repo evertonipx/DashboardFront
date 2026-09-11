@@ -2321,7 +2321,8 @@ async function fetchDurationAggregatePartition({
   }
 
   const validationOptions = {
-    allowLegacyUncertifiedInstantBuckets: true,
+    allowDocumentedAggregateResponse: true,
+    expectedTimezone: timeZone,
     requireCertification: true,
   } as const;
   const rows = requireOccupancyAggregateRows(
