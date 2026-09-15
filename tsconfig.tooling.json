@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "paths": { "@/*": ["./*.ts", "./*.tsx", "./*"] },
+    "allowImportingTsExtensions": true,
+    "incremental": false,
+    "plugins": []
+  },
+  "include": ["tests/**/*.mts", "tools/**/*.mts"],
+  "exclude": ["node_modules", ".next", "context", "release"]
+}

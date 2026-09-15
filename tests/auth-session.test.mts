@@ -1,0 +1,5034 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+// Runtime modules and adversarial authentication payloads are intentionally
+// dynamic; storage, fetch and the loader itself retain explicit contracts.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type DynamicFixture = any;
+type RuntimeModule = { exports: Record<string, DynamicFixture> };
+type RequestFixture = {
+  path: string;
+  method?: string;
+  companyId?: string | null;
+  authorization?: string | null;
+  body?: unknown;
+};
+const browserFixture = globalThis as unknown as {
+  window?: { dispatchEvent: () => void; localStorage: ReturnType<typeof memoryStorage> };
+};
+
+const require = createRequire(import.meta.url);
+const ts: typeof import("typescript") = require("typescript");
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const moduleCache = new Map<string, RuntimeModule>();
+
+const accessTokenClaims = loadTypeScriptModule("lib/access-token-claims.ts");
+const authenticatedPermissionMetadata = loadTypeScriptModule(
+  "lib/authenticated-permission-metadata.ts",
+);
+const api = loadTypeScriptModule("lib/api.ts");
+const companyCache = loadTypeScriptModule("lib/company-cache.ts");
+const companyTimeZone = loadTypeScriptModule("lib/company-time-zone.ts");
+const companyAdminPermissionPolicy = loadTypeScriptModule(
+  "lib/company-admin-permission-policy.ts",
+);
+const companyUserAdditiveAdmin = loadTypeScriptModule(
+  "lib/company-user-additive-admin.ts",
+);
+const companyUserResource = loadTypeScriptModule(
+  "lib/company-user-resource.ts",
+);
+const companyUserProfileUpdate = loadTypeScriptModule(
+  "lib/company-user-profile-update.ts",
+);
+const occupancyAggregateValidation = loadTypeScriptModule(
+  "lib/occupancy-aggregate-validation.ts",
+);
+const permissions = loadTypeScriptModule("lib/permissions.ts");
+const resourceAutoRefresh = loadTypeScriptModule(
+  "lib/resource-auto-refresh.ts",
+);
+const scenarioComparisonScope = loadTypeScriptModule(
+  "lib/scenario-comparison-scope.ts",
+);
+const masterCompanyScope = loadTypeScriptModule(
+  "lib/master-company-scope.ts",
+);
+const workerScope = loadTypeScriptModule("lib/worker-scope.ts");
+
+test("papel de admin da empresa não dispara atualização do perfil", () => {
+  const current = {
+    name: "Usuário Empresa",
+    email: "usuario@empresa.com",
+    active: true,
+  };
+
+  assert.equal(
+    companyUserProfileUpdate.buildCompanyUserProfileUpdate(current, {
+      name: "  Usuário Empresa  ",
+      email: "USUARIO@EMPRESA.COM",
+      password: "",
+      active: true,
+    }),
+    null,
+  );
+
+  assert.equal(
+    companyUserProfileUpdate.buildCompanyUserProfileUpdate(
+      current,
+      {
+        name: "Representação divergente recebida da listagem",
+        email: "outro-formato@empresa.com",
+        password: "",
+        active: false,
+      },
+      { profileTouched: false },
+    ),
+    null,
+    "uma alteração exclusiva de permissões não pode chamar PUT /users/{id}",
+  );
+});
+
+test("toggle de admin permanece separado do PUT de perfil no painel master", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const adminToggle = source.slice(
+    source.indexOf("function setCompanyAdminAccess"),
+    source.indexOf("function setUserProfileField"),
+  );
+  const saveUser = source.slice(
+    source.indexOf("async function saveUser"),
+    source.indexOf("async function deleteCompanyUser"),
+  );
+  assert.doesNotMatch(adminToggle, /setUserProfileDirty/);
+  assert.match(
+    saveUser,
+    /buildCompanyUserProfileUpdate\([\s\S]*?profileTouched: userProfileDirty/,
+  );
+  assert.match(source, /type="password"\s+autoComplete="new-password"/);
+});
+
+test("gestão cross-company separa descoberta, perfil e acessos", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const saveUser = source.slice(
+    source.indexOf("async function saveUser"),
+    source.indexOf("async function deleteCompanyUser"),
+  );
+  const deleteUser = source.slice(
+    source.indexOf("async function deleteCompanyUser"),
+    source.indexOf("async function saveMasterUser"),
+  );
+
+  assert.match(
+    saveUser,
+    /hasAccessMutation[\s\S]*?discoverCompanyUserResource<ManagedUser>[\s\S]*?mutateCompanyUserResource/,
+  );
+  assert.match(
+    saveUser,
+    /error\.status !== 404[\s\S]*?!hasAccessMutation[\s\S]*?profileUpdateWarning/,
+  );
+  assert.match(
+    saveUser,
+    /if \(hasAccessMutation\) \{[\s\S]*?await syncUserPermissions\(savedUserId, companyId\)/,
+    "a sincronização só deve ocorrer quando algum acesso foi solicitado",
+  );
+  assert.match(
+    deleteUser,
+    /discoverCompanyUserResource\([\s\S]*?mutateCompanyUserResource\(route, "", \{ method: "DELETE" \}\)/,
+    "a exclusão também deve usar uma única rota certificada por leitura",
+  );
+});
+
+test("descoberta cross-company avança somente após 404 e muta uma única rota", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const request = {
+      body: typeof init.body === "string" ? JSON.parse(init.body) : init.body,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+      method: (init.method ?? "GET").toUpperCase(),
+      path: String(url),
+    };
+    requests.push(request);
+
+    if (request.method === "GET" && requests.length <= 2) {
+      return jsonResponse({ error: "user not found" }, 404);
+    }
+    if (request.method === "GET") return jsonResponse([]);
+    return jsonResponse({ ok: true });
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        company_id: "company-base",
+        exp: nowSeconds + 900,
+        is_master: true,
+        nbf: nowSeconds - 1,
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-company-user-route",
+      token_type: "Bearer",
+    });
+
+    const discovered = await companyUserResource.discoverCompanyUserResource(
+      "company-selected",
+      "user-selected",
+      "/permissions",
+    );
+    assert.equal(discovered.route.variant, "company-path");
+
+    await companyUserResource.mutateCompanyUserResource(
+      discovered.route,
+      "/permissions",
+      { method: "POST", body: { slug: "views_manage" } },
+    );
+
+    assert.deepEqual(requests, [
+      {
+        body: undefined,
+        companyId: "company-selected",
+        method: "GET",
+        path: "/api/v1/users/user-selected/permissions",
+      },
+      {
+        body: undefined,
+        companyId: "company-selected",
+        method: "GET",
+        path:
+          "/api/v1/users/user-selected/permissions?company_id=company-selected",
+      },
+      {
+        body: undefined,
+        companyId: null,
+        method: "GET",
+        path:
+          "/api/v1/companies/company-selected/users/user-selected/permissions",
+      },
+      {
+        body: { slug: "views_manage" },
+        companyId: null,
+        method: "POST",
+        path:
+          "/api/v1/companies/company-selected/users/user-selected/permissions",
+      },
+    ]);
+    assert.equal(
+      requests.filter((request) => request.method !== "GET").length,
+      1,
+      "a descoberta não pode repetir uma mutação em outra variante",
+    );
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("backend atualizado reutiliza a rota global certificada com X-Company-ID", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    requests.push({
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+      method: (init.method ?? "GET").toUpperCase(),
+      path: String(url),
+    });
+    return jsonResponse({
+      company_id: "company-selected",
+      id: "user-selected",
+    });
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        exp: nowSeconds + 900,
+        is_master: true,
+        nbf: nowSeconds - 1,
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-company-user-global-header",
+      token_type: "Bearer",
+    });
+
+    const discovered = await companyUserResource.discoverCompanyUserResource(
+      "company-selected",
+      "user-selected",
+    );
+    assert.equal(discovered.route.variant, "global-header");
+    await companyUserResource.mutateCompanyUserResource(
+      discovered.route,
+      "",
+      {
+        body: {
+          active: true,
+          email: "user@example.com",
+          is_master: false,
+          name: "User",
+        },
+        method: "PUT",
+      },
+    );
+
+    assert.deepEqual(requests, [
+      {
+        companyId: "company-selected",
+        method: "GET",
+        path: "/api/v1/users/user-selected",
+      },
+      {
+        companyId: "company-selected",
+        method: "PUT",
+        path: "/api/v1/users/user-selected",
+      },
+    ]);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("404 da mutação não dispara uma segunda variante de rota", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const request = {
+      method: (init.method ?? "GET").toUpperCase(),
+      path: String(url),
+    };
+    requests.push(request);
+    return request.method === "GET"
+      ? jsonResponse({ id: "user-selected" })
+      : jsonResponse({ error: "user not found" }, 404);
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        exp: nowSeconds + 900,
+        nbf: nowSeconds - 1,
+        role: "super-admin",
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-company-user-mutation-404",
+      token_type: "Bearer",
+    });
+
+    const discovered = await companyUserResource.discoverCompanyUserResource(
+      "company-selected",
+      "user-selected",
+    );
+    await assert.rejects(
+      () =>
+        companyUserResource.mutateCompanyUserResource(
+          discovered.route,
+          "",
+          {
+            method: "PUT",
+            body: {
+              active: true,
+              email: "user@example.com",
+              is_master: false,
+              name: "User",
+            },
+          },
+        ),
+      (error: DynamicFixture) => error instanceof api.ApiError && error.status === 404,
+    );
+
+    assert.deepEqual(requests, [
+      { method: "GET", path: "/api/v1/users/user-selected" },
+      { method: "PUT", path: "/api/v1/users/user-selected" },
+    ]);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("403 de descoberta cross-company encerra sem fallback nem mutação", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    requests.push({
+      method: (init.method ?? "GET").toUpperCase(),
+      path: String(url),
+    });
+    return jsonResponse({ error: "forbidden" }, 403);
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        exp: nowSeconds + 900,
+        nbf: nowSeconds - 1,
+        role: "super-admin",
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-company-user-forbidden",
+      token_type: "Bearer",
+    });
+
+    await assert.rejects(
+      () =>
+        companyUserResource.discoverCompanyUserResource(
+          "company-selected",
+          "user-selected",
+          "/permissions",
+        ),
+      (error: DynamicFixture) => error instanceof api.ApiError && error.status === 403,
+    );
+    assert.deepEqual(requests, [
+      {
+        method: "GET",
+        path: "/api/v1/users/user-selected/permissions",
+      },
+    ]);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("promoção aditiva certifica membership e cada UserPermissionResponse na rota documentada", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const request = {
+      body: typeof init.body === "string" ? JSON.parse(init.body) : init.body,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+      method: (init.method ?? "GET").toUpperCase(),
+      path: String(url),
+    };
+    requests.push(request);
+
+    if (request.method === "GET") {
+      return jsonResponse([
+        {
+          company_id: "company-test",
+          email: "teste@teste.com",
+          id: "user-test",
+          is_master: false,
+        },
+      ]);
+    }
+    const slug = request.body.slug;
+    return jsonResponse(
+      {
+        company_id: "company-test",
+        id: `assignment-${slug}`,
+        permission_id:
+          slug === "counting_view" ? "permission-1" : "permission-2",
+        slug,
+        user_id: "user-test",
+      },
+      201,
+    );
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        exp: nowSeconds + 900,
+        nbf: nowSeconds - 1,
+        role: "super-admin",
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-additive-admin-success",
+      token_type: "Bearer",
+    });
+
+    const result =
+      await companyUserAdditiveAdmin.promoteCompanyUserToAdminAdditively({
+        companyId: "company-test",
+        expectedEmail: "teste@teste.com",
+        grants: [
+          { permissionId: "permission-1", slug: "counting_view" },
+          { permissionId: "permission-2", slug: "counting_manage" },
+        ],
+        userId: "user-test",
+      });
+
+    assert.deepEqual(
+      result.map((permission: DynamicFixture) => permission.slug),
+      ["counting_view", "counting_manage"],
+    );
+    assert.deepEqual(requests, [
+      {
+        body: undefined,
+        companyId: null,
+        method: "GET",
+        path: "/api/v1/companies/company-test/users",
+      },
+      {
+        body: { slug: "counting_view" },
+        companyId: "company-test",
+        method: "POST",
+        path: "/api/v1/users/user-test/permissions",
+      },
+      {
+        body: { slug: "counting_manage" },
+        companyId: "company-test",
+        method: "POST",
+        path: "/api/v1/users/user-test/permissions",
+      },
+    ]);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("promoção aditiva rejeita 409 não certificado e reverte somente IDs criados na tentativa", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const request = {
+      body: typeof init.body === "string" ? JSON.parse(init.body) : init.body,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+      method: (init.method ?? "GET").toUpperCase(),
+      path: String(url),
+    };
+    requests.push(request);
+
+    if (request.method === "GET") {
+      return jsonResponse([
+        {
+          company_id: "company-test",
+          email: "teste@teste.com",
+          id: "user-test",
+          is_master: false,
+        },
+      ]);
+    }
+    if (request.method === "DELETE") return jsonResponse(undefined, 204);
+    if (request.body.slug === "counting_view") {
+      return jsonResponse(
+        {
+          company_id: "company-test",
+          id: "assignment-1",
+          permission_id: "permission-1",
+          slug: "counting_view",
+          user_id: "user-test",
+        },
+        201,
+      );
+    }
+    return jsonResponse({ error: "permission already exists" }, 409);
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        exp: nowSeconds + 900,
+        nbf: nowSeconds - 1,
+        role: "super-admin",
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-additive-admin-rollback",
+      token_type: "Bearer",
+    });
+
+    await assert.rejects(
+      () =>
+        companyUserAdditiveAdmin.promoteCompanyUserToAdminAdditively({
+          companyId: "company-test",
+          expectedEmail: "teste@teste.com",
+          grants: [
+            { permissionId: "permission-1", slug: "counting_view" },
+            { permissionId: "permission-2", slug: "counting_manage" },
+          ],
+          userId: "user-test",
+        }),
+      /409 sem retornar uma permissão certificada[\s\S]*foram revertidas/,
+    );
+    assert.deepEqual(
+      requests.map(({ body, companyId, method, path }) => ({
+        body,
+        companyId,
+        method,
+        path,
+      })),
+      [
+        {
+          body: undefined,
+          companyId: null,
+          method: "GET",
+          path: "/api/v1/companies/company-test/users",
+        },
+        {
+          body: { slug: "counting_view" },
+          companyId: "company-test",
+          method: "POST",
+          path: "/api/v1/users/user-test/permissions",
+        },
+        {
+          body: { slug: "counting_manage" },
+          companyId: "company-test",
+          method: "POST",
+          path: "/api/v1/users/user-test/permissions",
+        },
+        {
+          body: undefined,
+          companyId: "company-test",
+          method: "DELETE",
+          path: "/api/v1/users/user-test/permissions/permission-1",
+        },
+      ],
+    );
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("promoção aditiva reverte pelo permission_id certificado quando o corpo 201 diverge", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const request = {
+      body: typeof init.body === "string" ? JSON.parse(init.body) : init.body,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+      method: (init.method ?? "GET").toUpperCase(),
+      path: String(url),
+    };
+    requests.push(request);
+
+    if (request.method === "GET") {
+      return jsonResponse([
+        {
+          company_id: "company-test",
+          email: "teste@teste.com",
+          id: "user-test",
+          is_master: false,
+        },
+      ]);
+    }
+    if (request.method === "DELETE") return jsonResponse(undefined, 204);
+    return jsonResponse(
+      {
+        company_id: "company-test",
+        id: "assignment-wrong",
+        permission_id: "permission-from-divergent-response",
+        slug: "counting_view",
+        user_id: "user-test",
+      },
+      201,
+    );
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        exp: nowSeconds + 900,
+        nbf: nowSeconds - 1,
+        role: "super-admin",
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-additive-admin-divergent-response",
+      token_type: "Bearer",
+    });
+
+    await assert.rejects(
+      () =>
+        companyUserAdditiveAdmin.promoteCompanyUserToAdminAdditively({
+          companyId: "company-test",
+          expectedEmail: "teste@teste.com",
+          grants: [
+            { permissionId: "permission-1", slug: "counting_view" },
+          ],
+          userId: "user-test",
+        }),
+      /permission_id divergente[\s\S]*foram revertidas/,
+    );
+    assert.deepEqual(requests.at(-1), {
+      body: undefined,
+      companyId: "company-test",
+      method: "DELETE",
+      path: "/api/v1/users/user-test/permissions/permission-1",
+    });
+    assert.equal(
+      requests.some((request) =>
+        request.path.endsWith("/permission-from-divergent-response"),
+      ),
+      false,
+    );
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("promoção aditiva para antes do POST quando id/company do membership divergem", async () => {
+  assert.throws(
+    () =>
+      companyUserAdditiveAdmin.certifyCompanyUserMembership(
+        [
+          {
+            company_id: "company-home",
+            email: "teste@teste.com",
+            id: "user-test",
+          },
+        ],
+        {
+          companyId: "company-test",
+          expectedEmail: "teste@teste.com",
+          userId: "user-test",
+        },
+      ),
+    /company_id exato/,
+  );
+  assert.throws(
+    () =>
+      companyUserAdditiveAdmin.certifyAdditivePermissionResponse(
+        {
+          company_id: "company-test",
+          permission_id: "permission-1",
+          slug: "counting_view",
+          user_id: "foreign-user",
+        },
+        {
+          companyId: "company-test",
+          permissionId: "permission-1",
+          slug: "counting_view",
+          userId: "user-test",
+        },
+      ),
+    /user_id divergente/,
+  );
+});
+
+test("UI do fallback não oferece PUT, granularidade nem revogação", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const fallbackSave = source.slice(
+    source.indexOf("if (additiveAdminPromotionMode) {", source.indexOf("async function saveUser")),
+    source.indexOf("if (userForm.isMaster)", source.indexOf("async function saveUser")),
+  );
+  const fallbackNotice = source.slice(
+    source.indexOf(") : additiveAdminPromotionMode ? ("),
+    source.indexOf(") : editingUser &&", source.indexOf(") : additiveAdminPromotionMode ? (")),
+  );
+
+  assert.match(fallbackSave, /promoteCompanyUserToAdminAdditively/);
+  assert.doesNotMatch(fallbackSave, /PUT|revokeUserPermission|syncUserPermissions/);
+  assert.match(fallbackSave, /!companyAdminPromotionRequested/);
+  assert.match(fallbackSave, /touchedUserPermissionSlugs\.size > 0/);
+  assert.match(fallbackNotice, /somente o controle/);
+  assert.match(fallbackNotice, /Administrador da empresa/);
+  assert.match(fallbackNotice, /acessos existentes não serão removidos/);
+  assert.match(
+    source,
+    /if \(error instanceof ApiError && error\.status === 404\) \{[\s\S]*?readCertifiedCompanyUserMembership/,
+    "o modo aditivo nunca pode contornar 401, 403, falha de rede ou 5xx",
+  );
+});
+
+test("promoção de admin usa somente permissões explícitas e seguras", () => {
+  const widgetDefinition = permissions.OPERATIONAL_PERMISSIONS.find(
+    (permission: DynamicFixture) => permission.slug === "dashboard_widgets_manage",
+  );
+  const locationDefinition = permissions.OPERATIONAL_PERMISSIONS.find(
+    (permission: DynamicFixture) => permission.slug === "locations_manage",
+  );
+  const scenarioDefinition = permissions.OPERATIONAL_PERMISSIONS.find(
+    (permission: DynamicFixture) => permission.slug === "scenarios_manage",
+  );
+  const cameraDefinition = permissions.OPERATIONAL_PERMISSIONS.find(
+    (permission: DynamicFixture) => permission.slug === "cameras_manage",
+  );
+
+  assert.ok(widgetDefinition);
+  assert.ok(locationDefinition);
+  assert.ok(scenarioDefinition);
+  assert.ok(cameraDefinition);
+  assert.equal(
+    permissions.permissionMatchesExplicitGrant(
+      { slug: "dashboard_layout_manage" },
+      widgetDefinition,
+    ),
+    true,
+  );
+  assert.equal(
+    permissions.permissionMatchesExplicitGrant(
+      { slug: "counting_create_scenario" },
+      widgetDefinition,
+    ),
+    false,
+    "acesso a cenário não pode conceder configuração de widgets",
+  );
+  assert.equal(
+    permissions.permissionMatchesExplicitGrant(
+      { slug: "counting_create_camera" },
+      locationDefinition,
+    ),
+    false,
+    "acesso a câmera não pode conceder edição de locations",
+  );
+  assert.equal(
+    permissions.permissionMatchesExplicitGrant(
+      { slug: "counting_create_scenario" },
+      scenarioDefinition,
+    ),
+    true,
+  );
+  assert.equal(
+    permissions.permissionMatchesExplicitGrant(
+      { slug: "counting_create_camera" },
+      cameraDefinition,
+    ),
+    true,
+  );
+  assert.equal(
+    permissions.permissionMatchesExplicitGrant(
+      { slug: "dashboard_experimental_configure" },
+      widgetDefinition,
+    ),
+    false,
+    "uma correspondência apenas textual não pode ser usada em alteração granular",
+  );
+});
+
+test("rotas administrativas exigem a concessão do próprio recurso", () => {
+  const routeShell = readFileSync(
+    resolve(projectRoot, "components/app/authenticated-route-shell.tsx"),
+    "utf8",
+  );
+  const managerLayout = readFileSync(
+    resolve(projectRoot, "app/manager/layout.tsx"),
+    "utf8",
+  );
+  const guardedPaths = {
+    cameras: "/manager/cameras",
+    locations: "/manager/locations",
+    occupancy: "/manager/occupancy",
+    scenarios: "/manager/scenarios",
+    views: "/manager/views",
+    workers: "/manager/workers",
+  };
+
+  assert.match(managerLayout, /<ManagerRouteShell>\{children\}<\/ManagerRouteShell>/);
+  assert.match(
+    routeShell,
+    /<AuthGuard[\s\S]*?requireManager[\s\S]*?requireResource=\{MANAGER_RESOURCE_BY_PATH\[pathname\]\}/,
+  );
+  for (const [resource, pathname] of Object.entries(guardedPaths)) {
+    assert.match(
+      routeShell,
+      new RegExp(`"${pathname}": "${resource}"`),
+      `${pathname} não pode confiar apenas no acesso genérico ao Manager`,
+    );
+  }
+
+  const guardSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-guard.tsx"),
+    "utf8",
+  );
+  for (const capability of [
+    "canManageCameras",
+    "canManageLocations",
+    "canManageOccupancy",
+    "canManageScenarioCatalogs",
+    "canManageViews",
+    "canManageWorkers",
+  ]) {
+    assert.match(guardSource, new RegExp(`${capability}\\(user\\)`));
+  }
+});
+
+test("perfil admin certifica todo o catálogo real dos módulos operacionais habilitados", () => {
+  const enabledModules = new Set(["counting-module"]);
+  const options = [
+    {
+      module_id: "counting-module",
+      slug: "counting_view",
+      grants: [
+        {
+          id: "counting-view-permission",
+          module_id: "counting-module",
+          slug: "counting_view",
+        },
+      ],
+    },
+    {
+      module_id: "counting-module",
+      slug: "counting_manage",
+      grants: [
+        {
+          id: "counting-manage-permission",
+          module_id: "counting-module",
+          slug: "counting_manage",
+        },
+      ],
+    },
+    {
+      module_id: "occupancy-module",
+      slug: "occupancy_view",
+      grants: [
+        {
+          id: "occupancy-view-permission",
+          module_id: "occupancy-module",
+          slug: "occupancy_view",
+        },
+      ],
+    },
+  ];
+
+  assert.deepEqual(
+    companyAdminPermissionPolicy.missingCompanyAdminPermissionSlugs(
+      options,
+      enabledModules,
+    ),
+    [],
+  );
+  assert.equal(
+    companyAdminPermissionPolicy.isCertifiedCompanyAdminState(
+      {
+        counting_view: true,
+        counting_manage: true,
+        occupancy_view: false,
+      },
+      options,
+      enabledModules,
+    ),
+    true,
+  );
+  assert.equal(
+    companyAdminPermissionPolicy.isCertifiedCompanyAdminState(
+      {
+        counting_view: true,
+        counting_manage: false,
+        occupancy_view: true,
+      },
+      options,
+      enabledModules,
+    ),
+    false,
+  );
+  assert.deepEqual(
+    companyAdminPermissionPolicy.missingCompanyAdminPermissionSlugs(
+      options,
+      new Set(),
+    ),
+    [],
+    "um módulo desabilitado não exige nem libera permissões",
+  );
+
+  const unavailableAtomicCatalogOptions = options.map((option) =>
+    option.slug === "counting_view"
+      ? {
+          ...option,
+          grants: [],
+          unavailable: true,
+        }
+      : option,
+  );
+  assert.deepEqual(
+    companyAdminPermissionPolicy.missingCompanyAdminPermissionSlugs(
+      unavailableAtomicCatalogOptions,
+      enabledModules,
+    ),
+    ["counting_view"],
+    "uma permissão publicada do módulo habilitado não pode ser certificada sem grant exato",
+  );
+  assert.equal(
+    Object.hasOwn(companyAdminPermissionPolicy, "COMPANY_ADMIN_ESSENTIAL_PERMISSION_SLUGS"),
+    false,
+    "o contrato não pode inventar slugs essenciais ausentes do catálogo Swagger",
+  );
+  assert.deepEqual(
+    companyAdminPermissionPolicy.enabledCompanyAdminOperationalSlugs(
+      [
+        {
+          module_id: "counting-module",
+          slug: "counting_view",
+          grants: [
+            {
+              id: "cross-module-permission",
+              module_id: "occupancy-module",
+              slug: "counting_view",
+            },
+          ],
+        },
+      ],
+      new Set(["counting-module", "occupancy-module"]),
+    ),
+    [],
+    "module_id divergente não pode certificar nem conceder outro módulo",
+  );
+});
+
+test("sincronização de admin é aditiva e alterações granulares não tocam o restante", () => {
+  const enabledModuleIds = new Set(["counting-module"]);
+  const option = {
+    slug: "views_manage",
+    grants: [
+      {
+        id: "views-permission",
+        module_id: "counting-module",
+        slug: "views_manage",
+      },
+    ],
+  };
+  const mutation = (overrides = {}) =>
+    companyAdminPermissionPolicy.resolvePermissionMutation({
+      baselineCertified: true,
+      companyAdminPromotion: false,
+      desired: false,
+      enabledModuleIds,
+      option,
+      permissionTouched: false,
+      ...overrides,
+    });
+
+  assert.equal(mutation(), "none", "opção não tocada deve ser preservada");
+  assert.equal(
+    mutation({ desired: true }),
+    "none",
+    "estado já carregado não deve gerar concessão redundante",
+  );
+  assert.equal(
+    mutation({ desired: true, permissionTouched: true }),
+    "grant",
+  );
+  assert.equal(mutation({ permissionTouched: true }), "revoke");
+  assert.equal(
+    mutation({ baselineCertified: false, permissionTouched: true }),
+    "blocked-revoke",
+  );
+  assert.equal(
+    mutation({ companyAdminPromotion: true, permissionTouched: true }),
+    "none",
+    "promoção nunca revoga",
+  );
+  assert.equal(
+    mutation({ companyAdminPromotion: true, desired: true }),
+    "grant",
+  );
+  assert.deepEqual(
+    companyAdminPermissionPolicy.enabledCompanyAdminOperationalSlugs(
+      [
+        {
+          slug: "views_manage",
+          grants: [
+            {
+              id: "views-permission",
+              module_id: "counting-module",
+              slug: "views_manage",
+            },
+          ],
+        },
+        {
+          slug: "dashboard_widgets_manage",
+          grants: [
+            {
+              id: "known-atomic-permission",
+              module_id: "counting-module",
+              slug: "counting_create_scenario",
+            },
+          ],
+        },
+        {
+          slug: "workers_manage",
+          grants: [
+            {
+              id: "foreign-permission",
+              module_id: "foreign-module",
+              slug: "must_not_be_granted",
+            },
+          ],
+        },
+        {
+          slug: "master_access",
+          grants: [
+            {
+              id: "sensitive-permission",
+              module_id: "counting-module",
+              slug: "tenant_master_delete",
+            },
+          ],
+          unavailable: true,
+        },
+      ],
+      enabledModuleIds,
+    ),
+    ["views_manage", "counting_create_scenario"],
+    "admin recebe somente grants operacionais explícitos, nunca o catálogo bruto",
+  );
+
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const syncSource = source.slice(
+    source.indexOf("async function syncUserPermissions"),
+    source.indexOf("async function toggleCompanyModule"),
+  );
+  assert.match(syncSource, /resolvePermissionMutation/);
+  assert.match(syncSource, /grantCompanyAdminOperationalPermissions/);
+  assert.doesNotMatch(
+    syncSource,
+    /grantCompanyAdminOperationalPermissions\([\s\S]*?permissionCatalog/,
+    "promoção não pode encaminhar o catálogo bruto de permissões",
+  );
+  assert.doesNotMatch(
+    syncSource,
+    /option\.slug !== "dashboard_widgets_manage"|option\.slug !== "locations_manage"/,
+  );
+});
+
+test("grade do Superadmin usa catálogo real, módulos conhecidos e seleções por superfície", () => {
+  const source = readFileSync(resolve(projectRoot, "components/app/super-admin-dashboard.tsx"), "utf8");
+  const resolverSource = readFileSync(resolve(projectRoot, "lib/user-access-catalog.ts"), "utf8");
+  const editorSource = readFileSync(resolve(projectRoot, "lib/user-access-editor.ts"), "utf8");
+  const moduleSelectorStart = source.indexOf("function selectVisibleProductModules");
+  const moduleSelectorEnd = source.indexOf("function algorithmModuleFamily", moduleSelectorStart);
+  const moduleSelectorSource = source.slice(moduleSelectorStart, moduleSelectorEnd);
+  assert.ok(moduleSelectorStart >= 0);
+  assert.match(source, /selectVisibleProductModules\(modules\)/);
+  assert.match(moduleSelectorSource, /if \(!family\) return/);
+  assert.match(moduleSelectorSource, /new Map<AlgorithmModuleFamily, IpxModule>/);
+  assert.match(source, /resolveUserAccessCatalog\(catalog, modules\)/);
+  assert.match(resolverSource, /for \(const permission of catalog\)/);
+  assert.match(resolverSource, /if \(!presentation\) continue;/);
+  assert.match(resolverSource, /module_id: moduleId/);
+  assert.match(resolverSource, /grants: \[grant\]/);
+  assert.match(resolverSource, /permissionDashboardSurface/);
+  assert.match(resolverSource, /operationalPermissionDefinitionForGrant/);
+  assert.match(source, /<UserAccessGrid/);
+  assert.match(editorSource, /Menus e recursos de gestão/);
+  assert.match(source, /unavailable: option\.unavailable \|\| !hasEnabledGrant/);
+  assert.doesNotMatch(source, /Slug: <code>|Módulo: <code>|is_master=true|API respondeu/);
+  assert.doesNotMatch(resolverSource, /managementModuleLabel|humanizePermissionSlug/);
+  for (const internalModule of ["alarms", "analytics", "audit log", "edge workers", "heatmap", "qr code"]) {
+    assert.doesNotMatch(editorSource, new RegExp('label: "' + internalModule + '"', "i"));
+  }
+});
+
+test("alteração real de usuário gera o PUT completo exigido pela API", () => {
+  assert.deepEqual(
+    companyUserProfileUpdate.buildCompanyUserProfileUpdate(
+      {
+        name: "Usuário Empresa",
+        email: "usuario@empresa.com",
+        active: true,
+      },
+      {
+        name: "  Usuário Atualizado ",
+        email: "novo@empresa.com ",
+        password: "nova-senha-segura",
+        active: false,
+      },
+    ),
+    {
+      name: "Usuário Atualizado",
+      email: "novo@empresa.com",
+      is_master: false,
+      active: false,
+      password: "nova-senha-segura",
+    },
+  );
+});
+
+test("resposta de usuário não pode redirecionar permissões para outra identidade", () => {
+  assert.equal(
+    companyUserProfileUpdate.certifyCompanyUserMutationIdentity(
+      {
+        id: "user-company-a",
+        company_id: "company-a",
+      },
+      {
+        companyId: "company-a",
+        userId: "user-company-a",
+      },
+    ),
+    "user-company-a",
+  );
+  assert.equal(
+    companyUserProfileUpdate.certifyCompanyUserMutationIdentity(
+      { id: "user-company-a" },
+      { companyId: "company-a" },
+    ),
+    "user-company-a",
+    "company_id omitido é tolerado somente após a requisição já escopada",
+  );
+  assert.throws(
+    () =>
+      companyUserProfileUpdate.certifyCompanyUserMutationIdentity(
+        {
+          id: "user-company-b",
+          company_id: "company-b",
+        },
+        { companyId: "company-a" },
+      ),
+    /fora da empresa selecionada "company-a"/,
+  );
+  assert.throws(
+    () =>
+      companyUserProfileUpdate.certifyCompanyUserMutationIdentity(
+        {
+          id: "another-user",
+          company_id: "company-a",
+        },
+        {
+          companyId: "company-a",
+          userId: "expected-user",
+        },
+      ),
+    /ao editar "expected-user"/,
+  );
+});
+
+test("sessão substituída remove expiração antiga e rejeita login malformado", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = browserFixture.window;
+  const storage = memoryStorage();
+  browserFixture.window = { dispatchEvent() {}, localStorage: storage };
+
+  try {
+    api.setStoredSession({
+      access_token: "access-valid",
+      refresh_token: "refresh-valid",
+      token_type: "Bearer",
+      expires_in: 900,
+    });
+    assert.notEqual(storage.getItem("expires_at"), null);
+
+    const signedExpiration = Math.floor(Date.now() / 1000) + 120;
+    api.setStoredSession({
+      access_token: accessToken({ exp: signedExpiration, sub: "session-user" }),
+      refresh_token: "refresh-signed-expiration",
+      token_type: "Bearer",
+      expires_in: 900,
+    });
+    assert.equal(
+      Number(storage.getItem("expires_at")),
+      signedExpiration * 1000,
+      "expires_in não pode prolongar a sessão além do exp assinado",
+    );
+
+    api.setStoredSession({
+      access_token: "access-without-expiration",
+      refresh_token: "refresh-without-expiration",
+      token_type: "Bearer",
+    });
+    assert.equal(storage.getItem("expires_in"), null);
+    assert.equal(storage.getItem("expires_at"), null);
+
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ access_token: "" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      });
+    await assert.rejects(
+      api.loginRequest("teste@teste.com", "senha"),
+      /access_token inválido|sessão inválida/,
+    );
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    browserFixture.window = originalWindow;
+  }
+});
+
+test("auth me mantém o snapshot do JWT realmente enviado na requisição", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = browserFixture.window;
+  const storage = memoryStorage();
+  let releaseResponse!: () => void;
+  let markRequestStarted!: () => void;
+  const responseGate = new Promise<void>((resolveResponse) => {
+    releaseResponse = resolveResponse;
+  });
+  const requestStarted = new Promise<void>((resolveStarted) => {
+    markRequestStarted = resolveStarted;
+  });
+  let authorization = "";
+  browserFixture.window = { dispatchEvent() {}, localStorage: storage };
+  globalThis.fetch = async (_url, init = {}) => {
+    authorization = new Headers(init.headers).get("Authorization") ?? "";
+    markRequestStarted();
+    await responseGate;
+    return jsonResponse({
+      company_id: "company-a",
+      email: "user@example.com",
+      id: "user-a",
+      is_master: false,
+      name: "User A",
+    });
+  };
+
+  try {
+    api.setStoredSession({
+      access_token: "access-token-a",
+      refresh_token: "refresh-token-a",
+      token_type: "Bearer",
+    });
+    const pending = api.currentUserRequestWithAccessToken();
+    await requestStarted;
+    api.setStoredSession({
+      access_token: "access-token-b",
+      refresh_token: "refresh-token-b",
+      token_type: "Bearer",
+    });
+    releaseResponse();
+
+    const result = await pending;
+    assert.equal(authorization, "Bearer access-token-a");
+    assert.equal(result.accessToken, "access-token-a");
+    assert.equal(storage.getItem("access_token"), "access-token-b");
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    browserFixture.window = originalWindow;
+  }
+});
+
+test("timezone efetivo prioriza a empresa e certifica a política do ambiente", () => {
+  const originalWindow = browserFixture.window;
+  const storage = memoryStorage();
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    companyCache.writeCompanyCache([
+      {
+        id: "company-cache",
+        name: "Empresa em cache",
+        timezone: "Europe/Lisbon",
+      },
+    ]);
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-selected",
+      name: "Empresa selecionada",
+      timezone: "Asia/Tokyo",
+    });
+
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution({
+        email: "master@example.com",
+        id: "master",
+        is_master: true,
+        name: "Master",
+      }),
+      {
+        fallback: false,
+        source: "selected-company",
+        timeZone: "Asia/Tokyo",
+      },
+    );
+
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-cache",
+      name: "Empresa em cache",
+    });
+    assert.equal(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution({
+        email: "master@example.com",
+        id: "master",
+        is_master: true,
+        name: "Master",
+      }).source,
+      "company-cache",
+    );
+
+    const regularResolution =
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution({
+        company_id: "company-regular",
+        company: {
+          id: "company-regular",
+          name: "Empresa regular",
+          timezone: "America/Manaus",
+        },
+        email: "user@example.com",
+        id: "user",
+        is_master: false,
+        name: "User",
+      });
+    assert.deepEqual(regularResolution, {
+      fallback: false,
+      source: "current-user-company",
+      timeZone: "America/Manaus",
+    });
+
+    const regularDeploymentResolution =
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution({
+        company_id: "company-without-timezone",
+        email: "user@example.com",
+        id: "user-without-timezone",
+        is_master: false,
+        name: "User without timezone",
+      });
+    assert.deepEqual(regularDeploymentResolution, {
+      fallback: false,
+      source: "deployment-default",
+      timeZone: "America/Sao_Paulo",
+    });
+    assert.equal(
+      companyTimeZone.requireCertifiedCompanyTimeZone(
+        regularDeploymentResolution,
+      ),
+      "America/Sao_Paulo",
+      "JWT e /auth/me podem omitir o IANA sem bloquear o próprio tenant",
+    );
+
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-invalid",
+      name: "Empresa sem fuso válido",
+      timezone: "Mars/Olympus",
+    });
+    const deploymentResolution =
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution({
+        email: "master@example.com",
+        id: "master",
+        is_master: true,
+        name: "Master",
+      });
+    assert.deepEqual(deploymentResolution, {
+      fallback: false,
+      source: "deployment-default",
+      timeZone: "America/Sao_Paulo",
+    });
+    assert.equal(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(null).fallback,
+      true,
+      "a política não deve certificar uma consulta sem empresa autenticada",
+    );
+  } finally {
+    if (originalWindow === undefined) delete browserFixture.window;
+    else browserFixture.window = originalWindow;
+  }
+});
+
+test("deployment-default rejeita escopo vazio ou divergente e cede ao IANA do JWT", () => {
+  const originalWindow = browserFixture.window;
+  const storage = memoryStorage();
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const regularUser = {
+    company_id: "company-regular-default",
+    email: "regular-default@example.com",
+    id: "user-regular-default",
+    is_master: false,
+    name: "Regular default",
+  };
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    companyCache.writeCompanyCache([
+      {
+        id: "company-foreign-cache",
+        name: "Empresa estrangeira em cache",
+        timezone: "Asia/Tokyo",
+      },
+    ]);
+    masterCompanyScope.setStoredCurrentCompanyScope({
+      id: "company-foreign-cache",
+      name: "Empresa estrangeira salva",
+      timezone: "Europe/Lisbon",
+    });
+
+    assert.equal(
+      masterCompanyScope.getCompanyTimeZoneResolutionForScope(
+        regularUser,
+        "",
+      ).fallback,
+      true,
+      "um escopo vazio não pode transformar o padrão do ambiente em certificação",
+    );
+    assert.equal(
+      masterCompanyScope.getCompanyTimeZoneResolutionForScope(
+        regularUser,
+        "company-foreign-cache",
+      ).fallback,
+      true,
+      "localStorage/cache de outro tenant não pode certificar um escopo divergente",
+    );
+
+    const jwtUser = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      regularUser,
+      accessToken({
+        company_id: regularUser.company_id,
+        company_timezone: "America/Manaus",
+        exp: now / 1000 + 900,
+        role: "operator",
+        sub: regularUser.id,
+      }),
+      now,
+    );
+    assert.ok(jwtUser);
+    assert.deepEqual(
+      masterCompanyScope.getCompanyTimeZoneResolutionForScope(
+        jwtUser,
+        regularUser.company_id,
+      ),
+      {
+        fallback: false,
+        source: "current-user-company",
+        timeZone: "America/Manaus",
+      },
+      "um IANA same-tenant assinado no JWT deve prevalecer sobre o deployment-default",
+    );
+  } finally {
+    if (originalWindow === undefined) delete browserFixture.window;
+    else browserFixture.window = originalWindow;
+  }
+});
+
+test("cache de empresa preserva timezone quando atualização parcial o omite", () => {
+  const originalWindow = browserFixture.window;
+  const storage = memoryStorage();
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+
+  try {
+    companyCache.writeCompanyCache([
+      {
+        id: "company-a",
+        name: "Empresa A",
+        timezone: "America/Fortaleza",
+      },
+    ]);
+    companyCache.writeCompanyCache([
+      { id: "company-a", name: "Empresa A atualizada" },
+    ]);
+
+    assert.deepEqual(companyCache.readCachedCompany("company-a"), {
+      id: "company-a",
+      name: "Empresa A atualizada",
+      timezone: "America/Fortaleza",
+      trade_name: null,
+    });
+    companyCache.writeCompanyCache([
+      {
+        company_timezone: "America/Recife",
+        id: "company-alias",
+        name: "Empresa com alias",
+      },
+    ]);
+    assert.equal(
+      companyCache.readCachedCompany("company-alias")?.timezone,
+      "America/Recife",
+      "o cache deve normalizar o alias realmente retornado pela API",
+    );
+  } finally {
+    if (originalWindow === undefined) delete browserFixture.window;
+    else browserFixture.window = originalWindow;
+  }
+});
+
+test("superadmin usa timezone do JWT apenas quando o tenant do claim é o selecionado", () => {
+  const originalWindow = browserFixture.window;
+  const storage = memoryStorage();
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  const now = Date.UTC(2026, 7, 24, 12, 0, 0);
+
+  try {
+    const master = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      {
+        email: "master@example.com",
+        id: "master-jwt",
+        is_master: true,
+        name: "Master",
+      },
+      accessToken({
+        company_id: "company-jwt",
+        company_timezone: "America/Manaus",
+        exp: now / 1000 + 900,
+        role: "super-admin",
+        sub: "master-jwt",
+      }),
+      now,
+    );
+    assert.ok(master);
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-jwt",
+      name: "Empresa JWT",
+    });
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
+      {
+        fallback: false,
+        source: "current-user-company",
+        timeZone: "America/Manaus",
+      },
+    );
+
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-other",
+      name: "Outra empresa",
+    });
+    assert.deepEqual(
+      masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
+      {
+        fallback: false,
+        source: "deployment-default",
+        timeZone: "America/Sao_Paulo",
+      },
+      "outro tenant usa a política do ambiente sem herdar o fuso do JWT",
+    );
+  } finally {
+    if (originalWindow === undefined) delete browserFixture.window;
+    else browserFixture.window = originalWindow;
+  }
+});
+
+test("override do video wall exige empresa ativa e timezone do mesmo escopo", () => {
+  const originalWindow = browserFixture.window;
+  const storage = memoryStorage();
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  const master = {
+    email: "master@example.com",
+    id: "master",
+    is_master: true,
+    name: "Master",
+  };
+
+  try {
+    companyCache.writeCompanyCache([
+      {
+        id: "company-a",
+        name: "Empresa A",
+        timezone: "America/Manaus",
+      },
+      {
+        id: "company-b",
+        name: "Empresa B",
+        timezone: "Asia/Tokyo",
+      },
+    ]);
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-a",
+      name: "Empresa A",
+    });
+
+    assert.deepEqual(
+      masterCompanyScope.certifyCompanyScopeTimeZoneOverride(
+        master,
+        "company-a",
+      ),
+      {
+        companyScopeId: "company-a",
+        timeZone: "America/Manaus",
+      },
+    );
+    assert.deepEqual(
+      masterCompanyScope.certifyCompanyScopeTimeZoneOverride(
+        master,
+        "company-b",
+      ),
+      {
+        companyScopeId: "company-b",
+        error: "Empresa do video wall não corresponde à empresa ativa.",
+      },
+      "o cache de outra empresa não autoriza um override divergente",
+    );
+
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-without-timezone",
+      name: "Empresa sem fuso",
+    });
+    assert.deepEqual(
+      masterCompanyScope.certifyCompanyScopeTimeZoneOverride(
+        master,
+        "company-without-timezone",
+      ),
+      {
+        companyScopeId: "company-without-timezone",
+        timeZone: "America/Sao_Paulo",
+      },
+      "o caminho explícito pode usar a política certificada somente no mesmo escopo",
+    );
+  } finally {
+    if (originalWindow === undefined) delete browserFixture.window;
+    else browserFixture.window = originalWindow;
+  }
+});
+
+test("comparativo certifica empresa e fuso da fonte horária", () => {
+  const base = {
+    companyScopeId: "company-a",
+    companyTimeZone: "America/Sao_Paulo",
+    hourlySource: {
+      companyScopeId: "company-a",
+      companyTimeZone: "America/Sao_Paulo",
+    },
+    scenarios: [{ company_id: "company-a", id: "scenario-a" }],
+  };
+
+  assert.deepEqual(
+    scenarioComparisonScope.requireScenarioComparisonScope(base),
+    {
+      companyScopeId: "company-a",
+      companyTimeZone: "America/Sao_Paulo",
+    },
+  );
+  assert.throws(
+    () =>
+      scenarioComparisonScope.requireScenarioComparisonScope({
+        ...base,
+        hourlySource: {
+          ...base.hourlySource,
+          companyScopeId: "company-b",
+        },
+      }),
+    /fonte horária pertence a outra empresa/,
+  );
+  assert.throws(
+    () =>
+      scenarioComparisonScope.requireScenarioComparisonScope({
+        ...base,
+        hourlySource: {
+          ...base.hourlySource,
+          companyTimeZone: "UTC",
+        },
+      }),
+    /fonte horária usa outro fuso/,
+  );
+  assert.throws(
+    () =>
+      scenarioComparisonScope.requireScenarioComparisonScope({
+        ...base,
+        scenarios: [{ company_id: "company-b", id: "scenario-b" }],
+      }),
+    /a seleção contém um cenário de outra empresa/,
+  );
+});
+
+test("video wall e comparativo propagam o escopo explícito em todas as consultas", () => {
+  const liveSource = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const comparisonSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-comparison-card.tsx"),
+    "utf8",
+  );
+  const reportSource = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(liveSource, /certifyCompanyScopeTimeZoneOverride\(/);
+  assert.match(
+    liveSource,
+    /companyScopeCertificationError[\s\S]*?setChartData\(\{\}\)[\s\S]*?return;/,
+    "um override não certificado deve parar antes da consulta",
+  );
+  for (const path of ["scenarios", "cameras", "locations"]) {
+    assert.match(
+      liveSource,
+      new RegExp(
+        `apiFetch<unknown>\\("/${path}", \\{[^}]*companyScopeId[^}]*\\}\\)`,
+      ),
+      `/${path} deve receber a empresa explícita`,
+    );
+  }
+  assert.match(
+    liveSource,
+    /fetchCompleteAggregateRange\(\{[\s\S]*?companyScopeId,[\s\S]*?signal,[\s\S]*?to:/,
+    "os agregados do Ao Vivo devem manter empresa e cancelamento explícitos",
+  );
+  assert.match(
+    liveSource,
+    /`\/locations\/\$\{locations\[index\]\.id\}\/sub-locations`,\s*\{\s*companyScopeId: expectedCompanyId, signal\s*\}/,
+  );
+  assert.match(
+    liveSource,
+    /apiFetch<unknown>\("\/workers", \{[^}]*companyScopeId[^}]*\}\)/,
+  );
+  assert.match(
+    comparisonSource,
+    /fetchScenarioComparisonRows\([\s\S]*?companyScopeId: string/,
+  );
+  assert.match(
+    comparisonSource,
+    /fetchCompleteAggregateRange\(\{[\s\S]*?companyScopeId,[\s\S]*?signal: options\.signal/,
+    "o comparativo deve propagar empresa e cancelamento ao carregador completo",
+  );
+  assert.match(
+    comparisonSource,
+    /apiFetch<AggregateEventsResponse>\(path, \{[\s\S]*?companyScopeId,[\s\S]*?signal: controller\.signal/,
+    "a requisição compartilhada do comparativo deve permanecer escopada",
+  );
+  assert.match(
+    reportSource,
+    /companyScopeId,[\s\S]*?companyTimeZone,[\s\S]*?from: reportComparisonMonthDefinition\.from[\s\S]*?granularity: "month"[\s\S]*?to: reportComparisonMonthDefinition\.to/,
+    "a fonte mensal consolidada reutilizada pelo comparativo deve carregar sua identidade",
+  );
+  for (const path of ["scenarios", "cameras", "locations"]) {
+    assert.match(
+      reportSource,
+      new RegExp(
+        `apiFetch<unknown>\\("/${path}", \\{[^}]*companyScopeId[^}]*\\}\\)`,
+      ),
+      `o caller de relatório deve escopar /${path}`,
+    );
+  }
+  assert.match(
+    reportSource,
+    /fetchBoundedHourlyAggregateRanges\(\{[\s\S]*?companyScopeId:/,
+    "o cache horário de relatórios deve receber a empresa explícita",
+  );
+  assert.match(
+    reportSource,
+    /fetchCompleteAggregateRange\(\{[\s\S]*?companyScopeId: companyScopeId\?\.trim\(\) \|\| undefined,[\s\S]*?signal: controller\.signal/,
+    "as demais granularidades de relatório devem manter escopo e cancelamento explícitos no carregador completo",
+  );
+});
+
+test("limites civis da empresa independem do timezone do navegador", () => {
+  const instant = new Date("2026-08-07T15:37:42.000Z");
+  const parts = companyTimeZone.companyZonedDateParts(
+    instant,
+    "America/Sao_Paulo",
+  );
+  assert.deepEqual(parts, {
+    day: 7,
+    hour: 12,
+    minute: 37,
+    month: 8,
+    second: 42,
+    year: 2026,
+  });
+  assert.equal(
+    companyTimeZone
+      .startOfCompanyTimeZoneHour(instant, "America/Sao_Paulo")
+      .toISOString(),
+    "2026-08-07T15:00:00.000Z",
+  );
+  assert.equal(
+    companyTimeZone
+      .endOfCompanyTimeZoneHour(instant, "America/Sao_Paulo")
+      .toISOString(),
+    "2026-08-07T16:00:00.000Z",
+  );
+  assert.equal(
+    companyTimeZone.companyTimeZoneOffsetLabel(
+      instant,
+      "America/Sao_Paulo",
+    ),
+    "UTC-03",
+  );
+  assert.equal(
+    companyTimeZone
+      .startOfCompanyTimeZoneDay(
+        new Date("2026-08-07T02:30:00.000Z"),
+        "America/Sao_Paulo",
+      )
+      .toISOString(),
+    "2026-08-06T03:00:00.000Z",
+  );
+
+  const tokyoYear = companyTimeZone.companyCalendarDate(
+    new Date("2026-12-31T16:00:00.000Z"),
+    "Asia/Tokyo",
+    "year",
+  );
+  assert.deepEqual(
+    [tokyoYear.getFullYear(), tokyoYear.getMonth(), tokyoYear.getDate()],
+    [2027, 0, 1],
+  );
+});
+
+test("consulta civil bloqueia divergência entre navegador e empresa", () => {
+  const runtimeTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  assert.equal(
+    companyTimeZone.requireRuntimeCompanyTimeZone(runtimeTimeZone),
+    runtimeTimeZone,
+  );
+  const differentTimeZone = runtimeTimeZone === "UTC"
+    ? "America/Sao_Paulo"
+    : "UTC";
+  assert.throws(
+    () => companyTimeZone.requireRuntimeCompanyTimeZone(differentTimeZone),
+    /consulta civil foi bloqueada.*não deslocar horas, dias, meses ou anos/,
+  );
+});
+
+test("hora repetida por DST mantém os dois buckets absolutos da empresa", () => {
+  const first = new Date("2026-11-01T05:30:00.000Z");
+  const second = new Date("2026-11-01T06:30:00.000Z");
+  const firstStart = companyTimeZone.startOfCompanyTimeZoneHour(
+    first,
+    "America/New_York",
+  );
+  const secondStart = companyTimeZone.startOfCompanyTimeZoneHour(
+    second,
+    "America/New_York",
+  );
+
+  assert.equal(firstStart.toISOString(), "2026-11-01T05:00:00.000Z");
+  assert.equal(secondStart.toISOString(), "2026-11-01T06:00:00.000Z");
+  assert.notEqual(firstStart.getTime(), secondStart.getTime());
+});
+
+test("agregado de ocupação é validado contra o timezone efetivo da empresa", () => {
+  const resolution = companyTimeZone.resolveCompanyTimeZone([
+    { source: "selected-company", value: "America/Sao_Paulo" },
+  ]);
+  const row = {
+    bucket: "2026-08-07T12:00:00-03:00",
+    scenario_total_avg: 3,
+    scenario_total_max: 7,
+    scenario_total_min: 0,
+  };
+
+  assert.equal(
+    occupancyAggregateValidation.requireOccupancyAggregateRows(
+      {
+        data: [row],
+        granularity: "hour",
+        scenario_id: "scenario-a",
+        timezone: "America/Sao_Paulo",
+      },
+      "hour",
+      "scenario-a",
+      resolution.timeZone,
+    )[0],
+    row,
+  );
+  assert.throws(
+    () =>
+      occupancyAggregateValidation.requireOccupancyAggregateRows(
+        {
+          data: [row],
+          granularity: "hour",
+          scenario_id: "scenario-a",
+          timezone: "UTC",
+        },
+        "hour",
+        "scenario-a",
+        resolution.timeZone,
+      ),
+    /API agregou.*UTC.*America\/Sao_Paulo/,
+  );
+});
+
+test("papel admin só administra recursos explicitamente concedidos no JWT", () => {
+  const now = Date.UTC(2026, 7, 4, 12, 0, 0);
+  const user = currentUser();
+  const enriched = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      nbf: now / 1000 - 1,
+      role: "admin",
+      sub: user.id,
+      user_id: user.id,
+    }),
+    now,
+  );
+
+  assert.equal(enriched.role, "admin");
+  assert.equal(permissions.hasAnyOperationalPermission(enriched), false);
+  assert.equal(permissions.canManageCameras(enriched), false);
+  assert.equal(permissions.canManageWorkers(enriched), false);
+  assert.equal(permissions.canReadInfrastructureCatalogs(enriched), true);
+
+  const cameraAdmin = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      permissions: ["cameras_manage"],
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.equal(permissions.hasAnyOperationalPermission(cameraAdmin), true);
+  assert.equal(permissions.canManageCameras(cameraAdmin), true);
+  assert.equal(permissions.canManageWorkers(cameraAdmin), false);
+  assert.equal(permissions.canManageLocations(cameraAdmin), false);
+
+  const readOnlyAdmin = {
+    ...cameraAdmin,
+    permissions: [
+      {
+        can_view: true,
+        id: "read-only-workers",
+        slug: "workers_manage",
+      },
+    ],
+  };
+  assert.equal(permissions.hasAnyOperationalPermission(readOnlyAdmin), false);
+  assert.equal(permissions.canManageWorkers(readOnlyAdmin), false);
+
+  const operatorWithStaleGrant = {
+    ...cameraAdmin,
+    permissions: [{ id: "stale-camera", slug: "cameras_manage" }],
+    role: "operator",
+  };
+  assert.equal(permissions.hasAnyOperationalPermission(operatorWithStaleGrant), false);
+  assert.equal(permissions.canManageCameras(operatorWithStaleGrant), false);
+  assert.equal(
+    permissions.canReadInfrastructureCatalogs(operatorWithStaleGrant),
+    false,
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenDeclaresMasterAccess(
+      accessToken({ ...validMasterTime(now), role: "admin" }),
+      now,
+    ),
+    false,
+  );
+});
+
+test("JWT migrado aceita identidade canônica e metadados nested sem mascarar /auth/me", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = currentUser();
+  const token = accessToken({
+    company: {
+      id: user.company_id,
+      metadata: { timezone: "America/Sao_Paulo" },
+    },
+    exp: now / 1000 + 900,
+    permissions: [
+      "occupancy_manage",
+      {
+        can_view: true,
+        id: "widget-permission-jwt",
+        slug: "dashboard_widgets_manage",
+      },
+      {
+        can_view: false,
+        slug: "workers_manage",
+      },
+    ],
+    role: "admin",
+    sub: "subject-externo",
+    user_id: user.id,
+  });
+
+  assert.deepEqual(
+    accessTokenClaims.resolveAccessTokenContext(token, now),
+    {
+      companyId: user.company_id,
+      expiresAt: now / 1000 + 900,
+      issuedAt: null,
+      isMaster: false,
+      notBefore: null,
+      role: "admin",
+      timeZone: "America/Sao_Paulo",
+      userId: user.id,
+    },
+  );
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    token,
+    now,
+  );
+  assert.equal(reconciled?.role, "admin");
+  assert.deepEqual(reconciled?.permissions, [
+    { id: "jwt:occupancy_manage", slug: "occupancy_manage" },
+    {
+      can_view: true,
+      id: "widget-permission-jwt",
+      slug: "dashboard_widgets_manage",
+    },
+  ]);
+
+  const explicitAuthMePermissions = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    { ...user, permissions: [] },
+    token,
+    now,
+  );
+  assert.deepEqual(
+    explicitAuthMePermissions.permissions,
+    [
+      { id: "jwt:occupancy_manage", slug: "occupancy_manage" },
+      {
+        can_view: true,
+        id: "widget-permission-jwt",
+        slug: "dashboard_widgets_manage",
+      },
+    ],
+    "a autorização do JWT aceito deve vencer uma lista legada de /auth/me",
+  );
+
+  const malformedPermissionClaims = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      permissions: { occupancy_manage: true },
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.equal(
+    malformedPermissionClaims.permissions.length,
+    0,
+    "um formato declarado mas desconhecido deve falhar fechado",
+  );
+
+  const nestedPermissions = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    user,
+    accessToken({
+      authorization: { permission_slugs: ["occupancy_manage"] },
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(nestedPermissions.permissions, [
+    { id: "jwt:occupancy_manage", slug: "occupancy_manage" },
+  ]);
+
+  const conflictingPermissionAliases =
+    accessTokenClaims.enrichCurrentUserFromAccessToken(
+      user,
+      accessToken({
+        company_id: user.company_id,
+        exp: now / 1000 + 900,
+        permission_slugs: ["workers_manage"],
+        permissions: ["occupancy_manage"],
+        role: "operator",
+        user_id: user.id,
+      }),
+      now,
+    );
+  assert.equal(
+    conflictingPermissionAliases.permissions.length,
+    0,
+    "aliases de autorização divergentes devem falhar de forma fechada",
+  );
+
+  const foreignPermissionScope = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      permissions: [
+        { company_id: "company-foreign", slug: "occupancy_manage" },
+      ],
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.equal(
+    foreignPermissionScope.permissions.length,
+    0,
+    "uma permissão escopada a outra empresa não pode habilitar a UI",
+  );
+
+  const authProviderSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-provider.tsx"),
+    "utf8",
+  );
+  assert.match(
+    authProviderSource,
+    /user\.permissions \?\? fallbackUser\?\.permissions \?\? \[\]/,
+    "as permissões autenticadas atuais devem vencer o snapshot anterior",
+  );
+  assert.match(
+    authProviderSource,
+    /if \(user\.permissions !== undefined\) \{[\s\S]*?certifyAuthenticatedUserPermissionMetadata\([\s\S]*?assignedMetadata[\s\S]*?user\.id[\s\S]*?enrichAuthenticatedPermissionMetadata\([\s\S]*?user\.permissions[\s\S]*?certifiedAssignedMetadata[\s\S]*?permissionCatalog/,
+    "permissões explícitas do JWT só podem receber metadados das rotas Swagger",
+  );
+});
+
+test("JWT habilita Demographics somente com grant e company_module da mesma empresa", () => {
+  const now = Date.UTC(2026, 8, 2, 12, 0, 0);
+  const user = currentUser();
+  const demographicsModule = {
+    active: true,
+    id: "module-demographics",
+    name: "Demographics",
+    slug: "demographics",
+  };
+  const commonClaims = {
+    company_id: user.company_id,
+    exp: now / 1000 + 900,
+    permissions: [
+      {
+        action: "view",
+        module: demographicsModule,
+        module_id: demographicsModule.id,
+        slug: "demographics_view",
+      },
+    ],
+    role: "operator",
+    user_id: user.id,
+  };
+
+  const enabled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      ...commonClaims,
+      company_modules: [
+        {
+          company_id: user.company_id,
+          enabled: true,
+          id: "assignment-demographics",
+          module: demographicsModule,
+          module_id: demographicsModule.id,
+        },
+      ],
+    }),
+    now,
+  );
+  assert.equal(enabled?.company_modules?.length, 1);
+  assert.equal(enabled?.company_modules?.[0].enabled, true);
+  assert.equal(permissions.canViewDemographics(enabled), true);
+
+  const disabled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      ...commonClaims,
+      company_modules: [
+        {
+          company_id: user.company_id,
+          enabled: false,
+          module: demographicsModule,
+          module_id: demographicsModule.id,
+        },
+      ],
+    }),
+    now,
+  );
+  assert.equal(disabled?.company_modules?.[0].enabled, false);
+  assert.equal(permissions.canViewDemographics(disabled), false);
+});
+
+test("company_modules do JWT aceita aliases limitados e falha fechado em conflito", () => {
+  const now = Date.UTC(2026, 8, 2, 12, 0, 0);
+  const user = currentUser();
+  const permissionClaims = [{ action: "view", slug: "demographics_view" }];
+  const nested = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company: {
+        id: user.company_id,
+        modules: ["demographics"],
+      },
+      exp: now / 1000 + 900,
+      permissions: permissionClaims,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.equal(nested?.company_modules?.[0].module?.slug, "demographics");
+  assert.equal(permissions.canViewDemographics(nested), true);
+
+  const conflictingAliases = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_modules: ["demographics"],
+      companyModules: [
+        {
+          enabled: false,
+          module: {
+            id: "module-demographics",
+            name: "Demographics",
+            slug: "demographics",
+          },
+          module_id: "module-demographics",
+        },
+      ],
+      exp: now / 1000 + 900,
+      permissions: permissionClaims,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(conflictingAliases?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(conflictingAliases), false);
+
+  const foreignAssignment = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_modules: [
+        {
+          company_id: "company-foreign",
+          enabled: true,
+          module_id: "module-demographics",
+        },
+      ],
+      exp: now / 1000 + 900,
+      permissions: permissionClaims,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(foreignAssignment?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(foreignAssignment), false);
+
+  const malformedAssignment = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_modules: [
+        { enabled: "false", module_id: "module-demographics" },
+      ],
+      exp: now / 1000 + 900,
+      permissions: permissionClaims,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(malformedAssignment?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(malformedAssignment), false);
+});
+
+test("GET company modules apenas enriquece o JWT e uma negativa explícita restringe", () => {
+  const authenticatedAssignments = [
+    {
+      company_id: "company-test",
+      enabled: true,
+      module: {
+        id: "jwt-module:demographics",
+        name: "demographics",
+        slug: "demographics",
+      },
+      module_id: "jwt-module:demographics",
+    },
+  ];
+  const metadata = [
+    {
+      company_id: "company-test",
+      enabled: true,
+      id: "assignment-demographics",
+      module: {
+        active: true,
+        description: "Perfil demográfico",
+        id: "module-demographics",
+        name: "Demographics",
+        slug: "demographics",
+      },
+      module_id: "module-demographics",
+    },
+    {
+      company_id: "company-test",
+      enabled: true,
+      module_id: "module-occupancy",
+      module: {
+        id: "module-occupancy",
+        name: "Ocupação",
+        slug: "occupancy",
+      },
+    },
+  ];
+  const enriched =
+    authenticatedPermissionMetadata.enrichAuthenticatedCompanyModuleMetadata(
+      authenticatedAssignments,
+      metadata,
+      "company-test",
+    );
+  assert.equal(enriched.length, 1, "metadado extra não pode criar módulo");
+  assert.equal(enriched[0].module_id, "module-demographics");
+  assert.equal(
+    enriched[0].module?.name,
+    "demographics",
+    "metadado não deve reescrever um nome já autenticado pelo JWT",
+  );
+  assert.equal(enriched[0].enabled, true);
+
+  const restricted =
+    authenticatedPermissionMetadata.enrichAuthenticatedCompanyModuleMetadata(
+      authenticatedAssignments,
+      [{ ...metadata[0], enabled: false }],
+      "company-test",
+    );
+  assert.equal(restricted[0].enabled, false);
+
+  const foreignMetadata =
+    authenticatedPermissionMetadata.enrichAuthenticatedCompanyModuleMetadata(
+      authenticatedAssignments,
+      [{ ...metadata[0], company_id: "company-foreign" }],
+      "company-test",
+    );
+  assert.equal(foreignMetadata.length, 1);
+  assert.equal(foreignMetadata[0].module_id, "jwt-module:demographics");
+
+  const conflictingIdentity =
+    authenticatedPermissionMetadata.enrichAuthenticatedCompanyModuleMetadata(
+      authenticatedAssignments,
+      [
+        {
+          ...metadata[0],
+          module: { ...metadata[0].module, id: "module-other", slug: "counting" },
+        },
+      ],
+      "company-test",
+    );
+  assert.equal(conflictingIdentity[0].module_id, "jwt-module:demographics");
+  assert.equal(conflictingIdentity[0].module?.slug, "demographics");
+});
+
+test("metadado de permissão por usuário certifica user_id sem afetar o catálogo global", () => {
+  const grant = {
+    action: "view",
+    id: "jwt:runtime-demographics",
+    slug: "runtime-demographics",
+  };
+  const demographicsMetadata = {
+    action: "view",
+    company_id: "company-test",
+    id: "assignment-demographics",
+    module: {
+      active: true,
+      id: "module-demographics",
+      name: "Demographics",
+      slug: "demographics",
+    },
+    module_id: "module-demographics",
+    slug: "runtime-demographics",
+  };
+  const certified =
+    authenticatedPermissionMetadata.certifyAuthenticatedUserPermissionMetadata(
+      [
+        { ...demographicsMetadata, user_id: "user-test" },
+        { ...demographicsMetadata, id: "foreign", user_id: "user-foreign" },
+        { ...demographicsMetadata, id: "unbound" },
+        {
+          ...demographicsMetadata,
+          company_id: undefined,
+          companyId: "company-foreign",
+          id: "foreign-camel-company",
+          userId: "user-test",
+        },
+        {
+          ...demographicsMetadata,
+          id: "conflicting-user-alias",
+          user_id: "user-test",
+          userId: "user-foreign",
+        },
+      ],
+      "user-test",
+      "company-test",
+    );
+  assert.equal(certified.length, 1);
+  assert.equal(certified[0].user_id, "user-test");
+
+  const rejectedForeignMetadata =
+    authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+      [grant],
+      [
+        authenticatedPermissionMetadata.certifyAuthenticatedUserPermissionMetadata(
+          [{ ...demographicsMetadata, user_id: "user-foreign" }],
+          "user-test",
+          "company-test",
+        ),
+      ],
+      "company-test",
+    );
+  assert.equal(rejectedForeignMetadata[0].module, undefined);
+
+  const enrichedFromGlobalCatalog =
+    authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+      [grant],
+      [[{ ...demographicsMetadata, company_id: undefined }]],
+      "company-test",
+    );
+  assert.equal(enrichedFromGlobalCatalog[0].module?.slug, "demographics");
+});
+
+test("company_modules nunca atravessa identidade ou empresa ausente", () => {
+  const now = Date.UTC(2026, 8, 2, 12, 0, 0);
+  const user = currentUser();
+  const base = {
+    company_id: user.company_id,
+    company_modules: ["demographics"],
+    exp: now / 1000 + 900,
+    permissions: [{ action: "view", slug: "demographics_view" }],
+    role: "operator",
+  };
+
+  const conflictingIdentity = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      ...base,
+      user_id: user.id,
+      userId: "user-foreign",
+    }),
+    now,
+  );
+  assert.deepEqual(conflictingIdentity?.company_modules, []);
+  assert.deepEqual(conflictingIdentity?.permissions, []);
+  assert.equal(permissions.canViewDemographics(conflictingIdentity), false);
+
+  const foreignNestedUser = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      permissions: base.permissions,
+      role: "operator",
+      user: { id: "user-foreign", company_modules: ["demographics"] },
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(foreignNestedUser?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(foreignNestedUser), false);
+
+  const companylessUser: Omit<typeof user, "company_id"> & { company_id?: string } = { ...user };
+  delete companylessUser.company_id;
+  const missingCompany = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    companylessUser,
+    accessToken({
+      company_modules: ["demographics"],
+      exp: now / 1000 + 900,
+      permissions: base.permissions,
+      role: "operator",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(missingCompany?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(missingCompany), false);
+
+  const previouslyAuthorizedUser = {
+    ...user,
+    company_modules: [
+      {
+        company_id: user.company_id,
+        enabled: true,
+        module_id: "module-demographics",
+        module: {
+          id: "module-demographics",
+          name: "Demographics",
+          slug: "demographics",
+        },
+      },
+    ],
+    is_master: true,
+    permissions: [{ id: "old-grant", slug: "demographics_view" }],
+    role: "super-admin",
+  };
+  const rejectedIdentity =
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      previouslyAuthorizedUser,
+      accessToken({
+        ...base,
+        user_id: user.id,
+        userId: "user-foreign",
+      }),
+      now,
+    );
+  assert.equal(rejectedIdentity?.is_master, false);
+  assert.deepEqual(rejectedIdentity?.permissions, []);
+  assert.deepEqual(rejectedIdentity?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(rejectedIdentity), false);
+
+  const conflictingCompanyAliases =
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      user,
+      accessToken({
+        authorization: {
+          company_modules: ["demographics"],
+          permissions: ["demographics_view"],
+        },
+        company_id: user.company_id,
+        companyId: "company-foreign",
+        exp: now / 1000 + 900,
+        role: "operator",
+        user_id: user.id,
+      }),
+      now,
+    );
+  assert.deepEqual(conflictingCompanyAliases?.company_modules, []);
+  assert.equal(permissions.canViewDemographics(conflictingCompanyAliases), false);
+});
+
+test("fallback de sessão não reutiliza módulos após troca de empresa", () => {
+  const now = Date.UTC(2026, 8, 2, 12, 0, 0);
+  const user = currentUser();
+  assert.equal(
+    accessTokenClaims.accessTokenExplicitlyMismatchesUserContext(
+      accessToken({
+        company_id: "company-other",
+        exp: now / 1000 + 900,
+        role: "operator",
+        user_id: user.id,
+      }),
+      user,
+      now,
+    ),
+    true,
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenExplicitlyMismatchesUserContext(
+      accessToken({
+        company_id: user.company_id,
+        companyId: "company-other",
+        exp: now / 1000 + 900,
+        role: "operator",
+        user_id: user.id,
+      }),
+      user,
+      now,
+    ),
+    true,
+    "aliases de tenant contraditórios não podem preservar o snapshot",
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenExplicitlyMismatchesUserContext(
+      accessToken({
+        company_id: "company-other",
+        exp: now / 1000 + 900,
+        is_master: true,
+        role: "super-admin",
+        user_id: user.id,
+      }),
+      { ...user, is_master: true, role: "super-admin" },
+      now,
+    ),
+    false,
+    "um JWT explicitamente Master continua global",
+  );
+});
+
+test("bootstrap preserva company_modules explícito do JWT quando o catálogo falha", () => {
+  const authProviderSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-provider.tsx"),
+    "utf8",
+  );
+  assert.match(
+    authProviderSource,
+    /const authenticatedAssignments =[\s\S]*?certifyCompanyModuleAssignments\(user\.company_modules, companyId\)[\s\S]*?enrichAuthenticatedCompanyModuleMetadata\([\s\S]*?authenticatedAssignments[\s\S]*?certifiedRows/,
+  );
+  assert.match(
+    authProviderSource,
+    /return authenticatedAssignments !== undefined[\s\S]*?\[\.\.\.authenticatedAssignments\][\s\S]*?: \[\];/,
+  );
+  assert.match(
+    authProviderSource,
+    /return authenticatedAssignments !== undefined[\s\S]*?enrichAuthenticatedCompanyModuleMetadata\([\s\S]*?: certifiedRows;/,
+    "quando o JWT legado omite company_modules, o endpoint autenticado continua sendo a fonte de atribuições",
+  );
+  assert.match(
+    authProviderSource,
+    /if \(user\.company_modules === undefined\) return undefined;/,
+    "a claim omitida precisa continuar distinguível de uma negativa explícita",
+  );
+  assert.match(
+    authProviderSource,
+    /const companyModulesHydrated = Boolean\([\s\S]*?tokenEnrichedUser\.company_modules === undefined[\s\S]*?Promise\.all\(\[[\s\S]*?hydrateUserCompanyModules\(tokenEnrichedUser, authenticatedSession\)/,
+    "o endpoint autoritativo deve ser certificado antes da publicação quando o JWT omite os módulos",
+  );
+  assert.match(
+    authProviderSource,
+    /companyModulesHydrated[\s\S]*?Promise\.resolve\(user\.company_modules \?\? \[\]\)/,
+    "a hidratação descritiva não deve repetir a consulta de módulos já certificada",
+  );
+  assert.match(
+    authProviderSource,
+    /const permissionAssignmentsHydrated = Boolean\([\s\S]*?tokenEnrichedUser\.permissions === undefined/,
+    "o bootstrap deve lembrar quando já consultou as concessões legadas",
+  );
+  assert.match(
+    authProviderSource,
+    /hydrateAuthenticatedUser\([\s\S]*?\{ companyModulesHydrated, permissionAssignmentsHydrated \}/,
+  );
+  assert.match(
+    authProviderSource,
+    /assignmentsHydrated[\s\S]*?\? Promise\.resolve\(\[\]\)[\s\S]*?: readAuthenticatedPermissionMetadata\(/,
+    "a hidratação descritiva não deve repetir imediatamente a mesma consulta de acessos",
+  );
+  assert.match(
+    authProviderSource,
+    /typeof assignment\.enabled !== "boolean"/,
+    "o endpoint não pode transformar strings truthy em módulos habilitados",
+  );
+  assert.match(
+    authProviderSource,
+    /const assignments = new Map<string, CurrentUserCompanyModule>\(\);[\s\S]*?previous\.enabled &&[\s\S]*?certifiedAssignment\.enabled/,
+    "duplicatas contraditórias do endpoint devem ser consolidadas com negativa vencedora",
+  );
+  assert.match(
+    authProviderSource,
+    /company_id: expectedCompanyId/,
+    "toda atribuição certificada deve carregar o tenant autenticado",
+  );
+  assert.match(
+    authProviderSource,
+    /resolveRuntimeIdentifierAliases\(assignment, \[[\s\S]*?"companyId"[\s\S]*?"tenantId"[\s\S]*?resolveRuntimeIdentifierAliases\(assignment, \[[\s\S]*?"moduleId"/,
+    "aliases camelCase de empresa e módulo precisam ser validados antes da canonicalização",
+  );
+});
+
+test("catálogos Swagger apenas enriquecem grants autenticados correspondentes", () => {
+  const authenticatedGrants = [
+    { id: "jwt:occupancy_create", slug: "occupancy_create" },
+    { id: "jwt:workers_manage", slug: "workers_manage" },
+  ];
+  const assignedMetadata = [
+    {
+      action: "create",
+      company_id: "company-a",
+      id: "assignment-occupancy",
+      module: {
+        id: "module-occupancy",
+        name: "Ocupação",
+        slug: "occupancy",
+      },
+      slug: "occupancy_create",
+    },
+    {
+      company_id: "company-a",
+      id: "assignment-extra",
+      module: {
+        id: "module-cameras",
+        name: "Câmeras",
+        slug: "cameras",
+      },
+      slug: "cameras_manage",
+    },
+  ];
+  const permissionCatalog = [
+    {
+      action: "manage",
+      id: "catalog-workers",
+      module_id: "module-workers",
+      module: {
+        active: true,
+        description: "Workers de ingestão",
+        id: "module-workers",
+        name: "Workers",
+        slug: "workers",
+      },
+      slug: "workers_manage",
+    },
+  ];
+
+  const reconciled =
+    authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+      authenticatedGrants,
+      [assignedMetadata, permissionCatalog],
+      "company-a",
+    );
+
+  assert.deepEqual(
+    reconciled.map((permission: DynamicFixture) => permission.slug),
+    ["occupancy_create", "workers_manage"],
+    "um grant extra do endpoint não pode ser fabricado na sessão",
+  );
+  assert.deepEqual(reconciled[0], {
+    action: "create",
+    id: "jwt:occupancy_create",
+    module_id: "module-occupancy",
+    module: {
+      id: "module-occupancy",
+      name: "Ocupação",
+      slug: "occupancy",
+    },
+    slug: "occupancy_create",
+  });
+  assert.deepEqual(reconciled[1], {
+    action: "manage",
+    id: "jwt:workers_manage",
+    module_id: "module-workers",
+    module: {
+      description: "Workers de ingestão",
+      id: "module-workers",
+      name: "Workers",
+      slug: "workers",
+    },
+    slug: "workers_manage",
+  });
+  assert.equal(
+    Object.hasOwn(reconciled[1], "can_edit"),
+    false,
+    "capabilities do catálogo não podem ampliar a autorização JWT",
+  );
+  assert.deepEqual(
+    authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+      [],
+      [assignedMetadata],
+      "company-a",
+    ),
+    [],
+    "uma lista JWT explicitamente vazia deve permanecer vazia",
+  );
+
+  const opaqueGrant = { id: "jwt:opaque", slug: "permission-opaque" };
+  const [readGrant] =
+    authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+      [opaqueGrant],
+      [[
+        {
+          action: "view",
+          id: "catalog-opaque",
+          module_id: "module-counting",
+          module: {
+            id: "module-counting",
+            name: "Contagem",
+            slug: "counting",
+          },
+          slug: "permission-opaque",
+        },
+      ]],
+      "company-a",
+    );
+  assert.equal(readGrant.action, "view");
+  assert.equal(
+    permissions.canViewCounting({
+      ...currentUser(),
+      role: "operator",
+      permissions: [readGrant],
+    }),
+    true,
+    "action e módulo estáveis do catálogo devem interpretar um slug JWT opaco",
+  );
+});
+
+test("reconciliação de metadados rejeita tenant ou módulo ambíguo", () => {
+  const grant = {
+    company_id: "company-a",
+    id: "jwt:create",
+    module_id: "module-occupancy",
+    slug: "create",
+    action: "create",
+  };
+  const matchingCatalog = {
+    action: "create",
+    id: "catalog-occupancy-create",
+    module_id: "module-occupancy",
+    module: {
+      id: "module-occupancy",
+      name: "Ocupação",
+      slug: "occupancy",
+    },
+    slug: "occupancy_create",
+  };
+
+  assert.deepEqual(
+    authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+      [grant],
+      [[matchingCatalog]],
+      "company-a",
+    )[0],
+    {
+      ...grant,
+      module: matchingCatalog.module,
+    },
+    "ação genérica só pode ser ligada por identidade de módulo coincidente",
+  );
+
+  const foreignMetadata = {
+    ...matchingCatalog,
+    company_id: "company-b",
+    slug: "create",
+  };
+  assert.deepEqual(
+    authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+      [grant],
+      [[foreignMetadata]],
+      "company-a",
+    ),
+    [grant],
+  );
+
+  const genericGrant = { id: "jwt:manage", slug: "manage" };
+  const ambiguous = authenticatedPermissionMetadata.enrichAuthenticatedPermissionMetadata(
+    [genericGrant],
+    [[
+      {
+        id: "catalog-a",
+        module_id: "module-a",
+        module: { id: "module-a", name: "A", slug: "a" },
+        slug: "manage",
+      },
+      {
+        id: "catalog-b",
+        module_id: "module-b",
+        module: { id: "module-b", name: "B", slug: "b" },
+        slug: "manage",
+      },
+    ]],
+    "company-a",
+  );
+  assert.deepEqual(ambiguous, [genericGrant]);
+});
+
+test("permissão JWT nested preserva o módulo sem transformar ação genérica em grant de recurso", () => {
+  const now = Date.UTC(2026, 7, 25, 13, 0, 0);
+  const user = currentUser();
+  const token = accessToken({
+    authorization: {
+      company_id: user.company_id,
+      permissions: [
+        {
+          action: "create",
+          can_create: true,
+          id: "occupancy-create-jwt",
+          module_id: "occupancy-module",
+          module: {
+            active: true,
+            description: "Módulo de Ocupação",
+            id: "occupancy-module",
+            name: "Ocupação",
+            slug: "occupancy",
+          },
+          slug: "create",
+        },
+      ],
+    },
+    company_id: user.company_id,
+    exp: now / 1000 + 900,
+    role: "admin",
+    sub: "subject-do-provedor",
+    user_id: user.id,
+  });
+
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    token,
+    now,
+  );
+  assert.deepEqual(reconciled?.permissions, [
+    {
+      action: "create",
+      can_create: true,
+      id: "occupancy-create-jwt",
+      module_id: "occupancy-module",
+      module: {
+        active: true,
+        description: "Módulo de Ocupação",
+        id: "occupancy-module",
+        name: "Ocupação",
+        slug: "occupancy",
+      },
+      slug: "create",
+    },
+  ]);
+  assert.equal(
+    permissions.canManageOccupancy(reconciled),
+    false,
+    "módulo Ocupação + slug genérico create não substitui occupancy_manage",
+  );
+  assert.equal(
+    permissions.canViewOccupancy(reconciled),
+    true,
+    "a mesma permissão ainda concede a visualização do módulo",
+  );
+
+  const repeatedActionSlugs = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      authorization: {
+        company_id: user.company_id,
+        permissions: [
+          {
+            action: "create",
+            can_create: true,
+            module: {
+              id: "occupancy-module",
+              name: "Ocupação",
+              slug: "occupancy",
+            },
+            slug: "create",
+          },
+          {
+            action: "create",
+            can_create: true,
+            module: {
+              id: "counting-module",
+              name: "Contagem",
+              slug: "counting",
+            },
+            slug: "create",
+          },
+        ],
+      },
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.deepEqual(
+    repeatedActionSlugs?.permissions?.map((permission: DynamicFixture) => permission.module?.slug),
+    ["occupancy", "counting"],
+    "ações genéricas repetidas devem permanecer separadas pelo módulo",
+  );
+
+  const conflictingModule = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      authorization: {
+        company_id: user.company_id,
+        permissions: [
+          {
+            can_create: true,
+            module_id: "occupancy-module",
+            module: {
+              id: "foreign-module",
+              name: "Ocupação",
+              slug: "occupancy",
+            },
+            slug: "create",
+          },
+        ],
+      },
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.equal(
+    conflictingModule?.permissions?.length,
+    0,
+    "IDs de módulo divergentes não podem fabricar uma concessão no navegador",
+  );
+
+  const conflictingDeclarations = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      authorization: {
+        permissions: [
+          {
+            can_create: true,
+            module: {
+              id: "counting-module",
+              name: "Contagem",
+              slug: "counting",
+            },
+            slug: "create",
+          },
+        ],
+      },
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      permissions: [
+        {
+          can_create: true,
+          module: {
+            id: "occupancy-module",
+            name: "Ocupação",
+            slug: "occupancy",
+          },
+          slug: "create",
+        },
+      ],
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+  assert.equal(
+    conflictingDeclarations?.permissions?.length,
+    0,
+    "declarações duplicadas com o mesmo slug e módulos distintos devem falhar fechadas",
+  );
+});
+
+test("contexto JWT reconcilia identidade, empresa, papel e validade sem adivinhar conflitos", () => {
+  const now = Date.UTC(2026, 7, 12, 12, 0, 0);
+  const claims = {
+    company_id: "company-jwt",
+    exp: now / 1000 + 900,
+    iat: now / 1000 - 30,
+    nbf: now / 1000 - 1,
+    role: "super_admin",
+    sub: "user-jwt",
+    user_id: "user-jwt",
+  };
+  const token = accessToken(claims);
+  const context = accessTokenClaims.resolveAccessTokenContext(token, now);
+
+  assert.deepEqual(context, {
+    companyId: "company-jwt",
+    expiresAt: claims.exp,
+    issuedAt: claims.iat,
+    isMaster: true,
+    notBefore: claims.nbf,
+    role: "super-admin",
+    timeZone: "",
+    userId: "user-jwt",
+  });
+  assert.equal(
+    accessTokenClaims.accessTokenExpirationMilliseconds(token),
+    claims.exp * 1000,
+  );
+
+  const enriched = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    {
+      company_id: undefined,
+      email: "jwt@example.com",
+      id: "user-jwt",
+      is_master: false,
+      name: "JWT",
+    },
+    token,
+    now,
+  );
+  assert.equal(enriched.company_id, "company-jwt");
+  assert.equal(enriched.role, "super-admin");
+  assert.equal(
+    enriched.is_master,
+    true,
+    "papel Master assinado no JWT complementa um boolean legado divergente do /auth/me",
+  );
+  assert.equal(
+    permissions.hasAnyOperationalPermission(enriched),
+    true,
+    "a navegação deve reconhecer a mesma autorização Master que o JWT envia à API",
+  );
+
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({ ...claims, companyId: "company-other" }),
+      now,
+    )?.companyId,
+    "company-jwt",
+    "company_id canônico deve vencer aliases auxiliares de migração",
+  );
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({ ...claims, exp: "invalid" }),
+      now,
+    ),
+    null,
+  );
+  const contextWithInvalidTimeZone =
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({ ...claims, timezone: "Invalid/Timezone" }),
+      now,
+    );
+  assert.equal(contextWithInvalidTimeZone?.userId, "user-jwt");
+  assert.equal(
+    contextWithInvalidTimeZone?.timeZone,
+    "",
+    "timezone opcional inválido não pode derrubar a identidade autenticada",
+  );
+
+  const contextDuringTimeZoneMigration =
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({
+        ...claims,
+        company_timezone: "America/Manaus",
+        timezone: "America/Sao_Paulo",
+      }),
+      now,
+    );
+  assert.equal(
+    contextDuringTimeZoneMigration?.timeZone,
+    "America/Manaus",
+    "o claim específico da empresa deve vencer o alias genérico transitório",
+  );
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({
+        ...claims,
+        company_timezone: "America/Manaus",
+        companyTimezone: "America/Sao_Paulo",
+      }),
+      now,
+    )?.timeZone,
+    "",
+    "claims específicos divergentes continuam sem certificação",
+  );
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({
+        ...claims,
+        company_timezone: null,
+        timezone: "America/Sao_Paulo",
+      }),
+      now,
+    )?.timeZone,
+    "",
+    "claim específico nulo não pode herdar um timezone genérico",
+  );
+  const contextWithRelatedCompany =
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({
+        ...claims,
+        company: {
+          id: "company-other",
+          timezone: "Asia/Tokyo",
+        },
+      }),
+      now,
+    );
+  assert.equal(contextWithRelatedCompany?.companyId, "company-jwt");
+  assert.equal(
+    contextWithRelatedCompany?.timeZone,
+    "",
+    "metadados nested de outro tenant não podem atravessar o company_id canônico",
+  );
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({
+        ...claims,
+        company: {
+          id: claims.company_id,
+          company_timezone: "Asia/Tokyo",
+        },
+        company_timezone: "America/Manaus",
+      }),
+      now,
+    )?.timeZone,
+    "",
+    "fusos divergentes no mesmo tenant não podem ser escolhidos por ordem",
+  );
+  assert.equal(
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      {
+        company_id: "company-auth-me",
+        email: "master@example.com",
+        id: "master-global",
+        is_master: true,
+        name: "Master",
+      },
+      accessToken({
+        exp: claims.exp,
+        role: "super-admin",
+        sub: "master-global",
+      }),
+      now,
+    )?.company_id,
+    "company-auth-me",
+    "master global pode ter empresa explícita no /auth/me mesmo sem claim company_id",
+  );
+  const selectedCompanyMaster =
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      {
+        company_id: "company-selected",
+        email: "master@example.com",
+        id: "master-global",
+        is_master: true,
+        name: "Master",
+      },
+      accessToken({
+        company_id: "company-home",
+        company_timezone: "America/Manaus",
+        exp: claims.exp,
+        role: "super-admin",
+        sub: "master-global",
+      }),
+      now,
+    );
+  assert.equal(
+    selectedCompanyMaster?.company_id,
+    "company-selected",
+    "master global pode ter empresa contextual diferente da empresa-base do JWT",
+  );
+  assert.equal(
+    selectedCompanyMaster?.company_timezone,
+    undefined,
+    "o fuso da empresa-base do JWT não pode certificar a empresa selecionada",
+  );
+  const authenticatedRegularUser = {
+    company_id: "company-selected",
+    email: "regular@example.com",
+    id: "regular-user",
+    is_master: false,
+    name: "Regular",
+  };
+  const rejectedCrossTenantUser =
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      authenticatedRegularUser,
+      accessToken({
+        company_id: "company-home",
+        exp: claims.exp,
+        role: "admin",
+        sub: "regular-user",
+      }),
+      now,
+    );
+  assert.equal(rejectedCrossTenantUser?.company_id, "company-selected");
+  assert.equal(rejectedCrossTenantUser?.role, undefined);
+  assert.deepEqual(rejectedCrossTenantUser?.permissions, []);
+  assert.deepEqual(rejectedCrossTenantUser?.company_modules, []);
+});
+
+test("claims master conflitantes nunca elevam o perfil autenticado", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = currentUser();
+  const contradictoryToken = accessToken({
+    company_id: user.company_id,
+    exp: now / 1000 + 900,
+    is_master: false,
+    role: "super-admin",
+    user_id: user.id,
+  });
+
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenMasterClaimState(
+      contradictoryToken,
+      now,
+    ),
+    "invalid",
+  );
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(contradictoryToken, now),
+    null,
+  );
+  assert.equal(
+    accessTokenClaims.accessTokenDeclaresMasterAccess(contradictoryToken, now),
+    false,
+  );
+  assert.strictEqual(
+    accessTokenClaims.reconcileCurrentUserWithAccessToken(
+      user,
+      contradictoryToken,
+      now,
+    ),
+    user,
+  );
+});
+
+test("timezone operacional same-company sobrevive a claim role em migração", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = {
+    company_id: "company-authenticated",
+    email: "regular@example.com",
+    id: "regular-operational-timezone",
+    is_master: false,
+    name: "Regular",
+  };
+
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_timezone: "America/Recife",
+      exp: now / 1000 + 900,
+      role: { legacy: "admin" },
+      user_id: user.id,
+    }),
+    now,
+  );
+
+  assert.equal(reconciled?.company_timezone, "America/Recife");
+  assert.equal(
+    reconciled?.role,
+    undefined,
+    "claim role inválido não pode conceder autorização durante a migração",
+  );
+  assert.equal(reconciled?.is_master, false);
+});
+
+test("company.timezone nested sem id usa o company_id autenticado pelo auth me", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = {
+    company_id: "company-authenticated",
+    email: "regular@example.com",
+    id: "regular-nested-timezone",
+    is_master: false,
+    name: "Regular",
+  };
+
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company: { timezone: "America/Manaus" },
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+
+  assert.equal(reconciled?.company_id, user.company_id);
+  assert.equal(reconciled?.company_timezone, "America/Manaus");
+});
+
+test("timezone IANA autenticado pelo auth me vence metadado divergente do JWT", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = {
+    company_id: "company-authenticated",
+    company_timezone: "America/Fortaleza",
+    email: "regular@example.com",
+    id: "regular-auth-me-timezone",
+    is_master: false,
+    name: "Regular",
+  };
+
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      company_timezone: "America/Manaus",
+      exp: now / 1000 + 900,
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+
+  assert.equal(reconciled?.company_timezone, "America/Fortaleza");
+});
+
+test("timezone do JWT não atravessa tenant divergente do auth me", () => {
+  const now = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const user = {
+    company_id: "company-authenticated",
+    email: "regular@example.com",
+    id: "regular-foreign-timezone",
+    is_master: false,
+    name: "Regular",
+  };
+
+  const reconciled = accessTokenClaims.reconcileCurrentUserWithAccessToken(
+    user,
+    accessToken({
+      company_id: "company-foreign",
+      company_timezone: "Asia/Tokyo",
+      exp: now / 1000 + 900,
+      role: "admin",
+      user_id: user.id,
+    }),
+    now,
+  );
+
+  assert.equal(reconciled?.company_id, user.company_id);
+  assert.equal(reconciled?.company_timezone, undefined);
+  assert.equal(
+    reconciled?.role,
+    undefined,
+    "tenant divergente também não pode complementar autorização",
+  );
+});
+
+test("role do JWT aceito vence metadado legado sem atravessar identidade ou empresa", () => {
+  const now = Date.UTC(2026, 7, 4, 12, 0, 0);
+  const user = currentUser();
+  const validClaims = {
+    company_id: user.company_id,
+    exp: now / 1000 + 900,
+    nbf: now / 1000 - 1,
+    role: "admin",
+    sub: user.id,
+    user_id: user.id,
+  };
+
+  for (const claims of [
+    { ...validClaims, user_id: "user-other" },
+    { ...validClaims, company_id: "company-other" },
+    { ...validClaims, exp: now / 1000 },
+    { ...validClaims, nbf: now / 1000 + 61 },
+  ]) {
+    assert.strictEqual(
+      accessTokenClaims.enrichCurrentUserFromAccessToken(
+        user,
+        accessToken(claims),
+        now,
+      ),
+      user,
+    );
+  }
+
+  const genericSubject = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    user,
+    accessToken({ ...validClaims, sub: "subject-do-provedor" }),
+    now,
+  );
+  assert.equal(
+    genericSubject.role,
+    "admin",
+    "sub genérico não conflita com o user_id canônico da aplicação",
+  );
+
+  const emailSubject = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    user,
+    accessToken({
+      company_id: user.company_id,
+      exp: now / 1000 + 900,
+      role: "admin",
+      sub: user.email.toUpperCase(),
+    }),
+    now,
+  );
+  assert.equal(
+    emailSubject.role,
+    "admin",
+    "sub em formato de e-mail pode identificar o mesmo /auth/me",
+  );
+
+  const explicitRole = { ...user, role: "operator" };
+  const signedRole = accessTokenClaims.enrichCurrentUserFromAccessToken(
+    explicitRole,
+    accessToken(validClaims),
+    now,
+  );
+  assert.equal(signedRole.role, "admin");
+  assert.notStrictEqual(signedRole, explicitRole);
+  assert.strictEqual(
+    accessTokenClaims.enrichCurrentUserFromAccessToken(user, "inválido", now),
+    user,
+  );
+  assert.equal(
+    accessTokenClaims.resolveAccessTokenContext(
+      accessToken({ ...validClaims, nbf: now / 1000 + 60 }),
+      now,
+    )?.userId,
+    user.id,
+    "o navegador tolera até 60s de diferença de relógio quando a API já aceitou o JWT",
+  );
+});
+
+test("refresh atrasado da conta anterior não sobrescreve o novo tenant", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  let resolveOldRefresh!: (response: Response) => void;
+  let markRefreshStarted!: () => void;
+  const refreshStarted = new Promise<void>((resolveStarted) => {
+    markRefreshStarted = resolveStarted;
+  });
+  const oldRefreshResponse = new Promise<Response>((resolveResponse) => {
+    resolveOldRefresh = resolveResponse;
+  });
+  const workerAuthorization: (string | null)[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path.endsWith("/auth/refresh")) {
+      markRefreshStarted();
+      return oldRefreshResponse;
+    }
+    if (path.endsWith("/auth/login")) {
+      return jsonResponse({
+        access_token: "access-company-new",
+        expires_in: 900,
+        refresh_token: "refresh-company-new",
+        token_type: "Bearer",
+      });
+    }
+    if (path.endsWith("/workers")) {
+      workerAuthorization.push(
+        new Headers(init.headers).get("Authorization"),
+      );
+      return jsonResponse([]);
+    }
+    throw new Error(`Requisição inesperada: ${path}`);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: "access-company-old",
+      expires_in: 1,
+      refresh_token: "refresh-company-old",
+      token_type: "Bearer",
+    });
+
+    const oldRequest = api.apiFetch("/workers");
+    await refreshStarted;
+    await api.loginRequest("new-company@example.com", "password");
+    resolveOldRefresh(
+      jsonResponse({
+        access_token: "late-access-company-old",
+        expires_in: 900,
+        refresh_token: "late-refresh-company-old",
+        token_type: "Bearer",
+      }),
+    );
+    await assert.rejects(
+      oldRequest,
+      (error: DynamicFixture) => error instanceof api.ApiError && error.status === 409,
+    );
+
+    assert.equal(storage.getItem("access_token"), "access-company-new");
+    assert.equal(storage.getItem("refresh_token"), "refresh-company-new");
+    assert.deepEqual(workerAuthorization, []);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("escopo selecionado pelo master segue apenas para rotas tenant-aware", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    requests.push({
+      path: String(url),
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+    });
+    return jsonResponse([]);
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        company_id: "company-base",
+        exp: nowSeconds + 900,
+        is_master: true,
+        nbf: nowSeconds - 1,
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-master",
+      token_type: "Bearer",
+    });
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-selected",
+      name: "Empresa selecionada",
+    });
+
+    await api.apiFetch("/cameras");
+    await api.apiFetch("/workers");
+    await api.apiFetch("/scenarios");
+    await api.apiFetch("/analytics/aggregate?granularity=hour");
+    await api.apiFetch("/demographics/buckets?from=2026-09-01T03%3A00%3A00.000Z&to=2026-09-02T03%3A00%3A00.000Z");
+    await api.apiFetch("/audit?page=1&limit=50");
+    await api.apiFetch("/companies/company-selected/users");
+    await api.apiFetch("/cameras", {
+      companyScopeId: "company-explicit",
+    });
+    await api.apiFetch("/users/user-selected", {
+      method: "PUT",
+      body: {
+        name: "Usuário",
+        email: "usuario@empresa.com",
+        is_master: false,
+        active: true,
+      },
+      companyScopeId: "company-explicit",
+    });
+    await api.apiFetch("/users/user-selected/permissions", {
+      companyScopeId: "company-explicit",
+    });
+    await api.apiFetch("/users/master-home/permissions", {
+      jwtCompanyScopeOnly: true,
+    });
+    await api.apiFetch("/users/me/grid");
+    await api.apiFetch("/auth/me", {
+      headers: { "X-Company-ID": "company-forged" },
+    });
+    await api.apiFetch("/companies");
+    await api.apiFetch("/users-export");
+    await assert.rejects(
+      () =>
+        api.apiFetch("/companies/company-path/users", {
+          companyScopeId: "company-other",
+        }),
+      (error: DynamicFixture) => error instanceof api.ApiError && error.status === 403,
+    );
+
+    assert.deepEqual(requests, [
+      { path: "/api/v1/cameras", companyId: "company-selected" },
+      { path: "/api/v1/workers", companyId: "company-selected" },
+      { path: "/api/v1/scenarios", companyId: "company-selected" },
+      {
+        path: "/api/v1/analytics/aggregate?granularity=hour",
+        companyId: "company-selected",
+      },
+      {
+        path: "/api/v1/demographics/buckets?from=2026-09-01T03%3A00%3A00.000Z&to=2026-09-02T03%3A00%3A00.000Z",
+        companyId: "company-selected",
+      },
+      {
+        path: "/api/v1/audit?page=1&limit=50",
+        companyId: "company-selected",
+      },
+      {
+        path: "/api/v1/companies/company-selected/users",
+        companyId: null,
+      },
+      { path: "/api/v1/cameras", companyId: "company-explicit" },
+      {
+        path: "/api/v1/users/user-selected",
+        companyId: "company-explicit",
+      },
+      {
+        path: "/api/v1/users/user-selected/permissions",
+        companyId: "company-explicit",
+      },
+      { path: "/api/v1/users/master-home/permissions", companyId: null },
+      { path: "/api/v1/users/me/grid", companyId: null },
+      { path: "/api/v1/auth/me", companyId: null },
+      { path: "/api/v1/companies", companyId: null },
+      { path: "/api/v1/users-export", companyId: null },
+    ]);
+
+    requests.length = 0;
+    api.setStoredSession({
+      access_token: accessToken({
+        exp: nowSeconds + 900,
+        nbf: nowSeconds - 1,
+        role: "admin",
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-company-user",
+      token_type: "Bearer",
+    });
+    await api.apiFetch("/cameras", {
+      headers: { "X-Company-ID": "company-forged" },
+    });
+    assert.deepEqual(requests, [
+      { path: "/api/v1/cameras", companyId: null },
+    ]);
+
+    requests.length = 0;
+    masterCompanyScope.clearStoredMasterCompanyScope();
+    masterCompanyScope.setStoredCurrentCompanyScope({
+      id: "company-regular",
+      name: "Empresa do usuário",
+    });
+    await api.apiFetch("/cameras");
+    assert.deepEqual(requests, [
+      { path: "/api/v1/cameras", companyId: null },
+    ]);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("usuário comum consulta exclusivamente a empresa assinada no JWT", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    requests.push({
+      authorization: new Headers(init.headers).get("Authorization"),
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+      path: String(url),
+    });
+    return jsonResponse([]);
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        company_id: "company-jwt",
+        exp: nowSeconds + 900,
+        iat: nowSeconds - 10,
+        nbf: nowSeconds - 1,
+        role: "admin",
+        sub: "user-jwt",
+        user_id: "user-jwt",
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-jwt",
+      token_type: "Bearer",
+    });
+
+    await assert.rejects(
+      () =>
+        api.apiFetch("/cameras", {
+          companyScopeId: "company-other",
+        }),
+      (error: DynamicFixture) => error instanceof api.ApiError && error.status === 403,
+    );
+    assert.equal(requests.length, 0);
+
+    await api.apiFetch("/cameras", { companyScopeId: "company-jwt" });
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].authorization ?? "", /^Bearer /);
+    assert.equal(requests[0].companyId, null);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("master confirmado por auth me escopa recursos com identidade JWT ainda desconhecida", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    requests.push({
+      path: String(url),
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+    });
+    return jsonResponse([]);
+  };
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({
+        exp: nowSeconds + 900,
+        nbf: nowSeconds - 1,
+        principal: "formato-de-identidade-ainda-desconhecido",
+      }),
+      expires_in: 900,
+      refresh_token: "refresh-master-with-legacy-token",
+      token_type: "Bearer",
+    });
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-selected-from-auth-me",
+      name: "Empresa selecionada",
+    });
+    api.setAuthenticatedMasterAccess({
+      email: "master@example.com",
+      id: "master-with-legacy-token",
+      is_master: true,
+      name: "Master",
+    });
+
+    await api.apiFetch("/workers");
+    await api.apiFetch("/locations");
+    await api.apiFetch("/cameras");
+
+    assert.deepEqual(requests, [
+      {
+        path: "/api/v1/workers",
+        companyId: "company-selected-from-auth-me",
+      },
+      {
+        path: "/api/v1/locations",
+        companyId: "company-selected-from-auth-me",
+      },
+      {
+        path: "/api/v1/cameras",
+        companyId: "company-selected-from-auth-me",
+      },
+    ]);
+
+    requests.length = 0;
+    api.setAuthenticatedMasterAccess({
+      company_id: "company-regular",
+      email: "regular@example.com",
+      id: "regular",
+      is_master: false,
+      name: "Regular",
+    });
+    await api.apiFetch("/workers", {
+      companyScopeId: "company-forged",
+      headers: { "X-Company-ID": "company-forged" },
+    });
+    assert.deepEqual(requests, [
+      { path: "/api/v1/workers", companyId: null },
+    ]);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("confirmação master de auth me acompanha a rotação do access token", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path === "/api/v1/auth/refresh") {
+      return jsonResponse({
+        access_token: accessToken({
+          role: "super-admin",
+          sub: "master-before-refresh",
+        }),
+        expires_in: 900,
+        refresh_token: "refresh-master-rotated",
+        token_type: "Bearer",
+      });
+    }
+    requests.push({
+      path,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+    });
+    return jsonResponse([]);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({ sub: "master-before-refresh" }),
+      expires_at: Date.now() + 1_000,
+      expires_in: 1,
+      refresh_token: "refresh-master-rotated",
+      token_type: "Bearer",
+    });
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-after-refresh",
+      name: "Empresa após refresh",
+    });
+    api.setAuthenticatedMasterAccess({
+      email: "master@example.com",
+      id: "master-before-refresh",
+      is_master: true,
+      name: "Master",
+    });
+
+    await api.apiFetch("/workers");
+    assert.deepEqual(requests, [
+      {
+        path: "/api/v1/workers",
+        companyId: "company-after-refresh",
+      },
+    ]);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("confirmação master é removida quando o JWT renovado perde o papel", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path === "/api/v1/auth/refresh") {
+      return jsonResponse({
+        access_token: accessToken({
+          role: "operator",
+          sub: "master-demoted-after-refresh",
+        }),
+        expires_in: 900,
+        refresh_token: "refresh-master-demoted",
+        token_type: "Bearer",
+      });
+    }
+    requests.push({
+      path,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+    });
+    return jsonResponse([]);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({ sub: "master-demoted-after-refresh" }),
+      expires_at: Date.now() + 1_000,
+      expires_in: 1,
+      refresh_token: "refresh-master-demoted",
+      token_type: "Bearer",
+    });
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-must-not-survive-demotion",
+      name: "Empresa selecionada",
+    });
+    api.setAuthenticatedMasterAccess({
+      email: "master@example.com",
+      id: "master-demoted-after-refresh",
+      is_master: true,
+      name: "Master",
+    });
+
+    await api.apiFetch("/workers");
+    assert.deepEqual(requests, [
+      { path: "/api/v1/workers", companyId: null },
+    ]);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("confirmação master não atravessa refresh para outra identidade", async () => {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path === "/api/v1/auth/refresh") {
+      return jsonResponse({
+        access_token: accessToken({ sub: "different-user-after-refresh" }),
+        expires_in: 900,
+        refresh_token: "refresh-master-identity-changed",
+        token_type: "Bearer",
+      });
+    }
+    requests.push({
+      path,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+    });
+    return jsonResponse([]);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken({ sub: "master-before-refresh" }),
+      expires_at: Date.now() + 1_000,
+      expires_in: 1,
+      refresh_token: "refresh-master-identity-changed",
+      token_type: "Bearer",
+    });
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: "company-must-not-cross-identity",
+      name: "Empresa selecionada",
+    });
+    api.setAuthenticatedMasterAccess({
+      email: "master@example.com",
+      id: "master-before-refresh",
+      is_master: true,
+      name: "Master",
+    });
+
+    await assert.rejects(
+      () => api.apiFetch("/workers"),
+      (error: DynamicFixture) => error instanceof api.ApiError && error.status === 401,
+    );
+    assert.deepEqual(requests, []);
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) {
+      delete browserFixture.window;
+    } else {
+      browserFixture.window = originalWindow;
+    }
+  }
+});
+
+test("confirmação master sobrevive ao refresh que omite role e is_master", async () => {
+  const result = await runTriStateMasterRefreshScenario({
+    currentUserId: "master-refresh-without-role",
+    refreshedClaims: { sub: "master-refresh-without-role" },
+    scopeId: "company-preserved-without-role",
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.refreshCalls, 1);
+  assert.deepEqual(result.requests, [
+    {
+      path: "/api/v1/workers",
+      companyId: "company-preserved-without-role",
+    },
+  ]);
+  assert.equal(result.storedScope?.id, "company-preserved-without-role");
+});
+
+test("refresh preserva o principal durante migração entre sub e user_id", async () => {
+  const currentUserId = "master-migrating-identity-claims";
+  const currentUserEmail = "master.migration@example.com";
+  const scenarios = [
+    {
+      initialClaims: { sub: currentUserEmail },
+      refreshedClaims: { sub: currentUserEmail, user_id: currentUserId },
+    },
+    {
+      initialClaims: { sub: currentUserEmail, user_id: currentUserId },
+      refreshedClaims: { sub: currentUserEmail },
+    },
+  ];
+
+  for (const [index, scenario] of scenarios.entries()) {
+    const scopeId = `company-identity-migration-${index}`;
+    const result = await runTriStateMasterRefreshScenario({
+      currentUserEmail,
+      currentUserId,
+      initialClaims: scenario.initialClaims,
+      refreshedClaims: scenario.refreshedClaims,
+      scopeId,
+    });
+
+    assert.equal(result.error, null);
+    assert.deepEqual(result.requests, [
+      { path: "/api/v1/workers", companyId: scopeId },
+    ]);
+    assert.equal(result.storedScope?.id, scopeId);
+  }
+});
+
+test("is_master false vence role super-admin conflitante no refresh", async () => {
+  const result = await runTriStateMasterRefreshScenario({
+    currentUserId: "master-with-conflicting-refresh-claims",
+    refreshedClaims: {
+      is_master: false,
+      role: "super-admin",
+      sub: "master-with-conflicting-refresh-claims",
+    },
+    scopeId: "company-must-not-use-conflicting-master-claims",
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.refreshCalls, 1);
+  assert.deepEqual(result.requests, [
+    { path: "/api/v1/workers", companyId: null },
+  ]);
+  assert.equal(result.storedScope, null);
+});
+
+async function runTriStateMasterRefreshScenario({
+  currentUserEmail,
+  currentUserId,
+  initialClaims,
+  refreshedClaims,
+  scopeId,
+}: {
+  currentUserEmail?: string;
+  currentUserId: string;
+  initialClaims?: Record<string, unknown>;
+  refreshedClaims: Record<string, unknown>;
+  scopeId: string;
+}) {
+  const originalWindow = browserFixture.window;
+  const originalFetch = globalThis.fetch;
+  const storage = memoryStorage();
+  const requests: RequestFixture[] = [];
+  let refreshCalls = 0;
+
+  browserFixture.window = {
+    dispatchEvent() {},
+    localStorage: storage,
+  };
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url);
+    if (path === "/api/v1/auth/refresh") {
+      refreshCalls += 1;
+      return jsonResponse({
+        access_token: accessToken(refreshedClaims),
+        expires_in: 900,
+        refresh_token: `refresh-${currentUserId}`,
+        token_type: "Bearer",
+      });
+    }
+    requests.push({
+      path,
+      companyId: new Headers(init.headers).get("X-Company-ID"),
+    });
+    return jsonResponse([]);
+  };
+
+  try {
+    api.clearStoredSession();
+    api.setStoredSession({
+      access_token: accessToken(initialClaims ?? { sub: currentUserId }),
+      expires_at: Date.now() + 1_000,
+      expires_in: 1,
+      refresh_token: `refresh-${currentUserId}`,
+      token_type: "Bearer",
+    });
+    masterCompanyScope.setStoredMasterCompanyScope({
+      id: scopeId,
+      name: "Empresa selecionada antes do refresh",
+    });
+    api.setAuthenticatedMasterAccess({
+      email: currentUserEmail ?? `${currentUserId}@example.com`,
+      id: currentUserId,
+      is_master: true,
+      name: "Master",
+    });
+
+    let error = null;
+    try {
+      await api.apiFetch("/workers");
+    } catch (requestError) {
+      error = requestError;
+    }
+
+    return {
+      error,
+      refreshCalls,
+      requests: [...requests],
+      storedScope: masterCompanyScope.getStoredMasterCompanyScope(),
+    };
+  } finally {
+    api.clearStoredSession();
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete browserFixture.window;
+    else browserFixture.window = originalWindow;
+  }
+}
+
+test("worker sem company id só é aceito quando a resposta escopada não mistura empresas", () => {
+  const target = { company_id: "company-selected", id: "worker-target" };
+  const unscoped = { id: "worker-legacy" };
+  const foreign = { company_id: "company-foreign", id: "worker-foreign" };
+
+  const compatible = workerScope.partitionWorkersByCompanyScope(
+    [target, unscoped],
+    "company-selected",
+  );
+  assert.deepEqual(
+    workerScope
+      .workersFromExplicitCompanyScope(compatible)
+      .map((worker: DynamicFixture) => worker.id),
+    ["worker-target", "worker-legacy"],
+  );
+
+  const mixed = workerScope.partitionWorkersByCompanyScope(
+    [target, unscoped, foreign],
+    "company-selected",
+  );
+  assert.deepEqual(
+    workerScope
+      .workersFromExplicitCompanyScope(mixed)
+      .map((worker: DynamicFixture) => worker.id),
+    ["worker-target"],
+  );
+});
+
+test("alias company_id vazio não mascara empresa nested explícita", () => {
+  const nestedForeign = {
+    company_id: "",
+    company: { id: "company-foreign" },
+    id: "row-foreign",
+  };
+
+  assert.equal(
+    masterCompanyScope.getEntityCompanyId(nestedForeign),
+    "company-foreign",
+  );
+  assert.deepEqual(
+    masterCompanyScope.filterScopedApiRows(
+      [nestedForeign],
+      "company-selected",
+    ),
+    [],
+    "registro nested de outra empresa deve continuar fail-closed",
+  );
+  assert.equal(
+    masterCompanyScope.getCurrentUserCompanyId({
+      company_id: "",
+      company: { id: "company-selected" },
+    }),
+    "company-selected",
+  );
+});
+
+test("gestores operacionais encaminham explicitamente a empresa efetiva", () => {
+  const workerSource = readFileSync(
+    resolve(projectRoot, "components/app/worker-manager.tsx"),
+    "utf8",
+  );
+  const infrastructureSource = readFileSync(
+    resolve(projectRoot, "components/app/infrastructure-manager.tsx"),
+    "utf8",
+  );
+  const superAdminSource = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    workerSource,
+    /fetchCompanyWorkers\(requestedCompanyId\)[\s\S]*?apiFetch<unknown>\("\/workers", \{ companyScopeId \}\)/,
+  );
+  assert.match(
+    workerSource,
+    /apiFetch<T>\(path, \{ body, companyScopeId, method \}\)/,
+  );
+  assert.match(
+    infrastructureSource,
+    /apiFetch<Location\[]>\("\/locations", \{[\s\S]*?companyScopeId: requestedCompanyScopeId[\s\S]*?apiFetch<Camera\[]>\("\/cameras", \{[\s\S]*?companyScopeId: requestedCompanyScopeId/,
+  );
+  assert.match(
+    infrastructureSource,
+    /apiFetch<unknown>\("\/workers", \{ companyScopeId \}\)/,
+  );
+  assert.match(
+    superAdminSource,
+    /fetchScopedWorkers\(companyId, controller\.signal\)[\s\S]*?fetchValidatedRows\([\s\S]*?"\/locations"[\s\S]*?controller\.signal[\s\S]*?fetchValidatedRows\([\s\S]*?"\/cameras"/,
+  );
+  assert.doesNotMatch(superAdminSource, /canQueryJwtBoundCatalogs/);
+  assert.doesNotMatch(
+    superAdminSource,
+    /lista detalhada de Workers é disponibilizada somente para a empresa assinada/,
+  );
+  assert.match(
+    superAdminSource,
+    /companyUserRows[\s\S]*?returnedCompanyId !== company\.id[\s\S]*?company_id: company\.id/,
+    "a listagem global de masters deve preservar a empresa certificada pela rota",
+  );
+  assert.match(
+    superAdminSource,
+    /const companyId = editingMasterUser[\s\S]*?getScopedRowCompanyId\(editingMasterUser\)[\s\S]*?: selectedCompanyId\.trim\(\)/,
+    "edição de master deve usar a empresa da própria linha, não a seleção visual",
+  );
+  assert.match(
+    superAdminSource,
+    /async function deleteMasterUser[\s\S]*?const companyId = getScopedRowCompanyId\(user\)[\s\S]*?companyScopeId: companyId/,
+    "exclusão de master deve manter o escopo da própria linha",
+  );
+  assert.match(
+    superAdminSource,
+    /loadCompanyDetails = React\.useCallback\(async \(\s*expectedCompanyId: string,[\s\S]*?selectedCompanyIdRef\.current !== companyId[\s\S]*?canPublishCompanyDetails\(requestSequence, companyId\)/,
+  );
+  assert.match(
+    superAdminSource,
+    /loadUserPermissions\(userId: string, companyId: string\)[\s\S]*?isCurrentUserPermissionRequest\([\s\S]*?userPermissionRequestContextRef\.current/,
+  );
+  assert.match(
+    superAdminSource,
+    /selectCompanyId = React\.useCallback\([\s\S]*?\(companyId: string\)[\s\S]*?invalidateUserPermissionRequest\(\{ closeDialog: true \}\)/,
+  );
+  assert.match(
+    workerSource,
+    /workerMutationSequenceRef[\s\S]*?isCurrentWorkerMutation\(mutationSequence, requestedCompanyId\)[\s\S]*?setKeyNotice/,
+  );
+});
+
+test("Central Master carrega cada recurso somente quando sua seção é solicitada", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+
+  const companiesStart = source.indexOf(
+    "const loadCompanies = React.useCallback",
+  );
+  const companiesEnd = source.indexOf(
+    "const loadModuleCatalog = React.useCallback",
+    companiesStart,
+  );
+  const companiesLoader = source.slice(companiesStart, companiesEnd);
+  assert.ok(companiesStart >= 0 && companiesEnd > companiesStart);
+  assert.match(companiesLoader, /apiFetch<Company\[]>\("\/companies"\)/);
+  assert.doesNotMatch(
+    companiesLoader,
+    /"\/(?:modules|permissions|workers|locations|cameras|scenarios|occupancy\/scenarios)"/,
+    "o bootstrap deve consultar somente empresas",
+  );
+
+  const bootstrapEffectStart = source.indexOf(
+    "React.useEffect(() => {\n    loadCompanies();",
+  );
+  const bootstrapEffectEnd = source.indexOf(
+    "const ensureCompanyTimeZone",
+    bootstrapEffectStart,
+  );
+  const bootstrapEffect = source.slice(
+    bootstrapEffectStart,
+    bootstrapEffectEnd,
+  );
+  assert.ok(bootstrapEffectStart >= 0 && bootstrapEffectEnd > bootstrapEffectStart);
+  assert.doesNotMatch(
+    bootstrapEffect,
+    /loadCompany(?:Details|Modules|Workers)|loadModuleCatalog|loadPermissionCatalog/,
+  );
+
+  const scopeEffectAnchor = source.indexOf("if (!selectedCompany) return;");
+  const scopeEffectStart = source.lastIndexOf(
+    "React.useEffect(() =>",
+    scopeEffectAnchor,
+  );
+  const scopeEffectEnd = source.indexOf(
+    "React.useEffect(() =>",
+    scopeEffectAnchor + 1,
+  );
+  const scopeEffect = source.slice(scopeEffectStart, scopeEffectEnd);
+  assert.doesNotMatch(
+    scopeEffect,
+    /ensureCompanyTimeZone\(/,
+    "selecionar a empresa não deve hidratar detalhes antes de uma ação que exija fuso",
+  );
+
+  const sectionEffectAnchor = source.indexOf(
+    'if (activeCompanyTab === "users")',
+  );
+  const sectionEffectStart = source.lastIndexOf(
+    "React.useEffect(() =>",
+    sectionEffectAnchor,
+  );
+  const sectionEffectEnd = source.indexOf(
+    "React.useEffect(() =>",
+    sectionEffectAnchor + 1,
+  );
+  const sectionEffect = source.slice(sectionEffectStart, sectionEffectEnd);
+  assert.ok(sectionEffectStart >= 0 && sectionEffectEnd > sectionEffectStart);
+  assert.match(sectionEffect, /activeCompanyTab === "users"[\s\S]*?loadCompanyDetails\(selectedCompanyId\)/);
+  assert.match(sectionEffect, /activeCompanyTab === "modules"[\s\S]*?loadCompanyModules\(selectedCompanyId\)/);
+  assert.match(sectionEffect, /activeCompanyTab === "workers"[\s\S]*?loadCompanyWorkers\(selectedCompanyId\)/);
+  assert.doesNotMatch(
+    sectionEffect,
+    /"\/locations"|"\/cameras"|"\/scenarios"|fetchScopedOccupancyScenarios|includeOperational/,
+  );
+  assert.doesNotMatch(
+    source,
+    /loadCompanyDetails\([^)]*\{\s*(?:force:\s*[^,}]+,\s*)?includeOperational:\s*true/,
+    "o fluxo padrão não pode reativar o fan-out operacional legado",
+  );
+
+  const workerStart = source.indexOf(
+    "const loadCompanyWorkers = React.useCallback",
+  );
+  const workerEnd = source.indexOf("React.useEffect(() =>", workerStart);
+  const workerLoader = source.slice(workerStart, workerEnd);
+  assert.match(workerLoader, /fetchScopedWorkers\(companyId, controller\.signal\)/);
+  assert.doesNotMatch(
+    workerLoader,
+    /"\/locations"|"\/cameras"|"\/scenarios"|fetchScopedOccupancyScenarios/,
+    "a aba Workers deve carregar somente workers",
+  );
+
+  assert.match(
+    source,
+    /fetchScopedWorkers\([\s\S]*?companyScopeId: string,[\s\S]*?signal\?: AbortSignal[\s\S]*?requireWorkerRows\([\s\S]*?selectExplicitCompanyScopedRows\(value, companyScopeId[\s\S]*?companyScopeId/,
+    "worker deve ser particionado explicitamente e revalidado no tenant selecionado",
+  );
+  assert.doesNotMatch(
+    source,
+    /Dados operacionais parciais\./,
+    "o resumo administrativo não deve exibir avisos técnicos globais",
+  );
+});
+
+test("Central Master inicia em Empresas e elimina a navegação lateral legada", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+
+  const companyTabType = source.slice(
+    source.indexOf("type CompanyTab ="),
+    source.indexOf("type CompanyOperationalResource"),
+  );
+  assert.match(companyTabType, /"companies"/);
+  assert.doesNotMatch(companyTabType, /"overview"/);
+
+  const initialSection = source.slice(
+    source.indexOf("function readInitialMasterSection"),
+    source.indexOf("type AlgorithmModuleFamily"),
+  );
+  assert.match(initialSection, /return "companies"/);
+  assert.match(
+    initialSection,
+    /if \(section === "overview"\) return "companies"/,
+    "favoritos da antiga Visão geral devem abrir a seção Empresas",
+  );
+  assert.doesNotMatch(initialSection, /return "overview"/);
+
+  const tabsStart = source.indexOf("<TabsList");
+  const tabsEnd = source.indexOf("</TabsList>", tabsStart);
+  const tabs = source.slice(tabsStart, tabsEnd);
+  const companiesTab = tabs.indexOf('<TabsTrigger value="companies"');
+  const usersTab = tabs.indexOf('<TabsTrigger value="users"');
+  assert.ok(tabsStart >= 0 && tabsEnd > tabsStart);
+  assert.ok(companiesTab >= 0, "Empresas deve existir na navegação principal");
+  assert.ok(
+    usersTab < 0 || companiesTab < usersTab,
+    "Empresas deve ser a primeira seção do Master",
+  );
+  assert.match(
+    tabs,
+    /<TabsTrigger value="companies"[\s\S]*?Empresas[\s\S]*?<\/TabsTrigger>/,
+  );
+  assert.match(source, /<TabsContent value="companies"/);
+  assert.doesNotMatch(source, /value="overview"|CompanyManagementFlow/);
+  assert.doesNotMatch(
+    source,
+    /Diretório de empresas/,
+    "a gestão das empresas deve ocorrer na seção principal, não em uma lateral fixa",
+  );
+});
+
+test("Central Master oferece lotes certificados e controlados nos três CRUDs", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const functionSource = (name: string, nextName: DynamicFixture) => {
+    const start = source.indexOf(`async function ${name}`);
+    const end = source.indexOf(`async function ${nextName}`, start + 1);
+    assert.ok(start >= 0 && end > start, `${name} deve existir antes de ${nextName}`);
+    return source.slice(start, end);
+  };
+
+  const companyDelete = functionSource(
+    "deleteCheckedCompanies",
+    "loadUserPermissions",
+  );
+  const companyUserStatus = functionSource(
+    "updateCheckedCompanyUserStatus",
+    "deleteCheckedCompanyUsers",
+  );
+  const companyUserDelete = functionSource(
+    "deleteCheckedCompanyUsers",
+    "deleteCompanyUser",
+  );
+  const masterStatus = functionSource(
+    "updateCheckedMasterUserStatus",
+    "deleteCheckedMasterUsers",
+  );
+  const masterDelete = functionSource(
+    "deleteCheckedMasterUsers",
+    "deleteMasterUser",
+  );
+
+  for (const bulkDelete of [companyDelete, companyUserDelete, masterDelete]) {
+    assert.equal(
+      (bulkDelete.match(/window\.confirm/g) ?? []).length,
+      1,
+      "cada exclusão em lote deve pedir uma única confirmação",
+    );
+    assert.match(bulkDelete, /mapWithConcurrency\([\s\S]*?MASTER_USER_DISCOVERY_CONCURRENCY/);
+    assert.match(bulkDelete, /failedCount/);
+  }
+
+  assert.match(
+    companyUserStatus,
+    /buildCompanyUserProfileUpdate\(managedUser,[\s\S]*?name: managedUser\.name,[\s\S]*?email: managedUser\.email,[\s\S]*?password: "",[\s\S]*?active/,
+    "status de usuário deve reutilizar o payload completo certificado",
+  );
+  assert.doesNotMatch(
+    `${companyUserStatus}\n${companyUserDelete}`,
+    /syncUserPermissions|promoteCompanyUserToAdminAdditively/,
+    "ações em lote de perfil não podem alterar permissões",
+  );
+  assert.match(
+    masterStatus,
+    /body: \{[\s\S]*?name: managedUser\.name,[\s\S]*?email: managedUser\.email,[\s\S]*?is_master: true,[\s\S]*?active/,
+  );
+  assert.match(masterStatus, /managedUser\.id !== currentUser\?\.id/);
+  assert.match(masterDelete, /managedUser\.id !== currentUser\?\.id/);
+
+  assert.match(
+    companyUserDelete,
+    /setCheckedCompanyUserIds\([\s\S]*?deletedIds\.forEach\(\(userId\) => next\.delete\(userId\)\)/,
+    "sucessos devem sair da seleção e falhas devem permanecer para nova tentativa",
+  );
+  assert.match(
+    masterDelete,
+    /setCheckedMasterUserIds\([\s\S]*?deletedIds\.forEach\(\(userId\) => next\.delete\(userId\)\)/,
+  );
+  assert.equal(
+    (companyUserDelete.match(/loadCompanyDetails\(/g) ?? []).length,
+    1,
+    "usuários da empresa devem ser recarregados somente uma vez após o lote",
+  );
+  assert.equal(
+    (masterDelete.match(/loadMasterUsers\(/g) ?? []).length,
+    1,
+    "super-admins devem ser recarregados somente uma vez após o lote",
+  );
+
+  for (const label of [
+    "Selecionar empresas exibidas",
+    "Selecionar usuários exibidos",
+    "Selecionar super-admins exibidos",
+  ]) {
+    assert.match(source, new RegExp(`aria-label="${label}"`));
+  }
+});
+
+test("grade comum do Master nunca publica nem altera super-admin em lote", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const functionSource = (name: string, nextName: DynamicFixture) => {
+    const start = source.indexOf(`async function ${name}`);
+    const end = source.indexOf(`async function ${nextName}`, start + 1);
+    assert.ok(start >= 0 && end > start, `${name} deve existir antes de ${nextName}`);
+    return source.slice(start, end);
+  };
+  const companySelection = source.slice(
+    source.indexOf("const selectCompanyId = React.useCallback"),
+    source.indexOf("const canPublishCompanyDetails", source.indexOf("const selectCompanyId = React.useCallback")),
+  );
+  const companyUserStatus = functionSource(
+    "updateCheckedCompanyUserStatus",
+    "deleteCheckedCompanyUsers",
+  );
+  const companyUserDelete = functionSource(
+    "deleteCheckedCompanyUsers",
+    "deleteCompanyUser",
+  );
+
+  assert.match(
+    companySelection,
+    /companyNonMasterUsersForScope\(cachedUsers, nextCompanyId\)/,
+    "retornar a uma empresa em cache não pode recolocar masters na grade comum",
+  );
+  assert.match(
+    source,
+    /function companyNonMasterUsersForScope[\s\S]*?managedUser\.is_master === false[\s\S]*?getScopedRowCompanyId\(managedUser\) === expectedCompanyId/,
+    "a publicação deve exigir simultaneamente perfil não-master e tenant certificado",
+  );
+  for (const bulkAction of [companyUserStatus, companyUserDelete]) {
+    assert.match(
+      bulkAction,
+      /companyNonMasterUsersForScope\(users, companyId\)\.filter/,
+      "ações em lote devem recertificar perfil e empresa mesmo contra estado stale",
+    );
+  }
+});
+
+test("login é transacional e impede submissões concorrentes", () => {
+  const authProviderSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-provider.tsx"),
+    "utf8",
+  );
+  const loginSource = readFileSync(
+    resolve(projectRoot, "app/login/page.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    authProviderSource,
+    /const login = React\.useCallback[\s\S]*?await loginRequest[\s\S]*?catch \(error\)[\s\S]*?clearStoredSession\(\)[\s\S]*?clearUserGridSync\(\)[\s\S]*?throw error/,
+    "falha após emitir tokens deve desfazer integralmente a sessão",
+  );
+  assert.match(
+    loginSource,
+    /(?:submittingRef|submitInFlightRef)\.current\) return[\s\S]*?(?:submittingRef|submitInFlightRef)\.current = true[\s\S]*?(?:submittingRef|submitInFlightRef)\.current = false/,
+    "duplo clique não pode iniciar dois logins concorrentes",
+  );
+  assert.match(
+    authProviderSource,
+    /currentUserRequest\(\)[\s\S]*?assertAuthenticatedSessionCurrent\(authenticatedSession\)[\s\S]*?certifyAuthenticatedUserForPublication\(\s*authenticatedSession/,
+    "a resposta de /auth/me deve permanecer vinculada ao token e à revisão que a autenticaram",
+  );
+  assert.match(
+    authProviderSource,
+    /publishAuthenticatedUser\(certified\.user, certified\.authenticatedSession\)[\s\S]*?hydrateAuthenticatedUserInBackground\(certified\)/,
+    "o principal certificado deve ser publicado antes da hidratação descritiva",
+  );
+  assert.match(
+    authProviderSource,
+    /currentAttempt\?\.accessToken === accessToken &&[\s\S]*?currentAttempt\.sessionRevision === authenticatedSession\.sessionRevision/,
+    "hidratações em background só podem ser reutilizadas na mesma revisão de sessão",
+  );
+  assert.match(
+    authProviderSource,
+    /hasMasterAccess\(certifiedUser\)[\s\S]*?await hydrateStoredMasterCompanyScope\(certifiedUser, authenticatedSession\)/,
+    "o fuso pendente do escopo salvo do Master deve ser resolvido antes de montar o dashboard",
+  );
+  assert.match(
+    authProviderSource,
+    /if \(user\.permissions !== undefined\) return user\.permissions;[\s\S]*?apiFetch<UserPermission\[]>\([\s\S]*?jwtCompanyScopeOnly: true[\s\S]*?return \[\];/,
+    "claims ausentes só podem sair do estado fechado após a rota autenticada do próprio usuário",
+  );
+  assert.match(
+    authProviderSource,
+    /hydrateUserPermissions\([\s\S]*?expectedAccessToken: authenticatedSession\.accessToken[\s\S]*?hydrateUserCompanyModules\([\s\S]*?expectedAccessToken: authenticatedSession\.accessToken/,
+    "a hidratação complementar não pode trocar de Bearer durante a sessão",
+  );
+  assert.match(
+    authProviderSource,
+    /await Promise\.race\([\s\S]*?flushUserGridSync\(\)[\s\S]*?const currentSession = getStoredSession\(\)[\s\S]*?accessTokensShareUserIdentity[\s\S]*?sessionWasReplaced[\s\S]*?return;[\s\S]*?clearStoredSession\(\)/,
+    "logout deve salvar preferências e nunca apagar uma sessão substituta",
+  );
+});
+
+test("bootstrap próprio usa a identidade do JWT sem herdar a empresa visual do master", () => {
+  const authProviderSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-provider.tsx"),
+    "utf8",
+  );
+  const dashboardViewRouteSource = readFileSync(
+    resolve(projectRoot, "app/api/v1/dashboard-views/[menuKey]/route.ts"),
+    "utf8",
+  );
+
+  assert.match(
+    authProviderSource,
+    /apiFetch<UserPermission\[]>\(\s*`\/users\/\$\{user\.id\}\/permissions`,\s*\{[\s\S]*?jwtCompanyScopeOnly: true/,
+  );
+  assert.doesNotMatch(authProviderSource, /users\/me\/permissions/);
+  assert.match(
+    dashboardViewRouteSource,
+    /`\/api\/v1\/users\/\$\{encodeURIComponent\(user\.id\)\}\/permissions`/,
+  );
+  assert.match(
+    dashboardViewRouteSource,
+    /let permissions = requireUserPermissions\(user\.permissions\);[\s\S]*?if \(user\.permissions === undefined\) \{[\s\S]*?backendFetch\([\s\S]*?\/permissions/,
+    "a rota deve usar permissões já reconciliadas do JWT antes do endpoint legado",
+  );
+  assert.match(
+    dashboardViewRouteSource,
+    /reconcileCurrentUserWithAccessToken\(rawUser, accessToken\)/,
+  );
+  assert.match(
+    dashboardViewRouteSource,
+    /canManageWidgets\(\{ \.\.\.user, permissions \}\)/,
+    "um slug residual não pode permitir que Operador grave configurações administrativas",
+  );
+});
+
+test("atualização automática só executa para catálogo habilitado e visível", () => {
+  assert.equal(
+    resourceAutoRefresh.shouldAutoRefreshResources({
+      enabled: true,
+      visibilityState: "visible",
+    }),
+    true,
+  );
+  assert.equal(
+    resourceAutoRefresh.shouldAutoRefreshResources({
+      enabled: true,
+      visibilityState: "hidden",
+    }),
+    false,
+  );
+  assert.equal(
+    resourceAutoRefresh.shouldAutoRefreshResources({
+      enabled: false,
+      visibilityState: "visible",
+    }),
+    false,
+  );
+  assert.ok(
+    resourceAutoRefresh.PROVISIONED_RESOURCE_REFRESH_INTERVAL_MS <
+      resourceAutoRefresh.RESOURCE_METADATA_REFRESH_INTERVAL_MS,
+  );
+});
+
+test("bootstrap comum evita detalhe administrativo e master mantém a hidratação autorizada", () => {
+  const superAdminSource = readFileSync(
+    resolve(projectRoot, "components/app/super-admin-dashboard.tsx"),
+    "utf8",
+  );
+  const authSource = readFileSync(
+    resolve(projectRoot, "components/app/auth-provider.tsx"),
+    "utf8",
+  );
+  const apiSource = readFileSync(resolve(projectRoot, "lib/api.ts"), "utf8");
+  const ensureStart = superAdminSource.indexOf("const ensureCompanyTimeZone");
+  const detailFetch = superAdminSource.indexOf(
+    "`/companies/${company.id}`",
+    ensureStart,
+  );
+  const navigationStart = superAdminSource.indexOf(
+    "async function openCompanyDashboard",
+  );
+  const certificationBeforeNavigation = superAdminSource.indexOf(
+    "await ensureCompanyTimeZone(company, true)",
+    navigationStart,
+  );
+  const navigation = superAdminSource.indexOf(
+    'router.push("/dashboard/live")',
+    navigationStart,
+  );
+  const userHydrationStart = authSource.indexOf(
+    "async function hydrateUserCompany(",
+  );
+  const userHydrationEnd = authSource.indexOf(
+    "function getDeclaredCompany",
+    userHydrationStart,
+  );
+  const userHydrationSource = authSource.slice(
+    userHydrationStart,
+    userHydrationEnd,
+  );
+  const regularReturn = userHydrationSource.indexOf(
+    "if (!hasMasterAccess(user)) return fallbackCompany",
+  );
+  const administrativeDetail = userHydrationSource.indexOf(
+    "`/companies/${companyId}`",
+  );
+
+  assert.ok(ensureStart >= 0 && detailFetch > ensureStart);
+  assert.ok(
+    navigationStart >= 0 &&
+      certificationBeforeNavigation > navigationStart &&
+      navigation > certificationBeforeNavigation,
+  );
+  assert.ok(
+    userHydrationStart >= 0 &&
+      userHydrationEnd > userHydrationStart &&
+      regularReturn >= 0 &&
+      administrativeDetail > regularReturn,
+    "usuário comum deve retornar antes de qualquer GET /companies/{id}",
+  );
+  assert.doesNotMatch(
+    userHydrationSource.slice(0, regularReturn),
+    /(?:apiFetch\s*(?:<[^>]+>)?\s*\(|\bfetch\s*\()/,
+    "JWT, /auth/me, cache same-tenant ou deployment-default devem bastar no bootstrap comum",
+  );
+  assert.match(
+    authSource,
+    /reconcileCurrentUserWithAccessToken\([\s\S]*?synchronizeAuthenticatedCompanyScope\(certifiedUser\)/,
+    "o JWT precisa ser reconciliado antes da hidratação local da empresa",
+  );
+  assert.match(
+    authSource,
+    /hydrateAuthenticatedUser\([\s\S]*?hydrateCurrentUser\(\s*certifiedUser,\s*authenticatedSession/,
+    "a hidratação em segundo plano deve partir apenas do principal certificado",
+  );
+  assert.match(
+    authSource,
+    /await hydrateStoredMasterCompanyScope\(hydratedUser, authenticatedSession\)[\s\S]*?async function hydrateStoredMasterCompanyScope[\s\S]*?`\/companies\/\$\{storedScope\.id\}`/,
+    "uma recarga direta do superadmin deve reparar o tenant salvo antes do dashboard",
+  );
+  assert.match(apiSource, /SESSION_UPDATED_EVENT/);
+  assert.match(authSource, /SESSION_UPDATED_EVENT/);
+});
+
+test("proxy exige destino fixo em produção", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "lib/backend-routing.ts"),
+    "utf8",
+  );
+  assert.match(source, /process\.env\.NODE_ENV === "production"/);
+  assert.match(source, /IPXDATA_API_URL é obrigatório em produção/);
+  assert.match(source, /if \(configuredUrl\) return normalizeConfiguredUrl/);
+});
+
+function currentUser() {
+  return {
+    company_id: "company-test",
+    email: "teste@teste.com",
+    id: "user-test",
+    is_master: false,
+    name: "Teste",
+  };
+}
+
+function validMasterTime(now: number) {
+  return {
+    exp: now / 1000 + 900,
+    nbf: now / 1000 - 1,
+  };
+}
+
+function accessToken(claims: unknown) {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "HS256", typ: "JWT" })}.${encode(claims)}.signature`;
+}
+
+function jsonResponse(value: unknown, status = 200) {
+  return new Response(JSON.stringify(value), {
+    headers: { "Content-Type": "application/json" },
+    status,
+  });
+}
+
+function memoryStorage() {
+  const values = new Map<string, string>();
+  return {
+    getItem(key: string) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    removeItem(key: string) {
+      values.delete(key);
+    },
+    setItem(key: string, value: string) {
+      values.set(key, String(value));
+    },
+  };
+}
+
+function loadTypeScriptModule(relativePath: string): RuntimeModule["exports"] {
+  const filename = resolve(projectRoot, relativePath);
+  const cached = moduleCache.get(filename);
+  if (cached) return cached.exports;
+
+  const source = readFileSync(filename, "utf8");
+  const output = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+    },
+    fileName: filename,
+  }).outputText;
+  const loadedModule: RuntimeModule = { exports: {} };
+  moduleCache.set(filename, loadedModule);
+  const nodeRequire = createRequire(filename);
+  const localRequire = (specifier: string): unknown => {
+    if (!specifier.startsWith("@/")) return nodeRequire(specifier);
+    return loadTypeScriptModule(`${specifier.slice(2)}.ts`);
+  };
+  const execute = new Function(
+    "exports",
+    "require",
+    "module",
+    "__filename",
+    "__dirname",
+    output,
+  );
+  execute(
+    loadedModule.exports,
+    localRequire,
+    loadedModule,
+    filename,
+    dirname(filename),
+  );
+  return loadedModule.exports;
+}
