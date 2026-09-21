@@ -35,6 +35,15 @@ export type OccupancyAreaCatalogResult = {
   options: OccupancyAreaOption[];
 };
 
+type OptionalCameraCatalogResult =
+  | { available: true; payload: unknown }
+  | { available: false; error: unknown };
+
+type OccupancyAreaCatalogRows = {
+  complete: boolean;
+  rows: OccupancyRow[];
+};
+
 type UnknownRecord = Record<string, unknown>;
 
 const OCCUPANCY_DISCOVERY_COLLECTION_KEYS = [
@@ -144,32 +153,55 @@ export async function fetchOccupancyAreaCatalog({
   );
   requireValidRange(from, to);
 
-  const [cameraPayload, areaCatalogPayload] = await Promise.all([
-    request<unknown>("/cameras"),
+  const [cameraCatalog, areaCatalogPayload] = await Promise.all([
+    fetchOptionalCameraCatalog(request),
     fetchOptionalOccupancyAreaCatalog(request),
   ]);
+  if (areaCatalogPayload !== null) {
+    const cameras = cameraCatalog.available
+      ? filterScopedApiRows(
+          requireCameraRows(
+            masterCrossCompanyScope
+              ? selectExplicitCompanyScopedRows(
+                  cameraCatalog.payload,
+                  expectedCompanyId,
+                  { label: "câmeras" },
+                ).rows
+              : cameraCatalog.payload,
+            expectedCompanyId,
+          ),
+          expectedCompanyId,
+        )
+      : undefined;
+    const catalog = requireOccupancyAreaCatalogRows(
+      areaCatalogPayload,
+      expectedCompanyId,
+      cameras,
+      masterCrossCompanyScope,
+    );
+
+    return {
+      authoritative: catalog.complete,
+      options: buildOccupancyAreaOptions(catalog.rows),
+    };
+  }
+
+  if (!cameraCatalog.available) {
+    throw cameraCatalog.error;
+  }
+
+  const cameraPayload = cameraCatalog.payload;
   const cameras = filterScopedApiRows(
     requireCameraRows(
       masterCrossCompanyScope
-        ? selectExplicitCompanyScopedRows(cameraPayload, expectedCompanyId, { label: "câmeras" }).rows
+        ? selectExplicitCompanyScopedRows(cameraPayload, expectedCompanyId, {
+            label: "câmeras",
+          }).rows
         : cameraPayload,
       expectedCompanyId,
     ),
     expectedCompanyId,
   );
-  if (areaCatalogPayload !== null) {
-    return {
-      authoritative: true,
-      options: buildOccupancyAreaOptions(
-        requireOccupancyAreaCatalogRows(
-          areaCatalogPayload,
-          expectedCompanyId,
-          cameras,
-          masterCrossCompanyScope,
-        ),
-      ),
-    };
-  }
 
   // Compatibilidade temporária: snapshots e metadados legados podem omitir
   // regiões estáveis. O catálogo autorizado acima é a única fonte completa.
@@ -250,23 +282,32 @@ async function fetchOptionalOccupancyAreaCatalog(
   }
 }
 
+async function fetchOptionalCameraCatalog(
+  request: OccupancyAreaRequest,
+): Promise<OptionalCameraCatalogResult> {
+  try {
+    return {
+      available: true,
+      payload: await request<unknown>("/cameras"),
+    };
+  } catch (error) {
+    if (!isUnavailableCameraCatalog(error)) throw error;
+    return { available: false, error };
+  }
+}
+
 function requireOccupancyAreaCatalogRows(
   value: unknown,
   companyId: string,
-  cameras: Camera[],
+  cameras: Camera[] | undefined,
   masterCrossCompanyScope = false,
-): OccupancyRow[] {
+): OccupancyAreaCatalogRows {
   const resolveCompanyId = createTenantCompanyIdResolver(companyId);
   const response = requireRecord(value, "catálogo de áreas de ocupação");
-  const complete = requireBoolean(
+  const complete = requireOptionalBoolean(
     response.complete,
     "complete do catálogo de áreas de ocupação",
-  );
-  if (!complete) {
-    throw new Error(
-      "A API ainda não concluiu o catálogo de áreas de ocupação.",
-    );
-  }
+  ) === true;
   const catalogRows = requireSingleArrayEnvelope(
     response,
     OCCUPANCY_AREA_CATALOG_COLLECTION_KEYS,
@@ -277,17 +318,19 @@ function requireOccupancyAreaCatalogRows(
   const rows = masterCrossCompanyScope
     ? selectExplicitCompanyScopedRows(catalogRows, companyId, { label: "áreas de ocupação" }).rows
     : catalogRows;
-  const camerasById = new Map(cameras.map((camera) => [camera.id, camera]));
+  const camerasById = cameras
+    ? new Map(cameras.map((camera) => [camera.id, camera]))
+    : undefined;
   const identities = new Set<string>();
 
-  return rows.flatMap((candidate, index) => {
+  const normalizedRows = rows.flatMap((candidate, index) => {
     const context = `área na posição ${index} do catálogo de ocupação`;
     const row = requireRecord(candidate, context);
     resolveCompanyId(row.company_id, `company_id da ${context}`);
 
     const cameraId = requireId(row.camera_id, `camera_id da ${context}`);
-    const camera = camerasById.get(cameraId);
-    if (!camera) {
+    const camera = camerasById?.get(cameraId);
+    if (camerasById && !camera) {
       throw new Error(
         `A ${context} referencia a câmera desconhecida "${cameraId}".`,
       );
@@ -297,11 +340,6 @@ function requireOccupancyAreaCatalogRows(
       row.object_class,
       `object_class da ${context}`,
     );
-    if (objectClass !== objectClass.toLowerCase()) {
-      throw new Error(
-        `A ${context} possui object_class não normalizado em lowercase.`,
-      );
-    }
     const identity = JSON.stringify([cameraId, areaId]);
     if (identities.has(identity)) {
       throw new Error(
@@ -315,32 +353,28 @@ function requireOccupancyAreaCatalogRows(
       row.area_name ?? row.area_label ?? row.label ?? row.name,
       `nome da ${context}`,
     );
-    const sourceKind = requireId(
+    requireOptionalId(
       row.source_kind,
       `source_kind da ${context}`,
     );
-    if (sourceKind !== "region") {
-      throw new Error(
-        `A ${context} possui source_kind "${sourceKind}", não "region".`,
-      );
-    }
     requireOptionalTimestamp(row.last_seen, `last_seen da ${context}`);
     requireOptionalTimestamp(row.last_seen_at, `last_seen_at da ${context}`);
-    const hasBaseline =
-      (row.last_seen !== null && row.last_seen !== undefined) ||
-      (row.last_seen_at !== null && row.last_seen_at !== undefined);
 
-    if (!active || camera.active === false || !hasBaseline) return [];
+    if (!active || camera?.active === false) return [];
     return [
       {
         area: areaId,
         area_label: label,
         camera_id: cameraId,
-        camera_name: camera.name,
+        camera_name:
+          camera?.name ??
+          requireOptionalId(row.camera_name, `camera_name da ${context}`),
         object_class: objectClass,
       },
     ];
   });
+
+  return { complete, rows: normalizedRows };
 }
 
 function requireOptionalTimestamp(value: unknown, context: string) {
@@ -395,6 +429,12 @@ function isMissingApiRoute(error: unknown) {
   if (!error || typeof error !== "object") return false;
   const status = (error as { status?: unknown }).status;
   return status === 404 || status === 405;
+}
+
+function isUnavailableCameraCatalog(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const status = (error as { status?: unknown }).status;
+  return status === 401 || status === 403 || status === 404 || status === 405;
 }
 
 function cameraLineCountToAreaRows(

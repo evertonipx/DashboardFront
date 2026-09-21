@@ -24,6 +24,7 @@ const series = [{
     hour("2026-09-01", 0, 3600, 0, 0, 0),
     hour("2026-09-01", 1, 0, 3600, 0, 0),
     hour("2026-09-01", 2, 0, 0, 1800, 1800),
+    hour("2026-09-01", 4, 0, 0, 3600, 0),
     hour("2026-09-02", 0, 900, 900, 900, 900),
   ],
 }];
@@ -78,10 +79,77 @@ test("calendário distingue 0% confirmado, ausência e futuro sem omitir dia 1 o
   assert.match(option.tooltip.formatter({ data: missing }), /Sem tempo ocupado ou livre confirmado/);
   assert.match(option.tooltip.formatter({ data: future }), /Intervalo ainda não decorrido/);
   assert.equal(option.series.reduce((sum: RuntimeFixture, item: RuntimeFixture) => sum + item.data.length, 0), month.dateKeys.length * 24);
-  const transition = option.series[3].data.find((point: RuntimeFixture) => point.value[0] === 0 && point.value[1] === 2);
+  const mixedCoverage = option.series[1].data.find((point: RuntimeFixture) => point.value[0] === 0 && point.value[1] === 2);
+  assert.ok(mixedCoverage, "uma lacuna parcial não pode pintar a célula inteira como transição");
+  assert.equal(option.series[3].data.some((point: RuntimeFixture) => point.value[0] === 0 && point.value[1] === 2), false);
+  const transition = option.series[3].data.find((point: RuntimeFixture) => point.value[0] === 0 && point.value[1] === 4);
   assert.ok(transition);
   assert.notEqual(option.series[3].itemStyle.color, option.series[1].itemStyle.color);
 });
+
+for (const theme of ["light", "dark"]) {
+  test(`todos os heatmaps de permanência mantêm ausência neutra em ${theme}`, () => {
+    for (const kind of charts.OCCUPANCY_DURATION_INSIGHT_CARD_IDS.filter(
+      (item: RuntimeFixture) => item.endsWith("heatmap"),
+    )) {
+      // An orange metric palette reproduces the riskiest visual combination:
+      // missing data must not inherit either the heat scale or transition hue.
+      const option = charts.buildOccupancyDurationInsightOption({
+        kind,
+        model,
+        month,
+        scenarioNames: series.map((item) => item.name),
+        theme,
+        widgetColor: "#F97316",
+      });
+      const missing = option.series.find(
+        (item: RuntimeFixture) => item.name === "Sem dados",
+      );
+      const transition = option.series.find(
+        (item: RuntimeFixture) => item.name === "Transição",
+      );
+      assert.ok(missing?.data.length > 0, `${kind}: a fixture deve conter ausência`);
+      assert.ok(transition?.data.length > 0, `${kind}: a fixture deve conter transição`);
+      assertNeutralNoDataColor(missing.itemStyle.color, theme, kind);
+      assert.notDeepEqual(
+        echarts.color.parse(missing.itemStyle.color),
+        echarts.color.parse(transition.itemStyle.color),
+        `${kind}: ausência e transição precisam ter semânticas distintas`,
+      );
+      assert.deepEqual(
+        option.visualMap[1].inRange.color.map((color: string) =>
+          echarts.color.parse(color)),
+        [missing.itemStyle.color, missing.itemStyle.color].map((color) =>
+          echarts.color.parse(color)),
+        `${kind}: o visualMap não pode recolorir a ausência`,
+      );
+
+      const chart = echarts.init(null, null, {
+        renderer: "svg",
+        ssr: true,
+        width: 1200,
+        height: 600,
+      });
+      try {
+        chart.setOption(option, { notMerge: true, lazyUpdate: false });
+        chart.renderToSVGString();
+        const renderedMissing = chart
+          .getModel()
+          .getSeriesByIndex(option.series.indexOf(missing))
+          .getData()
+          .getItemGraphicEl(0);
+        assert.ok(renderedMissing, `${kind}: a célula sem dados precisa ser desenhada`);
+        assert.deepEqual(
+          echarts.color.parse(renderedMissing.style.fill),
+          echarts.color.parse(missing.itemStyle.color),
+          `${kind}: a cor neutra precisa sobreviver ao pipeline real do ECharts`,
+        );
+      } finally {
+        chart.dispose();
+      }
+    }
+  });
+}
 
 test("eixos semanais e por cenário preservam o domínio completo e tooltip escapa nomes", () => {
   const scenario = build("occupancy_duration_scenario_heatmap", "dark");
@@ -265,6 +333,24 @@ function axisLabelRects(chart: RuntimeFixture, axis: RuntimeFixture) {
     labels.push({ text: element.style.text, rect });
   });
   return labels;
+}
+
+function assertNeutralNoDataColor(
+  color: string,
+  theme: string,
+  context: string,
+) {
+  const [red, green, blue] = echarts.color.parse(color).slice(0, 3);
+  const average = (red + green + blue) / 3;
+  assert.ok(
+    Math.max(red, green, blue) - Math.min(red, green, blue) <= 40,
+    `${context}: ausência precisa ser cinza neutro, nunca laranja`,
+  );
+  if (theme === "dark") {
+    assert.ok(average >= 45 && average <= 120, `${context}: neutro dark deve permanecer discreto`);
+  } else {
+    assert.ok(average >= 180 && average < 245, `${context}: neutro light deve permanecer suave`);
+  }
 }
 
 function load(relativePath: string): RuntimeFixture {

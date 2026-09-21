@@ -14,6 +14,15 @@ import {
   type HourlyCalendarMonthQuery,
 } from "@/lib/aggregate-query-plan";
 import { apiFetch } from "@/lib/api";
+import { normalizeCountingAggregateRowsTimeZone } from "@/lib/counting-aggregate-time";
+import {
+  countingAddCalendarMonths,
+  countingCalendarBoundaryInstant,
+  countingCalendarStart,
+  countingEndOfHourInstant,
+  countingStartOfDayInstant,
+  countingStartOfHourInstant,
+} from "@/lib/counting-time-zone";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -72,6 +81,7 @@ type FetchHourlyAggregateRangesOptions = {
   /** Optional per-generation queue; receives every physical partition. */
   request?: (path: string) => Promise<AggregateEventsResponse>;
   signal?: AbortSignal;
+  timeZone?: string;
 };
 
 /**
@@ -88,9 +98,12 @@ export async function fetchHourlyAggregateRanges({
   ranges,
   request,
   signal,
+  timeZone,
 }: FetchHourlyAggregateRangesOptions) {
   requireValidFetchOptions(cacheScope, metricType, now, queryConcurrency);
-  const queries = planHourlyCalendarMonthQueries(ranges);
+  const queries = timeZone
+    ? planIanaHourlyQueries(ranges, timeZone, false)
+    : planHourlyCalendarMonthQueries(ranges);
   if (queries.length > MAX_HOURLY_CALENDAR_MONTH_QUERIES) {
     throw new RangeError(
       `O período horário excede ${MAX_HOURLY_CALENDAR_MONTH_QUERIES} meses. Reduza o intervalo para evitar uma carga incompleta.`,
@@ -107,8 +120,9 @@ export async function fetchHourlyAggregateRanges({
         query,
         metricType,
         request,
-        revision: hourlyAggregateCacheRevision(query, now),
+        revision: hourlyAggregateCacheRevision(query, now, timeZone),
         signal,
+        timeZone,
       }),
   );
   const rows = rowsByQuery.flat();
@@ -132,9 +146,12 @@ export async function fetchBoundedHourlyAggregateRanges({
   ranges,
   request,
   signal,
+  timeZone,
 }: FetchHourlyAggregateRangesOptions) {
   requireValidFetchOptions(cacheScope, metricType, now, queryConcurrency);
-  const queries = planBoundedHourlyQueries(ranges);
+  const queries = timeZone
+    ? planIanaHourlyQueries(ranges, timeZone, true)
+    : planBoundedHourlyQueries(ranges);
   const rowsByQuery = await mapWithConcurrency(
     queries,
     queryConcurrency,
@@ -146,8 +163,9 @@ export async function fetchBoundedHourlyAggregateRanges({
         query,
         metricType,
         request,
-        revision: hourlyAggregateCacheRevision(query, now),
+        revision: hourlyAggregateCacheRevision(query, now, timeZone),
         signal,
+        timeZone,
       }),
   );
 
@@ -155,6 +173,47 @@ export async function fetchBoundedHourlyAggregateRanges({
     rowsByQuery.flat(),
     ranges,
     metricType,
+  );
+}
+
+function planIanaHourlyQueries(
+  ranges: readonly AggregateQueryRange[],
+  timeZone: string,
+  bounded: boolean,
+): HourlyAggregateQuery[] {
+  const queries = new Map<string, HourlyAggregateQuery>();
+  ranges.forEach((range) => {
+    if (range.from >= range.to) return;
+    let month = countingCalendarStart(range.from, timeZone, "month");
+    const lastMonth = countingCalendarStart(
+      new Date(range.to.getTime() - 1),
+      timeZone,
+      "month",
+    );
+    while (month <= lastMonth) {
+      const monthFrom = countingCalendarBoundaryInstant(month, timeZone);
+      const nextMonth = countingAddCalendarMonths(month, 1);
+      const monthTo = countingCalendarBoundaryInstant(nextMonth, timeZone);
+      const from = bounded
+        ? new Date(Math.max(monthFrom.getTime(), range.from.getTime()))
+        : monthFrom;
+      const to = bounded
+        ? new Date(Math.min(monthTo.getTime(), range.to.getTime()))
+        : monthTo;
+      if (from < to) {
+        const monthKey = `${timeZone}:${month.getFullYear()}-${String(
+          month.getMonth() + 1,
+        ).padStart(2, "0")}`;
+        const key = bounded
+          ? `${monthKey}:${from.toISOString()}:${to.toISOString()}`
+          : monthKey;
+        queries.set(key, { from, key, to });
+      }
+      month = nextMonth;
+    }
+  });
+  return Array.from(queries.values()).sort(
+    (left, right) => left.from.getTime() - right.from.getTime(),
   );
 }
 
@@ -187,7 +246,11 @@ export function filterHourlyAggregateRowsToRanges(
   ranges: readonly AggregateQueryRange[],
   metricType = DEFAULT_METRIC_TYPE,
 ) {
-  planHourlyCalendarMonthQueries(ranges);
+  ranges.forEach((range) => {
+    if (range.from >= range.to) {
+      throw new RangeError("O intervalo horário deve ter início anterior ao fim.");
+    }
+  });
   return requireAggregateRows(
     rows.filter((row) =>
       ranges.some((range) =>
@@ -215,8 +278,12 @@ export function hourlyAggregateCacheKey(
 export function hourlyAggregateCacheRevision(
   query: Pick<HourlyCalendarMonthQuery, "from" | "to">,
   now: Date,
+  timeZone?: string,
 ) {
-  const hourlyRevision = startOfAggregateBucket(now, "hour").toISOString();
+  const hourlyRevision = (timeZone
+    ? countingStartOfHourInstant(now, timeZone)
+    : startOfAggregateBucket(now, "hour")
+  ).toISOString();
   if (query.from <= now && now < query.to) {
     return `hour:${hourlyRevision}`;
   }
@@ -227,7 +294,10 @@ export function hourlyAggregateCacheRevision(
     return `hour:${hourlyRevision}`;
   }
 
-  return `day:${startOfAggregateBucket(now, "day").toISOString()}`;
+  return `day:${(timeZone
+    ? countingStartOfDayInstant(now, timeZone)
+    : startOfAggregateBucket(now, "day")
+  ).toISOString()}`;
 }
 
 async function fetchHourlyAggregateQuery(
@@ -237,6 +307,7 @@ async function fetchHourlyAggregateQuery(
   companyScopeId?: string,
   splitDepth = 0,
   request?: (path: string) => Promise<AggregateEventsResponse>,
+  timeZone?: string,
 ) {
   signal?.throwIfAborted();
   const params = new URLSearchParams({
@@ -254,8 +325,13 @@ async function fetchHourlyAggregateQuery(
     response.granularity,
     "hour",
   );
-  const rows = requireAggregateRowsInRange(
+  const normalizedRows = normalizeCountingAggregateRowsTimeZone(
     response.data,
+    granularity,
+    timeZone,
+  );
+  const rows = requireAggregateRowsInRange(
+    normalizedRows,
     granularity,
     query.from,
     query.to,
@@ -264,7 +340,7 @@ async function fetchHourlyAggregateQuery(
 
   if (rows.length < AGGREGATE_RESPONSE_ROW_CEILING) return rows;
 
-  const partitions = splitHourlyAggregateQuery(query);
+  const partitions = splitHourlyAggregateQuery(query, timeZone);
   if (!partitions || splitDepth >= MAX_COMPLETENESS_SPLIT_DEPTH) {
     throw new Error(
       `A API atingiu o teto de ${AGGREGATE_RESPONSE_ROW_CEILING.toLocaleString("pt-BR")} linhas em um intervalo horário indivisível. A cobertura não pode ser certificada.`,
@@ -282,6 +358,7 @@ async function fetchHourlyAggregateQuery(
         companyScopeId,
         splitDepth + 1,
         request,
+        timeZone,
       )),
     );
   }
@@ -291,14 +368,19 @@ async function fetchHourlyAggregateQuery(
 
 function splitHourlyAggregateQuery(
   query: HourlyAggregateQuery,
+  timeZone?: string,
 ): readonly [HourlyAggregateQuery, HourlyAggregateQuery] | null {
   const midpoint = new Date(
     query.from.getTime() +
       Math.floor((query.to.getTime() - query.from.getTime()) / 2),
   );
-  let boundary = startOfAggregateBucket(midpoint, "hour");
+  let boundary = timeZone
+    ? countingStartOfHourInstant(midpoint, timeZone)
+    : startOfAggregateBucket(midpoint, "hour");
   if (boundary <= query.from) {
-    boundary = endOfAggregateBucket(query.from, "hour");
+    boundary = timeZone
+      ? countingEndOfHourInstant(query.from, timeZone)
+      : endOfAggregateBucket(query.from, "hour");
   }
   if (boundary <= query.from || boundary >= query.to) return null;
 
@@ -326,6 +408,7 @@ async function loadHourlyAggregateQuery({
   request,
   revision,
   signal,
+  timeZone,
 }: {
   cache?: HourlyAggregateCache;
   cacheScope: string;
@@ -335,6 +418,7 @@ async function loadHourlyAggregateQuery({
   request?: (path: string) => Promise<AggregateEventsResponse>;
   revision: string;
   signal?: AbortSignal;
+  timeZone?: string;
 }) {
   signal?.throwIfAborted();
   const cacheKey = hourlyAggregateCacheKey(
@@ -363,6 +447,7 @@ async function loadHourlyAggregateQuery({
     companyScopeId,
     0,
     request,
+    timeZone,
   );
   pendingRequests?.set(cacheKey, { promise, revision, signal });
 

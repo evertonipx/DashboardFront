@@ -78,12 +78,158 @@ test("exportação preserva data, hora e instante local do widget, não do naveg
     const bucket = new Date("2026-01-01T01:00:00Z");
     const scenario = { id: "a", name: "Entrada" };
     const series = [{ scenarioId: "a", name: "Entrada", metrics: new Map([[bucket.getTime(), { average: 3, peak: 3, minimum: 3 }]]) }];
-    const reports = widgets.buildOccupancyComparisonReportAssets({ aggregateBuckets: [bucket], aggregateSeries: series, currentHourBucket: bucket, currentHourSeries: [], heatmapScenarioId: "a", hexSnapshots: [], hourlyMaximumBuckets: [bucket], hourlyMaximumSeries: series, maximumTrendRanges: null, maximumTrendSeries: [], scenarioHourHeatmapDateKey: "2025-12-31", scenarios: [scenario], selectedScenarioIds: ["a"], settings: load("lib/occupancy-widget-settings.ts").DEFAULT_OCCUPANCY_WIDGET_SETTINGS, snapshots: [{ scenarioId: "a", name: "Entrada", total: 3, asOf: instant.toISOString() }], timeZone });
+    const reports = widgets.buildOccupancyComparisonReportAssets({ aggregateBuckets: [bucket], aggregateSeries: series, currentHourBucket: bucket, currentHourSeries: [], heatmapScenarioId: "a", hexSnapshots: [], hourlyMaximumBuckets: [bucket], hourlyMaximumSeries: series, maximumTrendRanges: null, maximumTrendSeries: [], scenarioHeatmapBuckets: [bucket], scenarioHeatmapSeries: series, scenarioHourHeatmapDateKey: "2025-12-31", scenarios: [scenario], selectedScenarioIds: ["a"], settings: load("lib/occupancy-widget-settings.ts").DEFAULT_OCCUPANCY_WIDGET_SETTINGS, snapshots: [{ scenarioId: "a", name: "Entrada", total: 3, asOf: instant.toISOString() }], timeZone });
     const byId = new Map<string, RuntimeFixture>(reports.map((report: RuntimeFixture) => [report.cardId, report.chart]));
     const heat = byId.get("occupancy_day_hour_heatmap");
     assert.equal(heat.table.rows[0].date, "2025-12-31"); assert.equal(heat.table.rows[0].hour, "22h");
+    const scenarioHeat = byId.get("occupancy_scenario_hour_heatmap");
+    assert.equal(
+      scenarioHeat.title,
+      "Ocupação por cenários x horários",
+      "o modo padrão deve preservar o título conhecido das visões legadas",
+    );
+    assert.equal(scenarioHeat.table.rows[0].period, "22h");
+    assert.equal(scenarioHeat.table.rows[0].scenario, "Entrada");
     assert.equal(byId.get("occupancy_scenario_half_donut").table.rows[0].asOf, utils.formatDateTime(instant, timeZone));
     assert.equal(byId.get("occupancy_scenario_bar_race").table.rows[0].asOf, utils.formatDateTime(instant, timeZone));
+  });
+});
+
+test("ranking ao vivo exporta gráfico e tabela somente com contagens inteiras", () => {
+  const settings = load(
+    "lib/occupancy-widget-settings.ts",
+  ).DEFAULT_OCCUPANCY_WIDGET_SETTINGS;
+  const scenarios = [
+    { id: "a", name: "Entrada" },
+    { id: "b", name: "Praça" },
+    { id: "c", name: "Sem leitura" },
+  ];
+  const reports = widgets.buildOccupancyComparisonReportAssets({
+    aggregateBuckets: [],
+    aggregateSeries: [],
+    currentHourBucket: null,
+    currentHourSeries: [],
+    heatmapScenarioId: "a",
+    hexSnapshots: [],
+    hourlyMaximumBuckets: [],
+    hourlyMaximumSeries: [],
+    maximumTrendRanges: null,
+    maximumTrendSeries: [],
+    scenarioHeatmapBuckets: [],
+    scenarioHeatmapSeries: [],
+    scenarioHourHeatmapDateKey: "",
+    scenarios,
+    selectedScenarioIds: scenarios.map((scenario) => scenario.id),
+    settings,
+    snapshots: [
+      { scenarioId: "a", name: "Entrada", total: 3.6 },
+      { scenarioId: "b", name: "Praça", total: 0.4 },
+      { scenarioId: "c", name: "Sem leitura", total: null },
+    ],
+    timeZone,
+  });
+  const ranking = reports.find(
+    (report: RuntimeFixture) =>
+      report.cardId === "occupancy_scenario_bar_race",
+  ).chart;
+
+  assert.deepEqual(
+    ranking.option.series[0].data.map(
+      (entry: RuntimeFixture) => entry.value,
+    ),
+    [4, 0, null],
+  );
+  assert.deepEqual(
+    ranking.table.rows.map(
+      (row: RuntimeFixture) => row.occupancy,
+    ),
+    [4, 0, null],
+  );
+});
+
+test("exportação acompanha minuto, dia, semana e mês configurados no widget", () => {
+  withBrowserZone("UTC", () => {
+    const settingsModule = load("lib/occupancy-widget-settings.ts");
+    const aggregateModule = load("lib/occupancy-aggregate-validation.ts");
+    const scenario = { id: "a", name: "Entrada" };
+    const fixtures = [
+      {
+        bucket: new Date("2026-09-16T15:42:00.000Z"),
+        granularity: "minute",
+        label: "12:42",
+        title: "Ocupação por cenários x minutos",
+      },
+      {
+        bucket: new Date(2026, 8, 16),
+        granularity: "day",
+        label: "qua. 16/09",
+        title: "Ocupação por cenários x dias",
+      },
+      {
+        bucket: new Date(2026, 8, 14),
+        granularity: "week",
+        label: "Sem. 14/09",
+        title: "Ocupação por cenários x semanas",
+      },
+      {
+        bucket: new Date(2026, 8, 1),
+        granularity: "month",
+        label: "set./26",
+        title: "Ocupação por cenários x meses",
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      const key = aggregateModule.occupancyAggregateBucketKey(
+        fixture.bucket,
+        fixture.granularity,
+      );
+      const series = [
+        {
+          metrics: new Map([
+            [key, { average: 0, minimum: 0, peak: 7 }],
+          ]),
+          name: scenario.name,
+          scenarioId: scenario.id,
+        },
+      ];
+      const reports = widgets.buildOccupancyComparisonReportAssets({
+        aggregateBuckets: [],
+        aggregateSeries: [],
+        currentHourBucket: null,
+        currentHourSeries: [],
+        heatmapScenarioId: "a",
+        hexSnapshots: [],
+        hourlyMaximumBuckets: [],
+        hourlyMaximumSeries: [],
+        maximumTrendRanges: null,
+        maximumTrendSeries: [],
+        scenarioHeatmapBuckets: [fixture.bucket],
+        scenarioHeatmapSeries: series,
+        scenarioHourHeatmapDateKey: "",
+        scenarios: [scenario],
+        selectedScenarioIds: ["a"],
+        settings: {
+          ...settingsModule.DEFAULT_OCCUPANCY_WIDGET_SETTINGS,
+          scenarioHeatmapGranularity: fixture.granularity,
+        },
+        snapshots: [],
+        timeZone,
+      });
+      const report = reports.find(
+        (candidate: RuntimeFixture) =>
+          candidate.cardId === "occupancy_scenario_hour_heatmap",
+      ).chart;
+      assert.equal(report.title, fixture.title);
+      assert.deepEqual(report.option.xAxis.data, [fixture.label]);
+      assert.equal(report.table.rows[0].period, fixture.label);
+      assert.equal(report.table.rows[0].scenario, "Entrada");
+      assert.equal(
+        report.table.rows[0].value,
+        0,
+        `${fixture.granularity}: zero certificado deve permanecer zero`,
+      );
+    }
   });
 });
 
@@ -105,9 +251,17 @@ test("callbacks passam explicitamente o fuso aos intervalos, exportação e redu
   assert.match(source, /fetchOccupancyCivilAggregate\(\{[\s\S]*?granularity: "month"[\s\S]*?fetchResponse: \(path\) => scheduleQuery/);
   assert.match(source, /const nextMonthlyBoundary = occupancyCalendarBoundaryInstant\(ranges.monthlySource.to, timeZone\)/);
   assert.doesNotMatch(source, /scheduleNext\(ranges.monthlySource.to\)/);
-  assert.equal((source.match(/allowDocumentedAggregateResponse: true/g) ?? []).length, 8);
-  assert.equal((source.match(/expectedTimezone: timeZone/g) ?? []).length, 8);
-  assert.match(source, /formatDateTime\(requestedAt, timeZone\)/);
+  const documentedResponseCount =
+    (source.match(/allowDocumentedAggregateResponse: true/g) ?? []).length;
+  const certifiedTimeZoneCount =
+    (source.match(/expectedTimezone: timeZone/g) ?? []).length;
+  assert.ok(documentedResponseCount >= 10);
+  assert.equal(certifiedTimeZoneCount, documentedResponseCount);
+  assert.match(
+    source,
+    /occupancySnapshotEffectiveAt\(snapshots, requestedAt\)[\s\S]*?formatDateTime\(effectiveAt, timeZone\)/,
+    "o horário visível deve usar current_at/as_of efetivo do worker, não o relógio da requisição",
+  );
 });
 
 function withBrowserZone(zone: RuntimeFixture, callback: (...args: RuntimeFixture[]) => RuntimeFixture) {

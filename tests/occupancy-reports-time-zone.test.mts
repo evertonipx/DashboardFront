@@ -42,13 +42,90 @@ test("Análises: o dia fechado usa instantes IANA e não depende do fuso do nave
       assert.equal(hourly.to.toISOString(), to);
       assert.equal(hourly.openBucket, undefined, "dia fechado não pode ganhar bucket aberto por parâmetro default");
       const minute = definitions.find((item: RuntimeFixture) => item.granularity === "minute");
+      assert.equal(minute.from.toISOString(), from);
       assert.equal(minute.to.toISOString(), to);
-      assert.equal(minute.to - minute.from, 60 * 60_000);
+      assert.equal(minute.to - minute.from, Date.parse(to) - Date.parse(from));
       assert.equal(minute.openBucket, undefined);
+      assert.equal(
+        reports.listBucketStarts(minute).length,
+        (Date.parse(to) - Date.parse(from)) / 60_000,
+        "o histórico minuto a minuto deve cobrir todo o último dia civil",
+      );
       assert.equal(reports.listBucketStarts(hourly).length,
         timeZone === "Australia/Lord_Howe" ? 24 : (Date.parse(to) - Date.parse(from)) / 3_600_000);
       assert.equal(reports.buildEmptyPoints(hourly).length, 24);
     }
+  });
+});
+
+test("Análises: o dia atual cobre desde 00h até o minuto aberto", () => {
+  inTimeZones(["UTC", "Asia/Tokyo"], () => {
+    const now = new Date("2026-09-10T13:42:37Z");
+    const range = windowApi.resolveOccupancyAnalysisRange(
+      now,
+      "2026-09-10",
+      "2026-09-10",
+      true,
+      "2026-09-10",
+      "America/Sao_Paulo",
+    );
+    const minute = reports
+      .buildOccupancyReportDefinitions(
+        range.reference,
+        now,
+        true,
+        range,
+        "America/Sao_Paulo",
+      )
+      .find((item: RuntimeFixture) => item.granularity === "minute");
+
+    assert.equal(minute.from.toISOString(), "2026-09-10T03:00:00.000Z");
+    assert.equal(minute.to.toISOString(), "2026-09-10T13:43:00.000Z");
+    assert.equal(minute.openBucket.toISOString(), "2026-09-10T13:42:00.000Z");
+    assert.equal(reports.listBucketStarts(minute).length, 643);
+  });
+});
+
+test("Análises: uma amostra diurna permanece no histórico diário por minuto", () => {
+  inTimeZones(["UTC", "Asia/Tokyo"], () => {
+    const range = windowApi.resolveOccupancyAnalysisRange(
+      new Date("2026-12-01T12:00:00Z"),
+      "2026-09-10",
+      "2026-09-10",
+      true,
+      "2026-12-01",
+      "America/Sao_Paulo",
+    );
+    const minute = reports
+      .buildOccupancyReportDefinitions(
+        range.reference,
+        null,
+        true,
+        range,
+        "America/Sao_Paulo",
+      )
+      .find((item: RuntimeFixture) => item.granularity === "minute");
+    const state = reports.buildScenarioPoints(minute, [
+      {
+        bucket: "2026-09-10T13:00:00Z",
+        scenario_total_avg: 3,
+        scenario_total_max: 5,
+        scenario_total_min: 1,
+      },
+    ]);
+    const tenOClock = state.points.find(
+      (point: RuntimeFixture) => point.bucket === "2026-09-10T13:00:00.000Z",
+    );
+
+    assert.equal(tenOClock?.label, "10:00");
+    assert.deepEqual(
+      {
+        average: tenOClock?.average,
+        minimum: tenOClock?.minimum,
+        peak: tenOClock?.peak,
+      },
+      { average: 3, minimum: 1, peak: 5 },
+    );
   });
 });
 
@@ -225,6 +302,8 @@ function loadReportFunctions(): RuntimeFixture {
     MINUTE_MS: 60_000, HOUR_MS: 3_600_000, DAY_MS: 86_400_000,
     AI_INSIGHTS_LIMITS: { dailyDatasetRows: 5000 }, AI_OCCUPANCY_DAILY_CHUNK_DAYS: 62,
     MAX_CLOSED_SEGMENT_CACHE_ENTRIES: 256,
+    MAX_OCCUPANCY_MINUTE_REPORT_BUCKETS: 1_600,
+    MAX_OCCUPANCY_REPORT_BUCKETS: 500,
   };
   const output = ts.transpileModule(declarations, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React }, fileName: file }).outputText;
   return new Function("exports", ...Object.keys(bindings), `${output};return {buildOccupancyReportDefinitions,listBucketStarts,buildEmptyPoints,buildComparisonDefinition,alignMinuteComparisonPoints,maskOpenBucketComparisons,buildOccupancyAiDailyTable,buildScenarioPoints,summarizeOccupancyRangeMetrics,cacheCertifiedClosedSegment};`)({}, ...Object.values(bindings));

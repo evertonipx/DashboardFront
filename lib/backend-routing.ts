@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 const DEFAULT_BACKEND_PORT = "8080";
 const DEFAULT_BACKEND_PROTOCOL = "http";
 const BACKEND_TIMEOUT_MS = 60_000;
+const UPSTREAM_ACCEPT_ENCODING = "br, gzip";
 const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
 const BODYLESS_STATUSES = new Set([204, 205, 304]);
 const HOP_BY_HOP_HEADERS = [
@@ -66,7 +67,10 @@ export async function proxyBackendRequest(
     const value = request.headers.get(header);
     if (value) requestHeaders.set(header, value);
   });
-  requestHeaders.set("accept-encoding", "identity");
+  // Node's fetch decodes the upstream stream transparently. Asking the API
+  // for compression sharply reduces the hop carrying large analytical JSON;
+  // representation headers are removed below before Next.js serves the body.
+  requestHeaders.set("accept-encoding", UPSTREAM_ACCEPT_ENCODING);
   requestHeaders.set(
     "x-forwarded-host",
     request.nextUrl.host,
@@ -79,6 +83,7 @@ export async function proxyBackendRequest(
   const body = BODYLESS_METHODS.has(request.method)
     ? undefined
     : await request.arrayBuffer();
+  const upstreamStartedAt = performance.now();
   const response = await fetchBackendWithTimeout(targetUrl, {
     body,
     cache: "no-store",
@@ -100,6 +105,14 @@ export async function proxyBackendRequest(
   const responseHeaders = new Headers(response.headers);
   HOP_BY_HOP_HEADERS.forEach((header) => responseHeaders.delete(header));
   responseHeaders.delete("content-encoding");
+  responseHeaders.delete("content-md5");
+  responseHeaders.delete("digest");
+  appendServerTiming(
+    responseHeaders,
+    "ipxdata_api",
+    performance.now() - upstreamStartedAt,
+    "Backend API",
+  );
 
   return new NextResponse(
     BODYLESS_STATUSES.has(response.status) ? null : response.body,
@@ -109,6 +122,21 @@ export async function proxyBackendRequest(
       statusText: response.statusText,
     },
   );
+}
+
+export function appendServerTiming(
+  headers: Headers,
+  metric: string,
+  durationMs: number,
+  description: string,
+) {
+  if (!/^[A-Za-z0-9_-]+$/.test(metric) || !Number.isFinite(durationMs)) return;
+  const safeDescription = description.replace(/["\\]/g, "").trim();
+  const value = `${metric};dur=${Math.max(0, durationMs).toFixed(1)}${
+    safeDescription ? `;desc="${safeDescription}"` : ""
+  }`;
+  const current = headers.get("server-timing");
+  headers.set("server-timing", current ? `${current}, ${value}` : value);
 }
 
 async function fetchBackendWithTimeout(targetUrl: string, init: RequestInit) {

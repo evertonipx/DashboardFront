@@ -91,12 +91,114 @@ test("tooltips preservam nomes completos escapados e grade não inventa horas fu
   assert.deepEqual(option.series[1].data[0], [3, 0, 5]);
 });
 
+test("eixo responsivo se adapta a qualquer quantidade de períodos sem assumir 24 horas", () => {
+  const minuteLabels = Array.from(
+    { length: 60 },
+    (_, index) => `12:${String(index).padStart(2, "0")}`,
+  );
+  const option = build(["Entrada"], "light", {
+    cells: [
+      { x: 0, y: 0, value: 1 },
+      { x: 0, y: 59, value: 2 },
+    ],
+    granularity: "minute",
+    xLabels: minuteLabels,
+  });
+  const desktopInterval = option.xAxis.axisLabel.interval;
+  const compactInterval = option.media[0].option.xAxis.axisLabel.interval;
+
+  assert.equal(option.xAxis.data.length, 60);
+  assert.equal(option.dataZoom[0].type, "inside");
+  assert.equal(option.dataZoom[0].xAxisIndex, 0);
+  assert.equal(option.dataZoom[0].startValue, 36);
+  assert.equal(option.dataZoom[0].endValue, 59);
+  assert.equal(desktopInterval(0), true);
+  assert.equal(desktopInterval(59), true);
+  assert.equal(compactInterval(0), true);
+  assert.equal(compactInterval(59), true);
+
+  const optionSource = source.slice(
+    source.indexOf("function buildHeatmapOption"),
+    source.indexOf("function sharedHeatmapMaximum"),
+  );
+  assert.match(optionSource, /const lastXIndex = Math\.max\(0, xLabels\.length - 1\)/);
+  assert.doesNotMatch(optionSource, /index\s*===\s*23/);
+});
+
+test("configurador e relatório preservam o ID legado nas cinco granularidades", () => {
+  const optionsSource = source.slice(
+    source.indexOf("function OccupancyComparisonOptions"),
+    source.indexOf("function OccupancyHalfDonutCard"),
+  );
+  for (const granularity of ["minute", "hour", "day", "week", "month"]) {
+    assert.match(optionsSource, new RegExp(`<SelectItem value="${granularity}">`));
+  }
+  assert.doesNotMatch(optionsSource, /<SelectItem value="(?:semester|year)">/);
+  assert.match(
+    optionsSource,
+    /scenarioPeriodCard && settings\.scenarioHeatmapGranularity === "hour"[\s\S]*?scenarioHourHeatmapDateKey/,
+    "a data civil legada deve continuar configurável somente no modo horário",
+  );
+  assert.match(
+    source,
+    /id: "occupancy_scenario_hour_heatmap"[\s\S]*?label: `Ocupação por cenários x \$\{occupancyScenarioHeatmapGranularityLabel/,
+  );
+  assert.doesNotMatch(
+    source,
+    /id: "occupancy_scenario_(?:minute|day|week|month)_heatmap"/,
+    "visões salvas não podem perder o widget por troca de ID",
+  );
+});
+
+test("tela e exportação consomem o mesmo dataset por período", () => {
+  assert.match(
+    source,
+    /const certifiedScenarioHeatmap[\s\S]*?granularity === "hour"[\s\S]*?certifiedAggregate[\s\S]*?scenarioHeatmapDataset\.scopeKey === scenarioHeatmapScopeKey/,
+  );
+  assert.match(
+    source,
+    /<OccupancyScenarioHourHeatmapCard[\s\S]*?buckets=\{certifiedScenarioHeatmap\.buckets\}[\s\S]*?series=\{series\}/,
+  );
+  assert.match(
+    source,
+    /scenarioHeatmapBuckets: certifiedScenarioHeatmap\.buckets,[\s\S]*?scenarioHeatmapSeries: certifiedScenarioHeatmap\.series/,
+  );
+  assert.equal(
+    (source.match(/buildOccupancyScenarioPeriodHeatmap\(\{/g) ?? []).length,
+    2,
+    "a mesma projeção certificada deve alimentar o card e o PDF",
+  );
+  assert.match(
+    source,
+    /table:[\s\S]*?period: scenarioPeriodMatrix\.labels\[cell\.y\][\s\S]*?scenario: scenarioPeriodMatrix\.scenarioNames\[cell\.x\]/,
+  );
+});
+
 test("tela e exportação usam o mesmo mapeamento, sem alterar os índices semânticos da tabela", () => {
-  assert.equal((source.match(/xLabels: OCCUPANCY_FIXED_HOUR_LABELS,/g) ?? []).length, 4);
-  assert.equal((source.match(/yLabels: (?:dayHourLabels|dayLabels|matrix\.scenarioNames|scenarioHourMatrix\.scenarioNames),/g) ?? []).length, 4);
+  assert.equal(
+    (source.match(/xLabels: OCCUPANCY_FIXED_HOUR_LABELS,/g) ?? []).length,
+    2,
+    "o mapa dias x horas continua com o eixo fixo de 24 horas na tela e na exportação",
+  );
+  assert.equal(
+    (source.match(/xLabels: (?:matrix|scenarioPeriodMatrix)\.labels,/g) ?? [])
+      .length,
+    2,
+    "o mapa por cenários deve compartilhar os labels dinâmicos na tela e exportação",
+  );
+  assert.equal(
+    (source.match(/yLabels: (?:dayHourLabels|dayLabels),/g) ?? []).length,
+    2,
+  );
+  assert.equal(
+    (source.match(/yLabels: (?:matrix|scenarioPeriodMatrix)\.scenarioNames,/g) ?? [])
+      .length,
+    2,
+  );
   assert.equal((source.match(/interactive: false,/g) ?? []).length, 2);
   assert.match(source, /hour: OCCUPANCY_FIXED_HOUR_LABELS\[cell\.y\]/);
-  assert.match(source, /scenario: scenarioHourMatrix\.scenarioNames\[cell\.x\]/);
+  assert.match(source, /period: scenarioPeriodMatrix\.labels\[cell\.y\]/);
+  assert.match(source, /scenario: scenarioPeriodMatrix\.scenarioNames\[cell\.x\]/);
 });
 
 function build(rows: RuntimeFixture, theme: RuntimeFixture, overrides: Record<string, RuntimeFixture> = {}) {

@@ -1,10 +1,10 @@
 const BUILT_IN_COMPANY_TIME_ZONE = "America/Sao_Paulo";
 
 /**
- * Explicit deployment-wide IANA policy used only when the authenticated
- * company's metadata is omitted by the current API/JWT contract. A timezone
- * bound to the same company through JWT, `/auth/me`, selection or cache always
- * takes precedence. This must never be replaced with the browser timezone.
+ * Deployment-wide display fallback used while authenticated company metadata
+ * is unavailable. It never certifies a temporal API request; only an IANA
+ * timezone bound to the same company through JWT, `/auth/me`, selection or
+ * cache may do that. This must never be replaced with the browser timezone.
  */
 export const DEFAULT_COMPANY_TIME_ZONE =
   process.env.NEXT_PUBLIC_IPXDATA_DEFAULT_COMPANY_TIME_ZONE?.trim() ||
@@ -344,6 +344,109 @@ export function formatCompanyDateTime(
     ...options,
     timeZone: requireCompanyTimeZone(timeZone),
   }).format(date);
+}
+
+/**
+ * Formats a real instant for an HTML `datetime-local` control using the
+ * selected company's wall clock. Unlike `Date#getTimezoneOffset`, this is
+ * independent of the browser/Node runtime timezone.
+ */
+export function companyDateTimeLocalValue(date: Date, timeZone: string) {
+  const parts = companyZonedDateParts(date, requireCompanyTimeZone(timeZone));
+  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(
+    2,
+    "0",
+  )}-${String(parts.day).padStart(2, "0")}T${String(parts.hour).padStart(
+    2,
+    "0",
+  )}:${String(parts.minute).padStart(2, "0")}`;
+}
+
+/**
+ * Converts an HTML `datetime-local` wall-clock value into the corresponding
+ * real instant in the selected company's IANA timezone. The first occurrence
+ * is chosen for a repeated DST minute; a nonexistent DST minute is rejected.
+ */
+export function companyDateTimeLocalInstant(
+  value: string,
+  timeZone: string,
+) {
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(
+      value.trim(),
+    );
+  if (!match) return null;
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] =
+    match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText ?? "0");
+  if (
+    !Number.isSafeInteger(hour) ||
+    hour < 0 ||
+    hour > 23 ||
+    !Number.isSafeInteger(minute) ||
+    minute < 0 ||
+    minute > 59 ||
+    !Number.isSafeInteger(second) ||
+    second < 0 ||
+    second > 59
+  ) {
+    return null;
+  }
+
+  try {
+    requireValidCivilDate(year, month, day);
+    const canonicalTimeZone = requireCompanyTimeZone(timeZone);
+    const wallClockAsUtc = Date.UTC(
+      year,
+      month - 1,
+      day,
+      hour,
+      minute,
+      second,
+    );
+    const offsets = new Set<number>();
+    // Sampling both sides of the civil value captures the offsets immediately
+    // before and after a DST transition without scanning all 1,500 minutes of
+    // a long day on every input keystroke.
+    for (let deltaHours = -48; deltaHours <= 48; deltaHours += 6) {
+      offsets.add(
+        timeZoneOffsetMinutes(
+          new Date(wallClockAsUtc + deltaHours * 60 * 60_000),
+          canonicalTimeZone,
+        ),
+      );
+    }
+
+    const candidates = [...offsets]
+      .map(
+        (offsetMinutes) =>
+          new Date(wallClockAsUtc - offsetMinutes * 60_000),
+      )
+      .sort((left, right) => left.getTime() - right.getTime());
+    for (const candidate of candidates) {
+      const parts = companyZonedDateParts(candidate, canonicalTimeZone);
+      if (
+        parts.year === year &&
+        parts.month === month &&
+        parts.day === day &&
+        parts.hour === hour &&
+        parts.minute === minute &&
+        parts.second === second
+      ) {
+        return candidate;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 export function companyDateKey(date: Date, timeZone: string) {

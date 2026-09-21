@@ -118,7 +118,7 @@ function harness(overrides: Record<string, RuntimeFixture> = {}) {
   const comparisonCacheRef: { current: RuntimeFixture } = { current: null };
   const comparisonRetryRef: { current: RuntimeFixture } = { current: null };
   let timerId = 0;
-  const state: RuntimeFixture = { pageActive: true, preferencesReady: true, surface: "analysis", comparisonVisible: true, queryRequested: true, rangeReady: true, comparisonReady: true, companyScopeId: "company-a", comparisonState: null, comparisonKey: "comparison-a", comparisonCacheScopeKey: "comparison-scope-a", comparisonWindow: windowFor({}), timeZone: "America/Sao_Paulo", pending: false, error: null, ...overrides };
+  const state: RuntimeFixture = { companyTimeZoneReady: true, pageActive: true, preferencesReady: true, surface: "analysis", comparisonVisible: true, queryRequested: true, rangeReady: true, comparisonReady: true, companyScopeId: "company-a", comparisonState: null, comparisonKey: "comparison-a", comparisonCacheScopeKey: "comparison-scope-a", comparisonWindow: windowFor({}), timeZone: "America/Sao_Paulo", pending: false, error: null, ...overrides };
   const run = () => compile(`return (${effect.arguments[0].getText(ast)});`, {
     ...state, ...helpers, ...cancellation, ...comparisonQuery, ...refreshPolicy, comparisonRequestRef, comparisonCacheRef, comparisonRetryRef,
     window: { setTimeout: (callback: (...args: RuntimeFixture[]) => RuntimeFixture) => { timers.set(++timerId, callback); return timerId; }, clearTimeout: (id: RuntimeFixture) => timers.delete(id) },
@@ -136,7 +136,7 @@ function harness(overrides: Record<string, RuntimeFixture> = {}) {
 }
 
 test("comparativo só consulta quando visível, solicitado, com período e dados primários prontos", async () => {
-  for (const blocked of [{ pageActive: false }, { preferencesReady: false }, { comparisonVisible: false }, { queryRequested: false }, { rangeReady: false }, { comparisonReady: false }, { companyScopeId: "" }, { comparisonState: { key: "comparison-a" } }]) {
+  for (const blocked of [{ companyTimeZoneReady: false }, { pageActive: false }, { preferencesReady: false }, { comparisonVisible: false }, { queryRequested: false }, { rangeReady: false }, { comparisonReady: false }, { companyScopeId: "" }, { comparisonState: { key: "comparison-a" } }]) {
     const testHarness = harness(blocked);
     testHarness.run();
     await testHarness.flush();

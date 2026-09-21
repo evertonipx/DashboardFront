@@ -9,6 +9,14 @@ import {
   monochromeHeatmapPalette,
   pastelBarColor,
 } from "@/lib/chart-palette";
+import {
+  companyDateTimeLocalInstant,
+  companyZonedDateParts,
+  requireCompanyTimeZone,
+  startOfCompanyTimeZoneCivilDay,
+  startOfCompanyTimeZoneDay,
+  startOfCompanyTimeZoneHour,
+} from "@/lib/company-time-zone";
 import { CHART_VALUE_LABEL_ANGLE } from "@/lib/chart-value-labels";
 import {
   inferDirectionFromText,
@@ -57,8 +65,7 @@ export const COUNTING_INTELLIGENCE_CARD_IDS = {
   accessLeader: "report_counting_access_leader",
   yearOverYearMonth: "report_counting_year_over_year_month",
   annualComparison: "report_counting_annual_comparison",
-  annualAccumulatedComparison:
-    "report_counting_annual_accumulated_comparison",
+  annualAccumulatedComparison: "report_counting_annual_accumulated_comparison",
   dayMonthHeatmap: "report_counting_day_month_heatmap",
   monthYearHeatmap: "report_counting_month_year_heatmap",
   directionalFlow: "report_counting_directional_flow",
@@ -199,6 +206,7 @@ export type CountingIntelligenceModel = {
 };
 
 type BuildCountingIntelligenceInput = {
+  companyTimeZone?: string;
   comparisonDataFrom?: Date;
   comparableDailyRows?: AggregateEventRow[];
   comparableHourlyRows?: AggregateEventRow[];
@@ -240,6 +248,7 @@ type ScenarioLineBinding = {
 };
 
 export function buildCountingIntelligenceModel({
+  companyTimeZone,
   comparisonDataFrom,
   comparableDailyRows,
   comparableHourlyRows,
@@ -257,14 +266,29 @@ export function buildCountingIntelligenceModel({
   scenarios,
   scope,
 }: BuildCountingIntelligenceInput): CountingIntelligenceModel {
-  const normalizedPeriod = normalizeModelPeriod(period, now, includeOpenPeriod);
+  const timeZone = companyTimeZone
+    ? requireCompanyTimeZone(companyTimeZone)
+    : undefined;
+  const normalizedPeriod = normalizeModelPeriod(
+    period,
+    now,
+    includeOpenPeriod,
+    timeZone,
+  );
   const periodFrom = normalizedPeriod.from;
   const periodTo = normalizedPeriod.to;
+  const periodInstants = countingModelDataRange(normalizedPeriod, timeZone);
   const directionalPeriodFrom = new Date(
-    Math.max(periodFrom.getTime(), hourlyPeriod?.from.getTime() ?? periodFrom.getTime()),
+    Math.max(
+      periodInstants.from.getTime(),
+      hourlyPeriod?.from.getTime() ?? periodInstants.from.getTime(),
+    ),
   );
   const directionalPeriodTo = new Date(
-    Math.min(periodTo.getTime(), hourlyPeriod?.to.getTime() ?? periodTo.getTime()),
+    Math.min(
+      periodInstants.to.getTime(),
+      hourlyPeriod?.to.getTime() ?? periodInstants.to.getTime(),
+    ),
   );
   const periodEnd = new Date(
     periodTo > periodFrom ? periodTo.getTime() - 1 : periodFrom.getTime(),
@@ -279,7 +303,7 @@ export function buildCountingIntelligenceModel({
   const requestedDayMonthTo =
     dayMonthHeatmapPeriod && isValidDate(dayMonthHeatmapPeriod.to)
       ? dayMonthHeatmapPeriod.to
-      : startOfCalendarDay(now);
+      : startOfCalendarDay(now, timeZone);
   const dayMonthHeatmapFrom = new Date(
     Math.max(
       periodFrom.getTime(),
@@ -307,20 +331,27 @@ export function buildCountingIntelligenceModel({
   const selectedMonthTotals = aggregateScopeMonths(monthlyRows, scope);
   const comparableCurrentMonthTotals = new Map(selectedMonthTotals);
   const comparablePreviousMonthTotals = new Map(selectedMonthTotals);
-  const openMonthStart = startOfCalendarMonth(now);
+  const openMonthStart = startOfCalendarMonth(now, timeZone);
   const hasOpenMonth =
     includeOpenPeriod &&
     openMonthStart >= periodFrom &&
     openMonthStart < periodTo;
   if (hasOpenMonth) {
-    const comparableCurrentTo = startOfAggregateBucket(now, "hour");
+    const comparableCurrentFrom = timeZone
+      ? countingCivilDateLikeInstant(openMonthStart, timeZone)
+      : openMonthStart;
+    const comparableCurrentTo = timeZone
+      ? startOfCompanyTimeZoneHour(now, timeZone)
+      : startOfAggregateBucket(now, "hour");
     const comparablePreviousFrom = shiftCalendarYearsClamped(
-      openMonthStart,
+      comparableCurrentFrom,
       -1,
+      timeZone,
     );
     const comparablePreviousTo = shiftCalendarYearsClamped(
       comparableCurrentTo,
       -1,
+      timeZone,
     );
     const hasConsolidatedComparableRows =
       comparableDailyRows !== undefined || comparableHourlyRows !== undefined;
@@ -331,20 +362,22 @@ export function buildCountingIntelligenceModel({
             comparableDailyRows ?? [],
             comparableHourlyRows ?? [],
             scope,
-            openMonthStart,
+            comparableCurrentFrom,
             comparableCurrentTo,
+            timeZone,
           )
         : sumScopeHourlyRange(
             hourlyRows,
             scope,
-            openMonthStart,
+            comparableCurrentFrom,
             comparableCurrentTo,
+            timeZone,
           ),
     );
     comparablePreviousMonthTotals.set(
       monthKey(
-        comparablePreviousFrom.getFullYear(),
-        comparablePreviousFrom.getMonth(),
+        modelYear(comparablePreviousFrom, timeZone),
+        modelMonth(comparablePreviousFrom, timeZone),
       ),
       hasConsolidatedComparableRows
         ? sumScopeComparableRange(
@@ -353,12 +386,14 @@ export function buildCountingIntelligenceModel({
             scope,
             comparablePreviousFrom,
             comparablePreviousTo,
+            timeZone,
           )
         : sumScopeHourlyRange(
             hourlyRows,
             scope,
             comparablePreviousFrom,
             comparablePreviousTo,
+            timeZone,
           ),
     );
   }
@@ -366,82 +401,73 @@ export function buildCountingIntelligenceModel({
   const yearRows: CountingYearRow[] = Array.from(
     { length: currentYear - firstYear + 1 },
     (_, index) => firstYear + index,
-  ).map((year) => {
-    const months = COUNTING_MONTH_LABELS.map((_, month) => {
-      const bucket = new Date(year, month, 1);
-      if (bucket < periodFrom || bucket >= periodTo) return null;
-      const key = monthKey(year, month);
-      return selectedMonthTotals.get(key) ?? 0;
-    });
-    const selectedMonthIndexes = months.flatMap((value, month) =>
-      value === null ? [] : [month],
-    );
-    const recordedMonthIndexes = selectedMonthIndexes;
-    const selectedTotal = sumValues(months);
-    const comparableSelectedTotal = selectedMonthIndexes.reduce(
-      (sum, month) =>
-        sum +
-        (rowUsesOpenMonthComparison(
-          year,
-          month,
-          currentYear,
-          currentMonth,
-          hasOpenMonth,
-        )
-          ? comparableCurrentMonthTotals.get(monthKey(year, month)) ?? 0
-          : selectedMonthTotals.get(monthKey(year, month)) ?? 0),
-      0,
-    );
-    const previousComparable = selectedMonthIndexes.reduce(
-      (sum, month) =>
-        sum +
-        (comparablePreviousMonthTotals.get(
-          monthKey(year - 1, month),
-        ) ?? 0),
-      0,
-    );
+  )
+    .map((year) => {
+      const months = COUNTING_MONTH_LABELS.map((_, month) => {
+        const bucket = new Date(year, month, 1);
+        if (bucket < periodFrom || bucket >= periodTo) return null;
+        const key = monthKey(year, month);
+        return selectedMonthTotals.get(key) ?? 0;
+      });
+      const selectedMonthIndexes = months.flatMap((value, month) =>
+        value === null ? [] : [month],
+      );
+      const recordedMonthIndexes = selectedMonthIndexes;
+      const selectedTotal = sumValues(months);
+      const comparableSelectedTotal = selectedMonthIndexes.reduce(
+        (sum, month) =>
+          sum +
+          (rowUsesOpenMonthComparison(
+            year,
+            month,
+            currentYear,
+            currentMonth,
+            hasOpenMonth,
+          )
+            ? (comparableCurrentMonthTotals.get(monthKey(year, month)) ?? 0)
+            : (selectedMonthTotals.get(monthKey(year, month)) ?? 0)),
+        0,
+      );
+      const previousComparable = selectedMonthIndexes.reduce(
+        (sum, month) =>
+          sum +
+          (comparablePreviousMonthTotals.get(monthKey(year - 1, month)) ?? 0),
+        0,
+      );
 
-    return {
-      average: recordedMonthIndexes.length
-        ? selectedTotal / recordedMonthIndexes.length
-        : 0,
-      months,
-      monthYoy: months.map((value, month) =>
-        value === null
-          ? null
-          : percentageDelta(
-              rowUsesOpenMonthComparison(
-                year,
-                month,
-                currentYear,
-                currentMonth,
-                hasOpenMonth,
-              )
-                ? comparableCurrentMonthTotals.get(
-                    monthKey(year, month),
-                  ) ?? 0
-                : value,
-              comparablePreviousMonthTotals.get(
-                monthKey(year - 1, month),
-              ) ?? 0,
-            ),
-      ),
-      selectedMonthCount: recordedMonthIndexes.length,
-      total: selectedTotal,
-      year,
-      ytd: selectedTotal,
-      ytdYoy: percentageDelta(
-        comparableSelectedTotal,
-        previousComparable,
-      ),
-    } satisfies CountingYearRow;
-  }).filter((row) => row.selectedMonthCount > 0 || row.year === currentYear);
+      return {
+        average: recordedMonthIndexes.length
+          ? selectedTotal / recordedMonthIndexes.length
+          : 0,
+        months,
+        monthYoy: months.map((value, month) =>
+          value === null
+            ? null
+            : percentageDelta(
+                rowUsesOpenMonthComparison(
+                  year,
+                  month,
+                  currentYear,
+                  currentMonth,
+                  hasOpenMonth,
+                )
+                  ? (comparableCurrentMonthTotals.get(monthKey(year, month)) ??
+                      0)
+                  : value,
+                comparablePreviousMonthTotals.get(monthKey(year - 1, month)) ??
+                  0,
+              ),
+        ),
+        selectedMonthCount: recordedMonthIndexes.length,
+        total: selectedTotal,
+        year,
+        ytd: selectedTotal,
+        ytdYoy: percentageDelta(comparableSelectedTotal, previousComparable),
+      } satisfies CountingYearRow;
+    })
+    .filter((row) => row.selectedMonthCount > 0 || row.year === currentYear);
 
-  const periodValue = sumMonthRange(
-    selectedMonthTotals,
-    periodFrom,
-    periodTo,
-  );
+  const periodValue = sumMonthRange(selectedMonthTotals, periodFrom, periodTo);
   const requestedPreviousPeriodFrom = addCalendarYears(periodFrom, -1);
   const previousPeriodTo = addCalendarYears(periodTo, -1);
   const certifiedComparisonFrom =
@@ -477,14 +503,13 @@ export function buildCountingIntelligenceModel({
       monthKey(currentYear - 1, currentMonth),
     ) ?? 0;
   const comparableCurrentMonthValue =
-    comparableCurrentMonthTotals.get(
-      monthKey(currentYear, currentMonth),
-    ) ?? 0;
+    comparableCurrentMonthTotals.get(monthKey(currentYear, currentMonth)) ?? 0;
   const monthlyScenarioTotals = aggregateScenarioDirections(
     monthlyRows.filter((row) =>
       isMonthlyBucketInRange(row.bucket, periodFrom, periodTo),
     ),
     scenarios,
+    timeZone,
   );
   const hourlyScenarioTotals = aggregateScenarioDirections(
     hourlyRows.filter((row) =>
@@ -496,6 +521,7 @@ export function buildCountingIntelligenceModel({
       ),
     ),
     scenarios,
+    timeZone,
   );
   const accesses = filterAndRankAccessRows(
     buildAccessRows(scenarios, monthlyScenarioTotals, hourlyScenarioTotals),
@@ -519,10 +545,9 @@ export function buildCountingIntelligenceModel({
     const previousKey = monthKey(currentYear - 1, month);
     const current =
       hasOpenMonth && month === currentMonth
-        ? comparableCurrentMonthTotals.get(currentKey) ?? 0
-        : selectedMonthTotals.get(currentKey) ?? 0;
-    const previous =
-      comparablePreviousMonthTotals.get(previousKey) ?? 0;
+        ? (comparableCurrentMonthTotals.get(currentKey) ?? 0)
+        : (selectedMonthTotals.get(currentKey) ?? 0);
+    const previous = comparablePreviousMonthTotals.get(previousKey) ?? 0;
     return [
       {
         current,
@@ -555,13 +580,9 @@ export function buildCountingIntelligenceModel({
     directionalPeriodTo,
     directionalHours,
     periodAverage: periodMonthCount ? periodValue / periodMonthCount : 0,
-    periodComparisonLimited:
-      previousPeriodFrom > requestedPreviousPeriodFrom,
+    periodComparisonLimited: previousPeriodFrom > requestedPreviousPeriodFrom,
     periodComparisonMonthCount: previousPeriodMonthCount,
-    periodDelta: percentageDelta(
-      comparablePeriodValue,
-      previousPeriodValue,
-    ),
+    periodDelta: percentageDelta(comparablePeriodValue, previousPeriodValue),
     periodFrom,
     periodMonthCount,
     periodTo,
@@ -575,10 +596,7 @@ export function buildCountingIntelligenceModel({
     scopeName: scope.name,
     yearOverYearMonths,
     yearRows,
-    ytdDelta: percentageDelta(
-      comparablePeriodValue,
-      previousPeriodValue,
-    ),
+    ytdDelta: percentageDelta(comparablePeriodValue, previousPeriodValue),
     ytdValue: periodValue,
   };
 }
@@ -632,9 +650,7 @@ export function buildCountingIntelligenceReportAssets(
         description: `Evolução acumulada mês a mês da visão selecionada em ${periodLabel}.`,
         option: buildAnnualAccumulatedComparisonChartOption(
           model,
-          colors[
-            COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison
-          ],
+          colors[COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison],
         ),
         table: annualAccumulatedTable,
         title: "Comparativo acumulado por ano",
@@ -730,9 +746,7 @@ export function buildCountingIntelligenceReportAssets(
             model.periodComparisonLimited
               ? "Base comparável anterior"
               : "Base anterior"
-          }: ${formatNumber(
-            model.previousPeriodAverage,
-          )} por mês`,
+          }: ${formatNumber(model.previousPeriodAverage)} por mês`,
           label: "Média mensal",
           value: formatNumber(model.periodAverage),
         },
@@ -799,8 +813,7 @@ export function buildCountingMonthlyComparison(
   const latestYear = model.currentYear;
   const comparisonYear = latestYear - 1;
   const rowsByYear = new Map<number, CountingMonthlyComparisonYearRow>();
-  let supplementalComparisonRow: CountingMonthlyComparisonYearRow | null =
-    null;
+  let supplementalComparisonRow: CountingMonthlyComparisonYearRow | null = null;
 
   model.yearRows.forEach((row) => {
     const values = [...row.months];
@@ -906,15 +919,13 @@ export function buildCountingDayMonthHeatmapChartOption(
 ): EnterpriseChartOption {
   const unavailableColor = theme === "dark" ? "#1E293B" : "#EEF2F6";
   const cellBorderColor =
-    theme === "dark"
-      ? "rgba(226, 232, 240, 0.12)"
-      : "rgba(15, 23, 42, 0.09)";
+    theme === "dark" ? "rgba(226, 232, 240, 0.12)" : "rgba(15, 23, 42, 0.09)";
   const activeCellBorderColor =
-    theme === "dark"
-      ? "rgba(248, 250, 252, 0.24)"
-      : "rgba(15, 23, 42, 0.20)";
+    theme === "dark" ? "rgba(248, 250, 252, 0.24)" : "rgba(15, 23, 42, 0.20)";
   const certifiedCells = model.dayMonthHeatmapCells.filter(
-    (cell): cell is CountingDayMonthHeatmapCell & { date: Date; total: number } =>
+    (
+      cell,
+    ): cell is CountingDayMonthHeatmapCell & { date: Date; total: number } =>
       cell.date !== null && cell.total !== null,
   );
   const unavailableData = model.dayMonthHeatmapCells
@@ -1078,13 +1089,9 @@ export function buildCountingMonthYearHeatmapChartOption(
   const heatmapColors = monochromeHeatmapPalette(color, theme);
   const unavailableColor = theme === "dark" ? "#1E293B" : "#EEF2F6";
   const cellBorderColor =
-    theme === "dark"
-      ? "rgba(226, 232, 240, 0.12)"
-      : "rgba(15, 23, 42, 0.09)";
+    theme === "dark" ? "rgba(226, 232, 240, 0.12)" : "rgba(15, 23, 42, 0.09)";
   const activeCellBorderColor =
-    theme === "dark"
-      ? "rgba(248, 250, 252, 0.24)"
-      : "rgba(15, 23, 42, 0.20)";
+    theme === "dark" ? "rgba(248, 250, 252, 0.24)" : "rgba(15, 23, 42, 0.20)";
   const rows = countingMonthYearHeatmapRows(model);
   const years = rows.map((row) => row.year);
   const unavailableData = rows.flatMap((row, yearIndex) =>
@@ -1145,7 +1152,10 @@ export function buildCountingMonthYearHeatmapChartOption(
             const tuple = heatmapTuple(parameters.data);
             if (!tuple || tuple[2] < 0) return "";
             const tone =
-              heatmapLabelColor(heatmapColors, tuple[2] / certifiedMaximum) === "#FFFFFF" ? "strong" : "soft";
+              heatmapLabelColor(heatmapColors, tuple[2] / certifiedMaximum) ===
+              "#FFFFFF"
+                ? "strong"
+                : "soft";
             return `{${tone}|${compactNumber(tuple[2])}}`;
           },
           rich: {
@@ -1284,7 +1294,7 @@ export function buildAnnualComparisonChartOption(
     color: [
       ...rows.map((row, index) =>
         row.year === model.currentYear
-          ? primaryColor ?? "#4F8FCB"
+          ? (primaryColor ?? "#4F8FCB")
           : pastelBarColor(index + 1),
       ),
       ANNUAL_COMPARISON_AVERAGE_COLOR,
@@ -1351,7 +1361,7 @@ export function buildAnnualComparisonChartOption(
           borderRadius: [2, 2, 0, 0],
           color:
             row.year === model.currentYear
-              ? primaryColor ?? "#4F8FCB"
+              ? (primaryColor ?? "#4F8FCB")
               : pastelBarColor(index + 1),
         },
         label: {
@@ -1480,7 +1490,7 @@ export function buildAnnualAccumulatedComparisonChartOption(
   return {
     color: rows.map((row, index) =>
       row.year === model.currentYear
-        ? primaryColor ?? "#4F8FCB"
+        ? (primaryColor ?? "#4F8FCB")
         : pastelBarColor(index + 1),
     ),
     grid: {
@@ -1542,7 +1552,7 @@ export function buildAnnualAccumulatedComparisonChartOption(
           borderRadius: [2, 2, 0, 0],
           color:
             row.year === model.currentYear
-              ? primaryColor ?? "#4F8FCB"
+              ? (primaryColor ?? "#4F8FCB")
               : pastelBarColor(index + 1),
         },
         label: {
@@ -1623,9 +1633,7 @@ function annualComparisonRows(model: CountingIntelligenceModel) {
     average: row.average,
     baselineOnly: row.baselineOnly,
     months: row.months,
-    name: row.baselineOnly
-      ? `${row.year} (base comparável)`
-      : String(row.year),
+    name: row.baselineOnly ? `${row.year} (base comparável)` : String(row.year),
     year: row.year,
   }));
 
@@ -1889,9 +1897,7 @@ function buildDayMonthHeatmapCells({
         date: certified ? candidate : null,
         day,
         month,
-        total: certified
-          ? (totals.get(dayKey(year, month, day)) ?? 0)
-          : null,
+        total: certified ? (totals.get(dayKey(year, month, day)) ?? 0) : null,
       } satisfies CountingDayMonthHeatmapCell;
     }),
   );
@@ -1940,8 +1946,9 @@ function sumScopeHourlyRange(
   scope: CountingIntelligenceScope,
   from: Date,
   to: Date,
+  companyTimeZone?: string,
 ) {
-  return sumScopeAggregateRange(rows, "hour", scope, from, to);
+  return sumScopeAggregateRange(rows, "hour", scope, from, to, companyTimeZone);
 }
 
 function sumScopeComparableRange(
@@ -1950,17 +1957,24 @@ function sumScopeComparableRange(
   scope: CountingIntelligenceScope,
   from: Date,
   to: Date,
+  companyTimeZone?: string,
 ) {
-  const firstPartialDayEnd = startOfAggregateBucket(from, "day");
+  const firstPartialDayEnd = companyTimeZone
+    ? startOfCompanyTimeZoneDay(from, companyTimeZone)
+    : startOfAggregateBucket(from, "day");
   const closedDayFrom =
     firstPartialDayEnd.getTime() === from.getTime()
       ? from
-      : new Date(
-          firstPartialDayEnd.getFullYear(),
-          firstPartialDayEnd.getMonth(),
-          firstPartialDayEnd.getDate() + 1,
-        );
-  const closedDayTo = startOfAggregateBucket(to, "day");
+      : companyTimeZone
+        ? addCompanyCalendarDays(firstPartialDayEnd, 1, companyTimeZone)
+        : new Date(
+            firstPartialDayEnd.getFullYear(),
+            firstPartialDayEnd.getMonth(),
+            firstPartialDayEnd.getDate() + 1,
+          );
+  const closedDayTo = companyTimeZone
+    ? startOfCompanyTimeZoneDay(to, companyTimeZone)
+    : startOfAggregateBucket(to, "day");
   if (closedDayFrom >= closedDayTo) {
     return sumScopeAggregateRange(
       hourlyRows,
@@ -1968,6 +1982,7 @@ function sumScopeComparableRange(
       scope,
       from,
       to,
+      companyTimeZone,
     );
   }
   const hourlyTotal =
@@ -1977,6 +1992,7 @@ function sumScopeComparableRange(
       scope,
       from,
       new Date(Math.min(closedDayFrom.getTime(), to.getTime())),
+      companyTimeZone,
     ) +
     sumScopeAggregateRange(
       hourlyRows,
@@ -1984,6 +2000,7 @@ function sumScopeComparableRange(
       scope,
       new Date(Math.max(closedDayTo.getTime(), from.getTime())),
       to,
+      companyTimeZone,
     );
 
   return (
@@ -1994,6 +2011,7 @@ function sumScopeComparableRange(
       scope,
       closedDayFrom,
       closedDayTo,
+      companyTimeZone,
     )
   );
 }
@@ -2004,6 +2022,7 @@ function sumScopeAggregateRange(
   scope: CountingIntelligenceScope,
   from: Date,
   to: Date,
+  companyTimeZone?: string,
 ) {
   if (from >= to) return 0;
 
@@ -2015,7 +2034,12 @@ function sumScopeAggregateRange(
     : new Map<string, number>();
 
   return rows.reduce((total, row) => {
-    if (!aggregateBucketInRange(row.bucket, granularity, from, to)) {
+    const bucket = countingAggregateBucketInstant(
+      row.bucket,
+      granularity,
+      companyTimeZone,
+    );
+    if (!bucket || bucket < from || bucket >= to) {
       return total;
     }
     if (selectedScenarios) {
@@ -2038,16 +2062,13 @@ function rowUsesOpenMonthComparison(
   currentMonth: number,
   hasOpenMonth: boolean,
 ) {
-  return (
-    hasOpenMonth &&
-    year === currentYear &&
-    month === currentMonth
-  );
+  return hasOpenMonth && year === currentYear && month === currentMonth;
 }
 
 function aggregateScenarioDirections(
   rows: AggregateEventRow[],
   scenarios: Scenario[],
+  companyTimeZone?: string,
 ) {
   const bindings = buildScenarioLineBindings(scenarios);
   const totals = new Map<string, ScenarioDirectionTotals>();
@@ -2068,13 +2089,14 @@ function aggregateScenarioDirections(
     const date = parseAggregateBucket(row.bucket, "hour");
     if (!date) return;
     const rawTotal = Math.abs(finiteTotal(row.total));
+    const hour = companyTimeZone
+      ? companyZonedDateParts(date, companyTimeZone).hour
+      : date.getHours();
 
     rowBindings.forEach((binding) => {
       const value = rawTotal * binding.weight;
       const scenarioTotal = totals.get(binding.scenarioId);
-      const hourTotal = hourly.get(
-        accessHourKey(binding.scenarioId, date.getHours()),
-      );
+      const hourTotal = hourly.get(accessHourKey(binding.scenarioId, hour));
       if (!scenarioTotal || !hourTotal) return;
 
       scenarioTotal[binding.direction] += value;
@@ -2165,7 +2187,10 @@ function buildAccessRows(
       flowRank: flowRanks.get(row.id) ?? 0,
       share: totalFlow ? row.flow / totalFlow : 0,
     }))
-    .sort((left, right) => right.flow - left.flow || left.name.localeCompare(right.name));
+    .sort(
+      (left, right) =>
+        right.flow - left.flow || left.name.localeCompare(right.name),
+    );
 }
 
 function filterAndRankAccessRows(
@@ -2405,7 +2430,9 @@ function buildAnnualAccumulatedReportTable(
   };
 }
 
-function buildAccessRankingReportTable(model: CountingIntelligenceModel): ReportTable {
+function buildAccessRankingReportTable(
+  model: CountingIntelligenceModel,
+): ReportTable {
   return {
     columns: [
       { key: "flow_rank", label: "Rank", width: 10, numeric: true },
@@ -2457,7 +2484,9 @@ function buildDirectionalHourlyReportTable(
   };
 }
 
-function buildAccessPeakReportTable(model: CountingIntelligenceModel): ReportTable {
+function buildAccessPeakReportTable(
+  model: CountingIntelligenceModel,
+): ReportTable {
   return {
     columns: [
       { key: "access", label: "Acesso (cenário)", width: 30 },
@@ -2514,7 +2543,10 @@ function buildAccessHourlyDetailReportTable(
 function rankValues(rows: CountingAccessRow[], key: "entry" | "exit" | "flow") {
   return new Map(
     [...rows]
-      .sort((left, right) => right[key] - left[key] || left.name.localeCompare(right.name))
+      .sort(
+        (left, right) =>
+          right[key] - left[key] || left.name.localeCompare(right.name),
+      )
       .map((row, index) => [row.id, row[key] > 0 ? index + 1 : 0]),
   );
 }
@@ -2524,13 +2556,18 @@ function peakHour(
   direction: Direction,
 ) {
   const peak = rows.reduce(
-    (best, row) => (row[direction] > best.value ? { hour: row.hour, value: row[direction] } : best),
+    (best, row) =>
+      row[direction] > best.value
+        ? { hour: row.hour, value: row[direction] }
+        : best,
     { hour: null as number | null, value: 0 },
   );
   return peak;
 }
 
-function peakFlowHour(rows: Array<{ entry: number; exit: number; hour: number }>) {
+function peakFlowHour(
+  rows: Array<{ entry: number; exit: number; hour: number }>,
+) {
   return rows.reduce(
     (best, row) => {
       const value = row.entry + row.exit;
@@ -2544,22 +2581,31 @@ function normalizeModelPeriod(
   period: BuildCountingIntelligenceInput["period"],
   now: Date,
   includeOpenPeriod: boolean,
+  companyTimeZone?: string,
 ) {
   const minimum = new Date(COUNTING_HISTORY_START_YEAR, 0, 1);
   const maximum = includeOpenPeriod
-    ? startOfNextMonth(now)
-    : startOfCalendarMonth(now);
-  const candidateFrom = period?.from && isValidDate(period.from)
-    ? startOfCalendarMonth(period.from)
-    : minimum;
-  const candidateTo = period?.to && isValidDate(period.to)
-    ? startOfCalendarMonth(period.to)
-    : maximum;
+    ? startOfNextMonth(now, companyTimeZone)
+    : startOfCalendarMonth(now, companyTimeZone);
+  const candidateFrom =
+    period?.from && isValidDate(period.from)
+      ? startOfCalendarMonth(period.from)
+      : minimum;
+  const candidateTo =
+    period?.to && isValidDate(period.to)
+      ? startOfCalendarMonth(period.to)
+      : maximum;
   let from = new Date(
-    Math.max(minimum.getTime(), Math.min(candidateFrom.getTime(), maximum.getTime())),
+    Math.max(
+      minimum.getTime(),
+      Math.min(candidateFrom.getTime(), maximum.getTime()),
+    ),
   );
   const to = new Date(
-    Math.max(minimum.getTime(), Math.min(candidateTo.getTime(), maximum.getTime())),
+    Math.max(
+      minimum.getTime(),
+      Math.min(candidateTo.getTime(), maximum.getTime()),
+    ),
   );
 
   if (to < from) from = new Date(to);
@@ -2567,11 +2613,7 @@ function normalizeModelPeriod(
   return { from, to };
 }
 
-function sumMonthRange(
-  totals: Map<string, number>,
-  from: Date,
-  to: Date,
-) {
+function sumMonthRange(totals: Map<string, number>, from: Date, to: Date) {
   let total = 0;
   for (
     let cursor = startOfCalendarMonth(from);
@@ -2595,15 +2637,27 @@ function countCalendarMonths(from: Date, to: Date) {
   return count;
 }
 
-function startOfCalendarMonth(date: Date) {
+function startOfCalendarMonth(date: Date, companyTimeZone?: string) {
+  if (companyTimeZone) {
+    const parts = companyZonedDateParts(date, companyTimeZone);
+    return new Date(parts.year, parts.month - 1, 1);
+  }
   return new Date(date.getFullYear(), date.getMonth(), 1);
 }
 
-function startOfCalendarDay(date: Date) {
+function startOfCalendarDay(date: Date, companyTimeZone?: string) {
+  if (companyTimeZone) {
+    const parts = companyZonedDateParts(date, companyTimeZone);
+    return new Date(parts.year, parts.month - 1, parts.day);
+  }
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-function startOfNextMonth(date: Date) {
+function startOfNextMonth(date: Date, companyTimeZone?: string) {
+  if (companyTimeZone) {
+    const parts = companyZonedDateParts(date, companyTimeZone);
+    return new Date(parts.year, parts.month, 1);
+  }
   return new Date(date.getFullYear(), date.getMonth() + 1, 1);
 }
 
@@ -2615,22 +2669,124 @@ function addCalendarYears(date: Date, amount: number) {
   return new Date(date.getFullYear() + amount, date.getMonth(), 1);
 }
 
-function shiftCalendarYearsClamped(date: Date, amount: number) {
-  const targetYear = date.getFullYear() + amount;
-  const lastDay = new Date(
-    targetYear,
-    date.getMonth() + 1,
-    0,
-  ).getDate();
-  return new Date(
-    targetYear,
-    date.getMonth(),
-    Math.min(date.getDate(), lastDay),
-    date.getHours(),
-    date.getMinutes(),
-    date.getSeconds(),
-    date.getMilliseconds(),
+function shiftCalendarYearsClamped(
+  date: Date,
+  amount: number,
+  companyTimeZone?: string,
+) {
+  const parts = companyTimeZone
+    ? companyZonedDateParts(date, companyTimeZone)
+    : {
+        day: date.getDate(),
+        hour: date.getHours(),
+        minute: date.getMinutes(),
+        month: date.getMonth() + 1,
+        second: date.getSeconds(),
+        year: date.getFullYear(),
+      };
+  const targetYear = parts.year + amount;
+  const lastDay = new Date(Date.UTC(targetYear, parts.month, 0)).getUTCDate();
+  if (!companyTimeZone) {
+    return new Date(
+      targetYear,
+      parts.month - 1,
+      Math.min(parts.day, lastDay),
+      parts.hour,
+      parts.minute,
+      parts.second,
+      date.getMilliseconds(),
+    );
+  }
+  const shifted = countingCivilDateLikeInstant(
+    new Date(
+      targetYear,
+      parts.month - 1,
+      Math.min(parts.day, lastDay),
+      parts.hour,
+      parts.minute,
+      parts.second,
+      date.getMilliseconds(),
+    ),
+    companyTimeZone,
   );
+  return shifted;
+}
+
+function countingModelDataRange(
+  period: { from: Date; to: Date },
+  companyTimeZone?: string,
+) {
+  if (!companyTimeZone) return period;
+  return {
+    from: countingCivilDateLikeInstant(period.from, companyTimeZone),
+    to: countingCivilDateLikeInstant(period.to, companyTimeZone),
+  };
+}
+
+function countingCivilDateLikeInstant(date: Date, companyTimeZone: string) {
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  const value = `${String(date.getFullYear()).padStart(4, "0")}-${String(
+    date.getMonth() + 1,
+  ).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(
+    date.getHours(),
+  ).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(
+    date.getSeconds(),
+  ).padStart(2, "0")}`;
+  const instant = companyDateTimeLocalInstant(value, timeZone);
+  if (!instant) {
+    throw new RangeError(
+      `O horário civil ${value} não existe no fuso ${timeZone}.`,
+    );
+  }
+  return new Date(instant.getTime() + date.getMilliseconds());
+}
+
+function countingAggregateBucketInstant(
+  value: string | Date,
+  granularity: "day" | "hour",
+  companyTimeZone?: string,
+) {
+  const bucket = parseAggregateBucket(value, granularity);
+  if (!bucket || !companyTimeZone || granularity === "hour") return bucket;
+  return startOfCompanyTimeZoneCivilDay(
+    {
+      day: bucket.getDate(),
+      month: bucket.getMonth() + 1,
+      year: bucket.getFullYear(),
+    },
+    companyTimeZone,
+  );
+}
+
+function addCompanyCalendarDays(
+  date: Date,
+  amount: number,
+  companyTimeZone: string,
+) {
+  const parts = companyZonedDateParts(date, companyTimeZone);
+  const next = new Date(
+    Date.UTC(parts.year, parts.month - 1, parts.day + amount),
+  );
+  return startOfCompanyTimeZoneCivilDay(
+    {
+      day: next.getUTCDate(),
+      month: next.getUTCMonth() + 1,
+      year: next.getUTCFullYear(),
+    },
+    companyTimeZone,
+  );
+}
+
+function modelYear(date: Date, companyTimeZone?: string) {
+  return companyTimeZone
+    ? companyZonedDateParts(date, companyTimeZone).year
+    : date.getFullYear();
+}
+
+function modelMonth(date: Date, companyTimeZone?: string) {
+  return companyTimeZone
+    ? companyZonedDateParts(date, companyTimeZone).month - 1
+    : date.getMonth();
 }
 
 function isValidDate(date: Date) {
@@ -2696,7 +2852,11 @@ function accessHourKey(accessId: string, hour: number) {
 }
 
 function percentageDelta(current: number, previous: number) {
-  if (!Number.isFinite(current) || !Number.isFinite(previous) || previous === 0) {
+  if (
+    !Number.isFinite(current) ||
+    !Number.isFinite(previous) ||
+    previous === 0
+  ) {
     return null;
   }
   return (current - previous) / Math.abs(previous);
@@ -2751,10 +2911,9 @@ function hourLabel(hour: number) {
 }
 
 function hourRangeLabel(hour: number) {
-  return `${String(hour).padStart(2, "0")}:00-${String((hour + 1) % 24).padStart(
-    2,
-    "0",
-  )}:00`;
+  return `${String(hour).padStart(2, "0")}:00-${String(
+    (hour + 1) % 24,
+  ).padStart(2, "0")}:00`;
 }
 
 export function optionalHourRangeLabel(hour: number | null) {

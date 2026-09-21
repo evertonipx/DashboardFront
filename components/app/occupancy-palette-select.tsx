@@ -48,7 +48,14 @@ export function OccupancyPaletteSelect({
         )}
         title={`${palette.label} — ${palette.description}`}
       >
-        <PaletteSwatches colors={palette.colors} compact={compact} selected />
+        <span className="flex min-w-0 items-center gap-2">
+          <PaletteSwatches colors={palette.colors} compact={compact} selected />
+          {fluid ? (
+            <span className="min-w-0 truncate text-xs font-medium">
+              {palette.label}
+            </span>
+          ) : null}
+        </span>
       </SelectTrigger>
       <SelectContent className="max-h-[360px] sm:min-w-[340px]">
         {OCCUPANCY_COLOR_PALETTES.map((option) => (

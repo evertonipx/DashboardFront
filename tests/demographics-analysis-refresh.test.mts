@@ -62,13 +62,14 @@ const dateRanges = loadModule("lib/demographics-date-range.ts", {
   "@/lib/user-grid-local": { writeUserGridPreference: () => true },
 });
 
-function createFixture({ visible = true, preferencesReady = true, pageVisible = true, online = true }: Record<string, RuntimeFixture> = {}) {
+function createFixture({ visible = true, preferencesReady = true, pageVisible = true, online = true, timeZoneReady = true }: Record<string, RuntimeFixture> = {}) {
   const state: RuntimeFixture = {
     now: new Date("2026-09-10T15:15:42Z"),
     clock: new Date("2026-09-10T13:00:00Z"),
     companyId: "company-a",
     userId: "user-a",
     timeZone: "America/Sao_Paulo",
+    timeZoneReady,
     rangeState: null,
     requestedKey: "",
     refreshVersion: 0,
@@ -160,6 +161,7 @@ function createFixture({ visible = true, preferencesReady = true, pageVisible = 
       window: fakeWindow,
       surface: "analysis",
       timeZone: state.timeZone,
+      companyTimeZoneReady: state.timeZoneReady,
       companyScopeId: state.companyId,
       user: { id: state.userId },
       todayInput: time.companyDateKey(state.clock, state.timeZone),
@@ -403,6 +405,26 @@ test("hidratar o fuso real reancora ontem somente quando ainda é a seleção pa
   const query = new URL(fixture.state.calls[0].path, "https://fixture.invalid").searchParams;
   assert.equal(query.get("from")!, "2026-09-09T00:00:00.000Z");
   assert.equal(query.get("to")!, "2026-09-10T00:00:00.000Z");
+});
+
+test("fallback de implantação não consulta; o fuso certificado hidrata e recompõe a janela", async () => {
+  const fixture = createFixture({ timeZoneReady: false });
+
+  await fixture.run();
+  assert.equal(fixture.state.calls.length, 0);
+  assert.equal(fixture.state.requestedKey, "");
+  assert.equal(fixture.state.error, "");
+
+  fixture.state.timeZone = "UTC";
+  fixture.state.timeZoneReady = true;
+  fixture.initialize();
+  await fixture.run();
+
+  assert.equal(fixture.state.calls.length, 1);
+  const query = new URL(fixture.state.calls[0].path, "https://fixture.invalid").searchParams;
+  assert.equal(query.get("from"), "2026-09-09T00:00:00.000Z");
+  assert.equal(query.get("to"), "2026-09-10T00:00:00.000Z");
+  assert.equal(fixture.state.data.summary.temporal.timeZone, "UTC");
 });
 
 test("hidratar fuso preserva datas explicitamente aplicadas e remapeia seus instantes", async () => {

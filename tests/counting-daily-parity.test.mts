@@ -14,6 +14,8 @@ const time = load("lib/aggregate-time.ts");
 const scenariosModel = load("lib/scenario-analytics.ts");
 const analysis = load("lib/period-analysis-model.ts");
 const reconciliation = load("lib/aggregate-reconciliation.ts");
+const countingReconciliation = load("lib/counting-aggregate-reconciliation.ts");
+const countingTime = load("lib/counting-time-zone.ts");
 const livePath = "components/app/realtime-dashboard.tsx";
 const liveTotal = standalone("sumScopeRowsInRange", {
   aggregateBucketInRange: time.aggregateBucketInRange,
@@ -100,6 +102,7 @@ test("agregados civis recentes renovam por hora; histórico não é baixado em c
   let total = 100;
   const loadNative = standalone("loadCachedRealtimeNativeQuery", {
     ...time,
+    ...countingTime,
     DEFAULT_METRIC_TYPE: "count",
     startOfDay: (date: Date) => time.startOfAggregateBucket(date, "day"),
     addDays: (date: Date, count: number) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + count),
@@ -108,6 +111,7 @@ test("agregados civis recentes renovam por hora; histórico não é baixado em c
   const cache = new Map();
   const base = {
     cache, cacheScope: "company:America/Sao_Paulo", companyScopeId: "company",
+    timeZone: "America/Sao_Paulo",
     signal: new AbortController().signal,
     query: { granularity: "day", from: new Date(2026, 7, 1), to: new Date(2026, 7, 27) },
   };
@@ -162,7 +166,13 @@ test("Live recompõe dias completos como Análises, preservando lacunas e dias p
     { from: new Date(2026, 7, 1, 12), to: day2 },
     { from: new Date(2026, 7, 3, 10), to: new Date(2026, 7, 3, 11) },
   ];
-  const result = hydrate(original, definitions, new Date(2026, 7, 10), coverage);
+  const result = hydrate(
+    original,
+    definitions,
+    new Date(2026, 7, 10),
+    coverage,
+    "America/Sao_Paulo",
+  );
   const totals = Object.fromEntries(result.daily.rows.map((item: RuntimeFixture) => [item.bucket, item.total]));
   assert.deepEqual(totals, { "2026-08-01": 100, "2026-08-02": 500, "2026-08-03": 99 });
   assert.equal(original.daily.rows[0].total, 130, "hidratação não altera snapshot anterior");
@@ -171,7 +181,13 @@ test("Live recompõe dias completos como Análises, preservando lacunas e dias p
     widget: widget("day_total", "scenario", ["net"]),
   });
   assert.equal(totals["2026-08-01"], model.metrics[0].value);
-  const zero = hydrate({ ...original, live_operational_month_hours: { granularity: "hour", rows: [] } }, definitions, new Date(2026, 7, 10), coverage);
+  const zero = hydrate(
+    { ...original, live_operational_month_hours: { granularity: "hour", rows: [] } },
+    definitions,
+    new Date(2026, 7, 10),
+    coverage,
+    "America/Sao_Paulo",
+  );
   assert.equal(zero.daily.rows.some((item: RuntimeFixture) => item.bucket === "2026-08-01"), false, "resposta completa vazia substitui valor antigo por zero");
   assert.equal(zero.daily.rows.find((item: RuntimeFixture) => item.bucket === "2026-08-02").total, 500);
 });
@@ -189,7 +205,7 @@ test("falha na hora em andamento não publica um total parcial como diário comp
     { id: "live_operational_month_hours", from, to, granularity: "hour" },
     { id: "live_chart_hour", from, to, granularity: "hour" },
     { id: "daily", from, to, granularity: "day" },
-  ], new Date(2026, 7, 1, 10, 20), [{ from, to: new Date(2026, 7, 1, 11) }]);
+  ], new Date(2026, 7, 1, 10, 20), [{ from, to: new Date(2026, 7, 1, 11) }], "America/Sao_Paulo");
   for (const id of ["live_operational_month_hours", "live_chart_hour", "daily"]) {
     assert.equal(result[id].error, "Minutos indisponíveis");
     assert.deepEqual(result[id].rows, []);
@@ -198,7 +214,10 @@ test("falha na hora em andamento não publica um total parcial como diário comp
 
 function liveHydrator() {
   const base = {
-    ...time, ...reconciliation,
+    ...time,
+    ...reconciliation,
+    ...countingReconciliation,
+    ...countingTime,
     startOfHour: (date: Date) => time.startOfAggregateBucket(date, "hour"),
     startOfMinute: (date: Date) => time.startOfAggregateBucket(date, "minute"),
     startOfDay: (date: Date) => time.startOfAggregateBucket(date, "day"),
@@ -206,7 +225,7 @@ function liveHydrator() {
     addMinutes: (date: Date, count: number) => new Date(date.getTime() + count * 60_000),
     isRealtimeNativeCoarseGranularity: standalone("isRealtimeNativeCoarseGranularity", {}),
   };
-  return standalone("hydrateRealtimeOpenBuckets", {
+  const bindings: Record<string, RuntimeFixture> = {
     ...base,
     OPERATIONAL_MONTH_HOURS_ID: "live_operational_month_hours",
     OPERATIONAL_CURRENT_HOUR_MINUTES_ID: "live_operational_current_hour_minutes",
@@ -214,9 +233,13 @@ function liveHydrator() {
     CANONICAL_HOUR_DERIVED_IDS: new Set(["live_chart_hour"]),
     CANONICAL_HOUR_DERIVED_TARGETS: [{ id: "live_chart_hour", granularity: "hour" }],
     realtimeNativeOpenBoundaryRange: standalone("realtimeNativeOpenBoundaryRange", base),
-    realtimeNativeOpenBucketRange: standalone("realtimeNativeOpenBucketRange", base),
     mergeRealtimeQueryRanges: standalone("mergeRealtimeQueryRanges", {}),
-  });
+  };
+  bindings.realtimeFullyCoveredCivilDayRanges = standalone(
+    "realtimeFullyCoveredCivilDayRanges",
+    bindings,
+  );
+  return standalone("hydrateRealtimeOpenBuckets", bindings);
 }
 
 function row(date: Date, line: RuntimeFixture, total: number, camera = "camera") {

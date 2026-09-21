@@ -16,6 +16,9 @@ const dashboardAst = ts.createSourceFile(dashboardPath, dashboardSource, ts.Scri
 const modules = new Map();
 const time = loadModule("lib/aggregate-time.ts");
 const hourQuery = loadModule("lib/aggregate-hour-query.ts");
+const countingAggregateReconciliation = loadModule(
+  "lib/counting-aggregate-reconciliation.ts",
+);
 const { normalizeOccupancyAnalysisDateRangeInput } = loadModule("lib/occupancy-analysis-window.ts");
 const { companyDateKey } = loadModule("lib/company-time-zone.ts");
 const { resolvePeriodAnalysisRange } = loadModule("lib/period-analysis-model.ts");
@@ -112,6 +115,7 @@ function createFixture({ storageFails = false } = {}) {
       hourQuery.fetchBoundedHourlyAggregateRanges({
         cache: hourlyAggregateCacheRef.current, cacheScope: "analysis:company-a:America/Sao_Paulo",
         companyScopeId: "company-a", ranges: [range], now: new Date(2026, 8, 10, 12), signal: controller.signal,
+        timeZone: "America/Sao_Paulo",
         request: async (url: RuntimeFixture) => {
           const params = new URL(url, "https://fixture.invalid").searchParams;
           assert.equal(params.get("metric_type"), "count");
@@ -178,7 +182,10 @@ test("falha ao salvar a preferência não impede buscar a contagem atual", async
 });
 
 test("horas de uma janela parcial não apagam a indisponibilidade do histórico diário", () => {
-  const merge = standalone("mergeExactHoursIntoDays", loadModule("lib/aggregate-reconciliation.ts"));
+  const merge = standalone("mergeExactHoursIntoDays", {
+    ...loadModule("lib/aggregate-reconciliation.ts"),
+    ...countingAggregateReconciliation,
+  });
   const range = { from: new Date(2026, 7, 1), to: new Date(2026, 8, 1) };
   const unavailableHistory = {
     granularity: "day", rows: [], error: "O histórico diário de 2024 a 2026 está indisponível.",
@@ -188,7 +195,12 @@ test("horas de uma janela parcial não apagam a indisponibilidade do histórico 
     line_count_id: "line-a", metric_type: "count", total: 20,
   }]]) {
     assert.equal(
-      merge(unavailableHistory, { granularity: "hour", rows }, range),
+      merge(
+        unavailableHistory,
+        { granularity: "hour", rows },
+        range,
+        "America/Sao_Paulo",
+      ),
       unavailableHistory,
       "uma janela horária de 31 dias, inclusive vazia, não certifica o histórico inteiro",
     );
@@ -196,7 +208,10 @@ test("horas de uma janela parcial não apagam a indisponibilidade do histórico 
 });
 
 test("dias disponíveis continuam reconciliando horas válidas, inclusive correção vazia", () => {
-  const merge = standalone("mergeExactHoursIntoDays", loadModule("lib/aggregate-reconciliation.ts"));
+  const merge = standalone("mergeExactHoursIntoDays", {
+    ...loadModule("lib/aggregate-reconciliation.ts"),
+    ...countingAggregateReconciliation,
+  });
   const range = { from: new Date(2026, 7, 27), to: new Date(2026, 7, 28) };
   const row = { camera_id: "camera-a", line_count_id: "line-a", metric_type: "count" };
   const daily = { granularity: "day", rows: [
@@ -206,12 +221,20 @@ test("dias disponíveis continuam reconciliando horas válidas, inclusive corre�
   const before = structuredClone(daily);
   const corrected = merge(daily, {
     granularity: "hour", rows: [{ ...row, bucket: new Date(2026, 7, 27, 12).toISOString(), total: 20 }],
-  }, range);
+  }, range, "America/Sao_Paulo");
   assert.equal(corrected.error, undefined);
   assert.deepEqual(corrected.rows.map(({ bucket, total }: RuntimeFixture) => [bucket, total]), [
     ["2026-08-26", 100], ["2026-08-27", 20],
   ]);
-  assert.deepEqual(merge(daily, { granularity: "hour", rows: [] }, range).rows, [daily.rows[0]]);
+  assert.deepEqual(
+    merge(
+      daily,
+      { granularity: "hour", rows: [] },
+      range,
+      "America/Sao_Paulo",
+    ).rows,
+    [daily.rows[0]],
+  );
   assert.deepEqual(daily, before);
 });
 

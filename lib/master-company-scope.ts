@@ -6,7 +6,6 @@ import {
   readCachedCompany,
 } from "@/lib/company-cache";
 import {
-  DEFAULT_COMPANY_TIME_ZONE,
   resolveCompanyTimeZone,
   type CompanyTimeZoneCandidate,
   type CompanyTimeZoneResolution,
@@ -189,26 +188,18 @@ export function getCompanyTimeZoneResolutionForScope(
           },
       ];
 
-  return resolveCompanyTimeZone([
-    ...candidates,
-    {
-      // Swagger's `/auth/me` does not expose timezone and the only company
-      // detail route is super-admin-only. The deployment policy therefore
-      // completes only the exact authenticated/selected tenant. It never
-      // certifies an empty or divergent company scope.
-      source: "deployment-default",
-      value: scopeBelongsToAuthenticatedContext
-        ? DEFAULT_COMPANY_TIME_ZONE
-        : undefined,
-    },
-  ]);
+  // The deployment default remains a rendering fallback only. It must never
+  // certify a temporal request because it is not metadata bound to this
+  // company. Operational queries proceed only with an IANA timezone supplied
+  // by the same-company JWT/profile, selected scope or company cache.
+  return resolveCompanyTimeZone(candidates);
 }
 
 /**
  * An explicit company in a video-wall URL is accepted only while it remains
- * the effective authenticated scope and has timezone metadata tied to that
- * same company, including the explicit deployment policy. Browser timezone is
- * deliberately never accepted as a fallback in this path.
+ * the effective authenticated scope and has explicit timezone metadata tied
+ * to that same company. Neither the browser timezone nor the deployment
+ * display fallback is accepted in this path.
  */
 export function certifyCompanyScopeTimeZoneOverride(
   user: CurrentUser | null,

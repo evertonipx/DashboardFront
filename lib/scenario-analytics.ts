@@ -10,8 +10,10 @@ import {
 } from "@/lib/aggregate-time";
 import {
   companyZonedDateParts,
+  endOfCompanyTimeZoneHour,
   requireCompanyTimeZone,
   startOfCompanyTimeZoneCivilDay,
+  startOfCompanyTimeZoneHour,
 } from "@/lib/company-time-zone";
 import {
   buildHourlyOccupancySeries,
@@ -21,11 +23,7 @@ import {
 
 export type ScenarioSelectionMode = "all" | "custom";
 export type ScenarioAnalyticsGranularity =
-  | "minute"
-  | "hour"
-  | "day"
-  | "week"
-  | "month";
+  "minute" | "hour" | "day" | "week" | "month";
 
 export type ScenarioAnalyticsPoint = {
   bucket: string;
@@ -94,6 +92,7 @@ export function scenarioSelectionSummary(
 }
 
 export function buildCombinedScenarioPoints({
+  companyTimeZone,
   from,
   granularity,
   includeOverlappingSourceBuckets = false,
@@ -102,6 +101,7 @@ export function buildCombinedScenarioPoints({
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   from: Date;
   granularity: ScenarioAnalyticsGranularity;
   includeOverlappingSourceBuckets?: boolean;
@@ -118,15 +118,20 @@ export function buildCombinedScenarioPoints({
     from,
     to,
     includeOverlappingSourceBuckets,
+    companyTimeZone,
   );
 
-  return listBucketStarts(from, to, granularity).map((bucket) => ({
-    bucket: bucket.toISOString(),
-    isSaturday: granularity === "day" && bucket.getDay() === 6,
-    isSunday: granularity === "day" && bucket.getDay() === 0,
-    label: formatBucketLabel(bucket, granularity),
-    total: totals.get(bucketKey(bucket, granularity)) ?? 0,
-  }));
+  return listBucketStarts(from, to, granularity, companyTimeZone).map(
+    (bucket) => ({
+      bucket: bucket.toISOString(),
+      isSaturday:
+        granularity === "day" && bucketWeekday(bucket, companyTimeZone) === 6,
+      isSunday:
+        granularity === "day" && bucketWeekday(bucket, companyTimeZone) === 0,
+      label: formatBucketLabel(bucket, granularity, companyTimeZone),
+      total: totals.get(bucketKey(bucket, granularity, companyTimeZone)) ?? 0,
+    }),
+  );
 }
 
 /**
@@ -137,6 +142,7 @@ export function buildCombinedScenarioPoints({
  * one scenario from cancelling and avoids counting a shared line twice.
  */
 export function buildCombinedScenarioMagnitudePoints({
+  companyTimeZone,
   from,
   granularity,
   rows,
@@ -144,6 +150,7 @@ export function buildCombinedScenarioMagnitudePoints({
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   from: Date;
   granularity: ScenarioAnalyticsGranularity;
   rows: AggregateEventRow[];
@@ -159,15 +166,20 @@ export function buildCombinedScenarioMagnitudePoints({
     scenarios,
     sourceGranularity,
     to,
+    companyTimeZone,
   });
 
-  return listBucketStarts(from, to, granularity).map((bucket) => ({
-    bucket: bucket.toISOString(),
-    isSaturday: granularity === "day" && bucket.getDay() === 6,
-    isSunday: granularity === "day" && bucket.getDay() === 0,
-    label: formatBucketLabel(bucket, granularity),
-    total: totals.get(bucketKey(bucket, granularity)) ?? 0,
-  }));
+  return listBucketStarts(from, to, granularity, companyTimeZone).map(
+    (bucket) => ({
+      bucket: bucket.toISOString(),
+      isSaturday:
+        granularity === "day" && bucketWeekday(bucket, companyTimeZone) === 6,
+      isSunday:
+        granularity === "day" && bucketWeekday(bucket, companyTimeZone) === 0,
+      label: formatBucketLabel(bucket, granularity, companyTimeZone),
+      total: totals.get(bucketKey(bucket, granularity, companyTimeZone)) ?? 0,
+    }),
+  );
 }
 
 /**
@@ -197,6 +209,7 @@ export function buildScenarioCivilHourMagnitudePoints({
   >();
 
   buildCombinedScenarioMagnitudePoints({
+    companyTimeZone: timeZone,
     from,
     granularity: "hour",
     rows,
@@ -245,6 +258,7 @@ export function buildScenarioCivilHourMagnitudePoints({
 /** Builds every scenario series in one row pass instead of rescanning the
  * complete aggregate payload once per scenario. */
 export function buildIndividualScenarioSeries({
+  companyTimeZone,
   from,
   granularity,
   includeOverlappingSourceBuckets = false,
@@ -253,6 +267,7 @@ export function buildIndividualScenarioSeries({
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   from: Date;
   granularity: ScenarioAnalyticsGranularity;
   includeOverlappingSourceBuckets?: boolean;
@@ -270,20 +285,25 @@ export function buildIndividualScenarioSeries({
 
   rows.forEach((row) => {
     if (!row.line_count_id) return;
-    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    const bucket = parseScenarioAggregateBucket(
+      row.bucket,
+      sourceGranularity,
+      companyTimeZone,
+    );
     if (!bucket) return;
     const bucketTime = bucket.getTime();
     if (includeOverlappingSourceBuckets) {
-      const bucketEnd = endOfAggregateBucket(
+      const bucketEnd = endOfScenarioAggregateBucket(
         bucket,
         sourceGranularity,
+        companyTimeZone,
       ).getTime();
       if (bucketTime >= toTime || bucketEnd <= fromTime) return;
     } else if (bucketTime < fromTime || bucketTime >= toTime) {
       return;
     }
 
-    const key = bucketKey(bucket, granularity);
+    const key = bucketKey(bucket, granularity, companyTimeZone);
     const total = Number.isFinite(row.total) ? row.total : 0;
     (contributions.get(row.line_count_id) ?? []).forEach(
       ({ multiplier, scenarioId }) => {
@@ -297,13 +317,17 @@ export function buildIndividualScenarioSeries({
     );
   });
 
-  const buckets = listBucketStarts(from, to, granularity).map((bucket) => ({
-    bucket: bucket.toISOString(),
-    isSaturday: granularity === "day" && bucket.getDay() === 6,
-    isSunday: granularity === "day" && bucket.getDay() === 0,
-    key: bucketKey(bucket, granularity),
-    label: formatBucketLabel(bucket, granularity),
-  }));
+  const buckets = listBucketStarts(from, to, granularity, companyTimeZone).map(
+    (bucket) => ({
+      bucket: bucket.toISOString(),
+      isSaturday:
+        granularity === "day" && bucketWeekday(bucket, companyTimeZone) === 6,
+      isSunday:
+        granularity === "day" && bucketWeekday(bucket, companyTimeZone) === 0,
+      key: bucketKey(bucket, granularity, companyTimeZone),
+      label: formatBucketLabel(bucket, granularity, companyTimeZone),
+    }),
+  );
   return scenarios.map((scenario) => {
     const totals = totalsByScenario.get(scenario.id) ?? new Map();
     return {
@@ -318,12 +342,14 @@ export function buildIndividualScenarioSeries({
 }
 
 export function buildScenarioRanking({
+  companyTimeZone,
   from,
   rows,
   scenarios,
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   from: Date;
   rows: AggregateEventRow[];
   scenarios: Scenario[];
@@ -336,6 +362,7 @@ export function buildScenarioRanking({
     scenarios,
     sourceGranularity,
     to,
+    companyTimeZone,
   });
 
   const ranked = scenarios
@@ -347,7 +374,8 @@ export function buildScenarioRanking({
     .filter((point) => point.total > 0)
     .sort(
       (left, right) =>
-        right.total - left.total || left.name.localeCompare(right.name, "pt-BR"),
+        right.total - left.total ||
+        left.name.localeCompare(right.name, "pt-BR"),
     );
   const grandTotal = ranked.reduce((sum, point) => sum + point.total, 0);
 
@@ -358,12 +386,14 @@ export function buildScenarioRanking({
 }
 
 export function buildScenarioCumulativeTotals({
+  companyTimeZone,
   from,
   rows,
   scenarios,
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   from: Date;
   rows: AggregateEventRow[];
   scenarios: Scenario[];
@@ -376,6 +406,7 @@ export function buildScenarioCumulativeTotals({
     scenarios,
     sourceGranularity,
     to,
+    companyTimeZone,
   });
   const points = scenarios.map((scenario) => ({
     id: scenario.id,
@@ -391,12 +422,14 @@ export function buildScenarioCumulativeTotals({
 }
 
 export function buildTopScenarioPeakDays({
+  companyTimeZone,
   from,
   rows,
   scenarios,
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   from: Date;
   rows: AggregateEventRow[];
   scenarios: Scenario[];
@@ -410,13 +443,14 @@ export function buildTopScenarioPeakDays({
     scenarios,
     sourceGranularity,
     to,
+    companyTimeZone,
   });
 
-  return listBucketStarts(from, to, "day")
+  return listBucketStarts(from, to, "day", companyTimeZone)
     .map((bucket) => ({
       bucket: bucket.toISOString(),
-      label: formatPeakDayLabel(bucket),
-      total: totals.get(bucketKey(bucket, "day")) ?? 0,
+      label: formatPeakDayLabel(bucket, companyTimeZone),
+      total: totals.get(bucketKey(bucket, "day", companyTimeZone)) ?? 0,
     }))
     .filter((point) => point.total > 0)
     .sort(
@@ -460,11 +494,7 @@ export function buildScenarioHourlyOccupancy({
       through,
     });
   }
-  const dayStart = new Date(
-    day.getFullYear(),
-    day.getMonth(),
-    day.getDate(),
-  );
+  const dayStart = new Date(day.getFullYear(), day.getMonth(), day.getDate());
   const from = new Date(
     day.getFullYear(),
     day.getMonth(),
@@ -544,10 +574,7 @@ function buildCompanyTimeZoneHourlyOccupancy({
     timeZone,
   );
   const effectiveEnd = new Date(
-    Math.min(
-      dayEnd.getTime(),
-      Math.max(dayStart.getTime(), through.getTime()),
-    ),
+    Math.min(dayEnd.getTime(), Math.max(dayStart.getTime(), through.getTime())),
   );
   const entriesByHour = totalsByCompanyTimeZoneHour(
     rows,
@@ -570,10 +597,8 @@ function buildCompanyTimeZoneHourlyOccupancy({
       ? 23
       : effectiveEnd <= dayStart
         ? -1
-        : companyZonedDateParts(
-            new Date(effectiveEnd.getTime() - 1),
-            timeZone,
-          ).hour;
+        : companyZonedDateParts(new Date(effectiveEnd.getTime() - 1), timeZone)
+            .hour;
   let cumulativeEntries = 0;
   let cumulativeExits = 0;
 
@@ -651,9 +676,7 @@ export function sharedScenarioLineIds(
 ) {
   const firstLineIds = activeScenarioLineIds(firstGroup);
   const secondLineIds = activeScenarioLineIds(secondGroup);
-  return Array.from(firstLineIds).filter((lineId) =>
-    secondLineIds.has(lineId),
-  );
+  return Array.from(firstLineIds).filter((lineId) => secondLineIds.has(lineId));
 }
 
 export function formatOccupancyStartHour(startHour: number) {
@@ -661,12 +684,14 @@ export function formatOccupancyStartHour(startHour: number) {
 }
 
 export function sumSelectedScenarioRows({
+  companyTimeZone,
   from,
   rows,
   scenarios,
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   from: Date;
   rows: AggregateEventRow[];
   scenarios: Scenario[];
@@ -681,7 +706,11 @@ export function sumSelectedScenarioRows({
     if (!row.line_count_id) return sum;
     const multiplier = multipliers.get(row.line_count_id);
     if (multiplier === undefined) return sum;
-    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    const bucket = parseScenarioAggregateBucket(
+      row.bucket,
+      sourceGranularity,
+      companyTimeZone,
+    );
     if (!bucket) return sum;
     const bucketTime = bucket.getTime();
     if (bucketTime < fromTime || bucketTime >= toTime) return sum;
@@ -698,6 +727,7 @@ function aggregateSelectedRowsByBucket(
   from: Date,
   to: Date,
   includeOverlappingSourceBuckets: boolean,
+  companyTimeZone?: string,
 ) {
   const multipliers = buildCombinedScenarioMultiplierMap(scenarios);
   const totals = new Map<number, number>();
@@ -708,20 +738,25 @@ function aggregateSelectedRowsByBucket(
     if (!row.line_count_id) return;
     const multiplier = multipliers.get(row.line_count_id);
     if (multiplier === undefined) return;
-    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    const bucket = parseScenarioAggregateBucket(
+      row.bucket,
+      sourceGranularity,
+      companyTimeZone,
+    );
     if (!bucket) return;
     const bucketTime = bucket.getTime();
     if (includeOverlappingSourceBuckets) {
-      const bucketEnd = endOfAggregateBucket(
+      const bucketEnd = endOfScenarioAggregateBucket(
         bucket,
         sourceGranularity,
+        companyTimeZone,
       ).getTime();
       if (bucketTime >= toTime || bucketEnd <= fromTime) return;
     } else if (bucketTime < fromTime || bucketTime >= toTime) {
       return;
     }
 
-    const key = bucketKey(bucket, granularity);
+    const key = bucketKey(bucket, granularity, companyTimeZone);
     totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0) * multiplier);
   });
 
@@ -767,12 +802,14 @@ function buildLineScenarioContributions(scenarios: Scenario[]) {
 }
 
 function aggregateIndividualScenarioTotals({
+  companyTimeZone,
   from,
   rows,
   scenarios,
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   from: Date;
   rows: AggregateEventRow[];
   scenarios: Scenario[];
@@ -786,7 +823,11 @@ function aggregateIndividualScenarioTotals({
 
   rows.forEach((row) => {
     if (!row.line_count_id) return;
-    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    const bucket = parseScenarioAggregateBucket(
+      row.bucket,
+      sourceGranularity,
+      companyTimeZone,
+    );
     if (!bucket) return;
     const bucketTime = bucket.getTime();
     if (bucketTime < fromTime || bucketTime >= toTime) return;
@@ -805,6 +846,7 @@ function aggregateIndividualScenarioTotals({
 }
 
 function aggregateScenarioMagnitudesByBucket({
+  companyTimeZone,
   deduplicateLines = false,
   from,
   granularity,
@@ -813,6 +855,7 @@ function aggregateScenarioMagnitudesByBucket({
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   deduplicateLines?: boolean;
   from: Date;
   granularity: ScenarioAnalyticsGranularity;
@@ -829,6 +872,7 @@ function aggregateScenarioMagnitudesByBucket({
       scenarios,
       sourceGranularity,
       to,
+      companyTimeZone,
     });
   }
 
@@ -839,12 +883,16 @@ function aggregateScenarioMagnitudesByBucket({
 
   rows.forEach((row) => {
     if (!row.line_count_id) return;
-    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    const bucket = parseScenarioAggregateBucket(
+      row.bucket,
+      sourceGranularity,
+      companyTimeZone,
+    );
     if (!bucket) return;
     const bucketTime = bucket.getTime();
     if (bucketTime < fromTime || bucketTime >= toTime) return;
 
-    const bucketStartKey = bucketKey(bucket, granularity);
+    const bucketStartKey = bucketKey(bucket, granularity, companyTimeZone);
     const scenarioTotals =
       scenarioTotalsByBucket.get(bucketStartKey) ?? new Map<string, number>();
     const rowContributions = contributions.get(row.line_count_id) ?? [];
@@ -870,6 +918,7 @@ function aggregateScenarioMagnitudesByBucket({
 }
 
 function aggregateUniqueLineMagnitudesByBucket({
+  companyTimeZone,
   from,
   granularity,
   rows,
@@ -877,6 +926,7 @@ function aggregateUniqueLineMagnitudesByBucket({
   sourceGranularity,
   to,
 }: {
+  companyTimeZone?: string;
   from: Date;
   granularity: ScenarioAnalyticsGranularity;
   rows: AggregateEventRow[];
@@ -891,15 +941,17 @@ function aggregateUniqueLineMagnitudesByBucket({
 
   rows.forEach((row) => {
     if (!row.line_count_id || !lineIds.has(row.line_count_id)) return;
-    const bucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    const bucket = parseScenarioAggregateBucket(
+      row.bucket,
+      sourceGranularity,
+      companyTimeZone,
+    );
     if (!bucket) return;
     const bucketTime = bucket.getTime();
     if (bucketTime < fromTime || bucketTime >= toTime) return;
 
-    const key = bucketKey(bucket, granularity);
-    const magnitude = Math.abs(
-      Number.isFinite(row.total) ? row.total : 0,
-    );
+    const key = bucketKey(bucket, granularity, companyTimeZone);
+    const magnitude = Math.abs(Number.isFinite(row.total) ? row.total : 0);
     totals.set(key, (totals.get(key) ?? 0) + magnitude);
   });
 
@@ -918,44 +970,221 @@ function activeScenarioLineIds(scenarios: Scenario[]) {
   );
 }
 
+type ScenarioCalendarGranularity = Exclude<
+  AggregateGranularity,
+  "minute" | "hour"
+>;
+
+function parseScenarioAggregateBucket(
+  value: string | Date,
+  granularity: AggregateGranularity,
+  companyTimeZone?: string,
+) {
+  const bucket = parseAggregateBucket(value, granularity);
+  if (
+    !bucket ||
+    !companyTimeZone ||
+    granularity === "minute" ||
+    granularity === "hour"
+  ) {
+    return bucket;
+  }
+
+  // Calendar aggregates are floating civil buckets. Recreate their identity
+  // in the company's IANA zone instead of interpreting the runtime-local Date
+  // as a real instant.
+  return startOfCompanyTimeZoneCivilDay(
+    {
+      day: bucket.getDate(),
+      month: bucket.getMonth() + 1,
+      year: bucket.getFullYear(),
+    },
+    requireCompanyTimeZone(companyTimeZone),
+  );
+}
+
+function startOfScenarioAggregateBucket(
+  date: Date,
+  granularity: AggregateGranularity,
+  companyTimeZone?: string,
+) {
+  if (!companyTimeZone) return startOfAggregateBucket(date, granularity);
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  if (granularity === "minute") {
+    return new Date(Math.floor(date.getTime() / 60_000) * 60_000);
+  }
+  if (granularity === "hour") {
+    return startOfCompanyTimeZoneHour(date, timeZone);
+  }
+
+  const parts = companyZonedDateParts(date, timeZone);
+  if (granularity === "day") {
+    return startOfCompanyTimeZoneCivilDay(parts, timeZone);
+  }
+  if (granularity === "week") {
+    const weekday = civilWeekday(parts.year, parts.month, parts.day);
+    return companyCivilDayWithOffset(
+      parts,
+      -(weekday === 0 ? 6 : weekday - 1),
+      timeZone,
+    );
+  }
+  if (granularity === "month") {
+    return startOfCompanyTimeZoneCivilDay(
+      { day: 1, month: parts.month, year: parts.year },
+      timeZone,
+    );
+  }
+  if (granularity === "semester") {
+    return startOfCompanyTimeZoneCivilDay(
+      {
+        day: 1,
+        month: parts.month <= 6 ? 1 : 7,
+        year: parts.year,
+      },
+      timeZone,
+    );
+  }
+  return startOfCompanyTimeZoneCivilDay(
+    { day: 1, month: 1, year: parts.year },
+    timeZone,
+  );
+}
+
+function endOfScenarioAggregateBucket(
+  date: Date,
+  granularity: AggregateGranularity,
+  companyTimeZone?: string,
+) {
+  if (!companyTimeZone) return endOfAggregateBucket(date, granularity);
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  const start = startOfScenarioAggregateBucket(date, granularity, timeZone);
+  if (granularity === "minute") {
+    return new Date(start.getTime() + 60_000);
+  }
+  if (granularity === "hour") {
+    return endOfCompanyTimeZoneHour(start, timeZone);
+  }
+  return nextCompanyCalendarBucket(start, granularity, timeZone);
+}
+
+function nextCompanyCalendarBucket(
+  date: Date,
+  granularity: ScenarioCalendarGranularity,
+  timeZone: string,
+) {
+  const parts = companyZonedDateParts(date, timeZone);
+  if (granularity === "day" || granularity === "week") {
+    return companyCivilDayWithOffset(
+      parts,
+      granularity === "day" ? 1 : 7,
+      timeZone,
+    );
+  }
+
+  const monthDelta =
+    granularity === "month" ? 1 : granularity === "semester" ? 6 : 12;
+  const nextMonth = new Date(
+    Date.UTC(parts.year, parts.month - 1 + monthDelta, 1),
+  );
+  return startOfCompanyTimeZoneCivilDay(
+    {
+      day: 1,
+      month: nextMonth.getUTCMonth() + 1,
+      year: nextMonth.getUTCFullYear(),
+    },
+    timeZone,
+  );
+}
+
+function companyCivilDayWithOffset(
+  parts: { day: number; month: number; year: number },
+  dayOffset: number,
+  timeZone: string,
+) {
+  const shifted = new Date(
+    Date.UTC(parts.year, parts.month - 1, parts.day + dayOffset),
+  );
+  return startOfCompanyTimeZoneCivilDay(
+    {
+      day: shifted.getUTCDate(),
+      month: shifted.getUTCMonth() + 1,
+      year: shifted.getUTCFullYear(),
+    },
+    timeZone,
+  );
+}
+
+function civilWeekday(year: number, month: number, day: number) {
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+}
+
+function bucketWeekday(date: Date, companyTimeZone?: string) {
+  if (!companyTimeZone) return date.getDay();
+  const parts = companyZonedDateParts(
+    date,
+    requireCompanyTimeZone(companyTimeZone),
+  );
+  return civilWeekday(parts.year, parts.month, parts.day);
+}
+
 function listBucketStarts(
   from: Date,
   to: Date,
   granularity: ScenarioAnalyticsGranularity,
+  companyTimeZone?: string,
 ) {
   const buckets: Date[] = [];
-  let cursor = startOfBucket(from, granularity);
+  let cursor = startOfBucket(from, granularity, companyTimeZone);
 
   while (cursor < to) {
     buckets.push(new Date(cursor));
-    cursor = addBucket(cursor, granularity);
+    cursor = addBucket(cursor, granularity, companyTimeZone);
   }
 
   return buckets;
 }
 
-function bucketKey(date: Date, granularity: ScenarioAnalyticsGranularity) {
-  return startOfBucket(date, granularity).getTime();
+function bucketKey(
+  date: Date,
+  granularity: ScenarioAnalyticsGranularity,
+  companyTimeZone?: string,
+) {
+  return startOfBucket(date, granularity, companyTimeZone).getTime();
 }
 
 function startOfBucket(
   date: Date,
   granularity: ScenarioAnalyticsGranularity,
+  companyTimeZone?: string,
 ) {
-  return startOfAggregateBucket(date, granularity);
+  return startOfScenarioAggregateBucket(date, granularity, companyTimeZone);
 }
 
 function addBucket(
   date: Date,
   granularity: ScenarioAnalyticsGranularity,
+  companyTimeZone?: string,
 ) {
-  return endOfAggregateBucket(date, granularity);
+  if (!companyTimeZone) return endOfAggregateBucket(date, granularity);
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  if (granularity === "minute") {
+    return new Date(date.getTime() + 60_000);
+  }
+  if (granularity === "hour") {
+    return endOfCompanyTimeZoneHour(date, timeZone);
+  }
+  return nextCompanyCalendarBucket(date, granularity, timeZone);
 }
 
 function formatBucketLabel(
   date: Date,
   granularity: ScenarioAnalyticsGranularity,
+  companyTimeZone?: string,
 ) {
+  const timeZone = companyTimeZone
+    ? requireCompanyTimeZone(companyTimeZone)
+    : undefined;
   if (granularity === "minute") {
     return new Intl.DateTimeFormat("pt-BR", {
       day: "2-digit",
@@ -963,6 +1192,7 @@ function formatBucketLabel(
       hour12: false,
       minute: "2-digit",
       month: "2-digit",
+      timeZone,
     }).format(date);
   }
   if (granularity === "hour") {
@@ -971,17 +1201,20 @@ function formatBucketLabel(
       hour: "2-digit",
       hour12: false,
       month: "2-digit",
+      timeZone,
     }).format(date);
   }
   if (granularity === "week") {
     return `Sem. ${new Intl.DateTimeFormat("pt-BR", {
       day: "2-digit",
       month: "2-digit",
+      timeZone,
     }).format(date)}`;
   }
   if (granularity === "month") {
     return new Intl.DateTimeFormat("pt-BR", {
       month: "short",
+      timeZone,
       year: "2-digit",
     })
       .format(date)
@@ -991,11 +1224,16 @@ function formatBucketLabel(
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
     month: "2-digit",
+    timeZone,
   }).format(date);
 }
 
-function formatPeakDayLabel(date: Date) {
+function formatPeakDayLabel(date: Date, companyTimeZone?: string) {
+  const timeZone = companyTimeZone
+    ? requireCompanyTimeZone(companyTimeZone)
+    : undefined;
   const weekday = new Intl.DateTimeFormat("pt-BR", {
+    timeZone,
     weekday: "short",
   })
     .format(date)
@@ -1003,6 +1241,7 @@ function formatPeakDayLabel(date: Date) {
   const dayMonth = new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
     month: "2-digit",
+    timeZone,
   }).format(date);
 
   return `${weekday} ${dayMonth}`;

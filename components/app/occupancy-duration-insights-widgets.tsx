@@ -11,6 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Skeleton } from "@/components/ui/skeleton";
 import { monochromeHeatmapPalette } from "@/lib/chart-palette";
 import { formatOccupancyDuration } from "@/lib/occupancy-duration";
+import { occupancyHeatmapStateColors } from "@/lib/occupancy-heatmap-visual";
 import {
   buildOccupancyDurationInsightModel,
   type OccupancyDurationInsightMonth,
@@ -48,6 +49,11 @@ type InsightOptionInput = {
   widgetColor?: string;
 };
 
+const sharedInsightModels = new WeakMap<
+  OccupancyDurationInsightMonth,
+  WeakMap<OccupancyDurationInsightScenario[], InsightModel>
+>();
+
 const HOURS = Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, "0")}h`);
 const WEEKDAYS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"];
 const PERCENT = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
@@ -55,22 +61,26 @@ const STATE_LABELS = ["Ocupado confirmado", "Transição", "Livre confirmado", "
 const STATE_KEYS = ["confirmedOccupiedSeconds", "transitionSeconds", "confirmedFreeSeconds", "unknownSeconds"] as const;
 
 export function OccupancyDurationInsightCard({
+  defaultWidgetColor = "#1267C4",
   kind,
   series,
   month,
   loading,
   error,
   monitorMode = false,
+  periodLabel,
 }: {
+  defaultWidgetColor?: string;
   kind: OccupancyDurationInsightCardId;
   series: OccupancyDurationInsightScenario[];
   month: OccupancyDurationInsightMonth | null;
   loading: boolean;
   error?: string;
   monitorMode?: boolean;
+  periodLabel?: string;
 }) {
   const { effectiveTheme } = useTheme();
-  const widgetColor = useWidgetColor("#1267C4");
+  const widgetColor = useWidgetColor(defaultWidgetColor);
   const rootRef = React.useRef<HTMLDivElement>(null);
   const [compact, setCompact] = React.useState(false);
   React.useLayoutEffect(() => {
@@ -86,7 +96,7 @@ export function OccupancyDurationInsightCard({
     return () => observer.disconnect();
   }, []);
   const model = React.useMemo(
-    () => month ? buildOccupancyDurationInsightModel(series, month) : null,
+    () => month ? sharedOccupancyDurationInsightModel(series, month) : null,
     [month, series],
   );
   const option = React.useMemo(
@@ -96,7 +106,7 @@ export function OccupancyDurationInsightCard({
     [effectiveTheme, kind, model, month, series, widgetColor],
   );
   const title = OCCUPANCY_DURATION_INSIGHT_LABELS[kind];
-  const description = describeInsight(kind, series.length);
+  const description = describeInsight(kind, series.length, periodLabel);
   const partial = series.some((item) => item.error);
   const message = error || (partial ? "Alguns cenários estão sem dados neste período." : undefined);
   const initialLoading = loading && !series.some((item) => item.hours.length > 0 || item.error);
@@ -118,7 +128,7 @@ export function OccupancyDurationInsightCard({
         {message ? <p role="status" className="line-clamp-1 shrink-0 text-xs text-muted-foreground" title={message}>{message}</p> : null}
         {initialLoading ? <Skeleton className="min-h-0 w-full flex-1" /> : !option || !series.length ? (
           <div className="flex min-h-0 flex-1 items-center justify-center px-2 text-center text-xs text-muted-foreground">
-            {loading ? "Carregando permanência…" : "Selecione ao menos um cenário para visualizar a permanência."}
+            {loading ? "Carregando tempo ocupado…" : "Selecione ao menos um cenário para visualizar o tempo ocupado."}
           </div>
         ) : (
           <div className="min-h-0 min-w-0 flex-1" data-echart-layout="natural" aria-busy={loading}>
@@ -142,6 +152,22 @@ export function OccupancyDurationInsightCard({
   );
 }
 
+function sharedOccupancyDurationInsightModel(
+  series: OccupancyDurationInsightScenario[],
+  month: OccupancyDurationInsightMonth,
+) {
+  let bySeries = sharedInsightModels.get(month);
+  if (!bySeries) {
+    bySeries = new WeakMap();
+    sharedInsightModels.set(month, bySeries);
+  }
+  const cached = bySeries.get(series);
+  if (cached) return cached;
+  const model = buildOccupancyDurationInsightModel(series, month);
+  bySeries.set(series, model);
+  return model;
+}
+
 export function buildOccupancyDurationInsightOption(input: InsightOptionInput): EnterpriseChartOption {
   return input.kind === "occupancy_duration_daily_profile"
     ? buildDailyProfileOption(input)
@@ -161,7 +187,7 @@ function buildHeatmapOption({ kind, model, month, scenarioNames, theme, widgetCo
     cellIndex,
     value: [cell.x, cell.y, percent(cell.confirmedOccupiedSeconds, cell.expectedSeconds)],
   }));
-  const confirmed = (cell: InsightCell) => cell.confirmedOccupiedSeconds + cell.confirmedFreeSeconds > 0;
+  const state = (cell: InsightCell) => durationHeatmapCellState(cell);
   const tooltipFormatter = (params: unknown) => {
     const data = record(record(Array.isArray(params) ? params[0] : params).data);
     const cell = typeof data.cellIndex === "number" ? cells[data.cellIndex] : undefined;
@@ -194,10 +220,10 @@ function buildHeatmapOption({ kind, model, month, scenarioNames, theme, widgetCo
     legend: { bottom: 0, left: "center", icon: "roundRect", selectedMode: false, itemWidth: 9, itemHeight: 7, itemGap: 12, textStyle: { color: palette.legendText, fontSize: 10 }, data: ["Transição", "Sem dados", "Ainda não decorrido"] },
     ...(scrollScenarios ? { dataZoom: [{ type: "slider", yAxisIndex: 0, orient: "vertical", startValue: 0, endValue: 11, right: 2, top: 8, bottom: 59, width: 8, showDetail: false, brushSelect: false, filterMode: "filter", borderColor: "transparent", backgroundColor: colors.future, fillerColor: colors.unknown, handleSize: "100%" }] } : {}),
     series: [
-      { ...baseSeries, name: "Ocupado confirmado", data: cellData.filter((data) => cells[data.cellIndex].expectedSeconds > 0 && confirmed(cells[data.cellIndex])) },
-      { ...baseSeries, name: "Sem dados", itemStyle: { ...baseSeries.itemStyle, color: colors.unknown }, data: cellData.filter((data) => cells[data.cellIndex].expectedSeconds > 0 && !confirmed(cells[data.cellIndex]) && cells[data.cellIndex].transitionSeconds <= 0) },
-      { ...baseSeries, name: "Ainda não decorrido", itemStyle: { ...baseSeries.itemStyle, color: colors.future }, data: cellData.filter((data) => cells[data.cellIndex].expectedSeconds <= 0) },
-      { ...baseSeries, name: "Transição", itemStyle: { ...baseSeries.itemStyle, color: colors.transition }, data: cellData.filter((data) => cells[data.cellIndex].expectedSeconds > 0 && !confirmed(cells[data.cellIndex]) && cells[data.cellIndex].transitionSeconds > 0) },
+      { ...baseSeries, name: "Ocupado confirmado", data: cellData.filter((data) => state(cells[data.cellIndex]) === "confirmed") },
+      { ...baseSeries, name: "Sem dados", itemStyle: { ...baseSeries.itemStyle, color: colors.unknown }, data: cellData.filter((data) => state(cells[data.cellIndex]) === "unknown") },
+      { ...baseSeries, name: "Ainda não decorrido", itemStyle: { ...baseSeries.itemStyle, color: colors.future }, data: cellData.filter((data) => state(cells[data.cellIndex]) === "future") },
+      { ...baseSeries, name: "Transição", itemStyle: { ...baseSeries.itemStyle, color: colors.transition }, data: cellData.filter((data) => state(cells[data.cellIndex]) === "transition") },
     ],
     media: [
       { query: { maxWidth: 760 }, option: { xAxis: { axisLabel: { interval: scenarioView ? (index: number) => index % 3 === 0 || index === 23 : 0 } } } },
@@ -259,11 +285,12 @@ function dailyProfileLabel(params: unknown, rounded = false) {
 }
 
 export function buildOccupancyDurationInsightReport({
-  kind, series, month, widgetColor,
+  kind, series, month, periodLabel, widgetColor,
 }: {
   kind: OccupancyDurationInsightCardId;
   series: OccupancyDurationInsightScenario[];
   month: OccupancyDurationInsightMonth;
+  periodLabel?: string;
   widgetColor?: string;
 }): ReportChart {
   const model = buildOccupancyDurationInsightModel(series, month);
@@ -277,7 +304,7 @@ export function buildOccupancyDurationInsightReport({
     : (scenarioView ? model.scenarioHours : weekView ? model.weekHours : model.dayHours).map((cell) => ({ ...cell, label: scenarioView ? `${scenarioNames[cell.y] ?? "Cenário"} · ${HOURS[cell.x]}` : weekView ? `${WEEKDAYS[cell.x]} · ${HOURS[cell.y]}` : `${formatDateKey(month.dateKeys[cell.x] ?? "")} · ${HOURS[cell.y]}` }));
   const table: ReportTable = {
     title,
-    description: `${describeInsight(kind, series.length)} Percentuais calculados sobre o tempo decorrido dos cenários selecionados.`,
+    description: `${describeInsight(kind, series.length, periodLabel)} Percentuais calculados sobre o tempo decorrido dos cenários selecionados.`,
     columns: [
       { key: "period", label: scenarioView ? "Cenário / hora" : weekView ? "Dia da semana / hora" : dailyView ? "Dia" : "Dia / hora", width: 34 },
       { key: "occupiedPercent", label: "Ocupado (%)", numeric: true },
@@ -300,11 +327,22 @@ export function buildOccupancyDurationInsightReport({
   return { title, description: table.description, option: buildOccupancyDurationInsightOption({ kind, model, month, scenarioNames, theme: "light", widgetColor }), table };
 }
 
-function describeInsight(kind: OccupancyDurationInsightCardId, scenarioCount: number) {
+function describeInsight(
+  kind: OccupancyDurationInsightCardId,
+  scenarioCount: number,
+  periodLabel?: string,
+) {
   const composition = scenarioCount === 1 ? "Cenário selecionado" : `${scenarioCount} cenários · tempos somados`;
-  if (kind === "occupancy_duration_daily_profile") return `${composition}. Distribuição do tempo decorrido no mês entre ocupado, transição, livre e sem dados.`;
-  const detail = kind === "occupancy_duration_month_heatmap" ? "Dias do mês × horas" : kind === "occupancy_duration_week_heatmap" ? "Dias da semana × horas" : "Cada cenário × horas";
-  return `${detail} · % do tempo ocupado confirmado no mês. ${composition}.`;
+  const period = periodLabel?.trim() || "mês";
+  if (kind === "occupancy_duration_daily_profile") {
+    return `${composition}. Distribuição do tempo decorrido no ${period} entre ocupado, transição, livre e sem dados.`;
+  }
+  const detail = kind === "occupancy_duration_month_heatmap"
+    ? periodLabel ? "Dias do período × horas" : "Dias do mês × horas"
+    : kind === "occupancy_duration_week_heatmap"
+      ? "Dias da semana × horas"
+      : "Cada cenário × horas";
+  return `${detail} · % do tempo ocupado confirmado no ${period}. ${composition}.`;
 }
 
 function durationTooltip(heading: string, duration: InsightDuration, scenarioCount: number) {
@@ -319,16 +357,32 @@ function durationTooltip(heading: string, duration: InsightDuration, scenarioCou
 }
 
 function insightColors(theme: OccupancyChartTheme, widgetColor: string) {
-  const color = /^#[0-9a-f]{6}$/i.test(widgetColor) ? widgetColor : "#1267C4";
+  const color = /^#[0-9a-f]{6}$/i.test(widgetColor)
+    ? widgetColor
+    : "#1267C4";
+  const stateColors = occupancyHeatmapStateColors(theme);
   return {
     occupied: color,
-    transition: theme === "dark" ? "#B7791F" : "#FCD34D",
+    transition: stateColors.transition,
     free: theme === "dark" ? "#256D66" : "#A7E3D0",
-    unknown: theme === "dark" ? "#475569" : "#CBD5E1",
-    future: theme === "dark" ? "rgba(148,163,184,0.025)" : "rgba(148,163,184,0.035)",
-    outline: theme === "dark" ? "rgba(148,163,184,0.18)" : "rgba(100,116,139,0.20)",
+    unknown: stateColors.noData,
+    future: stateColors.future,
+    outline: stateColors.outline,
     heat: monochromeHeatmapPalette(color, theme),
   };
+}
+
+function durationHeatmapCellState(cell: InsightCell) {
+  if (cell.expectedSeconds <= 0) return "future" as const;
+  if (cell.confirmedOccupiedSeconds + cell.confirmedFreeSeconds > 0) {
+    return "confirmed" as const;
+  }
+  // Missing coverage takes precedence over transition. This prevents a cell
+  // with a brief detected transition and a long uncovered interval from being
+  // painted amber as if its whole state had been certified.
+  if (cell.unknownSeconds > 0) return "unknown" as const;
+  if (cell.transitionSeconds > 0) return "transition" as const;
+  return "unknown" as const;
 }
 
 function percent(seconds: number, expected: number) {

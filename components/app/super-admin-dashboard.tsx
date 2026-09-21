@@ -20,6 +20,7 @@ import {
 import { toast } from "sonner";
 
 import { DeferredAiInsightsDashboard as AiInsightsDashboard } from "@/components/app/deferred-route-panels";
+import { CompanyTimeZoneSelect } from "@/components/app/company-time-zone-select";
 import { useAuth } from "@/components/app/auth-provider";
 import { UserAccessGrid } from "@/components/app/user-access-grid";
 import { Badge } from "@/components/ui/badge";
@@ -2132,6 +2133,28 @@ export function SuperAdminDashboard() {
     );
   }
 
+  function publishSavedCompany(company: Company) {
+    const normalized = normalizeCompanyRecord(company);
+    setCompanies((current) => {
+      const exists = current.some((row) => row.id === normalized.id);
+      return exists
+        ? current.map((row) =>
+            row.id === normalized.id ? { ...row, ...normalized } : row,
+          )
+        : [...current, normalized];
+    });
+    writeCompanyCache([normalized]);
+
+    if (selectedCompanyIdRef.current === normalized.id) {
+      setStoredMasterCompanyScope({
+        id: normalized.id,
+        name: normalized.name,
+        timezone: normalized.timezone,
+        trade_name: normalized.trade_name ?? null,
+      });
+    }
+  }
+
   async function saveCompany() {
     const name = companyForm.name.trim();
     if (!name) {
@@ -2166,18 +2189,47 @@ export function SuperAdminDashboard() {
       };
 
       if (editingCompany) {
-        await apiFetch(`/companies/${editingCompany.id}`, {
-          companyScopeId: editingCompany.id,
-          method: "PUT",
-          body,
+        const response = await apiFetch<Company | undefined>(
+          `/companies/${editingCompany.id}`,
+          {
+            companyScopeId: editingCompany.id,
+            method: "PUT",
+            body,
+          },
+        );
+        publishSavedCompany({
+          ...editingCompany,
+          ...(response ?? {}),
+          ...body,
+          id: editingCompany.id,
+          name,
+          timezone: timeZone,
         });
         toast.success("Empresa atualizada.");
       } else {
-        const company = await apiFetch<Company>("/companies", {
+        const response = await apiFetch<Company>("/companies", {
           method: "POST",
           body,
         });
+        if (!response?.id?.trim()) {
+          throw new Error("A empresa foi salva sem uma identidade válida.");
+        }
+        const company: Company = {
+          ...response,
+          ...body,
+          id: response.id,
+          name,
+          timezone: timeZone,
+          active: response.active ?? true,
+        };
+        publishSavedCompany(company);
         selectCompanyId(company.id);
+        setStoredMasterCompanyScope({
+          id: company.id,
+          name: company.name,
+          timezone: company.timezone,
+          trade_name: company.trade_name ?? null,
+        });
         toast.success("Empresa criada.");
       }
 
@@ -4332,13 +4384,15 @@ export function SuperAdminDashboard() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
-            <FormField label="Fuso horário">
-              <Input
+            <FormField label="Fuso horário" htmlFor="company-timezone">
+              <CompanyTimeZoneSelect
+                id="company-timezone"
                 value={companyForm.timezone}
-                onChange={(event) =>
+                disabled={saving}
+                onValueChange={(timezone) =>
                   setCompanyForm((form) => ({
                     ...form,
-                    timezone: event.target.value,
+                    timezone,
                   }))
                 }
               />
@@ -4776,7 +4830,9 @@ function CompanySummary({
           />
           <Detail
             label="Fuso horário"
-            value={company.timezone ? "Configurado" : "Não informado"}
+            value={
+              canonicalCompanyTimeZone(company.timezone) ?? "Não informado"
+            }
           />
           <Detail
             label="Atualizado"
@@ -4812,15 +4868,17 @@ function Detail({ label, value }: { label: string; value: string }) {
 }
 
 function FormField({
-  label,
   children,
+  htmlFor,
+  label,
 }: {
-  label: string;
   children: React.ReactNode;
+  htmlFor?: string;
+  label: string;
 }) {
   return (
     <div className="min-w-0 space-y-2">
-      <Label>{label}</Label>
+      <Label htmlFor={htmlFor}>{label}</Label>
       {children}
     </div>
   );

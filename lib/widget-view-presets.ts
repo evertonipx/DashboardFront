@@ -706,6 +706,7 @@ function normalizeSnapshot(
             ? item.scenarioSelectionMode
             : undefined;
         const scenarioIds = uniqueStrings(item.scenarioIds);
+        const scenarioOrder = uniqueStrings(item.scenarioOrder);
         return [
           {
             chartType:
@@ -727,6 +728,7 @@ function normalizeSnapshot(
             ...(scenarioSelectionMode === "custom" && scenarioIds.length
               ? { scenarioIds }
               : {}),
+            ...(scenarioOrder.length ? { scenarioOrder } : {}),
             ...(scenarioSelectionMode ? { scenarioSelectionMode } : {}),
             size:
               item.size === "compact" ||

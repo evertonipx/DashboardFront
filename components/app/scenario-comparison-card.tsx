@@ -41,16 +41,16 @@ import { abortRequest } from "@/lib/request-cancellation";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import {
   aggregateBucketInRange,
-  endOfAggregateBucket,
-  startOfAggregateBucket,
+  parseAggregateBucket,
+  requireAggregateRows,
 } from "@/lib/aggregate-time";
+import { fetchBoundedHourlyAggregateRanges } from "@/lib/aggregate-hour-query";
 import {
   fetchCompleteAggregateRange,
   type CompleteAggregateRequest,
 } from "@/lib/aggregate-range-query";
-import {
-  reconcileAggregateRows,
-} from "@/lib/aggregate-reconciliation";
+import { reconcileAggregateRows } from "@/lib/aggregate-reconciliation";
+import { reconcileCountingCalendarRows } from "@/lib/counting-aggregate-reconciliation";
 import {
   DAY_OF_MONTH_AXIS_LABELS,
   buildCalendarAxisLabel,
@@ -58,16 +58,29 @@ import {
   holidayCategoryIndexes,
 } from "@/lib/chart-calendar-axis";
 import { pastelBarColor } from "@/lib/chart-palette";
-import { requireCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
+import {
+  countingAddCalendarDays,
+  countingAddCalendarMonths,
+  countingCalendarBoundaryInstant,
+  countingCalendarDate,
+  countingCalendarRangeToInstants,
+  countingCalendarStart,
+  countingEndOfHourInstant,
+  countingStartOfDayInstant,
+  countingStartOfHourInstant,
+  requireCountingRuntimeTimeZone,
+} from "@/lib/counting-time-zone";
+import {
+  companyDateTimeLocalInstant,
+  companyDateTimeLocalValue,
+  companyZonedDateParts,
+  formatCompanyDateTime,
+} from "@/lib/company-time-zone";
 import {
   requireScenarioComparisonScope,
   type ScenarioComparisonSourceScope,
 } from "@/lib/scenario-comparison-scope";
-import {
-  buildFixedHourlyAxisValues,
-  HOUR_OF_DAY_LABELS,
-  resolveFixedHourlyDayWindow,
-} from "@/lib/hourly-axis";
+import { HOUR_OF_DAY_LABELS } from "@/lib/hourly-axis";
 import type { ViewPreferenceScope } from "@/lib/counting-report-view-settings";
 import {
   getUserViewScopedStorageKey,
@@ -84,7 +97,7 @@ import {
   removeUserGridPreference,
   writeUserGridPreference,
 } from "@/lib/user-grid-local";
-import { cn, formatNumber, formatTime, toDateTimeLocalValue } from "@/lib/utils";
+import { cn, formatNumber } from "@/lib/utils";
 
 type ScenarioComparisonCardProps = {
   action?: React.ReactNode;
@@ -203,6 +216,7 @@ export function scenarioComparisonSettingsPresentationKey(
 }
 
 export type ScenarioComparisonDefinition = {
+  companyTimeZone: string;
   granularity: AggregateGranularity;
   from: Date;
   to: Date;
@@ -298,11 +312,11 @@ export function ScenarioComparisonCard({
   const widgetColor = useWidgetColor();
   const resolvedTitle = useWidgetTitle(title);
   const [settings, setSettings] = React.useState<ScenarioComparisonSettings>(
-    () => createDefaultScenarioComparisonSettings(),
+    () => createDefaultScenarioComparisonSettings(companyTimeZone),
   );
   const [draftSettings, setDraftSettings] =
     React.useState<ScenarioComparisonSettings>(() =>
-      createDefaultScenarioComparisonSettings(),
+      createDefaultScenarioComparisonSettings(companyTimeZone),
     );
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [rows, setRows] = React.useState<AggregateEventRow[]>([]);
@@ -338,8 +352,9 @@ export function ScenarioComparisonCard({
   const [loadedDefinition, setLoadedDefinition] =
     React.useState<ScenarioComparisonDefinition>(() =>
       buildScenarioComparisonDefinition(
-        createDefaultScenarioComparisonSettings(),
+        createDefaultScenarioComparisonSettings(companyTimeZone),
         new Date(),
+        companyTimeZone,
         periodOverride,
       ),
     );
@@ -450,6 +465,7 @@ export function ScenarioComparisonCard({
           view: dataView,
         },
         now,
+        companyTimeZone,
         periodOverrideFromKey && periodOverrideToKey
           ? {
               from: new Date(periodOverrideFromKey),
@@ -464,6 +480,7 @@ export function ScenarioComparisonCard({
       dataGranularity,
       dataPeriod,
       dataView,
+      companyTimeZone,
       periodOverrideFromKey,
       periodOverrideToKey,
     ],
@@ -653,10 +670,15 @@ export function ScenarioComparisonCard({
     setLastUpdated(null);
     setLoadedDataRequestKey("");
     setSettingsReady(false);
-    const loadedSettings = loadSettings(storageKey, companyId, {
-      userId: user?.id,
-      viewId: preferenceScopeId,
-    });
+    const loadedSettings = loadSettings(
+      storageKey,
+      companyId,
+      {
+        userId: user?.id,
+        viewId: preferenceScopeId,
+      },
+      companyTimeZone,
+    );
     setSettings(loadedSettings);
     setDraftSettings(loadedSettings);
     setSettingsReady(true);
@@ -775,7 +797,7 @@ export function ScenarioComparisonCard({
             {lastUpdated ? (
               <Badge variant="outline" className="gap-1 bg-card">
                 <Clock3 className="h-3.5 w-3.5" />
-                {formatTime(lastUpdated)}
+                {formatCompanyTime(lastUpdated, companyTimeZone)}
               </Badge>
             ) : null}
             {monitorMode ? null : (
@@ -1022,6 +1044,11 @@ export async function fetchScenarioComparisonRows(
     hourlySource,
   });
   requireCountingRuntimeTimeZone(certifiedScope.companyTimeZone);
+  if (definition.companyTimeZone !== certifiedScope.companyTimeZone) {
+    throw new Error(
+      "O fuso da comparação diverge do fuso certificado da empresa.",
+    );
+  }
   const ranges = definition.baselineFrom && definition.baselineTo
     ? [
         {
@@ -1067,17 +1094,20 @@ type AggregateRangeDefinition = {
 
 type ScenarioComparisonFetchOptions = {
   aggregateSource?: ScenarioComparisonAggregateSource;
-  companyTimeZone?: string;
   now?: Date;
   requestRevision?: string;
   signal?: AbortSignal;
 };
 
+type CertifiedScenarioComparisonFetchOptions = ScenarioComparisonFetchOptions & {
+  companyTimeZone: string;
+};
+
 async function fetchScenarioComparisonRangeRows(
   definition: AggregateRangeDefinition,
   companyScopeId: string,
-  hourlySource?: ScenarioComparisonHourlySource,
-  options: ScenarioComparisonFetchOptions = {},
+  hourlySource: ScenarioComparisonHourlySource | undefined,
+  options: CertifiedScenarioComparisonFetchOptions,
 ) {
   if (definition.granularity !== "hour") {
     return fetchConsolidatedScenarioComparisonRangeRows(
@@ -1091,8 +1121,15 @@ async function fetchScenarioComparisonRangeRows(
   const now = options.now ?? new Date();
   const hourlyDefinition = {
     granularity: "hour" as const,
-    from: startOfHour(definition.from),
-    to: alignEndToGranularity(definition.to, "hour"),
+    from: countingStartOfHourInstant(
+      definition.from,
+      options.companyTimeZone,
+    ),
+    to: alignEndToGranularity(
+      definition.to,
+      "hour",
+      options.companyTimeZone,
+    ),
   };
   const sourceIntersectionFrom = hourlySource
     ? new Date(
@@ -1151,7 +1188,11 @@ async function fetchScenarioComparisonRangeRows(
       ),
     );
   }
-  const currentHour = currentOpenBucket("hour", now);
+  const currentHour = currentOpenBucket(
+    "hour",
+    now,
+    options.companyTimeZone,
+  );
   const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
   const requiredCurrentFrom = new Date(
     Math.max(hourlyDefinition.from.getTime(), currentHour.from.getTime()),
@@ -1200,6 +1241,7 @@ async function fetchScenarioComparisonRangeRows(
       "minute",
       currentHour.from,
       currentHour.to,
+      options.companyTimeZone,
     );
     reconciledCurrentCutoff = true;
   }
@@ -1210,20 +1252,26 @@ async function fetchScenarioComparisonRangeRows(
     sourceIntersectionFrom &&
     sourceIntersectionTo
   ) {
-    hourlyRows = reconcileAggregateRows(
+    hourlyRows = reconcileCompanyHourlyRows(
       hourlyRows,
-      "hour",
       hourlySource.rows,
       "hour",
       sourceIntersectionFrom,
       sourceIntersectionTo,
+      options.companyTimeZone,
     );
   }
 
-  const initialBoundaryStart = startOfHour(definition.from);
+  const initialBoundaryStart = countingStartOfHourInstant(
+    definition.from,
+    options.companyTimeZone,
+  );
   const initialBoundaryTo = new Date(
     Math.min(
-      endOfAggregateBucket(initialBoundaryStart, "hour").getTime(),
+      countingEndOfHourInstant(
+        initialBoundaryStart,
+        options.companyTimeZone,
+      ).getTime(),
       definition.to.getTime(),
       currentMinuteEnd.getTime(),
     ),
@@ -1232,7 +1280,10 @@ async function fetchScenarioComparisonRangeRows(
     definition.from > initialBoundaryStart &&
     definition.from < initialBoundaryTo;
   const rangeEndsInInitialHour =
-    startOfHour(new Date(definition.to.getTime() - 1)).getTime() ===
+    countingStartOfHourInstant(
+      new Date(definition.to.getTime() - 1),
+      options.companyTimeZone,
+    ).getTime() ===
     initialBoundaryStart.getTime();
   if (hasPartialInitialBoundary) {
     const initialMinuteRows =
@@ -1248,17 +1299,20 @@ async function fetchScenarioComparisonRangeRows(
             companyScopeId,
             options,
           );
-    hourlyRows = reconcileAggregateRows(
+    hourlyRows = reconcileCompanyHourlyRows(
       hourlyRows,
-      "hour",
       initialMinuteRows,
       "minute",
       definition.from,
       initialBoundaryTo,
+      options.companyTimeZone,
     );
   }
 
-  const historicalBoundaryStart = startOfHour(definition.to);
+  const historicalBoundaryStart = countingStartOfHourInstant(
+    definition.to,
+    options.companyTimeZone,
+  );
   const hasPartialHistoricalBoundary =
     historicalBoundaryStart < definition.to &&
     definition.to <= currentMinuteEnd &&
@@ -1277,13 +1331,13 @@ async function fetchScenarioComparisonRangeRows(
       companyScopeId,
       options,
     );
-    hourlyRows = reconcileAggregateRows(
+    hourlyRows = reconcileCompanyHourlyRows(
       hourlyRows,
-      "hour",
       historicalMinuteRows,
       "minute",
       historicalBoundaryStart,
       definition.to,
+      options.companyTimeZone,
     );
   }
 
@@ -1294,24 +1348,52 @@ async function fetchConsolidatedScenarioComparisonRangeRows(
   definition: AggregateRangeDefinition,
   companyScopeId: string,
   hourlySource: ScenarioComparisonHourlySource | undefined,
-  options: ScenarioComparisonFetchOptions,
+  options: CertifiedScenarioComparisonFetchOptions,
 ) {
   const granularity = definition.granularity;
+  if (
+    granularity !== "day" &&
+    granularity !== "week" &&
+    granularity !== "month"
+  ) {
+    return fetchAggregateRows(definition, companyScopeId, options);
+  }
+
   const lastInstant = new Date(definition.to.getTime() - 1);
-  const firstBoundaryStart = startOfAggregateBucket(
+  const firstBoundaryCalendar = calendarBucketStartForInstant(
     definition.from,
     granularity,
+    options.companyTimeZone,
   );
-  const lastBoundaryStart = startOfAggregateBucket(lastInstant, granularity);
-  const firstBoundaryPartial = definition.from > firstBoundaryStart;
-  const lastBoundaryPartial = definition.to < endOfAggregateBucket(
+  const lastBoundaryCalendar = calendarBucketStartForInstant(
     lastInstant,
     granularity,
+    options.companyTimeZone,
   );
+  const firstBoundaryStart = countingCalendarBoundaryInstant(
+    firstBoundaryCalendar,
+    options.companyTimeZone,
+  );
+  const firstBoundaryEnd = countingCalendarBoundaryInstant(
+    addCalendarGranularity(firstBoundaryCalendar, granularity),
+    options.companyTimeZone,
+  );
+  const lastBoundaryStart = countingCalendarBoundaryInstant(
+    lastBoundaryCalendar,
+    options.companyTimeZone,
+  );
+  const lastBoundaryEnd = countingCalendarBoundaryInstant(
+    addCalendarGranularity(lastBoundaryCalendar, granularity),
+    options.companyTimeZone,
+  );
+  const firstBoundaryPartial = definition.from > firstBoundaryStart;
+  const lastBoundaryPartial = definition.to < lastBoundaryEnd;
   const fullFrom = firstBoundaryPartial
-    ? endOfAggregateBucket(definition.from, granularity)
-    : definition.from;
-  const fullTo = lastBoundaryPartial ? lastBoundaryStart : definition.to;
+    ? addCalendarGranularity(firstBoundaryCalendar, granularity)
+    : firstBoundaryCalendar;
+  const fullTo = lastBoundaryPartial
+    ? lastBoundaryCalendar
+    : addCalendarGranularity(lastBoundaryCalendar, granularity);
   const aggregateSource = options.aggregateSource?.granularity === granularity
     ? options.aggregateSource
     : undefined;
@@ -1363,7 +1445,7 @@ async function fetchConsolidatedScenarioComparisonRangeRows(
   const boundaryRanges: Array<{ from: Date; to: Date }> = [];
 
   if (
-    firstBoundaryStart.getTime() === lastBoundaryStart.getTime() &&
+    firstBoundaryCalendar.getTime() === lastBoundaryCalendar.getTime() &&
     (firstBoundaryPartial || lastBoundaryPartial)
   ) {
     boundaryRanges.push({ from: definition.from, to: definition.to });
@@ -1371,7 +1453,7 @@ async function fetchConsolidatedScenarioComparisonRangeRows(
     if (firstBoundaryPartial) {
       boundaryRanges.push({
         from: definition.from,
-        to: endOfAggregateBucket(definition.from, granularity),
+        to: firstBoundaryEnd,
       });
     }
     if (lastBoundaryPartial) {
@@ -1389,13 +1471,23 @@ async function fetchConsolidatedScenarioComparisonRangeRows(
       hourlySource,
       options,
     );
-    rows = reconcileAggregateRows(
+    const hourlyCoverageFrom = countingStartOfHourInstant(
+      boundary.from,
+      options.companyTimeZone,
+    );
+    const hourlyCoverageTo = alignEndToGranularity(
+      boundary.to,
+      "hour",
+      options.companyTimeZone,
+    );
+    rows = reconcileCountingCalendarRows(
       rows,
       granularity,
       hourlyRows,
       "hour",
-      boundary.from,
-      boundary.to,
+      hourlyCoverageFrom,
+      hourlyCoverageTo,
+      options.companyTimeZone,
     );
   }
 
@@ -1405,18 +1497,31 @@ async function fetchConsolidatedScenarioComparisonRangeRows(
 async function fetchAggregateRows(
   definition: AggregateRangeDefinition,
   companyScopeId: string,
-  options: ScenarioComparisonFetchOptions = {},
+  options: CertifiedScenarioComparisonFetchOptions,
 ) {
   const now = options.now ?? new Date();
   const request: CompleteAggregateRequest = (path) =>
     requestSharedScenarioComparisonAggregate({
       companyScopeId,
-      companyTimeZone: options.companyTimeZone ?? "UTC",
+      companyTimeZone: options.companyTimeZone,
       now,
       path,
       requestRevision: options.requestRevision,
       signal: options.signal,
     });
+
+  if (definition.granularity === "hour") {
+    return fetchBoundedHourlyAggregateRanges({
+      cacheScope: `scenario-comparison:${companyScopeId}:${options.companyTimeZone}`,
+      companyScopeId,
+      metricType: DEFAULT_METRIC_TYPE,
+      now,
+      ranges: [{ from: definition.from, to: definition.to }],
+      request,
+      signal: options.signal,
+      timeZone: options.companyTimeZone,
+    });
+  }
 
   return fetchCompleteAggregateRange({
     companyScopeId,
@@ -1425,6 +1530,7 @@ async function fetchAggregateRows(
     metricType: DEFAULT_METRIC_TYPE,
     request,
     signal: options.signal,
+    timeZone: options.companyTimeZone,
     to: definition.to,
   });
 }
@@ -1615,34 +1721,58 @@ function scenarioComparisonSourceGranularity(
 export function buildScenarioComparisonDefinition(
   settings: ScenarioComparisonSettings,
   now: Date,
+  companyTimeZone: string,
   periodOverride?: ScenarioComparisonPeriodOverride,
 ): ScenarioComparisonDefinition {
-  const range = periodOverride ?? scenarioComparisonRange(settings, now);
+  const canonicalTimeZone = requireCountingRuntimeTimeZone(companyTimeZone);
+  const range = periodOverride
+    ? countingCalendarRangeToInstants(periodOverride, canonicalTimeZone)
+    : scenarioComparisonRange(settings, now, canonicalTimeZone);
   if (settings.view !== "period") {
     const rangeEndReference = new Date(
       Math.max(range.from.getTime(), range.to.getTime() - 1),
     );
-    const currentFrom = startOfMonth(rangeEndReference);
-    const currentMonthEnd = addMonths(currentFrom, 1);
+    const currentMonth = countingCalendarStart(
+      rangeEndReference,
+      canonicalTimeZone,
+      "month",
+    );
+    const currentFrom = countingCalendarBoundaryInstant(
+      currentMonth,
+      canonicalTimeZone,
+    );
+    const currentMonthEnd = countingCalendarBoundaryInstant(
+      countingAddCalendarMonths(currentMonth, 1),
+      canonicalTimeZone,
+    );
     const requestedCurrentTo = range.to < currentMonthEnd
       ? range.to
       : currentMonthEnd;
     const currentTo = new Date(
       Math.min(currentMonthEnd.getTime(), requestedCurrentTo.getTime()),
     );
-    const baselineFrom = settings.view === "days_year"
-      ? new Date(currentFrom.getFullYear() - 1, currentFrom.getMonth(), 1)
-      : addMonths(currentFrom, -1);
-    const baselineMonthEnd = addMonths(baselineFrom, 1);
-    const baselineElapsedTo = addDays(
-      baselineFrom,
-      calendarDayDistance(currentFrom, currentTo),
+    const baselineMonth = settings.view === "days_year"
+      ? new Date(currentMonth.getFullYear() - 1, currentMonth.getMonth(), 1)
+      : countingAddCalendarMonths(currentMonth, -1);
+    const baselineFrom = countingCalendarBoundaryInstant(
+      baselineMonth,
+      canonicalTimeZone,
     );
-    baselineElapsedTo.setHours(
-      currentTo.getHours(),
-      currentTo.getMinutes(),
-      currentTo.getSeconds(),
-      currentTo.getMilliseconds(),
+    const baselineMonthEnd = countingCalendarBoundaryInstant(
+      countingAddCalendarMonths(baselineMonth, 1),
+      canonicalTimeZone,
+    );
+    const baselineElapsedDay = countingAddCalendarDays(
+      baselineMonth,
+      calendarDayDistance(
+        currentMonth,
+        countingCalendarDate(currentTo, canonicalTimeZone, "day"),
+      ),
+    );
+    const baselineElapsedTo = companyWallTimeOnCalendarDay(
+      baselineElapsedDay,
+      currentTo,
+      canonicalTimeZone,
     );
     const baselineTo = new Date(
       Math.min(baselineMonthEnd.getTime(), baselineElapsedTo.getTime()),
@@ -1651,10 +1781,11 @@ export function buildScenarioComparisonDefinition(
     return {
       accumulated: settings.accumulated,
       baselineFrom,
-      baselineLabel: monthYearLabel(baselineFrom),
+      baselineLabel: monthYearLabel(baselineMonth),
       baselineTo,
+      companyTimeZone: canonicalTimeZone,
       currentFrom,
-      currentLabel: monthYearLabel(currentFrom),
+      currentLabel: monthYearLabel(currentMonth),
       currentTo,
       from: baselineFrom,
       granularity: "day",
@@ -1667,10 +1798,12 @@ export function buildScenarioComparisonDefinition(
     settings.granularity,
     range.from,
     range.to,
+    canonicalTimeZone,
   );
 
   return {
     accumulated: settings.accumulated,
+    companyTimeZone: canonicalTimeZone,
     currentFrom: new Date(range.from),
     currentTo: new Date(range.to),
     granularity,
@@ -1684,11 +1817,15 @@ function fitScenarioGranularityToRange(
   preferred: ScenarioCompareGranularity,
   from: Date,
   to: Date,
+  companyTimeZone: string,
 ) {
   const order: ScenarioCompareGranularity[] = ["hour", "day", "week", "month"];
   let index = Math.max(0, order.indexOf(preferred));
 
-  while (index < order.length - 1 && estimatedBucketCount(from, to, order[index]) > 240) {
+  while (
+    index < order.length - 1 &&
+    estimatedBucketCount(from, to, order[index], companyTimeZone) > 240
+  ) {
     index += 1;
   }
 
@@ -1699,29 +1836,51 @@ function estimatedBucketCount(
   from: Date,
   to: Date,
   granularity: ScenarioCompareGranularity,
+  companyTimeZone: string,
 ) {
   const duration = Math.max(0, to.getTime() - from.getTime());
   if (granularity === "hour") return Math.ceil(duration / HOUR_MS);
-  if (granularity === "day") return Math.ceil(duration / (24 * HOUR_MS));
-  if (granularity === "week") return Math.ceil(duration / (7 * 24 * HOUR_MS));
+  const calendarFrom = countingCalendarDate(from, companyTimeZone, "day");
+  const calendarTo = countingCalendarDate(
+    new Date(to.getTime() - 1),
+    companyTimeZone,
+    "day",
+  );
+  if (granularity === "day") {
+    return calendarDayDistance(calendarFrom, calendarTo) + 1;
+  }
+  if (granularity === "week") {
+    return Math.ceil((calendarDayDistance(calendarFrom, calendarTo) + 1) / 7);
+  }
   return Math.max(
     0,
-    (to.getFullYear() - from.getFullYear()) * 12 +
-      to.getMonth() -
-      from.getMonth(),
+    (calendarTo.getFullYear() - calendarFrom.getFullYear()) * 12 +
+      calendarTo.getMonth() -
+      calendarFrom.getMonth() +
+      1,
   );
 }
 
-function scenarioComparisonRange(settings: ScenarioComparisonSettings, now: Date) {
+function scenarioComparisonRange(
+  settings: ScenarioComparisonSettings,
+  now: Date,
+  companyTimeZone: string,
+) {
   if (settings.period === "custom") {
-    const from = parseLocalDateTime(settings.customFrom);
-    const to = parseLocalDateTime(settings.customTo);
+    const from = parseCompanyDateTime(settings.customFrom, companyTimeZone);
+    const to = parseCompanyDateTime(settings.customTo, companyTimeZone);
     if (from && to && from < to) return { from, to };
   }
 
   if (settings.period === "yesterday") {
-    const todayStart = startOfDay(now);
-    return { from: addDays(todayStart, -1), to: todayStart };
+    const today = countingCalendarDate(now, companyTimeZone, "day");
+    return {
+      from: countingCalendarBoundaryInstant(
+        countingAddCalendarDays(today, -1),
+        companyTimeZone,
+      ),
+      to: countingCalendarBoundaryInstant(today, companyTimeZone),
+    };
   }
 
   const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
@@ -1733,20 +1892,31 @@ function scenarioComparisonRange(settings: ScenarioComparisonSettings, now: Date
   }
 
   if (settings.period === "last_7d") {
+    const today = countingCalendarDate(now, companyTimeZone, "day");
     return {
-      from: startOfDay(addDays(now, -6)),
+      from: countingCalendarBoundaryInstant(
+        countingAddCalendarDays(today, -6),
+        companyTimeZone,
+      ),
       to: currentMinuteEnd,
     };
   }
 
   if (settings.period === "last_30d") {
+    const today = countingCalendarDate(now, companyTimeZone, "day");
     return {
-      from: startOfDay(addDays(now, -29)),
+      from: countingCalendarBoundaryInstant(
+        countingAddCalendarDays(today, -29),
+        companyTimeZone,
+      ),
       to: currentMinuteEnd,
     };
   }
 
-  return { from: startOfDay(now), to: currentMinuteEnd };
+  return {
+    from: countingStartOfDayInstant(now, companyTimeZone),
+    to: currentMinuteEnd,
+  };
 }
 
 export function selectScenarioComparisonScenarios(
@@ -1772,7 +1942,11 @@ export function buildScenarioComparisonPoints(
     to: definition.currentTo,
   });
   const points = listBucketStarts(definition).map((bucketStart) => {
-    const next = addGranularity(bucketStart, definition.granularity);
+    const next = addGranularity(
+      bucketStart,
+      definition.granularity,
+      definition.companyTimeZone,
+    );
 
     return {
       id: bucketStart.toISOString(),
@@ -1780,7 +1954,11 @@ export function buildScenarioComparisonPoints(
         definition.granularity === "day" && bucketStart.getDay() === 6,
       isSunday:
         definition.granularity === "day" && bucketStart.getDay() === 0,
-      name: bucketLabel(bucketStart, definition.granularity),
+      name: bucketLabel(
+        bucketStart,
+        definition.granularity,
+        definition.companyTimeZone,
+      ),
       total: sumScenarioRowsInRange(
         rows,
         scenario,
@@ -1815,10 +1993,12 @@ export function buildScenarioComparisonSeries(
   const currentDays = calendarDayBucketCount(
     definition.currentFrom,
     definition.currentTo,
+    definition.companyTimeZone,
   );
   const baselineDays = calendarDayBucketCount(
     definition.baselineFrom,
     definition.baselineTo,
+    definition.companyTimeZone,
   );
   const dayCount = DAY_OF_MONTH_AXIS_LABELS.length;
   const baselineSourceGranularity = scenarioComparisonSourceGranularity({
@@ -1840,6 +2020,7 @@ export function buildScenarioComparisonSeries(
       baselineDays,
       dayCount,
       baselineSourceGranularity,
+      definition.companyTimeZone,
     );
     const currentPoints = buildDailyScenarioPoints(
       scenario,
@@ -1848,6 +2029,7 @@ export function buildScenarioComparisonSeries(
       currentDays,
       dayCount,
       currentSourceGranularity,
+      definition.companyTimeZone,
     );
 
     return [
@@ -1880,15 +2062,21 @@ function buildDailyScenarioPoints(
   availableDays: number,
   dayCount: number,
   sourceGranularity: AggregateGranularity,
+  companyTimeZone: string,
 ): ChartPoint[] {
+  const calendarMonthStart = countingCalendarStart(
+    monthStart,
+    companyTimeZone,
+    "month",
+  );
   const daysInMonth = new Date(
-    monthStart.getFullYear(),
-    monthStart.getMonth() + 1,
+    calendarMonthStart.getFullYear(),
+    calendarMonthStart.getMonth() + 1,
     0,
   ).getDate();
 
   return Array.from({ length: dayCount }, (_, index) => {
-    const from = addDays(monthStart, index);
+    const from = countingAddCalendarDays(calendarMonthStart, index);
     const existsInMonth = index < daysInMonth;
 
     return {
@@ -1902,7 +2090,7 @@ function buildDailyScenarioPoints(
               rows,
               scenario,
               from,
-              addDays(from, 1),
+              countingAddCalendarDays(from, 1),
               sourceGranularity,
             )
           : null,
@@ -1933,6 +2121,7 @@ export function buildScenarioComparisonChartOption(
           definition.currentFrom,
           definition.currentTo,
           referenceTime,
+          definition.companyTimeZone,
         )
       : null;
   const fixedHourlyAxis = fixedHourlyWindow !== null;
@@ -2088,6 +2277,7 @@ export function buildScenarioComparisonChartOption(
                 fromHour: hourlyFrom,
                 missingHourValue: null,
               },
+              definition.companyTimeZone,
             )
           : item.points.map((point) => point.total),
         emphasis: {
@@ -2141,8 +2331,12 @@ export function buildScenarioComparisonReportChart({
     emptyScenarioComparisonBuckets(definition);
 
   return {
-    comparison: `${formatReportDateTime(definition.from)} até ${formatReportDateTime(
+    comparison: `${formatReportDateTime(
+      definition.from,
+      definition.companyTimeZone,
+    )} até ${formatReportDateTime(
       definition.to,
+      definition.companyTimeZone,
     )}`,
     description: [
       `Período: ${periodLabelOverride ?? periodLabel(settings.period)}`,
@@ -2178,7 +2372,13 @@ export function buildScenarioComparisonReportChart({
         const row: Record<string, string | number> = {
           period: bucket.name,
           ...(definition.view === "period"
-            ? { period_start: formatReportDateTime(new Date(bucket.id)) }
+            ? {
+                period_start: formatScenarioBucketDateTime(
+                  new Date(bucket.id),
+                  definition.granularity,
+                  definition.companyTimeZone,
+                ),
+              }
             : {}),
         };
 
@@ -2198,19 +2398,24 @@ function emptyScenarioComparisonBuckets(
 ): ChartPoint[] {
   if (definition.view !== "period" && definition.baselineFrom && definition.baselineTo) {
     const dayCount = DAY_OF_MONTH_AXIS_LABELS.length;
+    const currentMonth = countingCalendarStart(
+      definition.currentFrom,
+      definition.companyTimeZone,
+      "month",
+    );
     const daysInMonth = new Date(
-      definition.currentFrom.getFullYear(),
-      definition.currentFrom.getMonth() + 1,
+      currentMonth.getFullYear(),
+      currentMonth.getMonth() + 1,
       0,
     ).getDate();
     return Array.from({ length: dayCount }, (_, index) => ({
-      id: addDays(definition.currentFrom, index).toISOString(),
+      id: countingAddCalendarDays(currentMonth, index).toISOString(),
       isSaturday:
         index < daysInMonth &&
-        addDays(definition.currentFrom, index).getDay() === 6,
+        countingAddCalendarDays(currentMonth, index).getDay() === 6,
       isSunday:
         index < daysInMonth &&
-        addDays(definition.currentFrom, index).getDay() === 0,
+        countingAddCalendarDays(currentMonth, index).getDay() === 0,
       name: String(index + 1),
       total: 0,
     }));
@@ -2222,7 +2427,11 @@ function emptyScenarioComparisonBuckets(
       definition.granularity === "day" && bucketStart.getDay() === 6,
     isSunday:
       definition.granularity === "day" && bucketStart.getDay() === 0,
-    name: bucketLabel(bucketStart, definition.granularity),
+    name: bucketLabel(
+      bucketStart,
+      definition.granularity,
+      definition.companyTimeZone,
+    ),
     total: 0,
   }));
 }
@@ -2266,86 +2475,221 @@ function replaceOpenBucketRowsFromSource(
   sourceGranularity: AggregateGranularity,
   sourceFrom: Date,
   sourceTo: Date,
+  companyTimeZone: string,
 ) {
-  return reconcileAggregateRows(
+  if (targetGranularity !== "hour") return rows;
+  if (sourceGranularity !== "minute" && sourceGranularity !== "hour") {
+    return rows;
+  }
+  return reconcileCompanyHourlyRows(
     rows,
-    targetGranularity,
     sourceRows,
     sourceGranularity,
     sourceFrom,
     sourceTo,
+    companyTimeZone,
   );
+}
+
+function reconcileCompanyHourlyRows(
+  targetRows: AggregateEventRow[],
+  sourceRows: AggregateEventRow[],
+  sourceGranularity: "minute" | "hour",
+  from: Date,
+  to: Date,
+  companyTimeZone: string,
+) {
+  requireAggregateRows(targetRows, "hour", DEFAULT_METRIC_TYPE);
+  requireAggregateRows(sourceRows, sourceGranularity, DEFAULT_METRIC_TYPE);
+
+  const stableRows = targetRows.filter((row) => {
+    const bucket = parseAggregateBucket(row.bucket, "hour");
+    if (!bucket) return false;
+    const start = countingStartOfHourInstant(bucket, companyTimeZone);
+    const end = countingEndOfHourInstant(start, companyTimeZone);
+    return !(start < to && end > from);
+  });
+  const totals = new Map<
+    string,
+    {
+      bucket: Date;
+      cameraId: string;
+      lineCountId: string;
+      metricType: string;
+      objectClass: string;
+      total: number;
+    }
+  >();
+
+  sourceRows.forEach((row) => {
+    const sourceBucket = parseAggregateBucket(row.bucket, sourceGranularity);
+    if (!sourceBucket) return;
+    const sourceStart =
+      sourceGranularity === "hour"
+        ? countingStartOfHourInstant(sourceBucket, companyTimeZone)
+        : sourceBucket;
+    const sourceEnd =
+      sourceGranularity === "hour"
+        ? countingEndOfHourInstant(sourceStart, companyTimeZone)
+        : addMinutes(sourceStart, 1);
+    if (!(sourceStart < to && sourceEnd > from)) return;
+
+    const bucket = countingStartOfHourInstant(sourceStart, companyTimeZone);
+    const identity = {
+      cameraId: row.camera_id,
+      lineCountId: row.line_count_id ?? "",
+      metricType: row.metric_type,
+      objectClass: row.object_class ?? "",
+    };
+    const key = JSON.stringify([
+      bucket.toISOString(),
+      identity.cameraId,
+      identity.lineCountId,
+      identity.metricType,
+      identity.objectClass,
+    ]);
+    const total = (totals.get(key)?.total ?? 0) + row.total;
+    if (!Number.isSafeInteger(total)) {
+      throw new RangeError(
+        "A soma horária da comparação excedeu o limite seguro.",
+      );
+    }
+    totals.set(key, { ...identity, bucket, total });
+  });
+
+  return [
+    ...stableRows,
+    ...Array.from(totals.values(), (item) => ({
+      bucket: item.bucket.toISOString(),
+      camera_id: item.cameraId,
+      line_count_id: item.lineCountId || undefined,
+      metric_type: item.metricType,
+      object_class: item.objectClass || undefined,
+      total: item.total,
+    })),
+  ];
 }
 
 function listBucketStarts(definition: ScenarioComparisonDefinition) {
   const starts: Date[] = [];
-  let cursor = alignToGranularity(definition.from, definition.granularity);
-  const end = alignEndToGranularity(definition.to, definition.granularity);
+  const { companyTimeZone, granularity } = definition;
+  if (granularity === "minute" || granularity === "hour") {
+    let cursor = alignToGranularity(
+      definition.from,
+      granularity,
+      companyTimeZone,
+    );
+    const end = alignEndToGranularity(
+      definition.to,
+      granularity,
+      companyTimeZone,
+    );
 
-  while (cursor < end) {
-    const bucketStart = new Date(cursor);
-    starts.push(bucketStart);
-    cursor = addGranularity(bucketStart, definition.granularity);
+    while (cursor < end) {
+      starts.push(new Date(cursor));
+      cursor = addGranularity(cursor, granularity, companyTimeZone);
+    }
+    return starts;
+  }
+
+  let cursor = calendarBucketStartForInstant(
+    definition.from,
+    granularity,
+    companyTimeZone,
+  );
+  const finalBucket = calendarBucketStartForInstant(
+    new Date(definition.to.getTime() - 1),
+    granularity,
+    companyTimeZone,
+  );
+
+  while (cursor <= finalBucket) {
+    starts.push(new Date(cursor));
+    cursor = addCalendarGranularity(cursor, granularity);
   }
 
   return starts;
 }
 
-function alignToGranularity(date: Date, granularity: AggregateGranularity) {
+function alignToGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+  companyTimeZone: string,
+) {
   if (granularity === "minute") return startOfMinute(date);
-  if (granularity === "hour") return startOfHour(date);
-  if (granularity === "day") return startOfDay(date);
-  if (granularity === "week") return startOfWeek(date);
-  if (granularity === "month") return startOfMonth(date);
-  return startOfDay(date);
+  if (granularity === "hour") {
+    return countingStartOfHourInstant(date, companyTimeZone);
+  }
+  return calendarBucketStartForInstant(date, granularity, companyTimeZone);
 }
 
-function alignEndToGranularity(date: Date, granularity: AggregateGranularity) {
-  const aligned = alignToGranularity(date, granularity);
+function alignEndToGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+  companyTimeZone: string,
+) {
+  const aligned = alignToGranularity(date, granularity, companyTimeZone);
   if (aligned.getTime() === date.getTime()) return aligned;
-  return addGranularity(aligned, granularity);
+  if (granularity === "minute" || granularity === "hour") {
+    return addGranularity(aligned, granularity, companyTimeZone);
+  }
+  return addCalendarGranularity(aligned, granularity);
 }
 
-function addGranularity(date: Date, granularity: AggregateGranularity) {
+function addGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+  companyTimeZone: string,
+) {
   if (granularity === "minute") return addMinutes(date, 1);
-  if (granularity === "hour") return endOfAggregateBucket(date, "hour");
-  if (granularity === "day") return addDays(date, 1);
-  if (granularity === "week") return addDays(date, 7);
-  if (granularity === "month") return addMonths(date, 1);
-  return addDays(date, 1);
+  if (granularity === "hour") {
+    return countingEndOfHourInstant(date, companyTimeZone);
+  }
+  return addCalendarGranularity(date, granularity);
 }
 
-function bucketLabel(date: Date, granularity: AggregateGranularity) {
-  if (granularity === "minute") return formatTime(date);
-  if (granularity === "hour") return `${String(date.getHours()).padStart(2, "0")}h`;
+function bucketLabel(
+  date: Date,
+  granularity: AggregateGranularity,
+  companyTimeZone: string,
+): string {
+  if (granularity === "minute") {
+    return formatCompanyTime(date, companyTimeZone);
+  }
+  if (granularity === "hour") {
+    const hour = companyZonedDateParts(date, companyTimeZone).hour;
+    return `${String(hour).padStart(2, "0")}h`;
+  }
   if (granularity === "day") {
-    return new Intl.DateTimeFormat("pt-BR", {
-      day: "2-digit",
-      month: "2-digit",
-    }).format(date);
+    return `${String(date.getDate()).padStart(2, "0")}/${String(
+      date.getMonth() + 1,
+    ).padStart(2, "0")}`;
   }
   if (granularity === "week") {
-    const end = addDays(date, 6);
-    return `${new Intl.DateTimeFormat("pt-BR", {
-      day: "2-digit",
-      month: "2-digit",
-    }).format(date)}-${new Intl.DateTimeFormat("pt-BR", {
-      day: "2-digit",
-      month: "2-digit",
-    }).format(end)}`;
+    const end = countingAddCalendarDays(date, 6);
+    return `${bucketLabel(date, "day", companyTimeZone)}-${bucketLabel(
+      end,
+      "day",
+      companyTimeZone,
+    )}`;
   }
 
   return new Intl.DateTimeFormat("pt-BR", {
     month: "short",
+    timeZone: "UTC",
     year: "2-digit",
-  }).format(date);
+  }).format(new Date(Date.UTC(date.getFullYear(), date.getMonth(), 1)));
 }
 
-function currentOpenBucket(granularity: AggregateGranularity, now: Date) {
-  const from = alignToGranularity(now, granularity);
+function currentOpenBucket(
+  granularity: AggregateGranularity,
+  now: Date,
+  companyTimeZone: string,
+) {
+  const from = alignToGranularity(now, granularity, companyTimeZone);
   return {
     from,
-    to: addGranularity(from, granularity),
+    to: addGranularity(from, granularity, companyTimeZone),
   };
 }
 
@@ -2359,46 +2703,12 @@ function startOfMinute(date: Date) {
   return next;
 }
 
-function startOfHour(date: Date) {
-  return startOfAggregateBucket(date, "hour");
-}
-
-function startOfDay(date: Date) {
-  const next = new Date(date);
-  next.setHours(0, 0, 0, 0);
-  return next;
-}
-
-function startOfWeek(date: Date) {
-  const next = startOfDay(date);
-  const day = next.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  next.setDate(next.getDate() + diff);
-  return next;
-}
-
-function startOfMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
-}
-
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * MINUTE_MS);
 }
 
 function addHours(date: Date, hours: number) {
   return new Date(date.getTime() + hours * HOUR_MS);
-}
-
-function addDays(date: Date, days: number) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function addMonths(date: Date, months: number) {
-  const next = new Date(date);
-  next.setMonth(next.getMonth() + months);
-  return next;
 }
 
 function calendarDayDistance(from: Date, to: Date) {
@@ -2411,38 +2721,206 @@ function calendarDayDistance(from: Date, to: Date) {
   return Math.max(0, Math.round((toUtc - fromUtc) / (24 * HOUR_MS)));
 }
 
-function calendarDayBucketCount(from: Date, to: Date) {
-  const calendarDays = calendarDayDistance(from, to);
-  return (
-    calendarDays +
-    (to.getTime() > startOfDay(to).getTime() ? 1 : 0)
+function calendarDayBucketCount(
+  from: Date,
+  to: Date,
+  companyTimeZone: string,
+) {
+  if (from >= to) return 0;
+  const first = countingCalendarDate(from, companyTimeZone, "day");
+  const last = countingCalendarDate(
+    new Date(to.getTime() - 1),
+    companyTimeZone,
+    "day",
   );
+  return calendarDayDistance(first, last) + 1;
+}
+
+function calendarBucketStartForInstant(
+  instant: Date,
+  granularity: AggregateGranularity,
+  companyTimeZone: string,
+) {
+  const day = countingCalendarDate(instant, companyTimeZone, "day");
+  if (granularity === "day") return day;
+  if (granularity === "week") {
+    return countingAddCalendarDays(day, -((day.getDay() + 6) % 7));
+  }
+  if (granularity === "month") {
+    return new Date(day.getFullYear(), day.getMonth(), 1);
+  }
+  if (granularity === "semester") {
+    return new Date(day.getFullYear(), day.getMonth() < 6 ? 0 : 6, 1);
+  }
+  if (granularity === "year") {
+    return new Date(day.getFullYear(), 0, 1);
+  }
+  throw new TypeError("A granularidade civil da comparação é inválida.");
+}
+
+function addCalendarGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+) {
+  if (granularity === "day") return countingAddCalendarDays(date, 1);
+  if (granularity === "week") return countingAddCalendarDays(date, 7);
+  if (granularity === "month") return countingAddCalendarMonths(date, 1);
+  if (granularity === "semester") return countingAddCalendarMonths(date, 6);
+  if (granularity === "year") {
+    return new Date(date.getFullYear() + 1, 0, 1);
+  }
+  throw new TypeError("A granularidade civil da comparação é inválida.");
+}
+
+function companyWallTimeOnCalendarDay(
+  calendarDay: Date,
+  reference: Date,
+  companyTimeZone: string,
+) {
+  const time = companyZonedDateParts(reference, companyTimeZone);
+  const desiredWallClock = Date.UTC(
+    calendarDay.getFullYear(),
+    calendarDay.getMonth(),
+    calendarDay.getDate(),
+    time.hour,
+    time.minute,
+    time.second,
+  );
+
+  // A mesma hora civil pode não existir no salto de DST. Nesse caso usamos
+  // o primeiro minuto civil real seguinte, mantendo a janela monotônica.
+  for (let offsetMinutes = 0; offsetMinutes <= 180; offsetMinutes += 1) {
+    const candidateWall = new Date(desiredWallClock + offsetMinutes * MINUTE_MS);
+    const value = `${String(candidateWall.getUTCFullYear()).padStart(4, "0")}-${String(
+      candidateWall.getUTCMonth() + 1,
+    ).padStart(2, "0")}-${String(candidateWall.getUTCDate()).padStart(
+      2,
+      "0",
+    )}T${String(candidateWall.getUTCHours()).padStart(2, "0")}:${String(
+      candidateWall.getUTCMinutes(),
+    ).padStart(2, "0")}:${String(candidateWall.getUTCSeconds()).padStart(
+      2,
+      "0",
+    )}`;
+    const instant = companyDateTimeLocalInstant(value, companyTimeZone);
+    if (instant) {
+      return new Date(instant.getTime() + reference.getMilliseconds());
+    }
+  }
+
+  throw new RangeError("Não foi possível resolver o horário civil comparado.");
+}
+
+function resolveFixedHourlyDayWindow(
+  from: Date,
+  to: Date,
+  referenceTime: Date,
+  companyTimeZone: string,
+) {
+  if (to <= from) return null;
+  const fromParts = companyZonedDateParts(from, companyTimeZone);
+  const finalParts = companyZonedDateParts(
+    new Date(to.getTime() - 1),
+    companyTimeZone,
+  );
+  if (!sameCompanyCalendarDay(fromParts, finalParts)) return null;
+
+  let throughHour = finalParts.hour;
+  if (referenceTime < from) {
+    throughHour = -1;
+  } else {
+    const referenceParts = companyZonedDateParts(referenceTime, companyTimeZone);
+    if (sameCompanyCalendarDay(referenceParts, fromParts)) {
+      throughHour = Math.min(referenceParts.hour, throughHour);
+    }
+  }
+
+  return { fromHour: fromParts.hour, throughHour };
+}
+
+function buildFixedHourlyAxisValues(
+  points: readonly { bucket: string; total: number }[],
+  throughHour: number,
+  options: { fromHour?: number; missingHourValue?: number | null },
+  companyTimeZone: string,
+) {
+  const totals = new Map<number, number>();
+  points.forEach((point) => {
+    const bucket = new Date(point.bucket);
+    if (Number.isNaN(bucket.getTime())) return;
+    const hour = companyZonedDateParts(bucket, companyTimeZone).hour;
+    totals.set(hour, (totals.get(hour) ?? 0) + point.total);
+  });
+  const fromHour = Math.max(0, Math.min(23, Math.trunc(options.fromHour ?? 0)));
+  const finalHour = Math.max(-1, Math.min(23, throughHour));
+  const missing =
+    options.missingHourValue === undefined
+      ? 0
+      : options.missingHourValue;
+
+  return HOUR_OF_DAY_LABELS.map((_, hour) => {
+    if (hour < fromHour || hour > finalHour) return null;
+    return totals.has(hour) ? totals.get(hour)! : missing;
+  });
+}
+
+function sameCompanyCalendarDay(
+  left: { day: number; month: number; year: number },
+  right: { day: number; month: number; year: number },
+) {
+  return (
+    left.year === right.year &&
+    left.month === right.month &&
+    left.day === right.day
+  );
+}
+
+function formatCompanyTime(value: Date, companyTimeZone: string) {
+  return formatCompanyDateTime(value, companyTimeZone, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatScenarioBucketDateTime(
+  value: Date,
+  granularity: AggregateGranularity,
+  companyTimeZone: string,
+) {
+  if (granularity === "minute" || granularity === "hour") {
+    return formatReportDateTime(value, companyTimeZone);
+  }
+  return `${String(value.getDate()).padStart(2, "0")}/${String(
+    value.getMonth() + 1,
+  ).padStart(2, "0")}/${value.getFullYear()}`;
 }
 
 function monthYearLabel(date: Date) {
   return new Intl.DateTimeFormat("pt-BR", {
     month: "short",
+    timeZone: "UTC",
     year: "numeric",
   })
-    .format(date)
+    .format(new Date(Date.UTC(date.getFullYear(), date.getMonth(), 1)))
     .replace(".", "");
 }
 
-function parseLocalDateTime(value: string) {
-  if (!value) return null;
-
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
+function parseCompanyDateTime(value: string, companyTimeZone: string) {
+  return value
+    ? companyDateTimeLocalInstant(value, companyTimeZone)
+    : null;
 }
 
-export function createDefaultScenarioComparisonSettings(): ScenarioComparisonSettings {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
+export function createDefaultScenarioComparisonSettings(
+  companyTimeZone = "UTC",
+  now = new Date(),
+): ScenarioComparisonSettings {
+  const start = countingStartOfDayInstant(now, companyTimeZone);
 
   return {
     accumulated: false,
-    customFrom: toDateTimeLocalValue(start),
-    customTo: toDateTimeLocalValue(new Date()),
+    customFrom: companyDateTimeLocalValue(start, companyTimeZone),
+    customTo: companyDateTimeLocalValue(now, companyTimeZone),
     granularity: "hour",
     period: "today",
     selectedScenarioIds: [],
@@ -2455,8 +2933,9 @@ export function loadScenarioComparisonSettings(
   storageKey: string,
   companyId?: string | null,
   scope: ViewPreferenceScope = {},
+  companyTimeZone = "UTC",
 ) {
-  return loadSettings(storageKey, companyId, scope);
+  return loadSettings(storageKey, companyId, scope, companyTimeZone);
 }
 
 export function saveScenarioComparisonSettings(
@@ -2464,11 +2943,12 @@ export function saveScenarioComparisonSettings(
   settings: ScenarioComparisonSettings,
   companyId?: string | null,
   scope: ViewPreferenceScope = {},
+  companyTimeZone = "UTC",
 ) {
   saveSettings(
     storageKey,
     companyId,
-    normalizeScenarioComparisonSettings(settings),
+    normalizeScenarioComparisonSettings(settings, companyTimeZone),
     scope,
   );
 }
@@ -2488,8 +2968,11 @@ function loadSettings(
   storageKey: string,
   companyId?: string | null,
   scope: ViewPreferenceScope = {},
+  companyTimeZone = "UTC",
 ) {
-  if (typeof window === "undefined") return createDefaultScenarioComparisonSettings();
+  if (typeof window === "undefined") {
+    return createDefaultScenarioComparisonSettings(companyTimeZone);
+  }
 
   try {
     const stored = readUserViewScopedStorageEntry(
@@ -2498,14 +2981,16 @@ function loadSettings(
       scope.userId,
       scope.viewId,
     );
-    if (!stored?.value) return createDefaultScenarioComparisonSettings();
+    if (!stored?.value) {
+      return createDefaultScenarioComparisonSettings(companyTimeZone);
+    }
 
     const parsed = JSON.parse(
       stored.value,
     ) as Partial<ScenarioComparisonSettings>;
-    return normalizeScenarioComparisonSettings(parsed);
+    return normalizeScenarioComparisonSettings(parsed, companyTimeZone);
   } catch {
-    return createDefaultScenarioComparisonSettings();
+    return createDefaultScenarioComparisonSettings(companyTimeZone);
   }
 }
 
@@ -2542,12 +3027,13 @@ function scenarioComparisonStorageBaseKey(storageKey: string) {
 
 export function normalizeScenarioComparisonSettings(
   value: unknown,
+  companyTimeZone = "UTC",
 ): ScenarioComparisonSettings {
   const settings =
     value && typeof value === "object"
       ? (value as Partial<ScenarioComparisonSettings>)
       : {};
-  const fallback = createDefaultScenarioComparisonSettings();
+  const fallback = createDefaultScenarioComparisonSettings(companyTimeZone);
 
   return {
     accumulated:
@@ -2626,11 +3112,11 @@ function scenarioColumnKey(scenarioId: string) {
   return `scenario_${scenarioId}`;
 }
 
-function formatReportDateTime(value: Date) {
-  return new Intl.DateTimeFormat("pt-BR", {
+function formatReportDateTime(value: Date, companyTimeZone: string) {
+  return formatCompanyDateTime(value, companyTimeZone, {
     dateStyle: "short",
     timeStyle: "short",
-  }).format(value);
+  });
 }
 
 function scenarioSelectionLabel(

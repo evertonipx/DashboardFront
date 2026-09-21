@@ -93,6 +93,7 @@ export type CardScenarioSelectionMode = "inherit" | "all" | "custom";
 
 export type CardScenarioSelection = {
   mode: CardScenarioSelectionMode;
+  scenarioOrder?: string[];
   scenarioIds: string[];
 };
 
@@ -105,6 +106,7 @@ export type CardPreference = {
   heightLevel?: CardLayoutLevel;
   id: string;
   scenarioIds?: string[];
+  scenarioOrder?: string[];
   scenarioSelectionMode?: CardScenarioSelectionMode;
   title?: string;
   visible: boolean;
@@ -258,6 +260,22 @@ export const cardViewMenus: CardMenuDefinition[] = [
       card("occupancy_scenario_max_month", "Máximo por mês por cenário", "Pico mensal dos últimos 12 meses."),
       card("occupancy_scenario_max_year", "Máximo por ano por cenário", "Pico observado em cada um dos últimos 5 anos."),
       card("occupancy_duration_confirmed", "Tempo ocupado confirmado", "Soma dos minutos integralmente ocupados hoje nos cenários escolhidos."),
+      card("occupancy_duration_free", "Tempo desocupado confirmado", "Soma dos minutos integralmente desocupados hoje nos cenários escolhidos."),
+      card("occupancy_duration_average", "Resumo médio de ocupação", "Ocupação média, tempos médios ocupado e livre e cobertura, sem inferir permanência individual."),
+      card("occupancy_loitering_summary", "Permanência individual", "Sessões concluídas com cenário, área, duração e horário de saída."),
+      card("occupancy_duration_average_by_scenario", "Permanência média por área", "Média das sessões concluídas em cada área, com seleção independente de cenários."),
+      card("occupancy_loitering_session_count_by_area", "Sessões concluídas por área", "Quantidade de sessões concluídas em cada área no período."),
+      card("occupancy_loitering_minimum_by_area", "Menor permanência por área", "Menor duração concluída em cada área no período."),
+      card("occupancy_loitering_maximum_by_area", "Maior permanência por área", "Maior duração concluída em cada área no período."),
+      card("occupancy_loitering_range_by_area", "Faixa de permanência por área", "Menor, média e maior duração das sessões concluídas em cada área."),
+      card("occupancy_loitering_sessions_over_time", "Sessões concluídas no tempo", "Quantidade de permanências concluídas por período e área."),
+      card("occupancy_loitering_average_over_time", "Permanência média no tempo", "Evolução da duração média das permanências concluídas."),
+      card("occupancy_loitering_accumulated_session_time", "Duração acumulada das sessões", "Soma das durações individuais concluídas, sem representar tempo cronológico de ocupação da área."),
+      card("occupancy_loitering_percentiles_by_area", "Mediana e P90 por área", "Duração típica e percentil 90 das permanências concluídas em cada área."),
+      card("occupancy_loitering_duration_distribution", "Distribuição das permanências", "Distribuição das sessões concluídas por faixa de duração."),
+      card("occupancy_loitering_area_period_heatmap", "Permanência por área e período", "Mapa de calor da duração média das sessões concluídas por área e período."),
+      card("occupancy_duration_rate", "Taxa de tempo ocupado", "Participação ocupada no tempo com estado confirmado, excluindo minutos mistos ou sem dados."),
+      card("occupancy_duration_transitions", "Mudanças mínimas de estado", "Piso conservador das mudanças entre ocupado e desocupado detectadas no dia."),
       card("occupancy_duration_longest", "Maior período ocupado", "Maior sequência contínua confirmada no dia atual."),
       card("occupancy_duration_load", "Carga de ocupação", "Integral da ocupação média de hoje em unidades-hora, sem inferir permanência individual."),
       card("occupancy_duration_coverage", "Cobertura da duração", "Percentual dos minutos fechados de hoje com dados disponíveis."),
@@ -269,7 +287,7 @@ export const cardViewMenus: CardMenuDefinition[] = [
       card("occupancy_duration_daily_profile", "Tempo ocupado · evolução diária", "Distribuição diária do tempo ocupado, livre, em transição e sem leitura."),
       card("occupancy_hex_layout", "Simulador operacional hexagonal", "Layout configurável para posições operacionais."),
       card("occupancy_day_hour_heatmap", "Ocupação por dias x horários", "Mapa horário do cenário ao longo dos dias."),
-      card("occupancy_scenario_hour_heatmap", "Ocupação por cenários x horários", "Mapa comparativo dos cenários nas horas da data."),
+      card("occupancy_scenario_hour_heatmap", "Ocupação por cenários x períodos", "Mapa comparativo dos cenários na granularidade configurada."),
     ],
   },
 ];
@@ -279,6 +297,25 @@ function card(id: string, label: string, description: string): CardDefinition {
 }
 
 type CardPreferenceStore = Partial<Record<CardMenuKey, CardPreference[]>>;
+
+// Widgets de permanência incluídos depois que as primeiras visões de Ocupação
+// já estavam persistidas. Eles não devem alterar silenciosamente o layout nem
+// disparar novas consultas numa visão antiga, mas continuam visíveis por padrão
+// numa visão realmente nova (sem preferências salvas).
+const OCCUPANCY_LOITERING_MIGRATION_CARD_IDS = new Set([
+  "occupancy_loitering_summary",
+  "occupancy_duration_average_by_scenario",
+  "occupancy_loitering_session_count_by_area",
+  "occupancy_loitering_minimum_by_area",
+  "occupancy_loitering_maximum_by_area",
+  "occupancy_loitering_range_by_area",
+  "occupancy_loitering_sessions_over_time",
+  "occupancy_loitering_average_over_time",
+  "occupancy_loitering_accumulated_session_time",
+  "occupancy_loitering_percentiles_by_area",
+  "occupancy_loitering_duration_distribution",
+  "occupancy_loitering_area_period_heatmap",
+]);
 
 export function getCardMenuDefinition(menuKey: CardMenuKey) {
   return cardViewMenus.find((menu) => menu.key === menuKey) ?? cardViewMenus[0];
@@ -335,6 +372,9 @@ export function normalizeCardPreferences(
       storedPreference.scenarioSelectionMode,
     );
     const scenarioIds = normalizeCardScenarioIds(storedPreference.scenarioIds);
+    const scenarioOrder = normalizeCardScenarioIds(
+      storedPreference.scenarioOrder,
+    );
     const demographicDimension = menuKey === "demographics"
       ? demographicDimensionForCard(id)
       : undefined;
@@ -360,6 +400,7 @@ export function normalizeCardPreferences(
       ...(scenarioSelectionMode === "custom" && scenarioIds.length
         ? { scenarioIds }
         : {}),
+      ...(scenarioOrder.length ? { scenarioOrder } : {}),
       ...(scenarioSelectionMode ? { scenarioSelectionMode } : {}),
       title: normalizeCardTitle(storedPreference.title),
       visible: storedPreference.visible ?? true,
@@ -371,6 +412,7 @@ export function normalizeCardPreferences(
   const normalizedIds = new Set(normalized.map((preference) => preference.id));
   const defaultOrder = Array.from(definitionIds);
   const merged = [...normalized];
+  const isExistingOccupancyView = menuKey === "occupancy" && byId.size > 0;
 
   defaultOrder.forEach((id, defaultIndex) => {
     if (normalizedIds.has(id)) return;
@@ -391,7 +433,9 @@ export function normalizeCardPreferences(
         heightLevel: undefined,
         id,
         title: undefined,
-        visible: true,
+        visible:
+          !isExistingOccupancyView ||
+          !OCCUPANCY_LOITERING_MIGRATION_CARD_IDS.has(id),
         size: undefined,
         widthLevel: undefined,
         zoom: undefined,

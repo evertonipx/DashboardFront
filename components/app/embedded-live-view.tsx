@@ -14,8 +14,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import {
   aggregateBucketInRange,
-  endOfAggregateBucket,
-  startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
   clearHourlyAggregateCache,
@@ -33,6 +31,7 @@ import {
   reconcileAggregateRows,
   rollupAggregateRows,
 } from "@/lib/aggregate-reconciliation";
+import { rollupCountingInstantRowsToCalendar } from "@/lib/counting-aggregate-reconciliation";
 import { hasMasterAccess } from "@/lib/access";
 import {
   buildWorkerBackedLocationOptions,
@@ -42,7 +41,14 @@ import {
 } from "@/lib/camera-groups";
 import { pastelBarColor } from "@/lib/chart-palette";
 import {
-  requireCertifiedCountingRuntimeTimeZone,
+  countingAddCalendarDays,
+  countingCalendarDate,
+  countingCalendarHourInstant,
+  countingCalendarStart,
+  countingEndOfHourInstant,
+  countingStartOfDayInstant,
+  countingStartOfHourInstant,
+  requireCertifiedCountingTimeZone,
   requireCountingRuntimeTimeZone,
 } from "@/lib/counting-time-zone";
 import {
@@ -79,7 +85,7 @@ import type {
   Worker,
 } from "@/lib/types";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
-import { formatNumber, formatTime } from "@/lib/utils";
+import { formatNumber } from "@/lib/utils";
 import { useViewLinkTarget } from "@/lib/view-link-reference";
 import {
   partitionWorkersByCompanyScope,
@@ -239,7 +245,7 @@ export function EmbeddedLiveView() {
 
       return {
         error: "",
-        timeZone: requireCertifiedCountingRuntimeTimeZone(
+        timeZone: requireCertifiedCountingTimeZone(
           companyTimeZoneResolution,
         ),
       };
@@ -395,7 +401,12 @@ export function EmbeddedLiveView() {
         return nextRequest;
       };
       const now = new Date();
-      const liveHourDefinition = buildAggregateDefinition(now, "hour");
+      const timeZone = companyScopeCertification.timeZone;
+      const liveHourDefinition = buildAggregateDefinition(
+        now,
+        "hour",
+        timeZone,
+      );
       const currentMinuteDefinition: AggregateDefinition = {
         from: startOfMinute(now),
         granularity: "minute",
@@ -418,17 +429,24 @@ export function EmbeddedLiveView() {
               now,
               ranges: [liveHourDefinition],
               signal: controller.signal,
+              timeZone,
             }),
             fetchMinuteDayAggregateBootstrap({
               cache: minuteAggregateCacheRef.current,
               cacheScope: minuteCacheScope,
               companyScopeId: companyScopeId ?? undefined,
-              from: startOfHour(now),
+              from: countingStartOfHourInstant(now, timeZone),
               now,
               signal: controller.signal,
+              timeZone,
               to: currentMinuteDefinition.from,
             }),
-            fetchAggregateRows(currentMinuteDefinition, request, controller.signal),
+            fetchAggregateRows(
+              currentMinuteDefinition,
+              request,
+              controller.signal,
+              timeZone,
+            ),
           ])
         : [[], [], []];
       const minuteRows = liveSourceRequired
@@ -436,16 +454,17 @@ export function EmbeddedLiveView() {
             cache: minuteAggregateCacheRef.current,
             cacheScope: minuteCacheScope,
             companyScopeId: companyScopeId ?? undefined,
-            from: startOfHour(now),
+            from: countingStartOfHourInstant(now, timeZone),
             now,
             signal: controller.signal,
             sourceFrom: currentMinuteDefinition.from,
             sourceRows: currentMinuteRows,
             sourceTo: currentMinuteDefinition.to,
+            timeZone,
           })) ?? minuteBootstrapRows
         : [];
       const liveHourRows = liveSourceRequired
-        ? hydrateCurrentHourRows(hourRows, minuteRows, now)
+        ? hydrateCurrentHourRows(hourRows, minuteRows, now, timeZone)
         : [];
       const scenarioRequests = new Map<
         string,
@@ -456,8 +475,12 @@ export function EmbeddedLiveView() {
           queryableConfigs
             .filter((config) => config.chart === "scenario-hour")
             .map(async (config) => {
-              const definition = buildScenarioComparisonDefinition(config, now);
-              const queryKey = `${companyScopeId ?? "jwt-company"}|${embeddedScenarioQueryKey(config, now)}`;
+              const definition = buildScenarioComparisonDefinition(
+                config,
+                now,
+                timeZone,
+              );
+              const queryKey = `${companyScopeId ?? "jwt-company"}|${embeddedScenarioQueryKey(config, now, timeZone)}`;
               const cached = scenarioDatasetCacheRef.current.get(queryKey);
               const pending =
                 scenarioRequests.get(queryKey) ??
@@ -474,6 +497,7 @@ export function EmbeddedLiveView() {
                       companyScopeId ?? undefined,
                       request,
                       controller.signal,
+                      timeZone,
                     ));
               scenarioRequests.set(queryKey, pending);
               const rows = await pending;
@@ -511,6 +535,7 @@ export function EmbeddedLiveView() {
             scenarioError: metadataSnapshot.scenarioError,
             scenarios: metadataSnapshot.scenarios,
             subLocationOptions: metadataSnapshot.subLocationOptions,
+            timeZone,
           }),
         ),
       );
@@ -880,7 +905,7 @@ export function EmbeddedLiveView() {
 
   React.useEffect(() => {
     const enabled = !hasMasterAccess(user) || Boolean(companyScopeId);
-    const refreshDataWhenVisible = () => {
+    const refreshData = (respectFreshness: boolean) => {
       const metadataSnapshot = metadataSnapshotRef.current;
       if (
         !shouldAutoRefreshResources({
@@ -890,7 +915,9 @@ export function EmbeddedLiveView() {
         metadataRequestRunningRef.current ||
         dataRequestRunningRef.current ||
         metadataSnapshot?.identityKey !== viewIdentityKeyRef.current ||
-        Date.now() - dataLoadedAtRef.current < MIN_DATA_REFRESH_INTERVAL_MS ||
+        (respectFreshness &&
+          Date.now() - dataLoadedAtRef.current <
+            MIN_DATA_REFRESH_INTERVAL_MS) ||
         !embeddedViewNeedsLiveRefresh(
           embeddedQueryableWidgetConfigs(
             queryWidgetConfigs,
@@ -903,8 +930,10 @@ export function EmbeddedLiveView() {
       }
       void loadData(metadataSnapshot, { silent: true });
     };
+    const refreshDataWhenVisible = () => refreshData(true);
+    const refreshDataOnPulse = () => refreshData(false);
     const interval = window.setInterval(
-      refreshDataWhenVisible,
+      refreshDataOnPulse,
       REFRESH_SECONDS * 1000,
     );
     window.addEventListener("focus", refreshDataWhenVisible);
@@ -1227,8 +1256,9 @@ function cacheEmbeddedScenarioDataset(
 function embeddedScenarioQueryKey(
   config: EmbeddedWidgetConfig,
   now: Date,
+  timeZone: string,
 ) {
-  const definition = buildScenarioComparisonDefinition(config, now);
+  const definition = buildScenarioComparisonDefinition(config, now, timeZone);
   return JSON.stringify([
     definition.granularity,
     definition.from.toISOString(),
@@ -1259,6 +1289,7 @@ function buildEmbeddedWidgetState({
   scenarioError,
   scenarios,
   subLocationOptions,
+  timeZone,
 }: {
   config: EmbeddedWidgetConfig;
   liveHourRows: AggregateEventRow[];
@@ -1268,6 +1299,7 @@ function buildEmbeddedWidgetState({
   scenarioError: string;
   scenarios: Scenario[];
   subLocationOptions: ScopeComparisonOption[];
+  timeZone: string;
 }): EmbeddedWidgetState {
   if (
     scenarioError &&
@@ -1285,7 +1317,11 @@ function buildEmbeddedWidgetState({
       scenarios,
       config.scenarioIds,
     );
-    const definition = buildScenarioComparisonDefinition(config, now);
+    const definition = buildScenarioComparisonDefinition(
+      config,
+      now,
+      timeZone,
+    );
 
     return {
       config,
@@ -1300,6 +1336,7 @@ function buildEmbeddedWidgetState({
           scenario,
           scenarioRows,
           definition,
+          timeZone,
         ),
       })),
     };
@@ -1309,7 +1346,12 @@ function buildEmbeddedWidgetState({
     return {
       config,
       error: "",
-      points: buildScenarioTodayComparisonPoints(scenarios, liveHourRows, now),
+      points: buildScenarioTodayComparisonPoints(
+        scenarios,
+        liveHourRows,
+        now,
+        timeZone,
+      ),
     };
   }
 
@@ -1317,7 +1359,12 @@ function buildEmbeddedWidgetState({
     return {
       config,
       error: "",
-      points: buildScopeTodayComparisonPoints(locationOptions, liveHourRows, now),
+      points: buildScopeTodayComparisonPoints(
+        locationOptions,
+        liveHourRows,
+        now,
+        timeZone,
+      ),
     };
   }
 
@@ -1328,6 +1375,7 @@ function buildEmbeddedWidgetState({
       subLocationOptions,
       liveHourRows,
       now,
+      timeZone,
     ),
   };
 }
@@ -1344,20 +1392,21 @@ function buildOptionForChart(
 function buildAggregateDefinition(
   now: Date,
   granularity: "hour" | "minute",
+  timeZone: string,
 ): AggregateDefinition {
   if (granularity === "minute") {
     const end = addMinutes(startOfMinute(now), 1);
     return {
       granularity,
-      from: startOfHour(now),
+      from: countingStartOfHourInstant(now, timeZone),
       to: end,
     };
   }
 
-  const end = endOfAggregateBucket(startOfHour(now), "hour");
+  const end = countingEndOfHourInstant(now, timeZone);
   return {
     granularity,
-    from: startOfDay(now),
+    from: countingStartOfDayInstant(now, timeZone),
     to: end,
   };
 }
@@ -1366,6 +1415,7 @@ async function fetchAggregateRows(
   definition: AggregateDefinition,
   request: EmbeddedApiRequest,
   signal?: AbortSignal,
+  timeZone?: string,
 ) {
   return fetchCompleteAggregateRange({
     from: definition.from,
@@ -1373,6 +1423,7 @@ async function fetchAggregateRows(
     metricType: DEFAULT_METRIC_TYPE,
     request: (path) => request<AggregateEventsResponse>(path),
     signal,
+    timeZone,
     to: definition.to,
   });
 }
@@ -1387,16 +1438,17 @@ async function fetchScenarioComparisonRows(
   cacheScope: string,
   companyScopeId: string | undefined,
   request: EmbeddedApiRequest,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  timeZone: string,
 ) {
-  const definition = buildScenarioComparisonDefinition(config, now);
-  const currentHourEnd = endOfAggregateBucket(startOfHour(now), "hour");
+  const definition = buildScenarioComparisonDefinition(config, now, timeZone);
+  const currentHourEnd = countingEndOfHourInstant(now, timeZone);
   const hourlyDefinition = {
-    from: startOfHour(definition.from),
+    from: countingStartOfHourInstant(definition.from, timeZone),
     granularity: "hour" as const,
     to: new Date(
       Math.min(
-        alignEndToGranularity(definition.to, "hour").getTime(),
+        alignEndToGranularity(definition.to, "hour", timeZone).getTime(),
         currentHourEnd.getTime(),
       ),
     ),
@@ -1416,6 +1468,7 @@ async function fetchScenarioComparisonRows(
         now,
         ranges: [hourlyDefinition],
         signal,
+        timeZone,
       });
   const overlapFrom = new Date(
     Math.max(
@@ -1445,6 +1498,7 @@ async function fetchScenarioComparisonRows(
     definition,
     now,
     liveSourceAvailable,
+    timeZone,
   );
   const boundaryEntries = await Promise.all(
     boundaryRanges.map(async (range) => ({
@@ -1456,6 +1510,8 @@ async function fetchScenarioComparisonRows(
           to: range.to,
         },
         request,
+        signal,
+        timeZone,
       ),
     })),
   );
@@ -1470,26 +1526,44 @@ async function fetchScenarioComparisonRows(
     );
   });
 
-  return rollupAggregateRows(
+  if (definition.granularity === "hour") {
+    return rollupAggregateRows(
+      hourlyRows,
+      "hour",
+      "hour",
+      hourlyDefinition.from,
+      hourlyDefinition.to,
+    );
+  }
+  if (
+    definition.granularity !== "day" &&
+    definition.granularity !== "week" &&
+    definition.granularity !== "month"
+  ) {
+    throw new Error("Granularidade inválida para a comparação incorporada.");
+  }
+  return rollupCountingInstantRowsToCalendar(
     hourlyRows,
     "hour",
     definition.granularity,
-    definition.from,
-    definition.to,
+    hourlyDefinition.from,
+    hourlyDefinition.to,
+    timeZone,
   );
 }
 
 function embeddedPartialHourRanges(
   definition: AggregateDefinition,
   now: Date,
-  liveSourceAvailable = true,
+  liveSourceAvailable: boolean,
+  timeZone: string,
 ) {
   const ranges = new Map<
     number,
     { from: Date; to: Date }
   >();
-  const firstHourStart = startOfHour(definition.from);
-  const firstHourEnd = endOfAggregateBucket(firstHourStart, "hour");
+  const firstHourStart = countingStartOfHourInstant(definition.from, timeZone);
+  const firstHourEnd = countingEndOfHourInstant(firstHourStart, timeZone);
   if (firstHourStart < definition.from) {
     ranges.set(firstHourStart.getTime(), {
       from: definition.from,
@@ -1499,8 +1573,8 @@ function embeddedPartialHourRanges(
     });
   }
 
-  const lastHourStart = startOfHour(definition.to);
-  const currentHourStart = startOfHour(now);
+  const lastHourStart = countingStartOfHourInstant(definition.to, timeZone);
+  const currentHourStart = countingStartOfHourInstant(now, timeZone);
   const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
   const currentOpenHourAlreadyCanonical =
     liveSourceAvailable &&
@@ -1634,9 +1708,10 @@ function hydrateCurrentHourRows(
   hourRows: AggregateEventRow[],
   minuteRows: AggregateEventRow[],
   now: Date,
+  timeZone: string,
 ) {
-  const currentHourStart = startOfHour(now);
-  const nextHourStart = endOfAggregateBucket(currentHourStart, "hour");
+  const currentHourStart = countingStartOfHourInstant(now, timeZone);
+  const nextHourStart = countingEndOfHourInstant(now, timeZone);
 
   return reconcileAggregateRows(
     hourRows,
@@ -1652,9 +1727,15 @@ function buildScenarioTodayComparisonPoints(
   scenarios: Scenario[],
   rows: AggregateEventRow[],
   now: Date,
+  timeZone: string,
 ): ChartPoint[] {
-  const todayStart = startOfDay(now);
-  const tomorrowStart = addDays(todayStart, 1);
+  const today = countingCalendarDate(now, timeZone);
+  const todayStart = countingStartOfDayInstant(now, timeZone);
+  const tomorrowStart = countingCalendarHourInstant(
+    countingAddCalendarDays(today, 1),
+    0,
+    timeZone,
+  );
 
   return scenarios
     .map((scenario) => ({
@@ -1675,9 +1756,15 @@ function buildScopeTodayComparisonPoints(
   scopes: Array<{ cameraIds: string[]; id: string; name: string }>,
   rows: AggregateEventRow[],
   now: Date,
+  timeZone: string,
 ): ChartPoint[] {
-  const todayStart = startOfDay(now);
-  const tomorrowStart = addDays(todayStart, 1);
+  const today = countingCalendarDate(now, timeZone);
+  const todayStart = countingStartOfDayInstant(now, timeZone);
+  const tomorrowStart = countingCalendarHourInstant(
+    countingAddCalendarDays(today, 1),
+    0,
+    timeZone,
+  );
 
   return scopes
     .map((scope) => ({
@@ -1697,8 +1784,9 @@ function buildScopeTodayComparisonPoints(
 function buildScenarioComparisonDefinition(
   config: EmbeddedWidgetConfig,
   now: Date,
+  timeZone: string,
 ): AggregateDefinition {
-  const range = scenarioComparisonRange(config, now);
+  const range = scenarioComparisonRange(config, now, timeZone);
 
   return {
     granularity: config.granularity,
@@ -1707,7 +1795,11 @@ function buildScenarioComparisonDefinition(
   };
 }
 
-function scenarioComparisonRange(config: EmbeddedWidgetConfig, now: Date) {
+function scenarioComparisonRange(
+  config: EmbeddedWidgetConfig,
+  now: Date,
+  timeZone: string,
+) {
   if (config.period === "custom") {
     const from = parseIsoDate(config.from);
     const to = parseIsoDate(config.to);
@@ -1715,8 +1807,12 @@ function scenarioComparisonRange(config: EmbeddedWidgetConfig, now: Date) {
   }
 
   if (config.period === "yesterday") {
-    const todayStart = startOfDay(now);
-    return { from: addDays(todayStart, -1), to: todayStart };
+    const today = countingCalendarDate(now, timeZone);
+    const yesterday = countingAddCalendarDays(today, -1);
+    return {
+      from: countingCalendarHourInstant(yesterday, 0, timeZone),
+      to: countingCalendarHourInstant(today, 0, timeZone),
+    };
   }
 
   const currentMinuteEnd = addMinutes(startOfMinute(now), 1);
@@ -1728,20 +1824,33 @@ function scenarioComparisonRange(config: EmbeddedWidgetConfig, now: Date) {
   }
 
   if (config.period === "last_7d") {
+    const today = countingCalendarDate(now, timeZone);
     return {
-      from: startOfDay(addDays(now, -6)),
+      from: countingCalendarHourInstant(
+        countingAddCalendarDays(today, -6),
+        0,
+        timeZone,
+      ),
       to: currentMinuteEnd,
     };
   }
 
   if (config.period === "last_30d") {
+    const today = countingCalendarDate(now, timeZone);
     return {
-      from: startOfDay(addDays(now, -29)),
+      from: countingCalendarHourInstant(
+        countingAddCalendarDays(today, -29),
+        0,
+        timeZone,
+      ),
       to: currentMinuteEnd,
     };
   }
 
-  return { from: startOfDay(now), to: currentMinuteEnd };
+  return {
+    from: countingStartOfDayInstant(now, timeZone),
+    to: currentMinuteEnd,
+  };
 }
 
 function selectScenarioComparisonScenarios(
@@ -1758,13 +1867,18 @@ function buildScenarioComparisonPoints(
   scenario: Scenario,
   rows: AggregateEventRow[],
   definition: AggregateDefinition,
+  timeZone: string,
 ): ChartPoint[] {
-  return listBucketStarts(definition).map((bucketStart) => {
-    const next = addGranularity(bucketStart, definition.granularity);
+  return listBucketStarts(definition, timeZone).map((bucketStart) => {
+    const next = addGranularity(
+      bucketStart,
+      definition.granularity,
+      timeZone,
+    );
 
     return {
       id: bucketStart.toISOString(),
-      name: bucketLabel(bucketStart, definition.granularity),
+      name: bucketLabel(bucketStart, definition.granularity, timeZone),
       total: sumScenarioRowsInRange(
         rows,
         scenario,
@@ -1780,39 +1894,96 @@ function compareChartPoints(left: ChartPoint, right: ChartPoint) {
   return right.total - left.total || left.name.localeCompare(right.name, "pt-BR");
 }
 
-function listBucketStarts(definition: AggregateDefinition) {
+function listBucketStarts(
+  definition: AggregateDefinition,
+  timeZone: string,
+) {
   const starts: Date[] = [];
-  let cursor = alignToGranularity(definition.from, definition.granularity);
-  const end = alignEndToGranularity(definition.to, definition.granularity);
+  if (
+    definition.granularity !== "minute" &&
+    definition.granularity !== "hour"
+  ) {
+    let cursor = countingCalendarStart(
+      definition.from,
+      timeZone,
+      definition.granularity,
+    );
+    const lastIncludedInstant = new Date(definition.to.getTime() - 1);
+    const end = addGranularity(
+      countingCalendarStart(
+        lastIncludedInstant,
+        timeZone,
+        definition.granularity,
+      ),
+      definition.granularity,
+      timeZone,
+    );
+    while (cursor < end) {
+      const bucketStart = new Date(cursor);
+      starts.push(bucketStart);
+      cursor = addGranularity(
+        bucketStart,
+        definition.granularity,
+        timeZone,
+      );
+    }
+    return starts;
+  }
+
+  let cursor = alignToGranularity(
+    definition.from,
+    definition.granularity,
+    timeZone,
+  );
+  const end = alignEndToGranularity(
+    definition.to,
+    definition.granularity,
+    timeZone,
+  );
 
   while (cursor < end) {
     const bucketStart = new Date(cursor);
     starts.push(bucketStart);
-    cursor = addGranularity(bucketStart, definition.granularity);
+    cursor = addGranularity(
+      bucketStart,
+      definition.granularity,
+      timeZone,
+    );
   }
 
   return starts;
 }
 
-function alignToGranularity(date: Date, granularity: AggregateGranularity) {
+function alignToGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+  timeZone: string,
+) {
   if (granularity === "minute") return startOfMinute(date);
-  if (granularity === "hour") return startOfHour(date);
-  if (granularity === "day") return startOfDay(date);
-  if (granularity === "week") return startOfWeek(date);
-  if (granularity === "month") return startOfMonth(date);
-  return startOfDay(date);
+  if (granularity === "hour") {
+    return countingStartOfHourInstant(date, timeZone);
+  }
+  return countingCalendarStart(date, timeZone, granularity);
 }
 
-function alignEndToGranularity(date: Date, granularity: AggregateGranularity) {
-  const aligned = alignToGranularity(date, granularity);
+function alignEndToGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+  timeZone: string,
+) {
+  const aligned = alignToGranularity(date, granularity, timeZone);
   if (aligned.getTime() === date.getTime()) return aligned;
-  return addGranularity(aligned, granularity);
+  return addGranularity(aligned, granularity, timeZone);
 }
 
-function addGranularity(date: Date, granularity: AggregateGranularity) {
+function addGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+  timeZone: string,
+) {
   if (granularity === "minute") return addMinutes(date, 1);
   if (granularity === "hour") {
-    return endOfAggregateBucket(date, "hour");
+    return countingEndOfHourInstant(date, timeZone);
   }
   if (granularity === "day") return addDays(date, 1);
   if (granularity === "week") return addDays(date, 7);
@@ -1820,9 +1991,25 @@ function addGranularity(date: Date, granularity: AggregateGranularity) {
   return addDays(date, 1);
 }
 
-function bucketLabel(date: Date, granularity: AggregateGranularity) {
-  if (granularity === "minute") return formatTime(date);
-  if (granularity === "hour") return `${String(date.getHours()).padStart(2, "0")}h`;
+function bucketLabel(
+  date: Date,
+  granularity: AggregateGranularity,
+  timeZone: string,
+) {
+  if (granularity === "minute") {
+    return new Intl.DateTimeFormat("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone,
+    }).format(date);
+  }
+  if (granularity === "hour") {
+    return `${new Intl.DateTimeFormat("pt-BR", {
+      hour: "2-digit",
+      hourCycle: "h23",
+      timeZone,
+    }).format(date)}h`;
+  }
   if (granularity === "day") {
     return new Intl.DateTimeFormat("pt-BR", {
       day: "2-digit",
@@ -2193,28 +2380,6 @@ function startOfMinute(date: Date) {
   const next = new Date(date);
   next.setSeconds(0, 0);
   return next;
-}
-
-function startOfHour(date: Date) {
-  return startOfAggregateBucket(date, "hour");
-}
-
-function startOfDay(date: Date) {
-  const next = new Date(date);
-  next.setHours(0, 0, 0, 0);
-  return next;
-}
-
-function startOfWeek(date: Date) {
-  const next = startOfDay(date);
-  const day = next.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  next.setDate(next.getDate() + diff);
-  return next;
-}
-
-function startOfMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
 }
 
 function addMinutes(date: Date, minutes: number) {

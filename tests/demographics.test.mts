@@ -92,6 +92,7 @@ function renderDemographicsEmptyState(overrides: Record<string, RuntimeFixture> 
     appliedRange: { startInput: "2026-09-09", endInput: "2026-09-09" },
     rangeLabel: "09/09/2026", summary: { hasData: false },
     queryRequested: true, loading: false, refreshing: false, error: "",
+    companyTimeZoneReady: true,
     applyRange() {},
     ...overrides,
   };
@@ -775,6 +776,24 @@ test("dashboard consulta o endpoint bruto uma vez por dia civil, reutiliza parti
   assert.doesNotMatch(source, /requireCertifiedCompanyTimeZone/);
   assert.match(
     source,
+    /!timeZoneResolution\.fallback[\s\S]*?timeZoneResolution\.source === "selected-company"[\s\S]*?timeZoneResolution\.source === "current-user-company"[\s\S]*?timeZoneResolution\.source === "current-company-scope"[\s\S]*?timeZoneResolution\.source === "company-cache"/,
+    "fallback de exibição não pode certificar uma consulta temporal",
+  );
+  assert.match(
+    source,
+    /if \(!companyTimeZoneReady\) \{[\s\S]*?setLoading\(false\)[\s\S]*?return;[\s\S]*?const sequence = \+\+requestSequenceRef\.current/,
+    "a consulta principal deve encerrar antes de agendar qualquer carregamento",
+  );
+  assert.match(
+    source,
+    /O fuso horário desta empresa precisa ser definido antes da consulta\./,
+  );
+  assert.doesNotMatch(
+    source,
+    /Consulta bloqueada: Fuso da empresa não certificado/,
+  );
+  assert.match(
+    source,
     /Math\.floor\(clock\.getTime\(\) \/ MINUTE_MS\) \* MINUTE_MS/,
   );
   const civilPartitions = source.slice(
@@ -804,6 +823,74 @@ test("dashboard consulta o endpoint bruto uma vez por dia civil, reutiliza parti
     "alterações de título, cor ou tamanho não devem refazer a consulta",
   );
   assert.match(source, /isAbortError\(requestError, controller\.signal\)/);
+});
+
+test("evento de cache ou escopo reativa a resolução IANA vinculada à mesma empresa", () => {
+  const previousWindow = fixtureGlobals.window;
+  const eventTarget = new EventTarget();
+  const fakeWindow = Object.assign(eventTarget, {
+    localStorage: {
+      getItem: () => null,
+      removeItem() {},
+      setItem() {},
+    },
+  });
+  let cachedCompany: RuntimeFixture = null;
+  let resolution: RuntimeFixture;
+  let cleanup: RuntimeFixture;
+  const companyTimeZone = loadTypeScriptModule("lib/company-time-zone.ts");
+  const masterScope = loadTypeScriptModule("lib/master-company-scope.ts", {
+    react: {
+      useEffect(effect: () => RuntimeFixture) {
+        cleanup = effect();
+      },
+      useState(initializer: RuntimeFixture) {
+        resolution = typeof initializer === "function" ? initializer() : initializer;
+        return [resolution, (next: RuntimeFixture) => {
+          resolution = typeof next === "function" ? next(resolution) : next;
+        }];
+      },
+    },
+    "@/lib/company-cache": {
+      COMPANY_CACHE_EVENT: "ipxdata:company-cache",
+      readCachedCompany: (companyId: string) =>
+        companyId === "company-a" ? cachedCompany : null,
+    },
+    "@/lib/company-time-zone": companyTimeZone,
+    "@/lib/user-grid-local": {
+      hasUserGridKnownDeletion: () => false,
+      writeUserGridPreference: () => true,
+    },
+    "@/lib/user-role": { isMasterUser: () => false },
+  });
+  const user = {
+    company_id: "company-a",
+    company: { id: "company-a", timezone: null },
+  };
+
+  fixtureGlobals.window = fakeWindow;
+  try {
+    masterScope.useEffectiveCompanyTimeZoneResolution(user);
+    assert.equal(resolution.fallback, true);
+
+    cachedCompany = { id: "company-a", timezone: "Asia/Kathmandu" };
+    fakeWindow.dispatchEvent(new Event("ipxdata:company-cache"));
+    assert.deepEqual(
+      { fallback: resolution.fallback, source: resolution.source, timeZone: resolution.timeZone },
+      { fallback: false, source: "company-cache", timeZone: "Asia/Katmandu" },
+    );
+
+    cachedCompany = { id: "company-a", timezone: "UTC" };
+    fakeWindow.dispatchEvent(new Event(masterScope.MASTER_COMPANY_SCOPE_EVENT));
+    assert.deepEqual(
+      { fallback: resolution.fallback, source: resolution.source, timeZone: resolution.timeZone },
+      { fallback: false, source: "company-cache", timeZone: "UTC" },
+    );
+  } finally {
+    cleanup?.();
+    if (previousWindow === undefined) delete fixtureGlobals.window;
+    else fixtureGlobals.window = previousWindow;
+  }
 });
 
 test("dashboard preserva os nove widgets originais e integra cinco widgets temporais", () => {

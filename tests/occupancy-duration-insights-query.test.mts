@@ -46,6 +46,51 @@ test("mínimo zero com pico positivo refina em lotes de até 480 minutos", async
   assert.equal(total(result, "transitionSeconds"), 0);
 });
 
+test("carga fria ao vivo limita horas mistas dispersas a um único envelope recente", async () => {
+  const fixture = createFixture((call) => reply(call, (bucket: RuntimeFixture) => {
+    if (call.granularity === "minute") {
+      return { minimum: 1, average: 1, peak: 1 };
+    }
+    return new Date(bucket).getUTCHours() % 2 === 0
+      ? { minimum: 0, average: 0.5, peak: 1 }
+      : { minimum: 0, average: 0, peak: 0 };
+  }));
+  const month = fixture.month("2026-09-03T15:00:00Z");
+  const live = await fixture.fetch({
+    minuteRefinement: "live-edge",
+    month,
+  });
+  const liveMinuteCalls = fixture.calls.filter(
+    (call) => call.granularity === "minute",
+  );
+  assert.ok(
+    liveMinuteCalls.length <= 1,
+    `a borda ao vivo deveria caber em um envelope, recebeu ${liveMinuteCalls.length}`,
+  );
+  assert.ok(
+    liveMinuteCalls.every((call) => call.from >= Date.parse("2026-09-03T07:00:00Z")),
+    "o Ao Vivo não deve baixar mais de oito horas de minutos na carga fria",
+  );
+  assert.ok(
+    total(live, "transitionSeconds") > 0,
+    "horas históricas mistas permanecem conservadoras, não são inventadas",
+  );
+
+  const complete = await fixture.fetch({
+    minuteRefinement: "complete",
+    month,
+  });
+  assert.equal(
+    total(complete, "transitionSeconds"),
+    0,
+    "uma consulta histórica explícita substitui a aproximação conservadora por minutos exatos",
+  );
+  assert.ok(
+    fixture.calls.filter((call) => call.granularity === "minute").length >
+      liveMinuteCalls.length,
+  );
+});
+
 test("somente horas de transição são refinadas; minutos mistos permanecem transição", async () => {
   const fixture = createFixture((call) => reply(call, (bucket: RuntimeFixture) => {
     if (call.granularity === "minute") return { minimum: 0, average: 0.4, peak: 2 };
@@ -113,7 +158,7 @@ test("dias encerrados reutilizam o cache e a hora aberta consulta somente minuto
   const second = await fixture.fetch({ month: fixture.month("2026-09-03T12:08:59Z") });
   assert.equal(fixture.calls.length, 3);
   assert.equal(fixture.calls[2].granularity, "minute");
-  assert.equal(fixture.calls[2].from.toISOString(), "2026-09-03T12:02:00.000Z");
+  assert.equal(fixture.calls[2].from.toISOString(), "2026-09-03T12:03:00.000Z");
   assert.equal(fixture.calls[2].to.toISOString(), "2026-09-03T12:08:00.000Z");
   assert.equal(total(second, "expectedSeconds"), total(first, "expectedSeconds") + 60);
   await fixture.fetch({ month: fixture.month("2026-09-03T12:08:59Z") });
@@ -122,14 +167,53 @@ test("dias encerrados reutilizam o cache e a hora aberta consulta somente minuto
     .every((day) => [...day.spans.values()].every((span) => span.final && !span.minuteMetrics)));
 });
 
-test("hora atual se reconcilia a cada quinze minutos sem reler os dias anteriores", async () => {
+test("borda aberta idêntica é reutilizada e o minuto seguinte relê só cinco minutos", async (t) => {
+  let now = Date.parse("2026-09-03T12:07:42Z");
+  t.mock.method(Date, "now", () => now);
+  const fixture = createFixture();
+  const month = fixture.month("2026-09-03T12:07:42Z");
+
+  await fixture.fetch({ month });
+  const historicalCalls = fixture.calls.filter(
+    (call) => call.granularity === "hour",
+  ).length;
+  assert.equal(historicalCalls, 1);
+  assert.equal(fixture.calls.length, 2);
+
+  now += 4_999;
+  await fixture.fetch({ month });
+  assert.equal(fixture.calls.length, 2, "borda ainda fresca não consulta a API");
+
+  now += 1;
+  await fixture.fetch({ month });
+  assert.equal(
+    fixture.calls.length,
+    2,
+    "o mesmo intervalo fechado não muda ao completar cinco segundos",
+  );
+
+  const nextMonth = fixture.month("2026-09-03T12:08:00Z");
+  await fixture.fetch({ month: nextMonth });
+  assert.equal(fixture.calls.length, 3);
+  assert.equal(
+    fixture.calls.filter((call) => call.granularity === "hour").length,
+    historicalCalls,
+    "o novo minuto não deve repetir o mês fechado",
+  );
+  const edge = fixture.calls.at(-1);
+  assert.equal(edge.granularity, "minute");
+  assert.equal(edge.from.toISOString(), "2026-09-03T12:03:00.000Z");
+  assert.equal(edge.to.toISOString(), "2026-09-03T12:08:00.000Z");
+});
+
+test("salto de quinze minutos busca somente a lacuna e não relê os dias anteriores", async () => {
   const fixture = createFixture();
   await fixture.fetch({ month: fixture.month("2026-09-03T12:05:00Z") });
   await fixture.fetch({ month: fixture.month("2026-09-03T12:20:00Z") });
   const last = fixture.calls.at(-1);
   assert.equal(fixture.calls.length, 3);
   assert.equal(last.granularity, "minute");
-  assert.equal(last.from.toISOString(), "2026-09-03T12:00:00.000Z");
+  assert.equal(last.from.toISOString(), "2026-09-03T12:05:00.000Z");
   assert.equal(last.to.toISOString(), "2026-09-03T12:20:00.000Z");
 });
 
@@ -167,7 +251,8 @@ test("escopo e cancelamento são propagados e um cancelamento não grava cache",
   const controller = new AbortController();
   const fixture = createFixture((call) => {
     assert.equal(call.options.companyScopeId, "company-selected");
-    assert.equal(call.options.signal, controller.signal);
+    assert.ok(call.options.signal instanceof AbortSignal);
+    assert.notEqual(call.options.signal, controller.signal);
     controller.abort();
     return reply(call);
   });
@@ -186,6 +271,137 @@ test("cache nunca cruza empresa, cenário ou fuso", async () => {
   await fixture.fetch({ scenarioId: "another-scenario" });
   await fixture.fetch({ month: fixture.month("2026-09-01T04:00:00Z", "UTC"), timeZone: "UTC" });
   assert.equal(fixture.calls.length, 4);
+});
+
+test("cache de remount é isolado por usuário e reaproveita histórico fechado", async () => {
+  const fixture = createFixture();
+  fixture.query.clearOccupancyDurationInsightQueryCaches();
+  const scope = {
+    companyScopeId: "company-selected",
+    timeZone: "America/Sao_Paulo",
+    userId: "user-a",
+  };
+  const firstCache = fixture.query.acquireOccupancyDurationInsightQueryCache(scope);
+  assert.ok(firstCache);
+  await fixture.fetch({ cache: firstCache });
+  assert.equal(fixture.calls.length, 1);
+
+  const remountedCache = fixture.query.acquireOccupancyDurationInsightQueryCache(scope);
+  assert.equal(remountedCache, firstCache);
+  await fixture.fetch({ cache: remountedCache });
+  assert.equal(
+    fixture.calls.length,
+    1,
+    "remount no mesmo escopo não relê a hora fechada",
+  );
+
+  assert.notEqual(
+    fixture.query.acquireOccupancyDurationInsightQueryCache({
+      ...scope,
+      userId: "user-b",
+    }),
+    firstCache,
+  );
+  assert.notEqual(
+    fixture.query.acquireOccupancyDurationInsightQueryCache({
+      ...scope,
+      companyScopeId: "company-b",
+    }),
+    firstCache,
+  );
+  assert.notEqual(
+    fixture.query.acquireOccupancyDurationInsightQueryCache({
+      ...scope,
+      timeZone: "UTC",
+    }),
+    firstCache,
+  );
+  assert.equal(
+    fixture.query.acquireOccupancyDurationInsightQueryCache({
+      ...scope,
+      userId: "",
+    }),
+    null,
+    "identidade ausente nunca entra no cache compartilhado",
+  );
+});
+
+test("Atualizar invalida só a borda aberta e não repete o histórico do mês", async () => {
+  const fixture = createFixture();
+  fixture.query.clearOccupancyDurationInsightQueryCaches();
+  const cache = fixture.query.acquireOccupancyDurationInsightQueryCache({
+    companyScopeId: "company-selected",
+    timeZone: "America/Sao_Paulo",
+    userId: "user-edge",
+  });
+  const month = fixture.month("2026-09-03T12:07:42Z");
+  await fixture.fetch({ cache, month });
+  const historicalCalls = fixture.calls.filter(
+    (call) => call.granularity === "hour",
+  ).length;
+  assert.equal(historicalCalls, 1);
+
+  fixture.query.invalidateOccupancyDurationInsightOpenEdge(cache);
+  await fixture.fetch({ cache, month });
+  assert.equal(
+    fixture.calls.filter((call) => call.granularity === "hour").length,
+    historicalCalls,
+    "horas fechadas permanecem no cache",
+  );
+  assert.equal(
+    fixture.calls.filter((call) => call.granularity === "minute").length,
+    2,
+    "somente a hora aberta é reconciliada",
+  );
+});
+
+test("Atualizar período fechado revisa apenas sua última hora", async () => {
+  const fixture = createFixture();
+  const cache = new Map();
+  const month = fixture.month("2026-09-04T03:00:00Z");
+  await fixture.fetch({ cache, month });
+  assert.equal(fixture.calls.length, 1);
+  assert.ok(fixture.calls[0].to - fixture.calls[0].from > HOUR);
+
+  fixture.query.invalidateOccupancyDurationInsightOpenEdge(cache, {
+    from: month.from.getTime(),
+    scenarioIds: new Set(["scenario-selected"]),
+    to: month.to.getTime(),
+  });
+  await fixture.fetch({ cache, month });
+  assert.equal(fixture.calls.length, 2);
+  assert.equal(fixture.calls[1].granularity, "hour");
+  assert.equal(fixture.calls[1].to - fixture.calls[1].from, HOUR);
+  assert.equal(fixture.calls[1].to.getTime(), month.to.getTime());
+});
+
+test("duas superfícies ao vivo coalescem o mesmo agregado, mas refresh explícito ignora transporte", async () => {
+  const fixture = createFixture();
+  const firstCache = new Map();
+  const secondCache = new Map();
+  await fixture.fetch({
+    bypassTransportCache: false,
+    cache: firstCache,
+  });
+  await fixture.fetch({
+    bypassTransportCache: false,
+    cache: secondCache,
+  });
+  assert.equal(
+    fixture.calls.length,
+    1,
+    "widgets ao vivo independentes devem compartilhar o GET exato",
+  );
+
+  await fixture.fetch({
+    bypassTransportCache: true,
+    cache: new Map(),
+  });
+  assert.equal(
+    fixture.calls.length,
+    2,
+    "uma consulta pedida pelo usuário continua chegando à API",
+  );
 });
 
 test("cenário, fuso e buckets fora do filtro são recusados", async () => {
@@ -314,6 +530,7 @@ function createFixture(responder = reply) {
       ...overrides,
     }),
     month,
+    query,
   };
 
   function load(relativePath: string): RuntimeFixture {

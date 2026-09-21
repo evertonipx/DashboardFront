@@ -146,6 +146,35 @@ obsoleto. A composição do cenário é versionada temporalmente: editar áreas 
 não reescreve seus relatórios antigos. Eventos atrasados recompõem os buckets e
 os alertas correspondentes de forma idempotente.
 
+## Permanência (`loitering`)
+
+Permanência é um recurso diferente da fotografia de ocupação. Todas as suas
+consultas usam o intervalo semiaberto `[from, to)` em RFC3339:
+
+- `GET /api/v1/occupancy/loitering/sessions?from=...&to=...` fornece uma linha
+  por sessão concluída e alimenta a permanência individual;
+- `GET /api/v1/occupancy/loitering/summary?from=...&to=...` fornece quantidade,
+  média, mínimo e máximo, sempre em segundos, e alimenta os widgets de sessões
+  concluídas, média, menor permanência, maior permanência e faixa mínimo-máximo
+  por área;
+- os únicos filtros opcionais documentados nessas rotas são `camera_id` e
+  `area`; o Dashboard consulta o tenant uma vez apenas com `from` e `to` e
+  relaciona câmera, área e classe aos cenários localmente;
+- sessões concluídas não substituem `/occupancy` em fotografia atual/ranking,
+  nem `/occupancy/scenarios/{id}/aggregate` em séries e heatmaps.
+
+Ao combinar áreas ou intervalos, a média é ponderada por `session_count`.
+Sessões simultâneas com os mesmos valores são registros distintos e não podem
+ser deduplicadas por `ended_at`.
+
+O valor bruto em segundos é preservado em cálculos e exportações. A interface
+apenas o humaniza em segundos, minutos, horas, dias ou anos. Quando uma duração
+extrema tornaria as demais ilegíveis, os gráficos usam `log1p` declarado no
+eixo, mantendo zero na origem e o valor original no tooltip. Todos os widgets
+agregados compartilham uma única consulta de `summary`; somente o widget de
+permanência individual consulta `sessions`, e widgets ocultos não ativam essas
+fontes.
+
 ## Compatibilidade verificada da API atual
 
 Na auditoria de 04/08/2026, a empresa de teste já estava configurada com
@@ -163,9 +192,12 @@ Também foi observado que a API atual:
 - aceita `minute`, `hour`, `day`, `week` e `month`, mas responde `400` para
   `semester` e `year`.
 
-Enquanto essas lacunas permanecerem, o Dashboard exibe buckets omitidos como
-`null` e cobertura parcial, nunca como zero. Semestre e ano permanecem fora do
-catálogo de relatórios. A média civil diária/semanal/mensal só poderá ser
-certificada depois que o backend aplicar o fuso IANA da empresa e publicar os
-metadados de completude acima; a resposta atual não permite recomposição exata
-e segura no frontend.
+Enquanto essas lacunas permanecerem, o Dashboard não consome diretamente os
+buckets civis `day`, `week` ou `month` sem `timezone` e completude certificados.
+Ele recompõe média, mínimo e máximo a partir de intervalos absolutos `hour` e,
+nas bordas fracionárias, `minute`, calculados no IANA associado à empresa.
+Unidades ausentes invalidam o bucket civil em vez de virarem zero. As consultas
+são agrupadas, deduplicadas e mantidas em cache por empresa, cenário, fuso e
+intervalo; widgets ocultos não abrem a fonte. Semestre e ano continuam fora do
+contrato direto da API e são compostos somente a partir dessas fontes civis já
+verificadas.

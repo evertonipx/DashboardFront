@@ -78,12 +78,22 @@ test("a cor dos números maximiza contraste com a interpolação real, inclusive
 
 for (const theme of ["light", "dark"]) {
   test(`ocupação compara valores com menor branco e maior escuro no primeiro frame (${theme})`, () => {
-    const scale = palette.monochromeHeatmapPalette("#1267C4", theme);
+    // Deliberately exercise an orange widget palette: absence must remain a
+    // neutral surface instead of inheriting the metric/alert hue.
+    const widgetColor = "#F97316";
+    const scale = palette.monochromeHeatmapPalette(widgetColor, theme);
+    const visualMap = occupancy.buildOccupancyHeatmapVisualMaps(
+      widgetColor,
+      100,
+      theme,
+    );
+    const noDataColor = visualMap[0].pieces[0].color;
+    assertNeutralNoDataColor(noDataColor, theme);
     const option = {
       animation: false,
       xAxis: { type: "category", data: ["00h", "01h", "02h"] },
       yAxis: { type: "category", data: ["Entrada"] },
-      visualMap: occupancy.buildOccupancyHeatmapVisualMaps("#1267C4", 100, theme),
+      visualMap,
       series: [
         { type: "heatmap", data: [[2, 0, -1]] },
         { type: "heatmap", data: [[0, 0, 0], [1, 0, 100]] },
@@ -92,6 +102,7 @@ for (const theme of ["light", "dark"]) {
     withChart(option, (chart: RuntimeFixture) => {
       assertRgbEqual(fill(chart, 1, 0), "#FFFFFF");
       assertRgbEqual(fill(chart, 1, 1), scale.at(-1));
+      assertRgbEqual(fill(chart, 0, 0), noDataColor);
       assert.notDeepEqual(echarts.color.parse(fill(chart, 0, 0)), echarts.color.parse("#FFFFFF"), "sem dados não equivale a zero confirmado");
     });
   });
@@ -302,6 +313,20 @@ function luminance(color: string) {
 function contrast(left: RuntimeFixture, right: RuntimeFixture) {
   const values = [luminance(left), luminance(right)].sort((a, b) => b - a);
   return (values[0] + 0.05) / (values[1] + 0.05);
+}
+
+function assertNeutralNoDataColor(color: string, theme: string) {
+  const [red, green, blue] = echarts.color.parse(color).slice(0, 3);
+  assert.ok(
+    Math.max(red, green, blue) - Math.min(red, green, blue) <= 40,
+    `${theme}: a ausência precisa ser neutra, nunca laranja`,
+  );
+  const lightness = luminance(color);
+  if (theme === "dark") {
+    assert.ok(lightness >= 0.015 && lightness <= 0.15, `${theme}: o neutro deve ser discreto na superfície escura`);
+  } else {
+    assert.ok(lightness >= 0.65 && lightness < 0.95, `${theme}: o neutro deve ser suave sem se confundir com zero branco`);
+  }
 }
 
 function assertRgbEqual(actual: RuntimeFixture, expected: RuntimeFixture) {

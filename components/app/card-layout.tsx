@@ -74,6 +74,7 @@ import {
   type WidgetViewPresetNamespace,
   type WidgetViewScope,
 } from "@/lib/widget-view-presets";
+import { orderWidgetScenarioIds } from "@/lib/widget-scenario-selection";
 import {
   CARD_ZOOM_LEVELS,
   cardHeightToLayoutLevel,
@@ -152,6 +153,7 @@ export type LayoutCard = {
   previewOrientation?: "horizontal" | "vertical";
   previewOrder?: "asc" | "desc";
   scenarioConfigurable?: boolean;
+  scenarioOrderingDisabled?: boolean;
   scenarioSelectionPolicy?: "aggregate" | "compare" | "single";
   titleEditable?: boolean;
   zoomEnabled?: boolean;
@@ -198,9 +200,13 @@ function flushNextCardMaterialization() {
 type CardLayoutProps = {
   cards: LayoutCard[];
   menuKey: CardMenuKey;
+  cardDemandRootMargin?: string;
+  cardDemandScopeKey?: string;
   editActions?: React.ReactNode;
   monitorMode?: boolean;
   onApplySavedViewSource?: (preset: WidgetViewPreset) => boolean;
+  onCardDemand?: (cardId: string, demanded: boolean) => void;
+  onCardMaterialize?: (cardId: string) => void;
   onOrganizerOpenChange?: (open: boolean) => void;
   onPreferencesChange?: (preferences: CardPreference[]) => void;
   onReorderModeChange?: (enabled: boolean) => void;
@@ -220,9 +226,13 @@ type CardLayoutProps = {
 export function CardLayout({
   cards,
   menuKey,
+  cardDemandRootMargin = "800px 0px",
+  cardDemandScopeKey = "",
   editActions,
   monitorMode = false,
   onApplySavedViewSource,
+  onCardDemand,
+  onCardMaterialize,
   onOrganizerOpenChange,
   onPreferencesChange,
   onReorderModeChange,
@@ -289,18 +299,32 @@ export function CardLayout({
     () => orderByCardPreferences(cards, preferences),
     [cards, preferences],
   );
+  const packingPlan = cardLayoutPackingPlan(
+    orderedCards,
+    preferences,
+  );
   const packedLayouts = React.useMemo(
-    () => packCardsForEveryTier(orderedCards, preferences),
-    [orderedCards, preferences],
+    () => packCardsForSerializedPlan(packingPlan),
+    [packingPlan],
+  );
+  const placementSets = React.useMemo(
+    () =>
+      new Map(
+        packedLayouts.desktop.map((placement) => [
+          placement.id,
+          placementSetForCard(packedLayouts, placement.id),
+        ]),
+      ),
+    [packedLayouts],
   );
   const activeLayoutTier = resolveCardLayoutTier(layoutWidth);
   const packedCards = React.useMemo(() => {
     const cardsById = new Map(orderedCards.map((card) => [card.id, card]));
     return packedLayouts[activeLayoutTier].map((placement) => ({
       card: cardsById.get(placement.id)!,
-      placements: placementSetForCard(packedLayouts, placement.id),
+      placements: placementSets.get(placement.id)!,
     }));
-  }, [activeLayoutTier, orderedCards, packedLayouts]);
+  }, [activeLayoutTier, orderedCards, packedLayouts, placementSets]);
   const organizerCards = orderByAllCardPreferences(cards, preferences);
   const currentViewScope = preferenceScopeId
     ? {
@@ -589,14 +613,19 @@ export function CardLayout({
     persistPreferences(
       preferences.map((preference) => {
         if (preference.id !== cardId) return preference;
+        const nextPreference = { ...preference };
+        if (selection.scenarioOrder?.length) {
+          nextPreference.scenarioOrder = selection.scenarioOrder;
+        } else {
+          delete nextPreference.scenarioOrder;
+        }
         if (selection.mode === "inherit") {
-          const inherited = { ...preference };
-          delete inherited.scenarioIds;
-          delete inherited.scenarioSelectionMode;
-          return inherited;
+          delete nextPreference.scenarioIds;
+          delete nextPreference.scenarioSelectionMode;
+          return nextPreference;
         }
         return {
-          ...preference,
+          ...nextPreference,
           scenarioIds:
             selection.mode === "custom" ? selection.scenarioIds : undefined,
           scenarioSelectionMode: selection.mode,
@@ -749,6 +778,9 @@ export function CardLayout({
               setScreenDraggingId(null);
               setScreenOverId(null);
             }}
+            onDemand={onCardDemand}
+            demandRootMargin={cardDemandRootMargin}
+            demandScopeKey={cardDemandScopeKey}
             overId={screenOverId}
             preference={preferences.find((preference) => preference.id === card.id)}
             configureEnabled={showCardConfigurationActions && canEditLayout}
@@ -757,6 +789,7 @@ export function CardLayout({
               setOrganizerSelectedCardId(card.id);
               setOrganizerOpen(true);
             }}
+            onMaterialize={onCardMaterialize}
             reorderEnabled={screenReorderEnabled}
             layoutWidth={layoutWidth}
           />
@@ -802,6 +835,8 @@ export function ReorderModeButton({
 function CardLayoutItem({
   card,
   configureEnabled,
+  demandRootMargin,
+  demandScopeKey,
   draggingId,
   layoutWidth,
   onDragEnd,
@@ -809,6 +844,8 @@ function CardLayoutItem({
   onDragStart,
   onDrop,
   onConfigure,
+  onDemand,
+  onMaterialize,
   overId,
   placements,
   preference,
@@ -816,6 +853,8 @@ function CardLayoutItem({
 }: {
   card: LayoutCard;
   configureEnabled: boolean;
+  demandRootMargin: string;
+  demandScopeKey: string;
   draggingId: string | null;
   layoutWidth: number;
   onDragEnd: () => void;
@@ -823,12 +862,16 @@ function CardLayoutItem({
   onDragStart: (event: React.DragEvent<HTMLButtonElement>) => void;
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
   onConfigure: () => void;
+  onDemand?: (cardId: string, demanded: boolean) => void;
+  onMaterialize?: (cardId: string) => void;
   overId: string | null;
   placements: CardLayoutPlacementSet;
   preference?: CardPreference;
   reorderEnabled: boolean;
 }) {
   const cardRootRef = React.useRef<HTMLDivElement | null>(null);
+  const demandedRef = React.useRef<boolean | null>(null);
+  const materializationNotifiedRef = React.useRef(false);
   const [contentReady, setContentReady] = React.useState(false);
   const requestedWidthLevel = resolveRequestedCardWidthLevel(card, preference);
   const requestedHeightLevel = resolveRequestedCardHeightLevel(
@@ -846,13 +889,64 @@ function CardLayoutItem({
   const chartTypes = supportedChartTypes(card);
   const scenarioSelection: CardScenarioSelection = {
     mode: preference?.scenarioSelectionMode ?? "inherit",
+    scenarioOrder: preference?.scenarioOrder ?? [],
     scenarioIds: preference?.scenarioIds ?? [],
   };
 
+  const notifyMaterialized = React.useCallback(() => {
+    if (!onMaterialize || materializationNotifiedRef.current) return;
+    materializationNotifiedRef.current = true;
+    onMaterialize(card.id);
+  }, [card.id, onMaterialize]);
+
+  const notifyDemanded = React.useCallback((demanded: boolean) => {
+    if (!onDemand || demandedRef.current === demanded) return;
+    demandedRef.current = demanded;
+    onDemand(card.id, demanded);
+  }, [card.id, onDemand]);
+
   React.useEffect(() => {
+    demandedRef.current = null;
+    // The parent's semantic data scope changes while this card can remain
+    // mounted. Certify its already-materialized content again for the new
+    // scope so demand cannot remain rejected as a distant placeholder.
+    materializationNotifiedRef.current = false;
+  }, [demandScopeKey]);
+
+  React.useEffect(() => {
+    const cardRoot = cardRootRef.current;
+    if (!cardRoot || !onDemand) return;
+    if (typeof IntersectionObserver === "undefined") {
+      notifyDemanded(true);
+      return () => notifyDemanded(false);
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries.at(-1);
+        if (entry) notifyDemanded(entry.isIntersecting);
+      },
+      // Start the data plan before the card reaches the visible viewport. The
+      // previous 120px margin was easy to outrun with a trackpad, so a card
+      // could become visible while its query was still returning to the plan.
+      { rootMargin: demandRootMargin, threshold: 0.01 },
+    );
+    observer.observe(cardRoot);
+    return () => {
+      observer.disconnect();
+      notifyDemanded(false);
+    };
+  }, [demandRootMargin, demandScopeKey, notifyDemanded, onDemand]);
+
+  React.useEffect(() => {
+    if (contentReady) {
+      notifyMaterialized();
+      return;
+    }
     const cardRoot = cardRootRef.current;
     if (!cardRoot) return;
     if (typeof IntersectionObserver === "undefined") {
+      notifyMaterialized();
       setContentReady(true);
       return;
     }
@@ -863,7 +957,10 @@ function CardLayoutItem({
         if (!entries.some((entry) => entry.isIntersecting)) return;
         observer.disconnect();
         cancelMaterialization = scheduleCardMaterialization(() => {
-          React.startTransition(() => setContentReady(true));
+          React.startTransition(() => {
+            notifyMaterialized();
+            setContentReady(true);
+          });
         });
       },
       { rootMargin: "600px 0px", threshold: 0.01 },
@@ -873,7 +970,7 @@ function CardLayoutItem({
       observer.disconnect();
       cancelMaterialization?.();
     };
-  }, []);
+  }, [contentReady, demandScopeKey, notifyMaterialized]);
 
   const cardNode = contentReady
     ? typeof card.node === "function"
@@ -901,7 +998,12 @@ function CardLayoutItem({
       onDrop={onDrop}
       style={cardLayoutItemStyle(placements)}
       className={cn(
-        "group relative h-full min-h-0 min-w-0 overflow-hidden transition [contain-intrinsic-size:auto_320px] [content-visibility:auto]",
+        // Do not apply `content-visibility:auto` to chart cards. Browsers may
+        // skip and then rebuild the paint subtree while scrolling; with canvas
+        // charts that is perceived as a reload even though React kept the card
+        // mounted. Runtime materialization above already provides the useful
+        // offscreen optimization without dropping painted frames.
+        "group relative h-full min-h-0 min-w-0 overflow-hidden transition",
         configureEnabled &&
           !reorderEnabled &&
           "[&_[data-card-header]]:pr-14 [&_[data-compact-metric-header]]:pr-12",
@@ -1378,8 +1480,13 @@ function WidgetOrganizerDialog({
                     selection={{
                       mode:
                         selectedPreference?.scenarioSelectionMode ?? "inherit",
+                      scenarioOrder: selectedPreference?.scenarioOrder ?? [],
                       scenarioIds: selectedPreference?.scenarioIds ?? [],
                     }}
+                    orderingEnabled={
+                      selectedCard.scenarioSelectionPolicy !== "single" &&
+                      !selectedCard.scenarioOrderingDisabled
+                    }
                     selectionPolicy={selectedCard.scenarioSelectionPolicy}
                   />
                 ) : null}
@@ -1500,6 +1607,7 @@ function WidgetScenarioCompositionEditor({
   inheritedScenarioIds = [],
   inheritedScenarioLabel,
   onChange,
+  orderingEnabled = true,
   scenarios,
   selection,
   selectionPolicy = "aggregate",
@@ -1507,6 +1615,7 @@ function WidgetScenarioCompositionEditor({
   inheritedScenarioIds?: string[];
   inheritedScenarioLabel?: string;
   onChange: (selection: CardScenarioSelection) => void;
+  orderingEnabled?: boolean;
   scenarios: ScenarioPickerOption[];
   selection: CardScenarioSelection;
   selectionPolicy?: "aggregate" | "compare" | "single";
@@ -1523,6 +1632,18 @@ function WidgetScenarioCompositionEditor({
   const inheritedIds = inheritedScenarioIds.filter((scenarioId) =>
     availableIds.has(scenarioId),
   );
+  const compositionIds =
+    selection.mode === "custom"
+      ? scenarios
+          .filter((scenario) => selectedIds.includes(scenario.id))
+          .map((scenario) => scenario.id)
+      : selection.mode === "all"
+        ? scenarios.map((scenario) => scenario.id)
+        : inheritedIds;
+  const orderedIds = orderWidgetScenarioIds(
+    compositionIds,
+    selection.scenarioOrder,
+  );
 
   function chooseCustom() {
     const candidateIds = selectedIds.length
@@ -1535,7 +1656,11 @@ function WidgetScenarioCompositionEditor({
     const initialIds =
       selectionPolicy === "single" ? candidateIds.slice(0, 1) : candidateIds;
     setOpenCustomPickerOnMount(true);
-    onChange({ mode: "custom", scenarioIds: initialIds });
+    onChange({
+      mode: "custom",
+      scenarioIds: initialIds,
+      scenarioOrder: selection.scenarioOrder,
+    });
   }
 
   return (
@@ -1564,7 +1689,11 @@ function WidgetScenarioCompositionEditor({
           variant={selection.mode === "inherit" ? "default" : "outline"}
           onClick={() => {
             setOpenCustomPickerOnMount(false);
-            onChange({ mode: "inherit", scenarioIds: [] });
+            onChange({
+              mode: "inherit",
+              scenarioIds: [],
+              scenarioOrder: selection.scenarioOrder,
+            });
           }}
           aria-pressed={selection.mode === "inherit"}
           title="Herdar a configuração da tela ou do widget"
@@ -1579,7 +1708,11 @@ function WidgetScenarioCompositionEditor({
           disabled={!scenarios.length || selectionPolicy === "single"}
           onClick={() => {
             setOpenCustomPickerOnMount(false);
-            onChange({ mode: "all", scenarioIds: [] });
+            onChange({
+              mode: "all",
+              scenarioIds: [],
+              scenarioOrder: selection.scenarioOrder,
+            });
           }}
           aria-pressed={selection.mode === "all"}
           title="Usar todos os cenários disponíveis"
@@ -1626,6 +1759,7 @@ function WidgetScenarioCompositionEditor({
           onSelectedIdsChange={(scenarioIds) =>
             onChange({
               mode: "custom",
+              scenarioOrder: selection.scenarioOrder,
               scenarioIds:
                 selectionPolicy === "single" ? scenarioIds.slice(-1) : scenarioIds,
             })
@@ -1635,7 +1769,165 @@ function WidgetScenarioCompositionEditor({
           summaryForItem={(scenario) => scenario.description ?? "Disponível"}
         />
       )}
+
+      {orderingEnabled && orderedIds.length > 1 ? (
+        <WidgetScenarioOrderEditor
+          onChange={(scenarioOrder) =>
+            onChange({ ...selection, scenarioOrder })
+          }
+          orderedIds={orderedIds}
+          scenarios={scenarios}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function WidgetScenarioOrderEditor({
+  onChange,
+  orderedIds,
+  scenarios,
+}: {
+  onChange: (scenarioOrder: string[]) => void;
+  orderedIds: string[];
+  scenarios: ScenarioPickerOption[];
+}) {
+  const scenarioById = React.useMemo(
+    () => new Map(scenarios.map((scenario) => [scenario.id, scenario])),
+    [scenarios],
+  );
+
+  function move(scenarioId: string, offset: -1 | 1) {
+    const sourceIndex = orderedIds.indexOf(scenarioId);
+    const targetIndex = sourceIndex + offset;
+    if (
+      sourceIndex < 0 ||
+      targetIndex < 0 ||
+      targetIndex >= orderedIds.length
+    ) {
+      return;
+    }
+    const next = [...orderedIds];
+    [next[sourceIndex], next[targetIndex]] = [
+      next[targetIndex],
+      next[sourceIndex],
+    ];
+    onChange(next);
+  }
+
+  function alphabetic(direction: "asc" | "desc") {
+    const next = [...orderedIds].sort((leftId, rightId) => {
+      const left = scenarioById.get(leftId)?.name ?? leftId;
+      const right = scenarioById.get(rightId)?.name ?? rightId;
+      const result = left.localeCompare(right, "pt-BR", {
+        numeric: true,
+        sensitivity: "base",
+      });
+      return direction === "asc" ? result : -result;
+    });
+    onChange(next);
+  }
+
+  return (
+    <div
+      className="min-w-0 space-y-2 rounded-md border bg-muted/15 p-2.5"
+      data-widget-scenario-order
+    >
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Ordem de exibição
+          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Organize eixos, séries, legendas e tabelas deste widget.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            aria-label="Ordenar cenários de A a Z"
+            className="h-7 px-2 text-[11px]"
+            onClick={() => alphabetic("asc")}
+            title="Ordenar de A a Z"
+            type="button"
+            variant="outline"
+          >
+            A–Z
+          </Button>
+          <Button
+            aria-label="Ordenar cenários de Z a A"
+            className="h-7 px-2 text-[11px]"
+            onClick={() => alphabetic("desc")}
+            title="Ordenar de Z a A"
+            type="button"
+            variant="outline"
+          >
+            Z–A
+          </Button>
+          <Button
+            aria-label="Restaurar ordem padrão dos cenários"
+            className="h-7 w-7"
+            onClick={() => onChange([])}
+            size="icon"
+            title="Restaurar ordem padrão"
+            type="button"
+            variant="ghost"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </div>
+
+      <div
+        aria-label="Cenários na ordem de exibição"
+        className="max-h-56 space-y-1 overflow-y-auto overscroll-contain pr-0.5"
+        role="list"
+      >
+        {orderedIds.map((scenarioId, index) => {
+          const scenario = scenarioById.get(scenarioId);
+          return (
+            <div
+              className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-1 rounded-md border bg-background px-1.5 py-1"
+              key={scenarioId}
+              role="listitem"
+            >
+              <span className="w-5 text-center text-[10px] tabular-nums text-muted-foreground">
+                {index + 1}
+              </span>
+              <span
+                className="min-w-0 truncate text-xs font-medium"
+                title={scenario?.name ?? scenarioId}
+              >
+                {scenario?.name ?? scenarioId}
+              </span>
+              <Button
+                aria-label={`Mover ${scenario?.name ?? scenarioId} para cima`}
+                className="h-7 w-7"
+                disabled={index === 0}
+                onClick={() => move(scenarioId, -1)}
+                size="icon"
+                title="Mover para cima"
+                type="button"
+                variant="ghost"
+              >
+                <ArrowUp className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                aria-label={`Mover ${scenario?.name ?? scenarioId} para baixo`}
+                className="h-7 w-7"
+                disabled={index === orderedIds.length - 1}
+                onClick={() => move(scenarioId, 1)}
+                size="icon"
+                title="Mover para baixo"
+                type="button"
+                variant="ghost"
+              >
+                <ArrowDown className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -2164,30 +2456,18 @@ function cardLayoutItemStyle(
 
 type PackedCardLayouts = Record<CardLayoutTier, CardLayoutPlacement[]>;
 type CardLayoutPlacementSet = Record<CardLayoutTier, CardLayoutPlacement>;
+type CardLayoutPackingPlanItem = [
+  id: string,
+  widthLevel: CardLayoutLevel,
+  heightLevel: CardLayoutLevel,
+  condensed: boolean,
+];
 
-function packCardsForEveryTier(
+function cardLayoutPackingPlan(
   cards: LayoutCard[],
   preferences: CardPreference[],
-): PackedCardLayouts {
-  return {
-    desktop: packCardsForTier(cards, preferences, "desktop"),
-    single: packCardsForTier(cards, preferences, "single"),
-    "three-column": packCardsForTier(cards, preferences, "three-column"),
-    "two-column": packCardsForTier(cards, preferences, "two-column"),
-  };
-}
-
-function packCardsForTier(
-  cards: LayoutCard[],
-  preferences: CardPreference[],
-  tier: CardLayoutTier,
 ) {
-  const columnCount = resolveCardLayoutDimensions({
-    heightLevel: 1,
-    tier,
-    widthLevel: 1,
-  }).columnCount;
-  return packCardLayout(
+  return JSON.stringify(
     cards.map((card) => {
       const preference = getPreference(preferences, card.id);
       const widthLevel = resolveRequestedCardWidthLevel(card, preference);
@@ -2196,15 +2476,43 @@ function packCardsForTier(
         preference,
         widthLevel,
       );
+      return [card.id, widthLevel, heightLevel, Boolean(card.condensed)];
+    }),
+  );
+}
+
+function packCardsForSerializedPlan(
+  serializedPlan: string,
+): PackedCardLayouts {
+  const plan = JSON.parse(serializedPlan) as CardLayoutPackingPlanItem[];
+  return {
+    desktop: packCardsForTier(plan, "desktop"),
+    single: packCardsForTier(plan, "single"),
+    "three-column": packCardsForTier(plan, "three-column"),
+    "two-column": packCardsForTier(plan, "two-column"),
+  };
+}
+
+function packCardsForTier(
+  plan: CardLayoutPackingPlanItem[],
+  tier: CardLayoutTier,
+) {
+  const columnCount = resolveCardLayoutDimensions({
+    heightLevel: 1,
+    tier,
+    widthLevel: 1,
+  }).columnCount;
+  return packCardLayout(
+    plan.map(([id, widthLevel, heightLevel, condensed]) => {
       const dimensions = resolveCardLayoutDimensions({
-        condensed: card.condensed,
+        condensed,
         heightLevel,
         tier,
         widthLevel,
       });
       return {
         columnSpan: dimensions.columnSpan,
-        id: card.id,
+        id,
         rowSpan: dimensions.rowSpan,
       };
     }),

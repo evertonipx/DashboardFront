@@ -9,11 +9,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Não autenticado." }, { status: 401 });
   }
 
-  const now = new Date();
-  const params = new URLSearchParams({
-    from: new Date(now.getTime() - 60 * 60_000).toISOString(),
-    to: now.toISOString(),
-  });
+  const params = documentedOccupancyParams(request.nextUrl.searchParams);
+  const from = params.get("from");
+  const to = params.get("to");
+  if (!isValidOccupancyPeriod(from, to)) {
+    return NextResponse.json(
+      { error: "Informe um período válido para consultar a ocupação." },
+      { status: 400 },
+    );
+  }
   const headers = new Headers({
     Authorization: authorization,
   });
@@ -63,4 +67,20 @@ async function fetchSnapshotResponse(
     clearTimeout(timeout);
     sourceSignal.removeEventListener("abort", forwardAbort);
   }
+}
+
+function documentedOccupancyParams(source: URLSearchParams) {
+  const params = new URLSearchParams();
+  ["from", "to", "camera_id", "area", "object_class"].forEach((key) => {
+    const value = source.get(key)?.trim();
+    if (value) params.set(key, value);
+  });
+  return params;
+}
+
+function isValidOccupancyPeriod(from: string | null, to: string | null) {
+  if (from === null || to === null) return false;
+  const fromTime = Date.parse(from);
+  const toTime = Date.parse(to);
+  return Number.isFinite(fromTime) && Number.isFinite(toTime) && fromTime < toTime;
 }

@@ -15,8 +15,10 @@ import {
 import {
   clearStoredCurrentCompanyScope,
   clearStoredMasterCompanyScope,
+  getStoredCurrentCompanyScope,
   getStoredMasterCompanyScope,
 } from "@/lib/master-company-scope";
+import { createApiReadCoordinator } from "@/lib/api-read-coordinator";
 import { isMasterUser } from "@/lib/user-role";
 
 const ACCESS_KEY = "access_token";
@@ -26,6 +28,9 @@ const EXPIRES_KEY = "expires_in";
 const EXPIRES_AT_KEY = "expires_at";
 export const SESSION_SYNC_STORAGE_KEY = "ipxdata.auth-session-sync.v1";
 const REFRESH_SKEW_MS = 60_000;
+const API_CATALOG_CACHE_TTL_MS = 30_000;
+const API_VOLATILE_CATALOG_CACHE_TTL_MS = 3_000;
+const API_STATIC_CATALOG_CACHE_TTL_MS = 5 * 60_000;
 
 export const SESSION_EXPIRED_EVENT = "ipxdata:session-expired";
 export const SESSION_UPDATED_EVENT = "ipxdata:session-updated";
@@ -69,17 +74,29 @@ let authenticatedPrincipal: AuthenticatedPrincipal | null = null;
 let authenticatedMasterAccess: AuthenticatedPrincipal | null = null;
 let storedSessionRevision = 0;
 let loginAttemptRevision = 0;
+let apiReadGeneration = 0;
+const apiReadCoordinator = createApiReadCoordinator();
 
 type ApiFetchOptions = Omit<RequestInit, "body"> & {
   auth?: boolean;
   authSnapshot?: { accessToken: string };
   body?: unknown;
+  bypassReadCache?: boolean;
   captureAccessToken?: (accessToken: string) => void;
   companyScopeId?: string;
+  dedupe?: boolean;
   expectedAccessToken?: string;
   expectedStatus?: number;
   jwtCompanyScopeOnly?: boolean;
+  readCacheTtlMs?: number;
   retry?: boolean;
+};
+
+type ApiTransportResponse = {
+  ok: boolean;
+  payload: unknown;
+  status: number;
+  statusText: string;
 };
 
 export class ApiError extends Error {
@@ -135,6 +152,7 @@ export function setStoredSession(
   if (accessTokenChanged) {
     authenticatedPrincipal = null;
     authenticatedMasterAccess = null;
+    invalidateApiReads();
   }
   storedSessionRevision += 1;
 
@@ -184,6 +202,7 @@ export function clearStoredSession() {
   authenticatedPrincipal = null;
   authenticatedMasterAccess = null;
   currentUserAttempt = null;
+  invalidateApiReads(true);
   storedSessionRevision += 1;
   if (!isBrowser()) return;
 
@@ -204,6 +223,7 @@ export function synchronizeExternalSessionUpdate() {
   authenticatedMasterAccess = null;
   currentUserAttempt = null;
   refreshAttempt = null;
+  invalidateApiReads(true);
   storedSessionRevision += 1;
   loginAttemptRevision += 1;
 }
@@ -409,11 +429,14 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     auth = true,
     authSnapshot,
     body,
+    bypassReadCache = false,
     captureAccessToken,
     companyScopeId,
+    dedupe = true,
     expectedAccessToken,
     expectedStatus,
     jwtCompanyScopeOnly = false,
+    readCacheTtlMs,
     retry = true,
     headers,
     ...init
@@ -530,12 +553,57 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   if (masterCompanyScope) {
     requestHeaders.set("X-Company-ID", masterCompanyScope);
   }
-  const response = await fetch(`${apiBase()}${path}`, {
-    ...init,
-    headers: requestHeaders,
-    body: body === undefined || body instanceof FormData ? body : JSON.stringify(body),
-    cache: "no-store",
-  });
+  const requestUrl = `${apiBase()}${path}`;
+  const method = (init.method ?? "GET").toUpperCase();
+  const requestBody =
+    body === undefined || body instanceof FormData ? body : JSON.stringify(body);
+  const readRequest = method === "GET" && requestBody === undefined;
+  const executeTransport = (signal?: AbortSignal) =>
+    fetchApiTransport(requestUrl, {
+      ...init,
+      body: requestBody,
+      cache: "no-store",
+      headers: requestHeaders,
+      method,
+      signal,
+    });
+  let response: ApiTransportResponse;
+  if (readRequest && dedupe) {
+    const cacheTtlMs = readCacheTtlMs ?? defaultApiReadCacheTtl(path);
+    response = await apiReadCoordinator.request({
+      bypassCache: bypassReadCache,
+      cacheResult: (candidate) => candidate.ok,
+      cloneResult: cacheTtlMs > 0 ? cloneApiTransportResponse : undefined,
+      execute: executeTransport,
+      key: apiReadKey({
+        authorizationIdentity: auth
+          ? ""
+          : authorizationFingerprint(requestHeaders.get("authorization")),
+        companyContext: JSON.stringify([
+          getStoredMasterCompanyScope()?.id ?? "",
+          getStoredCurrentCompanyScope()?.id ?? "",
+        ]),
+        generation: apiReadGeneration,
+        headers: requestHeaders,
+        init,
+        method,
+        sessionRevision: auth ? requestSessionRevision : -1,
+        url: requestUrl,
+      }),
+      signal: init.signal ?? undefined,
+      ttlMs: cacheTtlMs,
+    });
+  } else {
+    const invalidatesReads =
+      !["GET", "HEAD", "OPTIONS"].includes(method) &&
+      mutationInvalidatesCachedReads(path);
+    if (invalidatesReads) invalidateApiReads(true);
+    try {
+      response = await executeTransport(init.signal ?? undefined);
+    } finally {
+      if (invalidatesReads) invalidateApiReads(true);
+    }
+  }
 
   if (
     auth &&
@@ -552,7 +620,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     );
   }
 
-  const payload = await parseResponse(response);
+  const payload = response.payload;
   if (
     auth &&
     !returnsBoundAuthenticationSnapshot &&
@@ -700,6 +768,138 @@ export async function currentUserRequest() {
   });
   currentUserAttempt = { accessToken, promise, sessionRevision };
   return promise;
+}
+
+async function fetchApiTransport(
+  url: string,
+  init: RequestInit,
+): Promise<ApiTransportResponse> {
+  const response = await fetch(url, init);
+  return {
+    ok: response.ok,
+    payload: await parseResponse(response),
+    status: response.status,
+    statusText: response.statusText,
+  };
+}
+
+function cloneApiTransportResponse(
+  response: ApiTransportResponse,
+): ApiTransportResponse {
+  return {
+    ...response,
+    payload: structuredClone(response.payload),
+  };
+}
+
+function invalidateApiReads(abortPending = false) {
+  apiReadGeneration += 1;
+  apiReadCoordinator.clear({ abortPending });
+}
+
+function defaultApiReadCacheTtl(path: string) {
+  const pathname = apiPathname(path);
+  if (pathname === "/modules" || pathname === "/permissions") {
+    return API_STATIC_CATALOG_CACHE_TTL_MS;
+  }
+  if (
+    [
+      "/cameras",
+      "/companies",
+      "/company/modules",
+      "/locations",
+      "/occupancy/scenarios",
+      "/scenarios",
+    ].includes(pathname) ||
+    /^\/companies\/[^/]+\/modules$/.test(pathname) ||
+    /^\/locations\/[^/]+\/sub-locations$/.test(pathname) ||
+    /^\/cameras\/[^/]+\/line-counts$/.test(pathname)
+  ) {
+    return API_CATALOG_CACHE_TTL_MS;
+  }
+  if (pathname === "/workers") return API_VOLATILE_CATALOG_CACHE_TTL_MS;
+  return 0;
+}
+
+function apiReadKey({
+  authorizationIdentity,
+  companyContext,
+  generation,
+  headers,
+  init,
+  method,
+  sessionRevision,
+  url,
+}: {
+  authorizationIdentity: string;
+  companyContext: string;
+  generation: number;
+  headers: Headers;
+  init: RequestInit;
+  method: string;
+  sessionRevision: number;
+  url: string;
+}) {
+  const headerIdentity = Array.from(headers.entries())
+    .filter(([name]) => name.toLowerCase() !== "authorization")
+    .sort(([leftName, leftValue], [rightName, rightValue]) =>
+      leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue),
+    );
+  return JSON.stringify([
+    generation,
+    sessionRevision,
+    authorizationIdentity,
+    companyContext,
+    canonicalApiUrl(url),
+    method,
+    headerIdentity,
+    init.credentials ?? "",
+    init.mode ?? "",
+    init.redirect ?? "",
+  ]);
+}
+
+function canonicalApiUrl(value: string) {
+  const url = new URL(value, "http://ipxdata.local");
+  const params = Array.from(url.searchParams.entries(), (entry, index) => ({
+    entry,
+    index,
+  })).sort(
+    (left, right) =>
+      left.entry[0].localeCompare(right.entry[0]) || left.index - right.index,
+  );
+  const search = new URLSearchParams(params.map(({ entry }) => entry)).toString();
+  return `${url.origin}${url.pathname}${search ? `?${search}` : ""}`;
+}
+
+function authorizationFingerprint(value: string | null) {
+  if (!value) return "";
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193) >>> 0;
+    second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
+  }
+  return `${value.length}:${first.toString(16)}:${second.toString(16)}`;
+}
+
+function apiPathname(path: string) {
+  return new URL(path, "http://ipxdata.local").pathname.replace(
+    /^\/api\/v1(?=\/|$)/,
+    "",
+  );
+}
+
+function mutationInvalidatesCachedReads(path: string) {
+  const pathname = apiPathname(path);
+  return (
+    /^\/(?:cameras|companies|locations|modules|permissions|scenarios|workers)(?:\/|$)/.test(
+      pathname,
+    ) ||
+    /^\/company\/modules(?:\/|$)/.test(pathname) ||
+    /^\/occupancy\/scenarios(?:\/|$)/.test(pathname)
+  );
 }
 
 export function currentUserRequestIsInFlight() {

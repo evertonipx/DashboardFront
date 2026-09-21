@@ -60,6 +60,30 @@ export type OccupancyDurationSummary = {
 };
 
 /**
+ * Operational indicators derived only from the certified occupied/free state.
+ *
+ * `averageConfirmedOccupiedSequenceSeconds` is the mean length of the
+ * observed occupied runs in the requested window. It is deliberately not
+ * described as an individual dwell time: a run may contain several people or
+ * vehicles and a run touching either edge of the window may be partial.
+ */
+export type OccupancyStateMetrics = {
+  averageConfirmedFreeSequenceSeconds: number | null;
+  averageConfirmedOccupiedSequenceSeconds: number | null;
+  confirmedCoverageShare: number | null;
+  confirmedFreeSequenceCount: number;
+  confirmedStateSeconds: number;
+  confirmedOccupiedSequenceCount: number;
+  coverageShare: number | null;
+  freeShareOfConfirmed: number | null;
+  longestConfirmedFreeSeconds: number;
+  longestConfirmedOccupiedSeconds: number;
+  minimumDetectedTransitions: number;
+  occupiedShareOfConfirmed: number | null;
+  transitionMinuteCount: number;
+};
+
+/**
  * Lists every fully closed absolute minute in the company's current civil day.
  * A DST transition therefore produces the real 23/24/25-hour timeline rather
  * than assuming that every civil day contains exactly 1,440 minutes.
@@ -130,7 +154,6 @@ export function buildOccupancyDurationSummary(
   let observedBucketCount = 0;
   let transitionSeconds = 0;
   let unknownSeconds = 0;
-  let loadUnitSeconds = 0;
 
   buckets.forEach((bucket) => {
     const from = new Date(bucket);
@@ -152,7 +175,6 @@ export function buildOccupancyDurationSummary(
     }
     if (metric) {
       observedBucketCount += 1;
-      loadUnitSeconds = requireFiniteSum(loadUnitSeconds, segmentLoad);
     }
 
     appendDurationSegment(segments, {
@@ -167,6 +189,7 @@ export function buildOccupancyDurationSummary(
 
   const expectedSeconds = buckets.length * MINUTE_SECONDS;
   const observedSeconds = observedBucketCount * MINUTE_SECONDS;
+  const loadUnitSeconds = sumDurationSegmentLoads(segments);
   const summary: OccupancyDurationSummary = {
     bucketCount: buckets.length,
     confirmedFreeSeconds,
@@ -220,7 +243,7 @@ export function combineOccupancyDurationSummaries(
     confirmedFreeSeconds: total("confirmedFreeSeconds"),
     confirmedOccupiedSeconds: total("confirmedOccupiedSeconds"),
     expectedSeconds: total("expectedSeconds"),
-    loadUnitSeconds: total("loadUnitSeconds"),
+    loadUnitSeconds: sumDurationSegmentLoads(segments),
     longestConfirmedOccupiedSeconds: longestConfirmedSequence(segments),
     observedBucketCount: total("observedBucketCount"),
     observedSeconds: total("observedSeconds"),
@@ -250,6 +273,86 @@ export function formatOccupancyDuration(seconds: number) {
   ]
     .filter(Boolean)
     .join(" ") || "0min";
+}
+
+/**
+ * Derives useful state-based indicators without inventing object identity or
+ * precision inside a mixed minute. Percentages based on confirmed state omit
+ * transition and unknown buckets. Coverage remains available separately so a
+ * consumer cannot present a high occupied share without its data quality.
+ */
+export function deriveOccupancyStateMetrics(
+  summary: OccupancyDurationSummary,
+): OccupancyStateMetrics {
+  requireSummaryInvariants(summary);
+
+  let confirmedFreeSequenceCount = 0;
+  let confirmedOccupiedSequenceCount = 0;
+  let longestConfirmedFreeSeconds = 0;
+  let directConfirmedStateChanges = 0;
+  let previousSegment: OccupancyDurationSegment | undefined;
+
+  summary.segments.forEach((segment) => {
+    if (segment.state === "occupied") {
+      confirmedOccupiedSequenceCount += 1;
+    } else if (segment.state === "free") {
+      confirmedFreeSequenceCount += 1;
+      longestConfirmedFreeSeconds = Math.max(
+        longestConfirmedFreeSeconds,
+        segment.seconds,
+      );
+    }
+
+    if (
+      previousSegment &&
+      previousSegment.to.getTime() === segment.from.getTime() &&
+      isConfirmedState(previousSegment.state) &&
+      isConfirmedState(segment.state) &&
+      previousSegment.state !== segment.state
+    ) {
+      directConfirmedStateChanges += 1;
+    }
+    previousSegment = segment;
+  });
+
+  const confirmedStateSeconds =
+    summary.confirmedOccupiedSeconds + summary.confirmedFreeSeconds;
+  const transitionMinuteCount = summary.transitionSeconds / MINUTE_SECONDS;
+
+  return {
+    averageConfirmedFreeSequenceSeconds:
+      confirmedFreeSequenceCount > 0
+        ? summary.confirmedFreeSeconds / confirmedFreeSequenceCount
+        : null,
+    averageConfirmedOccupiedSequenceSeconds:
+      confirmedOccupiedSequenceCount > 0
+        ? summary.confirmedOccupiedSeconds / confirmedOccupiedSequenceCount
+        : null,
+    confirmedCoverageShare: safeShare(
+      confirmedStateSeconds,
+      summary.expectedSeconds,
+    ),
+    confirmedFreeSequenceCount,
+    confirmedStateSeconds,
+    confirmedOccupiedSequenceCount,
+    coverageShare: safeShare(summary.observedSeconds, summary.expectedSeconds),
+    freeShareOfConfirmed: safeShare(
+      summary.confirmedFreeSeconds,
+      confirmedStateSeconds,
+    ),
+    longestConfirmedFreeSeconds,
+    longestConfirmedOccupiedSeconds:
+      summary.longestConfirmedOccupiedSeconds,
+    // Every mixed minute contains at least one occupied/free change. It may
+    // contain more, so this is intentionally exposed as a conservative floor.
+    minimumDetectedTransitions:
+      transitionMinuteCount + directConfirmedStateChanges,
+    occupiedShareOfConfirmed: safeShare(
+      summary.confirmedOccupiedSeconds,
+      confirmedStateSeconds,
+    ),
+    transitionMinuteCount,
+  };
 }
 
 /**
@@ -331,6 +434,15 @@ function longestConfirmedSequence(segments: OccupancyDurationSegment[]) {
       segment.state === "occupied"
         ? Math.max(longest, segment.seconds)
         : longest,
+    0,
+  );
+}
+
+function sumDurationSegmentLoads(
+  segments: readonly OccupancyDurationSegment[],
+) {
+  return segments.reduce(
+    (sum, segment) => requireFiniteSum(sum, segment.loadUnitSeconds),
     0,
   );
 }
@@ -564,6 +676,16 @@ function isDurationState(value: unknown): value is OccupancyDurationState {
     value === "transition" ||
     value === "unknown"
   );
+}
+
+function isConfirmedState(
+  value: OccupancyDurationState,
+): value is "occupied" | "free" {
+  return value === "occupied" || value === "free";
+}
+
+function safeShare(numerator: number, denominator: number) {
+  return denominator > 0 ? numerator / denominator : null;
 }
 
 function startOfNextCompanyCivilDay(date: Date, timeZone: string) {

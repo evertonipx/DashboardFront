@@ -147,8 +147,24 @@ import {
   useEffectiveCompanyScopeId,
   useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
-import { requireCertifiedCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
-import { companyCalendarDate } from "@/lib/company-time-zone";
+import {
+  countingAddCalendarDays,
+  countingAddCalendarMonths,
+  countingCalendarBoundaryInstant,
+  countingCalendarDate,
+  countingCalendarHourInstant,
+  countingCalendarRangeToInstants,
+  countingCalendarStart,
+  countingEndOfHourInstant,
+  countingShiftInstantYearsClamped,
+  countingStartOfDayInstant,
+  countingStartOfHourInstant,
+  requireCertifiedCountingTimeZone,
+} from "@/lib/counting-time-zone";
+import {
+  companyCalendarDate,
+  companyZonedDateParts,
+} from "@/lib/company-time-zone";
 import {
   requireCameraRows,
   requireInfrastructureRelations,
@@ -396,21 +412,7 @@ export function ScenarioReportsDashboard({
     user,
     companyScopeId,
   );
-  const rawCompanyTimeZoneResolution =
-    useEffectiveCompanyTimeZoneResolution(user);
-  const companyTimeZoneResolution = React.useMemo(
-    () => ({
-      fallback: rawCompanyTimeZoneResolution.fallback,
-      source: rawCompanyTimeZoneResolution.fallback
-        ? ("fallback" as const)
-        : ("deployment-default" as const),
-      timeZone: rawCompanyTimeZoneResolution.timeZone,
-    }),
-    [
-      rawCompanyTimeZoneResolution.fallback,
-      rawCompanyTimeZoneResolution.timeZone,
-    ],
-  );
+  const companyTimeZoneResolution = useEffectiveCompanyTimeZoneResolution(user);
   const companyTimeZone = companyTimeZoneResolution.timeZone;
   const customGranularitySelectId = React.useId();
   const customKindSelectId = React.useId();
@@ -452,9 +454,13 @@ export function ScenarioReportsDashboard({
     React.useState(0);
   const [clock, setClock] = React.useState(() => new Date());
   const [countingPeriod, setCountingPeriod] =
-    React.useState<CountingReportPeriod>(() => defaultCountingReportPeriod());
+    React.useState<CountingReportPeriod>(() =>
+      defaultCountingReportPeriod(new Date(), companyTimeZone),
+    );
   const [appliedCountingPeriod, setAppliedCountingPeriod] =
-    React.useState<CountingReportPeriod>(() => defaultCountingReportPeriod());
+    React.useState<CountingReportPeriod>(() =>
+      defaultCountingReportPeriod(new Date(), companyTimeZone),
+    );
   const [countingViewSettings, setCountingViewSettings] =
     React.useState<CountingReportViewSettings>(() =>
       loadCountingReportViewSettings(companyScopeId, { userId: user?.id }),
@@ -485,7 +491,8 @@ export function ScenarioReportsDashboard({
   const hourlyAggregateCacheRef = React.useRef<HourlyAggregateCache>(new Map());
   const [customWidgetForm, setCustomWidgetForm] =
     React.useState<ReportCustomWidgetForm>({
-      comparisonSettings: createDefaultScenarioComparisonSettings(),
+      comparisonSettings:
+        createDefaultScenarioComparisonSettings(companyTimeZone),
       granularity: "hour",
       kind: "scope",
       scopeId: "",
@@ -577,11 +584,9 @@ export function ScenarioReportsDashboard({
     }
     latestReportContextKeyRef.current = reportContextKey;
   }, [reportContextKey]);
-  const clockYear = clock.getFullYear();
-  const clockMonth = clock.getMonth();
   const reportReferenceDate = React.useMemo(
-    () => new Date(clockYear, clockMonth, 1),
-    [clockMonth, clockYear],
+    () => companyCalendarDate(clock, companyTimeZone, "month"),
+    [clock, companyTimeZone],
   );
   const effectivePeriodDates = React.useMemo(
     () =>
@@ -589,11 +594,13 @@ export function ScenarioReportsDashboard({
         appliedCountingPeriod,
         countingViewSettings.includeOpenPeriod,
         reportReferenceDate,
+        companyTimeZone,
       ),
     [
       appliedCountingPeriod,
       countingViewSettings.includeOpenPeriod,
       reportReferenceDate,
+      companyTimeZone,
     ],
   );
   const effectivePeriodFromTime = effectivePeriodDates.from.getTime();
@@ -601,6 +608,7 @@ export function ScenarioReportsDashboard({
   const reportCoverageToTime = reportCoverageEnd(
     effectivePeriodDates,
     clock,
+    companyTimeZone,
   ).getTime();
   const reportPeriodLabel = `${formatCountingReportPeriod(
     appliedCountingPeriod,
@@ -624,17 +632,24 @@ export function ScenarioReportsDashboard({
           from: new Date(effectivePeriodFromTime),
           to: new Date(effectivePeriodToTime),
         },
-        new Date(Math.max(effectivePeriodFromTime, reportCoverageToTime - 1)),
+        clock,
+        companyTimeZone,
       ),
     [
+      clock,
+      companyTimeZone,
       effectivePeriodFromTime,
       effectivePeriodToTime,
-      reportCoverageToTime,
     ],
   );
   const chartDefinitions = React.useMemo(
-    () => buildScenarioAggregateDefinitions(clock, effectivePeriodDates),
-    [clock, effectivePeriodDates],
+    () =>
+      buildScenarioAggregateDefinitions(
+        clock,
+        effectivePeriodDates,
+        companyTimeZone,
+      ),
+    [clock, companyTimeZone, effectivePeriodDates],
   );
   const countingPeriodPending =
     countingPeriod.from !== appliedCountingPeriod.from ||
@@ -1008,7 +1023,7 @@ export function ScenarioReportsDashboard({
       if (!silent) setLoadingCharts(true);
 
       try {
-        requireCertifiedCountingRuntimeTimeZone(companyTimeZoneResolution);
+        requireCertifiedCountingTimeZone(companyTimeZoneResolution);
       } catch (error) {
         abortRequest(controller, "O fuso do relatório não foi certificado.");
         if (chartRequestControllerRef.current === controller) {
@@ -1041,6 +1056,7 @@ export function ScenarioReportsDashboard({
       const definitions = buildScenarioAggregateDefinitions(
         now,
         effectivePeriodDates,
+        companyTimeZone,
       );
       const requiredChartIds = new Set(
         (requiredCustomGranularitiesKey
@@ -1054,7 +1070,11 @@ export function ScenarioReportsDashboard({
         requiredChartIds.has(definition.id),
       );
       const countingDirectionalDefinition = canonicalHistoryRequired
-        ? buildCountingHourHistoryDefinition(effectivePeriodDates, now)
+        ? buildCountingHourHistoryDefinition(
+            effectivePeriodDates,
+            now,
+            companyTimeZone,
+          )
         : null;
       const visibleDirectionalSource = countingDirectionalDefinition
         ? visibleDefinitions.find(
@@ -1084,7 +1104,8 @@ export function ScenarioReportsDashboard({
             buildComparisonDefinition(
               definition,
               intradayComparison,
-              countingReportHistoryFrom(now),
+              countingReportHistoryFrom(now, companyTimeZone),
+              companyTimeZone,
             ),
           )
         : [];
@@ -1104,6 +1125,7 @@ export function ScenarioReportsDashboard({
                 effectivePeriodDates,
                 now,
                 countingIntelligenceOpenComparisonRequired,
+                companyTimeZone,
               ),
             ]
           : []),
@@ -1111,15 +1133,22 @@ export function ScenarioReportsDashboard({
           ? buildCountingOpenComparisonDefinitions(
               effectivePeriodDates,
               now,
+              companyTimeZone,
             )
           : []),
       ];
+      const effectivePeriodInstants = countingCalendarRangeToInstants(
+        effectivePeriodDates,
+        companyTimeZone,
+      );
       if (
         currentHourReconciliationRequired &&
-        now >= effectivePeriodDates.from &&
-        now < effectivePeriodDates.to
+        now >= effectivePeriodInstants.from &&
+        now < effectivePeriodInstants.to
       ) {
-        supportDefinitions.push(buildCurrentHourMinutesDefinition(now));
+        supportDefinitions.push(
+          buildCurrentHourMinutesDefinition(now, companyTimeZone),
+        );
       }
 
       const loadDataset = createCountingHistoryDatasetLoader(
@@ -1134,6 +1163,7 @@ export function ScenarioReportsDashboard({
                 ranges: [definition],
                 request: requestAggregate,
                 signal: controller.signal,
+                timeZone: companyTimeZone,
               })
             : await fetchCompleteAggregateRange({
                 companyScopeId: companyScopeId?.trim() || undefined,
@@ -1141,6 +1171,7 @@ export function ScenarioReportsDashboard({
                 granularity: definition.granularity,
                 request: requestAggregate,
                 signal: controller.signal,
+                timeZone: companyTimeZone,
                 to: definition.to,
               }),
         }),
@@ -1232,6 +1263,7 @@ export function ScenarioReportsDashboard({
           loadedData,
           now,
           effectivePeriodDates,
+          companyTimeZone,
         );
         setChartData(nextData);
         setChartLoadError("");
@@ -1364,6 +1396,7 @@ export function ScenarioReportsDashboard({
       companyScopeId,
       new Date(),
       preferenceScope,
+      companyTimeZone,
     );
     setShowPreviousPeriod(settings.showPreviousPeriod);
     setIntradayComparison(settings.intradayComparison);
@@ -1377,7 +1410,12 @@ export function ScenarioReportsDashboard({
     // saved range (four years for a first visit) and issue exactly one
     // deduplicated query as soon as its scope is ready.
     setReportRequested(true);
-  }, [companyScopeId, preferenceScope, reportSettingsScopeKey]);
+  }, [
+    companyScopeId,
+    companyTimeZone,
+    preferenceScope,
+    reportSettingsScopeKey,
+  ]);
 
   React.useEffect(() => {
     function syncCameraGroups() {
@@ -1553,6 +1591,7 @@ export function ScenarioReportsDashboard({
         companyScopeId,
         new Date(),
         preferenceScope,
+        companyTimeZone,
       ),
     );
   }
@@ -1595,9 +1634,11 @@ export function ScenarioReportsDashboard({
         },
         clock,
         countingIntelligenceOpenComparisonRequired,
+        companyTimeZone,
       ),
     [
       clock,
+      companyTimeZone,
       countingIntelligenceOpenComparisonRequired,
       effectivePeriodFromTime,
       effectivePeriodToTime,
@@ -1679,6 +1720,7 @@ export function ScenarioReportsDashboard({
     () =>
       reportRequested && selectedScope && !reportCertificationError
         ? buildCountingIntelligenceModel({
+            companyTimeZone,
             comparisonDataFrom: reportComparisonMonthDefinition.from,
             comparableDailyRows: countingComparableDailyRows,
             comparableHourlyRows: countingComparableHourlyRows,
@@ -1702,6 +1744,7 @@ export function ScenarioReportsDashboard({
     [
       chartData,
       clock,
+      companyTimeZone,
       countingComparableDailyRows,
       countingComparableHourlyRows,
       countingDayHeatmapPeriod,
@@ -1722,6 +1765,7 @@ export function ScenarioReportsDashboard({
           preference.id,
           {
             mode: preference.scenarioSelectionMode ?? "inherit",
+            scenarioOrder: preference.scenarioOrder ?? [],
             scenarioIds: preference.scenarioIds ?? [],
           },
         ]),
@@ -1745,6 +1789,7 @@ export function ScenarioReportsDashboard({
 
       const selectedScenarios = resolveWidgetScenarios(scenarios, selection);
       return buildCountingIntelligenceModel({
+        companyTimeZone,
         comparisonDataFrom: reportComparisonMonthDefinition.from,
         comparableDailyRows: countingComparableDailyRows,
         comparableHourlyRows: countingComparableHourlyRows,
@@ -1771,6 +1816,7 @@ export function ScenarioReportsDashboard({
     [
       chartData,
       clock,
+      companyTimeZone,
       countingComparableDailyRows,
       countingComparableHourlyRows,
       countingDayHeatmapPeriod,
@@ -1796,7 +1842,6 @@ export function ScenarioReportsDashboard({
       const selectedScenarios = resolveWidgetScenarios(scenarios, selection);
       const key = `${selection.mode}:${selectedScenarios
         .map((scenario) => scenario.id)
-        .sort()
         .join("|")}`;
       const cached = models.get(key);
       if (cached) return cached;
@@ -1858,7 +1903,8 @@ export function ScenarioReportsDashboard({
     const granularity: ReportCustomWidgetGranularity = "hour";
 
     setCustomWidgetForm({
-      comparisonSettings: createDefaultScenarioComparisonSettings(),
+      comparisonSettings:
+        createDefaultScenarioComparisonSettings(companyTimeZone),
       granularity,
       kind: "scope",
       scopeId: scope?.id ?? "",
@@ -1960,6 +2006,7 @@ export function ScenarioReportsDashboard({
           customWidgetForm.comparisonSettings,
           companyScopeId,
           preferenceScope,
+          companyTimeZone,
         );
       }
 
@@ -2188,6 +2235,7 @@ export function ScenarioReportsDashboard({
             scope={resolvedScope}
             showPreviousPeriod={showPreviousPeriod}
             state={state}
+            timeZone={companyTimeZone}
           />
         );
       },
@@ -2520,6 +2568,7 @@ export function ScenarioReportsDashboard({
       dataCompleteUntil: scenarioReportDataCompleteUntil(
         effectivePeriodDates,
         generatedAt,
+        companyTimeZone,
       ),
       context: [
         selectedScope
@@ -2556,7 +2605,10 @@ export function ScenarioReportsDashboard({
     const dailyTo = new Date(
       Math.min(
         effectivePeriodDates.to.getTime(),
-        addDays(startOfDay(dataCompleteUntil), 1).getTime(),
+        countingAddCalendarDays(
+          countingCalendarDate(dataCompleteUntil, companyTimeZone),
+          1,
+        ).getTime(),
       ),
     );
     const dailyState = chartData[CURRENT_MONTH_DAYS_ID];
@@ -2568,6 +2620,7 @@ export function ScenarioReportsDashboard({
             from: dailyFrom,
             granularity: "day",
             signal: requestSignal,
+            timeZone: companyTimeZone,
             to: dailyTo,
           });
     requestSignal.throwIfAborted();
@@ -2575,6 +2628,7 @@ export function ScenarioReportsDashboard({
       dailyRows,
       selectedScope,
       "day",
+      companyTimeZone,
     );
     const rows: ReportTable["rows"] = [];
     let cursor = dailyFrom;
@@ -2586,7 +2640,10 @@ export function ScenarioReportsDashboard({
       }
       rows.push({
         date: formatReportCivilDate(cursor),
-        total: totals.get(bucketKeyForGranularity(cursor, "day")) ?? 0,
+        total:
+          totals.get(
+            bucketKeyForGranularity(cursor, "day", companyTimeZone),
+          ) ?? 0,
       });
       cursor = addDays(cursor, 1);
     }
@@ -2734,6 +2791,7 @@ export function ScenarioReportsDashboard({
                   <CountingReportPeriodControl
                     disabled
                     includeOpenPeriod={countingViewSettings.includeOpenPeriod}
+                    timeZone={companyTimeZone}
                     value={countingPeriod}
                     onChange={updateCountingPeriod}
                     onIncludeOpenPeriodChange={(includeOpenPeriod) =>
@@ -2760,6 +2818,7 @@ export function ScenarioReportsDashboard({
                     <CountingReportPeriodControl
                       disabled={loadingCharts}
                       includeOpenPeriod={countingViewSettings.includeOpenPeriod}
+                      timeZone={companyTimeZone}
                       value={countingPeriod}
                       onChange={updateCountingPeriod}
                       onApply={applyCountingPeriod}
@@ -3192,6 +3251,7 @@ function ScenarioAggregateChartCard({
   scope,
   showPreviousPeriod,
   state,
+  timeZone,
 }: {
   action?: React.ReactNode;
   definition: ScenarioAggregateDefinition;
@@ -3203,11 +3263,12 @@ function ScenarioAggregateChartCard({
   scope: ReportScopeOption;
   showPreviousPeriod: boolean;
   state?: ScenarioChartState;
+  timeZone: string;
 }) {
   const widgetColor = useWidgetColor();
   const points = React.useMemo(
-    () => buildReportScopeAggregatePoints(definition, rows, scope),
-    [definition, rows, scope],
+    () => buildReportScopeAggregatePoints(definition, rows, scope, timeZone),
+    [definition, rows, scope, timeZone],
   );
   const previousPoints = React.useMemo(
     () =>
@@ -3217,9 +3278,17 @@ function ScenarioAggregateChartCard({
             previousRows,
             scope,
             intradayComparison,
+            timeZone,
           )
         : [],
-    [definition, intradayComparison, previousRows, scope, showPreviousPeriod],
+    [
+      definition,
+      intradayComparison,
+      previousRows,
+      scope,
+      showPreviousPeriod,
+      timeZone,
+    ],
   );
   const option = React.useMemo(
     () =>
@@ -3399,10 +3468,21 @@ function ComparisonModeSelect({
 
 function buildScenarioAggregateDefinitions(
   now: Date,
-  period?: { from: Date; to: Date },
+  period: { from: Date; to: Date },
+  timeZone: string,
 ): ScenarioAggregateDefinition[] {
   if (period) {
-    const coverageTo = reportCoverageEnd(period, now);
+    const calendarCoverageTo = reportCoverageEnd(period, now, timeZone);
+    const periodInstants = countingCalendarRangeToInstants(period, timeZone);
+    const instantCoverageTo =
+      now >= periodInstants.from && now < periodInstants.to
+        ? new Date(
+            Math.min(
+              periodInstants.to.getTime(),
+              addMinutes(startOfMinute(now), 1).getTime(),
+            ),
+          )
+        : periodInstants.to;
     const templates: Array<{
       granularity: ReportCustomWidgetGranularity;
       id: string;
@@ -3433,9 +3513,17 @@ function buildScenarioAggregateDefinitions(
       const granularity = fitReportGranularityToRange(
         template.granularity,
         period.from,
-        coverageTo,
+        calendarCoverageTo,
       );
       const adjusted = granularity !== template.granularity;
+      const instantGranularity =
+        granularity === "minute" || granularity === "hour";
+      const rangeFrom = instantGranularity
+        ? periodInstants.from
+        : period.from;
+      const rangeTo = instantGranularity
+        ? instantCoverageTo
+        : calendarCoverageTo;
 
       return {
         id: template.id,
@@ -3448,19 +3536,20 @@ function buildScenarioAggregateDefinitions(
               granularity,
             ).toLowerCase()}.`,
         granularity,
-        from: alignToGranularity(period.from, granularity),
-        to: alignEndToGranularity(coverageTo, granularity),
+        from: alignToGranularity(rangeFrom, granularity, timeZone),
+        to: alignEndToGranularity(rangeTo, granularity, timeZone),
       };
     });
   }
 
   const minuteEnd = addMinutes(startOfMinute(now), 1);
-  const hourEnd = endOfAggregateBucket(startOfHour(now), "hour");
-  const todayStart = startOfDay(now);
-  const currentWeekStart = startOfWeek(now);
-  const currentMonthStart = startOfMonth(now);
-  const currentSemesterStart = startOfSemester(now);
-  const currentYearStart = startOfYear(now);
+  const hourEnd = countingEndOfHourInstant(now, timeZone);
+  const todayStartInstant = countingStartOfDayInstant(now, timeZone);
+  const todayStart = countingCalendarStart(now, timeZone, "day");
+  const currentWeekStart = countingCalendarStart(now, timeZone, "week");
+  const currentMonthStart = countingCalendarStart(now, timeZone, "month");
+  const currentSemesterStart = countingCalendarStart(now, timeZone, "semester");
+  const currentYearStart = countingCalendarStart(now, timeZone, "year");
 
   const definitions: ScenarioAggregateDefinition[] = [
     {
@@ -3476,7 +3565,7 @@ function buildScenarioAggregateDefinitions(
       label: "Hora a hora",
       description: "Hoje por hora.",
       granularity: "hour",
-      from: todayStart,
+      from: todayStartInstant,
       to: hourEnd,
     },
     {
@@ -3484,32 +3573,32 @@ function buildScenarioAggregateDefinitions(
       label: "Dia a dia",
       description: "Últimos 7 dias.",
       granularity: "day",
-      from: addDays(todayStart, -6),
-      to: addDays(todayStart, 1),
+      from: countingAddCalendarDays(todayStart, -6),
+      to: countingAddCalendarDays(todayStart, 1),
     },
     {
       id: "report_chart_week",
       label: "Semana a semana",
       description: "Últimas 8 semanas.",
       granularity: "week",
-      from: addDays(currentWeekStart, -7 * 7),
-      to: addDays(currentWeekStart, 7),
+      from: countingAddCalendarDays(currentWeekStart, -7 * 7),
+      to: countingAddCalendarDays(currentWeekStart, 7),
     },
     {
       id: "report_chart_month",
       label: "Mês a mês",
       description: "Últimos 12 meses.",
       granularity: "month",
-      from: addMonths(currentMonthStart, -11),
-      to: addMonths(currentMonthStart, 1),
+      from: countingAddCalendarMonths(currentMonthStart, -11),
+      to: countingAddCalendarMonths(currentMonthStart, 1),
     },
     {
       id: "report_chart_semester",
       label: "Semestre a semestre",
       description: "Últimos 6 semestres.",
       granularity: "semester",
-      from: addMonths(currentSemesterStart, -5 * 6),
-      to: addMonths(currentSemesterStart, 6),
+      from: countingAddCalendarMonths(currentSemesterStart, -5 * 6),
+      to: countingAddCalendarMonths(currentSemesterStart, 6),
     },
     {
       id: "report_chart_year",
@@ -3587,13 +3676,14 @@ function aggregateGranularityLabel(granularity: AggregateGranularity) {
 
 function buildCurrentHourMinutesDefinition(
   now: Date,
+  timeZone: string,
 ): ScenarioAggregateDefinition {
   return {
     id: CURRENT_HOUR_MINUTES_ID,
     label: "Minutos da hora atual",
     description: "Base auxiliar do período aberto.",
     granularity: "minute",
-    from: startOfHour(now),
+    from: countingStartOfHourInstant(now, timeZone),
     to: addMinutes(startOfMinute(now), 1),
   };
 }
@@ -3604,21 +3694,37 @@ function buildCountingHourHistoryDefinition(
     to: Date;
   },
   now: Date,
+  timeZone: string,
 ): ScenarioAggregateDefinition {
-  const to = alignEndToGranularity(reportCoverageEnd(period, now), "hour");
+  const periodInstants = countingCalendarRangeToInstants(period, timeZone);
+  const coverageTo =
+    now >= periodInstants.from && now < periodInstants.to
+      ? addMinutes(startOfMinute(now), 1)
+      : periodInstants.to;
+  const to = alignEndToGranularity(coverageTo, "hour", timeZone);
   const lastIncludedInstant = new Date(
-    Math.max(period.from.getTime(), to.getTime() - 1),
+    Math.max(periodInstants.from.getTime(), to.getTime() - 1),
   );
-  const rollingFrom = startOfDay(
-    addDays(lastIncludedInstant, -(COUNTING_DIRECTIONAL_PROFILE_DAYS - 1)),
+  const rollingCalendarFrom = countingAddCalendarDays(
+    countingCalendarDate(lastIncludedInstant, timeZone, "day"),
+    -(COUNTING_DIRECTIONAL_PROFILE_DAYS - 1),
   );
+  const rollingFrom = countingCalendarRangeToInstants(
+    {
+      from: rollingCalendarFrom,
+      to: countingAddCalendarDays(rollingCalendarFrom, 1),
+    },
+    timeZone,
+  ).from;
 
   return {
     id: COUNTING_HOUR_HISTORY_ID,
     label: "Perfil horário recente",
     description: `Base horária limitada aos ${COUNTING_DIRECTIONAL_PROFILE_DAYS} dias mais recentes do período.`,
     granularity: "hour",
-    from: new Date(Math.max(period.from.getTime(), rollingFrom.getTime())),
+    from: new Date(
+      Math.max(periodInstants.from.getTime(), rollingFrom.getTime()),
+    ),
     to,
   };
 }
@@ -3666,6 +3772,7 @@ function buildCountingMonthHistoryDefinition(
   period: { from: Date; to: Date },
   now: Date,
   includePreviousYear: boolean,
+  timeZone: string,
 ): ScenarioAggregateDefinition {
   const requestedFrom = includePreviousYear
     ? addYears(period.from, -1)
@@ -3677,26 +3784,42 @@ function buildCountingMonthHistoryDefinition(
     granularity: "month",
     from: new Date(
       Math.max(
-        countingReportHistoryFrom(now).getTime(),
+        countingReportHistoryFrom(now, timeZone).getTime(),
         requestedFrom.getTime(),
       ),
     ),
-    to: alignEndToGranularity(reportCoverageEnd(period, now), "month"),
+    to: alignEndToGranularity(
+      reportCoverageEnd(period, now, timeZone),
+      "month",
+      timeZone,
+    ),
   };
 }
 
 function buildCountingOpenComparisonDefinitions(
   period: { from: Date; to: Date },
   now: Date,
+  timeZone: string,
 ): ScenarioAggregateDefinition[] {
-  if (now < period.from || now >= period.to) return [];
+  const periodInstants = countingCalendarRangeToInstants(period, timeZone);
+  if (now < periodInstants.from || now >= periodInstants.to) return [];
 
-  const currentMonthFrom = startOfMonth(now);
-  const currentDayFrom = startOfDay(now);
-  const currentHourTo = startOfHour(now);
+  const currentMonthFrom = countingCalendarStart(now, timeZone, "month");
+  const currentDayFrom = countingCalendarStart(now, timeZone, "day");
+  const currentDayInstant = countingStartOfDayInstant(now, timeZone);
+  const currentHourTo = countingStartOfHourInstant(now, timeZone);
   const previousMonthFrom = shiftCalendarYearsClamped(currentMonthFrom, -1);
   const previousDayFrom = shiftCalendarYearsClamped(currentDayFrom, -1);
-  const previousHourTo = shiftCalendarYearsClamped(currentHourTo, -1);
+  const previousDayInstant = countingShiftInstantYearsClamped(
+    currentDayInstant,
+    -1,
+    timeZone,
+  );
+  const previousHourTo = countingShiftInstantYearsClamped(
+    currentHourTo,
+    -1,
+    timeZone,
+  );
 
   const definitions: ScenarioAggregateDefinition[] = [
     {
@@ -3720,7 +3843,7 @@ function buildCountingOpenComparisonDefinitions(
       label: "Horas fechadas do dia atual",
       description: "Fronteira horária do mês em andamento.",
       granularity: "hour",
-      from: currentDayFrom,
+      from: currentDayInstant,
       to: currentHourTo,
     },
     {
@@ -3728,7 +3851,7 @@ function buildCountingOpenComparisonDefinitions(
       label: "Horas comparáveis do ano anterior",
       description: "Fronteira horária equivalente do ano anterior.",
       granularity: "hour",
-      from: previousDayFrom,
+      from: previousDayInstant,
       to: previousHourTo,
     },
   ];
@@ -3736,18 +3859,25 @@ function buildCountingOpenComparisonDefinitions(
   return definitions.filter((definition) => definition.from < definition.to);
 }
 
-function reportCoverageEnd(period: { from: Date; to: Date }, now: Date) {
-  return now >= period.from && now < period.to
-    ? addMinutes(startOfMinute(now), 1)
+function reportCoverageEnd(
+  period: { from: Date; to: Date },
+  now: Date,
+  timeZone: string,
+) {
+  const companyToday = countingCalendarDate(now, timeZone, "day");
+  return companyToday >= period.from && companyToday < period.to
+    ? companyToday
     : period.to;
 }
 
 function scenarioReportDataCompleteUntil(
   period: { from: Date; to: Date },
   now: Date,
+  timeZone: string,
 ) {
-  const inclusiveEnd = new Date(period.to.getTime() - 1);
-  return now >= period.from && now < period.to
+  const instants = countingCalendarRangeToInstants(period, timeZone);
+  const inclusiveEnd = new Date(instants.to.getTime() - 1);
+  return now >= instants.from && now < instants.to
     ? new Date(Math.min(now.getTime(), inclusiveEnd.getTime()))
     : inclusiveEnd;
 }
@@ -3761,7 +3891,10 @@ function buildReportCustomWidgetDefinition(
   const base =
     definitions.find((definition) => definition.id === chartId) ??
     definitions.find((definition) => definition.id === "report_chart_hour") ??
-    buildScenarioAggregateDefinitions(new Date())[1];
+    definitions[0];
+  if (!base) {
+    throw new Error("As definições do relatório de Contagem estão vazias.");
+  }
   const scopeName = scope?.name ?? widget.scopeName;
 
   return {
@@ -3834,15 +3967,26 @@ function buildComparisonDefinition(
   definition: ScenarioAggregateDefinition,
   intradayComparison: IntradayComparisonMode,
   minimumFrom: Date,
+  timeZone: string,
 ): ScenarioAggregateDefinition {
-  const comparisonStarts = listScenarioBucketStarts(definition).map((date) =>
-    comparisonBucketStart(date, definition.granularity, intradayComparison),
+  const comparisonStarts = listScenarioBucketStarts(definition, timeZone).map(
+    (date) =>
+      comparisonBucketStart(
+        date,
+        definition.granularity,
+        intradayComparison,
+        timeZone,
+      ),
   );
   const comparisonFrom = comparisonStarts.length
     ? new Date(Math.min(...comparisonStarts.map((date) => date.getTime())))
     : definition.from;
+  const minimumBoundary =
+    definition.granularity === "minute" || definition.granularity === "hour"
+      ? countingCalendarBoundaryInstant(minimumFrom, timeZone)
+      : minimumFrom;
   const from = new Date(
-    Math.max(comparisonFrom.getTime(), minimumFrom.getTime()),
+    Math.max(comparisonFrom.getTime(), minimumBoundary.getTime()),
   );
   const lastStart = comparisonStarts.length
     ? new Date(Math.max(...comparisonStarts.map((date) => date.getTime())))
@@ -3852,7 +3996,7 @@ function buildComparisonDefinition(
     ...definition,
     id: previousId(definition.id),
     from,
-    to: addGranularity(lastStart, definition.granularity),
+    to: addGranularity(lastStart, definition.granularity, timeZone),
   };
 }
 
@@ -3864,11 +4008,13 @@ function hydrateScenarioOpenBuckets(
   data: Record<string, ScenarioChartState>,
   now: Date,
   period: { from: Date; to: Date },
+  timeZone: string,
 ) {
   const next = cloneChartData(data);
-  const includesNow = now >= period.from && now < period.to;
+  const companyToday = countingCalendarDate(now, timeZone);
+  const includesNow = companyToday >= period.from && companyToday < period.to;
 
-  const currentHourStart = startOfHour(now);
+  const currentHourStart = countingStartOfHourInstant(now, timeZone);
   const currentMinuteState = next[CURRENT_HOUR_MINUTES_ID];
   const currentMinuteRows = currentMinuteState?.rows ?? [];
   const currentMinuteGranularity = currentMinuteState?.granularity ?? "minute";
@@ -3880,7 +4026,7 @@ function hydrateScenarioOpenBuckets(
       COUNTING_HOUR_HISTORY_ID,
       "hour",
       currentHourStart,
-      endOfAggregateBucket(currentHourStart, "hour"),
+      countingEndOfHourInstant(now, timeZone),
       currentMinuteRows,
       currentMinuteGranularity,
     );
@@ -3901,7 +4047,7 @@ function hydrateScenarioOpenBuckets(
             currentMinuteRows,
             currentMinuteGranularity,
             currentHourStart,
-            endOfAggregateBucket(currentHourStart, "hour"),
+            countingEndOfHourInstant(now, timeZone),
           ),
         };
       } else if (state.granularity === "minute") {
@@ -4134,18 +4280,24 @@ function buildReportScopeAggregatePoints(
   definition: ScenarioAggregateDefinition,
   rows: AggregateEventRow[],
   scope: ReportScopeOption,
+  timeZone: string,
 ) {
   const totals = aggregateReportScopeRowsByBucket(
     rows,
     scope,
     definition.granularity,
+    timeZone,
   );
   const points: ChartPoint[] = [];
-  listScenarioBucketStarts(definition).forEach((bucketStart) => {
-    const key = bucketKeyForGranularity(bucketStart, definition.granularity);
+  listScenarioBucketStarts(definition, timeZone).forEach((bucketStart) => {
+    const key = bucketKeyForGranularity(
+      bucketStart,
+      definition.granularity,
+      timeZone,
+    );
     points.push({
       bucket: bucketStart.toISOString(),
-      label: bucketLabel(bucketStart, definition.granularity),
+      label: bucketLabel(bucketStart, definition.granularity, timeZone),
       total: totals.get(key) ?? 0,
     });
   });
@@ -4158,27 +4310,35 @@ function buildReportScopeAggregateComparisonPoints(
   rows: AggregateEventRow[],
   scope: ReportScopeOption,
   intradayComparison: IntradayComparisonMode,
+  timeZone: string,
 ) {
   const totals = aggregateReportScopeRowsByBucket(
     rows,
     scope,
     definition.granularity,
+    timeZone,
   );
 
-  return listScenarioBucketStarts(definition).map((bucketStart) => {
+  return listScenarioBucketStarts(definition, timeZone).map((bucketStart) => {
     const comparisonStart = comparisonBucketStart(
       bucketStart,
       definition.granularity,
       intradayComparison,
+      timeZone,
     );
     const key = bucketKeyForGranularity(
       comparisonStart,
       definition.granularity,
+      timeZone,
     );
 
     return {
       bucket: comparisonStart.toISOString(),
-      label: bucketLabel(comparisonStart, definition.granularity),
+      label: bucketLabel(
+        comparisonStart,
+        definition.granularity,
+        timeZone,
+      ),
       total: totals.get(key) ?? 0,
     };
   });
@@ -4188,6 +4348,7 @@ function aggregateReportScopeRowsByBucket(
   rows: AggregateEventRow[],
   scope: ReportScopeOption,
   granularity: AggregateGranularity,
+  timeZone: string,
 ) {
   const selectedScenarios =
     scope.scenarios ?? (scope.scenario ? [scope.scenario] : null);
@@ -4212,7 +4373,7 @@ function aggregateReportScopeRowsByBucket(
       const date = parseAggregateBucket(row.bucket, granularity);
       if (!date) return;
 
-      const key = bucketKeyForGranularity(date, granularity);
+      const key = bucketKeyForGranularity(date, granularity, timeZone);
       totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0) * multiplier);
     });
 
@@ -4228,23 +4389,38 @@ function aggregateReportScopeRowsByBucket(
     const date = parseAggregateBucket(row.bucket, granularity);
     if (!date) return;
 
-    const key = bucketKeyForGranularity(date, granularity);
+    const key = bucketKeyForGranularity(date, granularity, timeZone);
     totals.set(key, (totals.get(key) ?? 0) + (row.total ?? 0));
   });
 
   return totals;
 }
 
-function listScenarioBucketStarts(definition: ScenarioAggregateDefinition) {
+function listScenarioBucketStarts(
+  definition: ScenarioAggregateDefinition,
+  timeZone?: string,
+) {
   const starts: Date[] = [];
-  let cursor = alignToGranularity(definition.from, definition.granularity);
-  const end = alignEndToGranularity(definition.to, definition.granularity);
+  let cursor = alignToGranularity(
+    definition.from,
+    definition.granularity,
+    timeZone,
+  );
+  const end = alignEndToGranularity(
+    definition.to,
+    definition.granularity,
+    timeZone,
+  );
   let guard = 0;
 
   while (cursor < end && guard < 500) {
     const bucketStart = new Date(cursor);
     starts.push(bucketStart);
-    cursor = addGranularity(bucketStart, definition.granularity);
+    cursor = addGranularity(
+      bucketStart,
+      definition.granularity,
+      timeZone,
+    );
     guard += 1;
   }
 
@@ -4261,8 +4437,16 @@ function comparisonBucketStart(
   bucketStart: Date,
   granularity: AggregateGranularity,
   intradayComparison: IntradayComparisonMode,
+  timeZone?: string,
 ) {
   if (granularity === "minute" || granularity === "hour") {
+    if (timeZone) {
+      return shiftReportInstantCalendarDays(
+        bucketStart,
+        intradayComparison === "last_week" ? -7 : -1,
+        timeZone,
+      );
+    }
     return addDays(bucketStart, intradayComparison === "last_week" ? -7 : -1);
   }
   if (granularity === "day") return addDays(bucketStart, -7);
@@ -4449,13 +4633,19 @@ function buildScenarioReportChart(
   timeZone: string,
   widgetColor?: string,
 ): ReportPayload["charts"][number] {
-  const points = buildReportScopeAggregatePoints(definition, rows, scope);
+  const points = buildReportScopeAggregatePoints(
+    definition,
+    rows,
+    scope,
+    timeZone,
+  );
   const previousPoints = showPreviousPeriod
     ? buildReportScopeAggregateComparisonPoints(
         definition,
         previousRows,
         scope,
         intradayComparison,
+        timeZone,
       )
     : [];
   const previousColumnLabel = comparisonSeriesName(
@@ -4667,9 +4857,17 @@ function barMaxWidth(granularity: AggregateGranularity) {
   return 34;
 }
 
-function alignToGranularity(date: Date, granularity: AggregateGranularity) {
+function alignToGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+  timeZone?: string,
+) {
   if (granularity === "minute") return startOfMinute(date);
-  if (granularity === "hour") return startOfHour(date);
+  if (granularity === "hour") {
+    return timeZone
+      ? countingStartOfHourInstant(date, timeZone)
+      : startOfHour(date);
+  }
   if (granularity === "day") return startOfDay(date);
   if (granularity === "week") return startOfWeek(date);
   if (granularity === "month") return startOfMonth(date);
@@ -4677,15 +4875,30 @@ function alignToGranularity(date: Date, granularity: AggregateGranularity) {
   return startOfYear(date);
 }
 
-function alignEndToGranularity(date: Date, granularity: AggregateGranularity) {
-  const aligned = alignToGranularity(date, granularity);
+function alignEndToGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+  timeZone?: string,
+) {
+  const aligned = alignToGranularity(date, granularity, timeZone);
   if (aligned.getTime() === date.getTime()) return aligned;
+  if (granularity === "hour" && timeZone) {
+    return countingEndOfHourInstant(aligned, timeZone);
+  }
   return addGranularity(aligned, granularity);
 }
 
-function addGranularity(date: Date, granularity: AggregateGranularity) {
+function addGranularity(
+  date: Date,
+  granularity: AggregateGranularity,
+  timeZone?: string,
+) {
   if (granularity === "minute") return addMinutes(date, 1);
-  if (granularity === "hour") return endOfAggregateBucket(date, "hour");
+  if (granularity === "hour") {
+    return timeZone
+      ? countingEndOfHourInstant(date, timeZone)
+      : endOfAggregateBucket(date, "hour");
+  }
   if (granularity === "day") return addDays(date, 1);
   if (granularity === "week") return addDays(date, 7);
   if (granularity === "month") return addMonths(date, 1);
@@ -4693,12 +4906,41 @@ function addGranularity(date: Date, granularity: AggregateGranularity) {
   return addYears(date, 1);
 }
 
+function shiftReportInstantCalendarDays(
+  instant: Date,
+  amount: number,
+  timeZone: string,
+) {
+  const parts = companyZonedDateParts(instant, timeZone);
+  const targetDate = countingAddCalendarDays(
+    new Date(parts.year, parts.month - 1, parts.day),
+    amount,
+  );
+  const targetHour = countingCalendarHourInstant(
+    targetDate,
+    parts.hour,
+    timeZone,
+  );
+  return new Date(
+    targetHour.getTime() +
+      parts.minute * 60_000 +
+      parts.second * 1_000 +
+      instant.getMilliseconds(),
+  );
+}
+
 function bucketKeyForGranularity(
   date: Date,
   granularity: AggregateGranularity,
+  timeZone?: string,
 ) {
   if (granularity === "minute") return startOfMinute(date).getTime();
-  if (granularity === "hour") return startOfHour(date).getTime();
+  if (granularity === "hour") {
+    return (timeZone
+      ? countingStartOfHourInstant(date, timeZone)
+      : startOfHour(date)
+    ).getTime();
+  }
   if (granularity === "day") {
     return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
   }
@@ -4720,10 +4962,29 @@ function bucketKeyForGranularity(
   return Date.UTC(date.getFullYear(), 0, 1);
 }
 
-function bucketLabel(date: Date, granularity: AggregateGranularity) {
-  if (granularity === "minute") return formatTime(date);
-  if (granularity === "hour")
-    return `${String(date.getHours()).padStart(2, "0")}h`;
+function bucketLabel(
+  date: Date,
+  granularity: AggregateGranularity,
+  timeZone?: string,
+) {
+  if (granularity === "minute") {
+    return timeZone
+      ? new Intl.DateTimeFormat("pt-BR", {
+          hour: "2-digit",
+          minute: "2-digit",
+          timeZone,
+        }).format(date)
+      : formatTime(date);
+  }
+  if (granularity === "hour") {
+    return timeZone
+      ? `${new Intl.DateTimeFormat("pt-BR", {
+          hour: "2-digit",
+          hourCycle: "h23",
+          timeZone,
+        }).format(date)}h`
+      : `${String(date.getHours()).padStart(2, "0")}h`;
+  }
   if (granularity === "day") {
     const dayMonth = new Intl.DateTimeFormat("pt-BR", {
       day: "2-digit",

@@ -41,6 +41,7 @@ type CountingReportPeriodControlProps = {
   onChange: (period: CountingReportPeriod) => void;
   onIncludeOpenPeriodChange: (value: boolean) => void;
   pending?: boolean;
+  timeZone: string;
   value: CountingReportPeriod;
 };
 
@@ -73,21 +74,23 @@ export function CountingReportPeriodControl({
   onChange,
   onIncludeOpenPeriodChange,
   pending = false,
+  timeZone,
   value,
 }: CountingReportPeriodControlProps) {
   const fromInputId = React.useId();
   const toInputId = React.useId();
   const openPeriodId = React.useId();
   const now = React.useMemo(() => new Date(), []);
-  const normalized = normalizeCountingReportPeriod(value, now);
+  const normalized = normalizeCountingReportPeriod(value, now, timeZone);
   const [open, setOpen] = React.useState(false);
   const [draft, setDraft] = React.useState(normalized);
   const [draftIncludeOpenPeriod, setDraftIncludeOpenPeriod] =
     React.useState(includeOpenPeriod);
-  const draftPreset = detectCountingReportPeriodPreset(draft, now);
+  const draftPreset = detectCountingReportPeriodPreset(draft, now, timeZone);
   const draftMonthCount = countingReportPeriodMonthCount(draft);
   const effectiveDraftMonthCount =
-    !draftIncludeOpenPeriod && draft.to === maximumCountingReportMonth(now)
+    !draftIncludeOpenPeriod &&
+    draft.to === maximumCountingReportMonth(now, timeZone)
       ? Math.max(0, draftMonthCount - 1)
       : draftMonthCount;
   const draftChanged =
@@ -107,17 +110,17 @@ export function CountingReportPeriodControl({
     const next = { ...draft, [boundary]: month };
     if (boundary === "from" && month > next.to) next.to = month;
     if (boundary === "to" && month < next.from) next.from = month;
-    setDraft(normalizeCountingReportPeriod(next, now));
+    setDraft(normalizeCountingReportPeriod(next, now, timeZone));
   }
 
   function updatePreset(
     nextPreset: Exclude<CountingReportPeriodPreset, "custom">,
   ) {
-    setDraft(countingReportPeriodForPreset(nextPreset, now));
+    setDraft(countingReportPeriodForPreset(nextPreset, now, timeZone));
   }
 
   function applyDraft() {
-    const nextPeriod = normalizeCountingReportPeriod(draft, now);
+    const nextPeriod = normalizeCountingReportPeriod(draft, now, timeZone);
     onChange(nextPeriod);
     if (draftIncludeOpenPeriod !== includeOpenPeriod) {
       onIncludeOpenPeriodChange(draftIncludeOpenPeriod);
@@ -197,8 +200,8 @@ export function CountingReportPeriodControl({
                   id={fromInputId}
                   type="month"
                   className="h-9 bg-card"
-                  min={minimumCountingReportMonth(now)}
-                  max={maximumCountingReportMonth(now)}
+                  min={minimumCountingReportMonth(now, timeZone)}
+                  max={maximumCountingReportMonth(now, timeZone)}
                   value={draft.from}
                   onChange={(event) =>
                     updateBoundary("from", event.target.value)
@@ -211,8 +214,8 @@ export function CountingReportPeriodControl({
                   id={toInputId}
                   type="month"
                   className="h-9 bg-card"
-                  min={minimumCountingReportMonth(now)}
-                  max={maximumCountingReportMonth(now)}
+                  min={minimumCountingReportMonth(now, timeZone)}
+                  max={maximumCountingReportMonth(now, timeZone)}
                   value={draft.to}
                   onChange={(event) => updateBoundary("to", event.target.value)}
                 />

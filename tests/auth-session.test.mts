@@ -1393,7 +1393,7 @@ test("auth me mantém o snapshot do JWT realmente enviado na requisição", asyn
   }
 });
 
-test("timezone efetivo prioriza a empresa e certifica a política do ambiente", () => {
+test("timezone efetivo prioriza a empresa e nunca certifica o padrão do ambiente", () => {
   const originalWindow = browserFixture.window;
   const storage = memoryStorage();
   browserFixture.window = {
@@ -1471,16 +1471,19 @@ test("timezone efetivo prioriza a empresa e certifica a política do ambiente", 
         name: "User without timezone",
       });
     assert.deepEqual(regularDeploymentResolution, {
-      fallback: false,
-      source: "deployment-default",
+      fallback: true,
+      source: "fallback",
       timeZone: "America/Sao_Paulo",
+      warning:
+        "O fuso horário da empresa ainda não foi configurado; os horários usam temporariamente a configuração padrão.",
     });
-    assert.equal(
-      companyTimeZone.requireCertifiedCompanyTimeZone(
-        regularDeploymentResolution,
-      ),
-      "America/Sao_Paulo",
-      "JWT e /auth/me podem omitir o IANA sem bloquear o próprio tenant",
+    assert.throws(
+      () =>
+        companyTimeZone.requireCertifiedCompanyTimeZone(
+          regularDeploymentResolution,
+        ),
+      /Fuso horário da empresa indisponível/,
+      "JWT, perfil ou cache same-tenant devem informar o IANA antes de consultar",
     );
 
     masterCompanyScope.setStoredMasterCompanyScope({
@@ -1496,9 +1499,11 @@ test("timezone efetivo prioriza a empresa e certifica a política do ambiente", 
         name: "Master",
       });
     assert.deepEqual(deploymentResolution, {
-      fallback: false,
-      source: "deployment-default",
+      fallback: true,
+      source: "fallback",
       timeZone: "America/Sao_Paulo",
+      warning:
+        "O fuso horário configurado para a empresa está inválido; os horários usam temporariamente a configuração padrão.",
     });
     assert.equal(
       masterCompanyScope.getEffectiveCompanyTimeZoneResolution(null).fallback,
@@ -1511,7 +1516,7 @@ test("timezone efetivo prioriza a empresa e certifica a política do ambiente", 
   }
 });
 
-test("deployment-default rejeita escopo vazio ou divergente e cede ao IANA do JWT", () => {
+test("fallback rejeita escopo vazio ou divergente e cede ao IANA do JWT", () => {
   const originalWindow = browserFixture.window;
   const storage = memoryStorage();
   const now = Date.UTC(2026, 7, 25, 12, 0, 0);
@@ -1580,7 +1585,7 @@ test("deployment-default rejeita escopo vazio ou divergente e cede ao IANA do JW
         source: "current-user-company",
         timeZone: "America/Manaus",
       },
-      "um IANA same-tenant assinado no JWT deve prevalecer sobre o deployment-default",
+      "um IANA same-tenant assinado no JWT deve prevalecer sobre o fallback visual",
     );
   } finally {
     if (originalWindow === undefined) delete browserFixture.window;
@@ -1679,11 +1684,13 @@ test("superadmin usa timezone do JWT apenas quando o tenant do claim é o seleci
     assert.deepEqual(
       masterCompanyScope.getEffectiveCompanyTimeZoneResolution(master),
       {
-        fallback: false,
-        source: "deployment-default",
+        fallback: true,
+        source: "fallback",
         timeZone: "America/Sao_Paulo",
+        warning:
+          "O fuso horário da empresa ainda não foi configurado; os horários usam temporariamente a configuração padrão.",
       },
-      "outro tenant usa a política do ambiente sem herdar o fuso do JWT",
+      "outro tenant não herda o fuso do JWT nem certifica o fallback visual",
     );
   } finally {
     if (originalWindow === undefined) delete browserFixture.window;
@@ -1756,9 +1763,9 @@ test("override do video wall exige empresa ativa e timezone do mesmo escopo", ()
       ),
       {
         companyScopeId: "company-without-timezone",
-        timeZone: "America/Sao_Paulo",
+        error: "Fuso horário da empresa indisponível para esta visão.",
       },
-      "o caminho explícito pode usar a política certificada somente no mesmo escopo",
+      "o caminho explícito exige timezone configurado no mesmo escopo",
     );
   } finally {
     if (originalWindow === undefined) delete browserFixture.window;
@@ -4920,7 +4927,7 @@ test("bootstrap comum evita detalhe administrativo e master mantém a hidrataç�
   assert.doesNotMatch(
     userHydrationSource.slice(0, regularReturn),
     /(?:apiFetch\s*(?:<[^>]+>)?\s*\(|\bfetch\s*\()/,
-    "JWT, /auth/me, cache same-tenant ou deployment-default devem bastar no bootstrap comum",
+    "JWT, /auth/me ou cache same-tenant devem bastar no bootstrap comum",
   );
   assert.match(
     authSource,

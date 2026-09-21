@@ -1,14 +1,17 @@
 import type { EnterpriseChartOption } from "@/components/app/echart";
 import { startOfAggregateBucket } from "@/lib/aggregate-time";
 import {
+  companyDateTimeLocalInstant,
+  companyZonedDateParts,
+  requireCompanyTimeZone,
+  startOfCompanyTimeZoneHour,
+} from "@/lib/company-time-zone";
+import {
   buildCalendarAxisLabel,
   buildCalendarMarkArea,
   holidayCategoryIndexes,
 } from "@/lib/chart-calendar-axis";
-import {
-  monochromeHeatmapPalette,
-  pastelBarColor,
-} from "@/lib/chart-palette";
+import { monochromeHeatmapPalette, pastelBarColor } from "@/lib/chart-palette";
 import {
   buildScenarioCompositionOption,
   normalizeScenarioCompositionChartType,
@@ -71,6 +74,7 @@ export type PeriodAnalysisRange = {
 };
 
 export type PeriodAnalysisDataset = {
+  companyTimeZone?: string;
   error?: string;
   granularity: AggregateGranularity;
   partialBoundariesReconciled?: boolean;
@@ -154,7 +158,10 @@ export function buildPeriodAnalysisWidgetModel({
     scopeOptions,
   );
   const selectedScenarios = resolvedScope.scenarios;
-  const scopedData = resolvedScope.data;
+  const scopedData = withPeriodAnalysisCompanyTimeZone(
+    resolvedScope.data,
+    companyTimeZone,
+  );
 
   if (!selectedScenarios.length) {
     return {
@@ -193,10 +200,7 @@ export function buildPeriodAnalysisWidgetModel({
       color,
     );
   }
-  if (
-    widget.kind === "year_monthly" ||
-    widget.kind === "year_accumulated"
-  ) {
+  if (widget.kind === "year_monthly" || widget.kind === "year_accumulated") {
     return buildCurrentYearModel(
       widget,
       scopedData,
@@ -258,12 +262,7 @@ export function buildPeriodAnalysisWidgetModel({
     );
   }
   if (widget.kind === "scope_totals") {
-    return buildScopeTotalsModel(
-      scopedData,
-      period,
-      selectedScenarios,
-      color,
-    );
+    return buildScopeTotalsModel(scopedData, period, selectedScenarios, color);
   }
   if (widget.kind === "trend") {
     return buildTrendModel(scopedData, period, selectedScenarios, color);
@@ -347,10 +346,7 @@ export function periodAnalysisBaselineDataRange(
     ? periodAnalysisOperationalRange(period)
     : period;
   const comparable = periodAnalysisBaselineRange(analysisPeriod, baseline);
-  if (
-    !isSingleDayAnalysisPeriod(period) ||
-    baseline === "previous_period"
-  ) {
+  if (!isSingleDayAnalysisPeriod(period) || baseline === "previous_period") {
     return comparable;
   }
 
@@ -398,10 +394,7 @@ export function periodAnalysisEffectiveGranularity(
   sourceSeriesCount = 1,
 ) {
   if (widget.kind === "hourly_occupancy") return "hour";
-  if (
-    !period ||
-    (widget.kind !== "timeline" && widget.kind !== "comparison")
-  ) {
+  if (!period || (widget.kind !== "timeline" && widget.kind !== "comparison")) {
     return widget.granularity;
   }
   return resolveCountingAnalysisVisualGranularity(
@@ -411,8 +404,41 @@ export function periodAnalysisEffectiveGranularity(
   );
 }
 
-function periodRangeThroughNow(period: PeriodAnalysisRange) {
+type PeriodAnalysisDataRange = PeriodAnalysisRange & {
+  dataFrom?: Date;
+  dataTo?: Date;
+};
+
+function periodRangeThroughNow(
+  period: PeriodAnalysisRange,
+  companyTimeZone?: string,
+): PeriodAnalysisDataRange {
   const now = new Date();
+  if (companyTimeZone) {
+    const dataRange = periodAnalysisDataRange(period, companyTimeZone);
+    if (now >= dataRange.from && now < dataRange.to) {
+      const parts = companyZonedDateParts(now, companyTimeZone);
+      return {
+        dataFrom: dataRange.from,
+        dataTo: now,
+        from: period.from,
+        to: new Date(
+          parts.year,
+          parts.month - 1,
+          parts.day,
+          parts.hour,
+          parts.minute,
+          parts.second,
+          now.getMilliseconds(),
+        ),
+      };
+    }
+    return {
+      dataFrom: dataRange.from,
+      dataTo: dataRange.to,
+      ...period,
+    };
+  }
   return now >= period.from && now < period.to
     ? { from: period.from, to: now }
     : period;
@@ -480,8 +506,7 @@ function buildTargetProgressModel(
     : currentPoints.length
       ? currentTotal / currentPoints.length
       : 0;
-  const baselineDataset =
-    data.baseline[widget.baseline] ?? emptyDataset("day");
+  const baselineDataset = data.baseline[widget.baseline] ?? emptyDataset("day");
   const baselinePeriod = periodAnalysisBaselineDataRange(
     period,
     widget.baseline,
@@ -547,7 +572,10 @@ function buildCumulativeMetricModel(
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
     : period;
-  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const effectivePeriod = periodRangeThroughNow(
+    analysisPeriod,
+    periodAnalysisTimeZone(data),
+  );
   const baselinePeriod = periodAnalysisBaselineRange(
     effectivePeriod,
     widget.baseline,
@@ -621,7 +649,10 @@ function buildDailyComparisonModel(
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
     : period;
-  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const effectivePeriod = periodRangeThroughNow(
+    analysisPeriod,
+    periodAnalysisTimeZone(data),
+  );
   const baselinePeriod = periodAnalysisBaselineRange(
     effectivePeriod,
     widget.baseline,
@@ -630,12 +661,7 @@ function buildDailyComparisonModel(
     data.baselineComparable?.[widget.baseline] ??
     data.baseline[widget.baseline] ??
     emptyDataset("day");
-  const current = combinedPoints(
-    data.day,
-    scenarios,
-    effectivePeriod,
-    "day",
-  );
+  const current = combinedPoints(data.day, scenarios, effectivePeriod, "day");
   const baseline = combinedPoints(
     baselineDataset,
     scenarios,
@@ -676,6 +702,7 @@ function buildDailyComparisonModel(
       color,
       current.map((point) => point.bucket),
       baselineAverage,
+      data.day.companyTimeZone,
     ),
     table: {
       columns: [
@@ -691,10 +718,7 @@ function buildDailyComparisonModel(
         baseline_date: baseline[index]?.label ?? "-",
         current: point.total,
         date: point.label,
-        variation: formatVariation(
-          point.total,
-          baseline[index]?.total ?? 0,
-        ),
+        variation: formatVariation(point.total, baseline[index]?.total ?? 0),
       })),
       title: widget.title,
     },
@@ -730,27 +754,41 @@ function buildCurrentYearModel(
     let value: number | null = null;
     if (month < currentMonth) {
       const from = new Date(year, month, 1);
+      const to = new Date(year, month + 1, 1);
+      const dataRange = periodAnalysisDataRange(
+        { from, to },
+        data.month.companyTimeZone,
+      );
       value = sumSelectedScenarioRows({
-        from,
+        companyTimeZone: data.month.companyTimeZone,
+        from: dataRange.from,
         rows: data.month.rows,
         scenarios,
         sourceGranularity: data.month.granularity,
-        to: new Date(year, month + 1, 1),
+        to: dataRange.to,
       });
     } else if (month === currentMonth) {
       const from = new Date(year, month, 1);
       const to = new Date(
         Math.min(
-          periodRangeThroughNow(period).to.getTime(),
+          periodRangeThroughNow(
+            period,
+            periodAnalysisTimeZone(data),
+          ).to.getTime(),
           new Date(year, month + 1, 1).getTime(),
         ),
       );
+      const dataRange = periodAnalysisDataRange(
+        { from, to },
+        data.month.companyTimeZone,
+      );
       value = sumSelectedScenarioRows({
-        from,
+        companyTimeZone: data.month.companyTimeZone,
+        from: dataRange.from,
         rows: data.month.rows,
         scenarios,
         sourceGranularity: data.month.granularity,
-        to,
+        to: dataRange.to,
       });
     }
 
@@ -780,9 +818,7 @@ function buildCurrentYearModel(
             label: accumulatedView ? "Acumulado" : "Último mês",
             tone: "primary",
             value: formatNumber(
-              accumulatedView
-                ? latest.accumulated ?? 0
-                : latest.value ?? 0,
+              accumulatedView ? (latest.accumulated ?? 0) : (latest.value ?? 0),
             ),
           },
         ]
@@ -816,9 +852,16 @@ function buildSummaryModel(
   scenarios: Scenario[],
 ): PeriodAnalysisWidgetModel {
   const singleDay = isSingleDayAnalysisPeriod(period);
-  const effectivePeriod = periodRangeThroughNow(period);
+  const effectivePeriod = periodRangeThroughNow(
+    period,
+    periodAnalysisTimeZone(data),
+  );
   const granularity = singleDay ? "hour" : "day";
   const dataset = singleDay ? data.hour : data.day;
+  const dataRange = periodAnalysisDataRange(
+    effectivePeriod,
+    dataset.companyTimeZone,
+  );
   const points = combinedPoints(
     dataset,
     scenarios,
@@ -826,16 +869,18 @@ function buildSummaryModel(
     granularity,
   );
   const ranking = buildScenarioRanking({
-    from: effectivePeriod.from,
+    companyTimeZone: dataset.companyTimeZone,
+    from: dataRange.from,
     rows: dataset.rows,
     scenarios,
     sourceGranularity: dataset.granularity,
-    to: effectivePeriod.to,
+    to: dataRange.to,
   });
   const total = points.reduce((sum, point) => sum + point.total, 0);
   const average = points.length ? total / points.length : 0;
   const peak = points.reduce<ScenarioAnalyticsPoint | null>(
-    (largest, point) => (!largest || point.total > largest.total ? point : largest),
+    (largest, point) =>
+      !largest || point.total > largest.total ? point : largest,
     null,
   );
   const leader = ranking[0];
@@ -904,7 +949,10 @@ function buildTimelineModel(
     sourceSeriesCount,
   );
   const resolutionAdapted = granularity !== widget.granularity;
-  const effectivePeriod = periodRangeThroughNow(period);
+  const effectivePeriod = periodRangeThroughNow(
+    period,
+    periodAnalysisTimeZone(data),
+  );
   const dataset = analysisDatasetForGranularity(data, granularity);
   const points = combinedPoints(
     dataset,
@@ -917,6 +965,7 @@ function buildTimelineModel(
     color,
     granularity,
     granularity === "hour" && isSingleDayAnalysisPeriod(period),
+    dataset.companyTimeZone,
   );
   const total = points.reduce((sum, point) => sum + point.total, 0);
   const peak = points.reduce<ScenarioAnalyticsPoint | null>(
@@ -974,17 +1023,25 @@ function buildComparisonModel(
     Math.max(1, sourceSeriesCount),
   );
   const resolutionAdapted = granularity !== widget.granularity;
-  const effectivePeriod = periodRangeThroughNow(period);
+  const effectivePeriod = periodRangeThroughNow(
+    period,
+    periodAnalysisTimeZone(data),
+  );
   const dataset = analysisDatasetForGranularity(data, granularity);
+  const dataRange = periodAnalysisDataRange(
+    effectivePeriod,
+    dataset.companyTimeZone,
+  );
   const rawSeries = buildIndividualScenarioSeries({
-    from: effectivePeriod.from,
+    companyTimeZone: dataset.companyTimeZone,
+    from: dataRange.from,
     granularity,
     includeOverlappingSourceBuckets:
       dataset.partialBoundariesReconciled === true,
     rows: dataset.rows,
     scenarios,
     sourceGranularity: dataset.granularity,
-    to: effectivePeriod.to,
+    to: dataRange.to,
   });
   const comparisonSeries = consolidateComparisonSeries(rawSeries);
   const series = comparisonSeries.series;
@@ -993,6 +1050,7 @@ function buildComparisonModel(
     color,
     granularity,
     granularity === "hour" && isSingleDayAnalysisPeriod(period),
+    dataset.companyTimeZone,
   );
   const labels = series[0]?.points.map((point) => point.label) ?? [];
   const scenarioTotals = series
@@ -1152,13 +1210,21 @@ function buildRankingModel(
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
     : period;
-  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const effectivePeriod = periodRangeThroughNow(
+    analysisPeriod,
+    periodAnalysisTimeZone(data),
+  );
+  const dataRange = periodAnalysisDataRange(
+    effectivePeriod,
+    data.day.companyTimeZone,
+  );
   const ranking = buildScenarioRanking({
-    from: effectivePeriod.from,
+    companyTimeZone: data.day.companyTimeZone,
+    from: dataRange.from,
     rows: data.day.rows,
     scenarios,
     sourceGranularity: data.day.granularity,
-    to: effectivePeriod.to,
+    to: dataRange.to,
   });
   const visualRanking = consolidateScenarioSummaryPoints(ranking);
   const displayed = [...visualRanking].reverse();
@@ -1275,13 +1341,11 @@ function buildPeakDaysModel(
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
     : period;
-  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
-  const ranked = combinedPoints(
-    data.day,
-    scenarios,
-    effectivePeriod,
-    "day",
-  )
+  const effectivePeriod = periodRangeThroughNow(
+    analysisPeriod,
+    periodAnalysisTimeZone(data),
+  );
+  const ranked = combinedPoints(data.day, scenarios, effectivePeriod, "day")
     .filter((point) => point.total !== 0)
     .sort((left, right) => right.total - left.total)
     .slice(0, 5);
@@ -1379,13 +1443,21 @@ function buildRoseModel(
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
     : period;
-  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const effectivePeriod = periodRangeThroughNow(
+    analysisPeriod,
+    periodAnalysisTimeZone(data),
+  );
+  const dataRange = periodAnalysisDataRange(
+    effectivePeriod,
+    data.day.companyTimeZone,
+  );
   const ranking = buildScenarioRanking({
-    from: effectivePeriod.from,
+    companyTimeZone: data.day.companyTimeZone,
+    from: dataRange.from,
     rows: data.day.rows,
     scenarios,
     sourceGranularity: data.day.granularity,
-    to: effectivePeriod.to,
+    to: dataRange.to,
   });
   const total = ranking.reduce((sum, point) => sum + point.total, 0);
   const leader = ranking[0];
@@ -1437,27 +1509,37 @@ function buildScenarioTotalsModel(
 ): PeriodAnalysisWidgetModel {
   const singleDay = isSingleDayAnalysisPeriod(period);
   const { dataset, effectivePeriod } = selectedPeriodDataset(data, period);
+  const selectedDataRange = periodAnalysisDataRange(
+    effectivePeriod,
+    dataset.companyTimeZone,
+  );
   const selectedPoints = buildScenarioCumulativeTotals({
-    from: effectivePeriod.from,
+    companyTimeZone: dataset.companyTimeZone,
+    from: selectedDataRange.from,
     rows: dataset.rows,
     scenarios,
     sourceGranularity: dataset.granularity,
-    to: effectivePeriod.to,
+    to: selectedDataRange.to,
   }).sort(
     (left, right) =>
-      right.total - left.total ||
-      left.name.localeCompare(right.name, "pt-BR"),
+      right.total - left.total || left.name.localeCompare(right.name, "pt-BR"),
   );
   const monthPeriod = periodRangeThroughNow(
     singleDay ? periodAnalysisOperationalRange(period) : period,
+    periodAnalysisTimeZone(data),
+  );
+  const monthDataRange = periodAnalysisDataRange(
+    monthPeriod,
+    data.day.companyTimeZone,
   );
   const monthPoints = singleDay
     ? buildScenarioCumulativeTotals({
-        from: monthPeriod.from,
+        companyTimeZone: data.day.companyTimeZone,
+        from: monthDataRange.from,
         rows: data.day.rows,
         scenarios,
         sourceGranularity: data.day.granularity,
-        to: monthPeriod.to,
+        to: monthDataRange.to,
       })
     : selectedPoints;
   const monthById = new Map(monthPoints.map((point) => [point.id, point]));
@@ -1483,9 +1565,7 @@ function buildScenarioTotalsModel(
 
       const groupedMonthTotal = monthPoints.reduce(
         (sum, monthPoint) =>
-          groupedSelectedIds.has(monthPoint.id)
-            ? sum + monthPoint.total
-            : sum,
+          groupedSelectedIds.has(monthPoint.id) ? sum + monthPoint.total : sum,
         0,
       );
       return [
@@ -1572,7 +1652,9 @@ function buildScenarioTotalsModel(
           scenario: point.name,
           selected: point.total,
           share: formatPercent(
-            singleDay ? visualMonthById.get(point.id)?.share ?? 0 : point.share,
+            singleDay
+              ? (visualMonthById.get(point.id)?.share ?? 0)
+              : point.share,
           ),
         })),
       ],
@@ -1614,7 +1696,7 @@ function buildScenarioTotalsModel(
             scenario: point.name,
             selected: point.total,
             share: formatPercent(
-              singleDay ? monthPoint?.share ?? 0 : point.share,
+              singleDay ? (monthPoint?.share ?? 0) : point.share,
             ),
           };
         }),
@@ -1631,25 +1713,31 @@ function buildScenarioCumulativeModel(
   color: string,
 ): PeriodAnalysisWidgetModel {
   const { dataset, effectivePeriod } = selectedPeriodDataset(data, period);
+  const dataRange = periodAnalysisDataRange(
+    effectivePeriod,
+    dataset.companyTimeZone,
+  );
   const points = buildScenarioCumulativeTotals({
-    from: effectivePeriod.from,
+    companyTimeZone: dataset.companyTimeZone,
+    from: dataRange.from,
     rows: dataset.rows,
     scenarios,
     sourceGranularity: dataset.granularity,
-    to: effectivePeriod.to,
+    to: dataRange.to,
   }).sort(
     (left, right) =>
-      right.total - left.total ||
-      left.name.localeCompare(right.name, "pt-BR"),
+      right.total - left.total || left.name.localeCompare(right.name, "pt-BR"),
   );
   const total = points.reduce((sum, point) => sum + point.total, 0);
   const visualPoints = consolidateScenarioSummaryPoints(points);
   const periodLabel = formatPeriodAnalysisRange(period);
 
   return {
-    description: `${isSingleDayAnalysisPeriod(period)
-      ? "Total combinado e acumulado individual no dia selecionado."
-      : "Total combinado e acumulado individual no intervalo selecionado."}${visualPoints.length === points.length ? "" : " A cauda visual foi reunida em Outros; a tabela mantém todos os cenários."}`,
+    description: `${
+      isSingleDayAnalysisPeriod(period)
+        ? "Total combinado e acumulado individual no dia selecionado."
+        : "Total combinado e acumulado individual no intervalo selecionado."
+    }${visualPoints.length === points.length ? "" : " A cauda visual foi reunida em Outros; a tabela mantém todos os cenários."}`,
     emptyText: "Sem totais para os cenários selecionados neste período.",
     error: dataset.error,
     hasData: points.some((point) => point.total > 0),
@@ -1693,25 +1781,31 @@ function buildScopeTotalsModel(
   color: string,
 ): PeriodAnalysisWidgetModel {
   const { dataset, effectivePeriod } = selectedPeriodDataset(data, period);
+  const dataRange = periodAnalysisDataRange(
+    effectivePeriod,
+    dataset.companyTimeZone,
+  );
   const points = buildScenarioCumulativeTotals({
-    from: effectivePeriod.from,
+    companyTimeZone: dataset.companyTimeZone,
+    from: dataRange.from,
     rows: dataset.rows,
     scenarios,
     sourceGranularity: dataset.granularity,
-    to: effectivePeriod.to,
+    to: dataRange.to,
   }).sort(
     (left, right) =>
-      right.total - left.total ||
-      left.name.localeCompare(right.name, "pt-BR"),
+      right.total - left.total || left.name.localeCompare(right.name, "pt-BR"),
   );
   const total = points.reduce((sum, point) => sum + point.total, 0);
   const visualPoints = consolidateScenarioSummaryPoints(points);
   const periodLabel = formatPeriodAnalysisRange(period);
 
   return {
-    description: `${isSingleDayAnalysisPeriod(period)
-      ? "Comparação dos totais exclusivamente no dia consultado."
-      : "Comparação dos totais exclusivamente no intervalo consultado."}${visualPoints.length === points.length ? "" : " A cauda visual foi reunida em Outros; a tabela mantém todas as visões."}`,
+    description: `${
+      isSingleDayAnalysisPeriod(period)
+        ? "Comparação dos totais exclusivamente no dia consultado."
+        : "Comparação dos totais exclusivamente no intervalo consultado."
+    }${visualPoints.length === points.length ? "" : " A cauda visual foi reunida em Outros; a tabela mantém todas as visões."}`,
     emptyText: "Sem totais nas visões selecionadas para este período.",
     error: dataset.error,
     hasData: points.some((point) => point.total > 0),
@@ -1754,19 +1848,18 @@ function buildHeatmapModel(
   theme: "light" | "dark" = "light",
 ): PeriodAnalysisWidgetModel {
   const cellBorderColor =
-    theme === "dark"
-      ? "rgba(226, 232, 240, 0.12)"
-      : "rgba(15, 23, 42, 0.09)";
+    theme === "dark" ? "rgba(226, 232, 240, 0.12)" : "rgba(15, 23, 42, 0.09)";
   const activeCellBorderColor =
-    theme === "dark"
-      ? "rgba(248, 250, 252, 0.24)"
-      : "rgba(15, 23, 42, 0.20)";
+    theme === "dark" ? "rgba(248, 250, 252, 0.24)" : "rgba(15, 23, 42, 0.20)";
   const hourlyDataset = data.contextHour;
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
     : period;
   const hourlyDetail = countingAnalysisHourlyDetailRange(analysisPeriod);
-  const effectivePeriod = periodRangeThroughNow(hourlyDetail);
+  const effectivePeriod = periodRangeThroughNow(
+    hourlyDetail,
+    hourlyDataset.companyTimeZone,
+  );
   const points = combinedPoints(
     hourlyDataset,
     scenarios,
@@ -1782,8 +1875,9 @@ function buildHeatmapModel(
     .map((point) => {
       const bucket = new Date(point.bucket);
       return [
-        dayIndexes.get(calendarDayKey(bucket)) ?? 0,
-        bucket.getHours(),
+        dayIndexes.get(calendarDayKey(bucket, hourlyDataset.companyTimeZone)) ??
+          0,
+        modelHour(bucket, hourlyDataset.companyTimeZone),
         point.total,
       ];
     });
@@ -1794,7 +1888,7 @@ function buildHeatmapModel(
   const sundayIndexes = days.flatMap((day, index) =>
     day.getDay() === 0 ? [index] : [],
   );
-  const labels = days.map(formatShortDate);
+  const labels = days.map((day) => formatShortDate(day));
   const peak = points.reduce<ScenarioAnalyticsPoint | null>(
     (largest, point) =>
       !largest || point.total > largest.total ? point : largest,
@@ -1806,8 +1900,8 @@ function buildHeatmapModel(
     description: hourlyDetail.limited
       ? `Detalhe horário limitado aos últimos ${buildCountingAnalysisRangePlan(hourlyDetail).spanDays} dias do intervalo; os consolidados mantêm todo o período.`
       : isSingleDayAnalysisPeriod(period)
-      ? `Intensidade por dia e hora no mês até ${formatDate(period.from)}.`
-      : "Intensidade combinada dos cenários escolhidos por dia e hora.",
+        ? `Intensidade por dia e hora no mês até ${formatDate(period.from)}.`
+        : "Intensidade combinada dos cenários escolhidos por dia e hora.",
     emptyText: "Sem eventos horários para montar o mapa de calor.",
     error: hourlyDataset.error,
     hasData: points.some((point) => point.total > 0),
@@ -1818,7 +1912,7 @@ function buildHeatmapModel(
             {
               label: "Maior intensidade",
               tone: "primary",
-              value: `${formatShortDate(peakDate)} ${HOUR_LABELS[peakDate.getHours()]} · ${formatNumber(peak.total)}`,
+              value: `${formatShortDate(peakDate, hourlyDataset.companyTimeZone)} ${HOUR_LABELS[modelHour(peakDate, hourlyDataset.companyTimeZone)]} · ${formatNumber(peak.total)}`,
             },
           ]
         : undefined,
@@ -1918,8 +2012,8 @@ function buildHeatmapModel(
       rows: points.map((point) => {
         const bucket = new Date(point.bucket);
         return {
-          date: formatDate(bucket),
-          hour: HOUR_LABELS[bucket.getHours()],
+          date: formatDate(bucket, hourlyDataset.companyTimeZone),
+          hour: HOUR_LABELS[modelHour(bucket, hourlyDataset.companyTimeZone)],
           total: point.total,
         };
       }),
@@ -1938,17 +2032,15 @@ function buildCumulativeModel(
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
     : period;
-  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const effectivePeriod = periodRangeThroughNow(
+    analysisPeriod,
+    periodAnalysisTimeZone(data),
+  );
   const baselinePeriod = periodAnalysisBaselineRange(
     effectivePeriod,
     widget.baseline,
   );
-  const current = combinedPoints(
-    data.day,
-    scenarios,
-    effectivePeriod,
-    "day",
-  );
+  const current = combinedPoints(data.day, scenarios, effectivePeriod, "day");
   const baselineDataset =
     data.baselineComparable?.[widget.baseline] ??
     data.baseline[widget.baseline] ??
@@ -1979,6 +2071,7 @@ function buildCumulativeModel(
   const visualPoints = samplePeriodAnalysisPoints(
     points,
     visualGranularity,
+    data.day.companyTimeZone,
   );
   const baselineLabel = periodAnalysisBaselineLabel(widget.baseline);
   const latest = points.at(-1);
@@ -1990,10 +2083,12 @@ function buildCumulativeModel(
     description: `${isSingleDayAnalysisPeriod(period) ? "Mês até a data escolhida" : "Período selecionado"} contra ${baselineLabel.toLowerCase()}. Base à esquerda e período atual à direita.${visualGranularity === "day" ? "" : ` Exibição amostrada em ${granularityLabel(visualGranularity).toLowerCase()}, mantendo o fechamento acumulado exato.`}`,
     emptyText: "Sem dados diários para o comparativo acumulado.",
     error: data.day.error ?? baselineDataset.error,
-    hasData: points.some((point) => point.current !== 0 || point.baseline !== 0),
+    hasData: points.some(
+      (point) => point.current !== 0 || point.baseline !== 0,
+    ),
     height: 340,
     insights: latest
-        ? [
+      ? [
           ...(visualGranularity === "day"
             ? []
             : [
@@ -2033,6 +2128,8 @@ function buildCumulativeModel(
       "Período selecionado",
       color,
       visualPoints.map((point) => point.bucket),
+      0,
+      data.day.companyTimeZone,
     ),
     table: {
       columns: [
@@ -2064,7 +2161,10 @@ function buildTrendModel(
   const analysisPeriod = isSingleDayAnalysisPeriod(period)
     ? periodAnalysisOperationalRange(period)
     : period;
-  const effectivePeriod = periodRangeThroughNow(analysisPeriod);
+  const effectivePeriod = periodRangeThroughNow(
+    analysisPeriod,
+    periodAnalysisTimeZone(data),
+  );
   const historyFrom = addDays(analysisPeriod.from, -29);
   const historyPoints = combinedPoints(
     data.day,
@@ -2078,7 +2178,11 @@ function buildTrendModel(
       average7: movingAverage(historyPoints, index, 7),
       average30: movingAverage(historyPoints, index, 30),
     }))
-    .filter((point) => new Date(point.bucket) >= analysisPeriod.from);
+    .filter(
+      (point) =>
+        new Date(point.bucket) >=
+        periodAnalysisDataRange(analysisPeriod, data.day.companyTimeZone).from,
+    );
   const visualGranularity = resolveCountingAnalysisVisualGranularity(
     "day",
     analysisPeriod,
@@ -2086,6 +2190,7 @@ function buildTrendModel(
   const visualTrendPoints = samplePeriodAnalysisPoints(
     trendPoints,
     visualGranularity,
+    data.day.companyTimeZone,
   );
   const saturdayIndexes = visualTrendPoints.flatMap((point, index) =>
     point.isSaturday ? [index] : [],
@@ -2107,7 +2212,8 @@ function buildTrendModel(
     description: isSingleDayAnalysisPeriod(period)
       ? `Médias móveis no mês até ${formatDate(period.from)}, com 29 dias anteriores de base.`
       : `Médias móveis calculadas com os 29 dias anteriores ao início do período.${visualGranularity === "day" ? "" : ` Exibição amostrada em ${granularityLabel(visualGranularity).toLowerCase()}, sem alterar os cálculos diários.`}`,
-    emptyText: "São necessários ao menos 7 dias com dados para calcular a tendência.",
+    emptyText:
+      "São necessários ao menos 7 dias com dados para calcular a tendência.",
     error: data.day.error,
     hasData:
       historyPoints.some((point) => point.total !== 0) &&
@@ -2279,10 +2385,7 @@ function buildHourlyOccupancyModel(
     };
   }
 
-  const sharedLineIds = sharedScenarioLineIds(
-    entryScenarios,
-    exitScenarios,
-  );
+  const sharedLineIds = sharedScenarioLineIds(entryScenarios, exitScenarios);
   if (sharedLineIds.length) {
     return {
       description: widgetDescription(widget),
@@ -2293,32 +2396,36 @@ function buildHourlyOccupancyModel(
   }
 
   const hourlyDetail = countingAnalysisHourlyDetailRange(period);
-  const effectivePeriod = periodRangeThroughNow(hourlyDetail);
-  const singleDay = isSingleDayAnalysisPeriod(period);
-  const points = listDayStarts(effectivePeriod.from, effectivePeriod.to).flatMap(
-    (day) => {
-      const through = new Date(
-        Math.min(addDays(day, 1).getTime(), effectivePeriod.to.getTime()),
-      );
-      return buildScenarioHourlyOccupancy({
-        companyTimeZone,
-        day,
-        entryScenarios,
-        exitScenarios,
-        rows: data.hour.rows,
-        sourceGranularity: data.hour.granularity,
-        startHour: widget.startHour,
-        through,
-      })
-        .filter((point) => singleDay || point.occupancy !== null)
-        .map<ScenarioHourlyOccupancyPoint>((point) => ({
-          ...point,
-          label: singleDay
-            ? point.label
-            : `${formatShortDate(day)} ${point.label}`,
-        }));
-    },
+  const effectivePeriod = periodRangeThroughNow(
+    hourlyDetail,
+    data.hour.companyTimeZone,
   );
+  const singleDay = isSingleDayAnalysisPeriod(period);
+  const points = listDayStarts(
+    effectivePeriod.from,
+    effectivePeriod.to,
+  ).flatMap((day) => {
+    const through = new Date(
+      Math.min(addDays(day, 1).getTime(), effectivePeriod.to.getTime()),
+    );
+    return buildScenarioHourlyOccupancy({
+      companyTimeZone,
+      day,
+      entryScenarios,
+      exitScenarios,
+      rows: data.hour.rows,
+      sourceGranularity: data.hour.granularity,
+      startHour: widget.startHour,
+      through,
+    })
+      .filter((point) => singleDay || point.occupancy !== null)
+      .map<ScenarioHourlyOccupancyPoint>((point) => ({
+        ...point,
+        label: singleDay
+          ? point.label
+          : `${formatShortDate(day)} ${point.label}`,
+      }));
+  });
   const latest = [...points]
     .reverse()
     .find((point) => point.occupancy !== null);
@@ -2327,12 +2434,12 @@ function buildHourlyOccupancyModel(
     description: hourlyDetail.limited
       ? `Detalhe hora a hora dos últimos ${buildCountingAnalysisRangePlan(hourlyDetail).spanDays} dias do intervalo, reiniciado diariamente a partir de ${formatOccupancyStartHour(widget.startHour)}.`
       : singleDay
-      ? `Entradas acumuladas menos saídas a partir de ${formatOccupancyStartHour(
-          widget.startHour,
-        )}; antes desse horário, o saldo é zero.`
-      : `Saldo hora a hora reiniciado diariamente, com contagem a partir de ${formatOccupancyStartHour(
-          widget.startHour,
-        )}.`,
+        ? `Entradas acumuladas menos saídas a partir de ${formatOccupancyStartHour(
+            widget.startHour,
+          )}; antes desse horário, o saldo é zero.`
+        : `Saldo hora a hora reiniciado diariamente, com contagem a partir de ${formatOccupancyStartHour(
+            widget.startHour,
+          )}.`,
     emptyText: "Sem eventos horários nos cenários de entrada e saída.",
     error: data.hour.error,
     hasData: points.some((point) => point.occupancy !== null),
@@ -2405,20 +2512,22 @@ function buildHourProfileModel(
   color: string,
 ): PeriodAnalysisWidgetModel {
   const hourlyDetail = countingAnalysisHourlyDetailRange(period);
-  const effectivePeriod = periodRangeThroughNow(hourlyDetail);
+  const effectivePeriod = periodRangeThroughNow(
+    hourlyDetail,
+    data.hour.companyTimeZone,
+  );
   const points = combinedPoints(data.hour, scenarios, effectivePeriod, "hour");
   const totals = Array.from({ length: 24 }, () => 0);
   const dayKeys = new Set<string>();
   points.forEach((point) => {
     const bucket = new Date(point.bucket);
-    totals[bucket.getHours()] += point.total;
-    dayKeys.add(calendarDayKey(bucket));
+    totals[modelHour(bucket, data.hour.companyTimeZone)] += point.total;
+    dayKeys.add(calendarDayKey(bucket, data.hour.companyTimeZone));
   });
   const divisor = Math.max(1, dayKeys.size);
   const averages = totals.map((total) => total / divisor);
   const peakIndex = averages.reduce(
-    (largest, value, index) =>
-      value > averages[largest] ? index : largest,
+    (largest, value, index) => (value > averages[largest] ? index : largest),
     0,
   );
   const averageTotal = averages.reduce((sum, value) => sum + value, 0);
@@ -2489,7 +2598,12 @@ function buildHourProfileModel(
       columns: [
         { key: "hour", label: "Hora", width: 14 },
         { key: "total", label: "Total", numeric: true, width: 18 },
-        { key: "daily_average", label: "Média por dia", numeric: true, width: 20 },
+        {
+          key: "daily_average",
+          label: "Média por dia",
+          numeric: true,
+          width: 20,
+        },
       ],
       description: `${formatPeriodAnalysisRange(period)} · ${dayKeys.size} dia(s)`,
       rows: HOUR_LABELS.map((hour, index) => ({
@@ -2507,6 +2621,7 @@ function buildBarTimelineOption(
   color: string,
   granularity: ScenarioAnalyticsGranularity,
   fixedHourlyAxis = false,
+  companyTimeZone?: string,
 ): EnterpriseChartOption {
   // Calendar bands describe civil days, not intraday UTC buckets or larger groups.
   const calendarPoints = granularity === "day" ? points : [];
@@ -2516,7 +2631,10 @@ function buildBarTimelineOption(
   const sundayIndexes = calendarPoints.flatMap((point, index) =>
     point.isSunday ? [index] : [],
   );
-  const calendarDates = calendarPoints.map((point) => point.bucket);
+  const calendarDates = modelCalendarDates(
+    calendarPoints.map((point) => point.bucket),
+    companyTimeZone,
+  );
   const throughHour = fixedHourlyAxis ? latestHourlyPointHour(points) : -1;
   const labels = fixedHourlyAxis
     ? HOUR_LABELS
@@ -2546,8 +2664,7 @@ function buildBarTimelineOption(
         type: "shadow",
       },
       trigger: "axis",
-      valueFormatter: (value) =>
-        `${formatNumber(Number(value ?? 0))} eventos`,
+      valueFormatter: (value) => `${formatNumber(Number(value ?? 0))} eventos`,
     },
     xAxis: {
       axisLabel:
@@ -2584,6 +2701,7 @@ function buildMultiScenarioOption(
   color: string,
   granularity: ScenarioAnalyticsGranularity,
   fixedHourlyAxis = false,
+  companyTimeZone?: string,
 ): EnterpriseChartOption {
   const axisPoints = series[0]?.points ?? [];
   const calendarPoints = granularity === "day" ? axisPoints : [];
@@ -2593,10 +2711,11 @@ function buildMultiScenarioOption(
   const sundayIndexes = calendarPoints.flatMap((point, index) =>
     point.isSunday ? [index] : [],
   );
-  const calendarDates = calendarPoints.map((point) => point.bucket);
-  const throughHour = fixedHourlyAxis
-    ? latestHourlyPointHour(axisPoints)
-    : -1;
+  const calendarDates = modelCalendarDates(
+    calendarPoints.map((point) => point.bucket),
+    companyTimeZone,
+  );
+  const throughHour = fixedHourlyAxis ? latestHourlyPointHour(axisPoints) : -1;
   const labels = fixedHourlyAxis
     ? HOUR_LABELS
     : axisPoints.map((point) => point.label);
@@ -2643,8 +2762,7 @@ function buildMultiScenarioOption(
       ...operationalTooltip(),
       axisPointer: { type: "shadow" },
       trigger: "axis",
-      valueFormatter: (value) =>
-        `${formatNumber(Number(value ?? 0))} eventos`,
+      valueFormatter: (value) => `${formatNumber(Number(value ?? 0))} eventos`,
     },
     xAxis: {
       axisLabel:
@@ -2681,12 +2799,19 @@ function buildCurrentBaselineBarOption(
   color: string,
   calendarDates: Array<Date | string>,
   baselineAverage = 0,
+  companyTimeZone?: string,
 ): EnterpriseChartOption {
-  const saturdayIndexes = calendarDates.flatMap((rawDate, index) => {
+  const zonedCalendarDates = calendarDates.map((rawDate) => {
+    const date = new Date(rawDate);
+    if (Number.isNaN(date.getTime()) || !companyTimeZone) return rawDate;
+    const parts = companyZonedDateParts(date, companyTimeZone);
+    return new Date(parts.year, parts.month - 1, parts.day);
+  });
+  const saturdayIndexes = zonedCalendarDates.flatMap((rawDate, index) => {
     const date = new Date(rawDate);
     return !Number.isNaN(date.getTime()) && date.getDay() === 6 ? [index] : [];
   });
-  const sundayIndexes = calendarDates.flatMap((rawDate, index) => {
+  const sundayIndexes = zonedCalendarDates.flatMap((rawDate, index) => {
     const date = new Date(rawDate);
     return !Number.isNaN(date.getTime()) && date.getDay() === 0 ? [index] : [];
   });
@@ -2713,7 +2838,7 @@ function buildCurrentBaselineBarOption(
           color: MUTED_BASE_COLOR,
           opacity: 0.78,
         },
-        markArea: buildCalendarMarkArea(calendarDates),
+        markArea: buildCalendarMarkArea(zonedCalendarDates),
         name: baselineLabel,
         type: "bar",
       },
@@ -2757,7 +2882,7 @@ function buildCurrentBaselineBarOption(
       axisLabel: buildCalendarAxisLabel({
         fontSize: 9,
         hideOverlap: true,
-        holidayIndexes: holidayCategoryIndexes(calendarDates),
+        holidayIndexes: holidayCategoryIndexes(zonedCalendarDates),
         interval: 0,
         saturdayIndexes,
         sundayIndexes,
@@ -2782,16 +2907,60 @@ function combinedPoints(
   period: PeriodAnalysisRange,
   granularity: ScenarioAnalyticsGranularity,
 ) {
+  const dataRange = periodAnalysisDataRange(period, dataset.companyTimeZone);
   return buildCombinedScenarioPoints({
-    from: period.from,
+    companyTimeZone: dataset.companyTimeZone,
+    from: dataRange.from,
     granularity,
     includeOverlappingSourceBuckets:
       dataset.partialBoundariesReconciled === true,
     rows: dataset.rows,
     scenarios,
     sourceGranularity: dataset.granularity,
-    to: period.to,
+    to: dataRange.to,
   });
+}
+
+function periodAnalysisTimeZone(data: PeriodAnalysisData) {
+  return (
+    data.hour.companyTimeZone ??
+    data.day.companyTimeZone ??
+    data.month.companyTimeZone
+  );
+}
+
+function periodAnalysisDataRange(
+  period: PeriodAnalysisDataRange,
+  companyTimeZone?: string,
+): PeriodAnalysisRange {
+  if (period.dataFrom && period.dataTo) {
+    return { from: period.dataFrom, to: period.dataTo };
+  }
+  if (!companyTimeZone) return period;
+  return {
+    from: companyCivilDateLikeInstant(period.from, companyTimeZone),
+    to: companyCivilDateLikeInstant(period.to, companyTimeZone),
+  };
+}
+
+function companyCivilDateLikeInstant(date: Date, companyTimeZone: string) {
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  const value =
+    [
+      String(date.getFullYear()).padStart(4, "0"),
+      String(date.getMonth() + 1).padStart(2, "0"),
+      String(date.getDate()).padStart(2, "0"),
+    ].join("-") +
+    `T${String(date.getHours()).padStart(2, "0")}:${String(
+      date.getMinutes(),
+    ).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}`;
+  const instant = companyDateTimeLocalInstant(value, timeZone);
+  if (!instant) {
+    throw new RangeError(
+      `O horário civil ${value} não existe no fuso ${timeZone}.`,
+    );
+  }
+  return new Date(instant.getTime() + date.getMilliseconds());
 }
 
 function resolveWidgetScope(
@@ -2890,6 +3059,39 @@ function periodAnalysisDatasets(data: PeriodAnalysisData) {
   ].filter((dataset): dataset is PeriodAnalysisDataset => Boolean(dataset));
 }
 
+function withPeriodAnalysisCompanyTimeZone(
+  data: PeriodAnalysisData,
+  companyTimeZone?: string,
+): PeriodAnalysisData {
+  if (!companyTimeZone) return data;
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  const applyTimeZone = (
+    dataset: PeriodAnalysisDataset,
+  ): PeriodAnalysisDataset => ({ ...dataset, companyTimeZone: timeZone });
+
+  return {
+    baseline: Object.fromEntries(
+      Object.entries(data.baseline).map(([baseline, dataset]) => [
+        baseline,
+        dataset ? applyTimeZone(dataset) : dataset,
+      ]),
+    ),
+    baselineComparable: data.baselineComparable
+      ? Object.fromEntries(
+          Object.entries(data.baselineComparable).map(([baseline, dataset]) => [
+            baseline,
+            dataset ? applyTimeZone(dataset) : dataset,
+          ]),
+        )
+      : undefined,
+    contextHour: applyTimeZone(data.contextHour),
+    day: applyTimeZone(data.day),
+    hour: applyTimeZone(data.hour),
+    minute: applyTimeZone(data.minute),
+    month: applyTimeZone(data.month),
+  };
+}
+
 function mapPeriodAnalysisDataRows(
   data: PeriodAnalysisData,
   mapRows: (rows: AggregateEventRow[]) => AggregateEventRow[],
@@ -2910,12 +3112,10 @@ function mapPeriodAnalysisDataRows(
     ),
     baselineComparable: data.baselineComparable
       ? Object.fromEntries(
-          Object.entries(data.baselineComparable).map(
-            ([baseline, dataset]) => [
-              baseline,
-              dataset ? mapDataset(dataset) : dataset,
-            ],
-          ),
+          Object.entries(data.baselineComparable).map(([baseline, dataset]) => [
+            baseline,
+            dataset ? mapDataset(dataset) : dataset,
+          ]),
         )
       : undefined,
     contextHour: mapDataset(data.contextHour),
@@ -2950,11 +3150,17 @@ function selectedPeriodDataset(
   const singleDay = isSingleDayAnalysisPeriod(period);
   return {
     dataset: singleDay ? data.hour : data.day,
-    effectivePeriod: periodRangeThroughNow(period),
+    effectivePeriod: periodRangeThroughNow(
+      period,
+      periodAnalysisTimeZone(data),
+    ),
   };
 }
 
-function pointsTable(title: string, points: ScenarioAnalyticsPoint[]): ReportTable {
+function pointsTable(
+  title: string,
+  points: ScenarioAnalyticsPoint[],
+): ReportTable {
   return {
     columns: [
       { key: "period", label: "Período", width: 22 },
@@ -3007,8 +3213,7 @@ function shiftMonthsClamped(date: Date, amount: number) {
     first.getMonth() + 1,
     0,
   ).getDate();
-  const isDayBoundary =
-    civilDayBoundary(date).getTime() === date.getTime();
+  const isDayBoundary = civilDayBoundary(date).getTime() === date.getTime();
   return new Date(
     first.getFullYear(),
     first.getMonth(),
@@ -3023,6 +3228,7 @@ function shiftMonthsClamped(date: Date, amount: number) {
 function samplePeriodAnalysisPoints<T extends { bucket: string }>(
   points: T[],
   granularity: ScenarioAnalyticsGranularity,
+  companyTimeZone?: string,
 ) {
   if (granularity === "day") return points;
 
@@ -3031,11 +3237,44 @@ function samplePeriodAnalysisPoints<T extends { bucket: string }>(
     const bucket = new Date(point.bucket);
     if (Number.isNaN(bucket.getTime())) return;
     sampled.set(
-      startOfAggregateBucket(bucket, granularity).getTime(),
+      periodAnalysisSampleBucketKey(bucket, granularity, companyTimeZone),
       point,
     );
   });
   return Array.from(sampled.values());
+}
+
+function periodAnalysisSampleBucketKey(
+  bucket: Date,
+  granularity: ScenarioAnalyticsGranularity,
+  companyTimeZone?: string,
+) {
+  if (!companyTimeZone) {
+    return startOfAggregateBucket(bucket, granularity).getTime();
+  }
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  if (granularity === "minute") {
+    return Math.floor(bucket.getTime() / 60_000) * 60_000;
+  }
+  if (granularity === "hour") {
+    return startOfCompanyTimeZoneHour(bucket, timeZone).getTime();
+  }
+
+  const parts = companyZonedDateParts(bucket, timeZone);
+  if (granularity === "month") {
+    return Date.UTC(parts.year, parts.month - 1, 1);
+  }
+  if (granularity === "week") {
+    const weekday = new Date(
+      Date.UTC(parts.year, parts.month - 1, parts.day),
+    ).getUTCDay();
+    return Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day - (weekday === 0 ? 6 : weekday - 1),
+    );
+  }
+  return Date.UTC(parts.year, parts.month - 1, parts.day);
 }
 
 function shiftExclusiveEndClamped(date: Date, amount: number) {
@@ -3063,8 +3302,7 @@ function parseDateInput(value: string) {
 }
 
 function addDays(date: Date, amount: number) {
-  const isDayBoundary =
-    civilDayBoundary(date).getTime() === date.getTime();
+  const isDayBoundary = civilDayBoundary(date).getTime() === date.getTime();
   return new Date(
     date.getFullYear(),
     date.getMonth(),
@@ -3080,27 +3318,64 @@ function civilDayBoundary(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-function formatDate(date: Date) {
+function formatDate(date: Date, companyTimeZone?: string) {
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
     month: "2-digit",
+    timeZone: companyTimeZone
+      ? requireCompanyTimeZone(companyTimeZone)
+      : undefined,
     year: "numeric",
   }).format(date);
 }
 
-function formatShortDate(date: Date) {
+function formatShortDate(date: Date, companyTimeZone?: string) {
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
     month: "2-digit",
+    timeZone: companyTimeZone
+      ? requireCompanyTimeZone(companyTimeZone)
+      : undefined,
   }).format(date);
 }
 
-function calendarDayKey(date: Date) {
+function calendarDayKey(date: Date, companyTimeZone?: string) {
+  if (companyTimeZone) {
+    const parts = companyZonedDateParts(
+      date,
+      requireCompanyTimeZone(companyTimeZone),
+    );
+    return [
+      parts.year,
+      String(parts.month).padStart(2, "0"),
+      String(parts.day).padStart(2, "0"),
+    ].join("-");
+  }
   return [
     date.getFullYear(),
     String(date.getMonth() + 1).padStart(2, "0"),
     String(date.getDate()).padStart(2, "0"),
   ].join("-");
+}
+
+function modelHour(date: Date, companyTimeZone?: string) {
+  return companyTimeZone
+    ? companyZonedDateParts(date, requireCompanyTimeZone(companyTimeZone)).hour
+    : date.getHours();
+}
+
+function modelCalendarDates(
+  values: Array<Date | string>,
+  companyTimeZone?: string,
+) {
+  if (!companyTimeZone) return values;
+  const timeZone = requireCompanyTimeZone(companyTimeZone);
+  return values.map((value) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    const parts = companyZonedDateParts(date, timeZone);
+    return new Date(parts.year, parts.month - 1, parts.day);
+  });
 }
 
 function formatPercent(value: number) {
@@ -3194,8 +3469,10 @@ function widgetDescription(widget: PeriodAnalysisWidget) {
     return "Soma progressiva dos meses do ano consultado.";
   }
   if (widget.kind === "heatmap") return "Distribuição do fluxo por dia e hora.";
-  if (widget.kind === "ranking") return "Ranking e representatividade por cenário.";
-  if (widget.kind === "cumulative") return "Acumulado contra uma base comparável.";
+  if (widget.kind === "ranking")
+    return "Ranking e representatividade por cenário.";
+  if (widget.kind === "cumulative")
+    return "Acumulado contra uma base comparável.";
   if (widget.kind === "scenario_cumulative") {
     return "Acumulado individual dos cenários no período selecionado.";
   }
@@ -3207,10 +3484,12 @@ function widgetDescription(widget: PeriodAnalysisWidget) {
   if (widget.kind === "hourly_occupancy") {
     return "Saldo acumulado entre cenários de entrada e saída.";
   }
-  if (widget.kind === "peak_days") return "Dias com os maiores picos do período.";
+  if (widget.kind === "peak_days")
+    return "Dias com os maiores picos do período.";
   if (widget.kind === "rose") return "Distribuição proporcional por cenário.";
   if (widget.kind === "totals_table") return "Totais individuais por cenário.";
-  if (widget.kind === "comparison") return "Comparação dos cenários selecionados.";
+  if (widget.kind === "comparison")
+    return "Comparação dos cenários selecionados.";
   if (widget.kind === "timeline") return "Fluxo agrupado no período.";
   return "Indicadores consolidados do período.";
 }

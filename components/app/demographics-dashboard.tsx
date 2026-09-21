@@ -183,6 +183,12 @@ export function DemographicsDashboard({
   const companyScopeId = useEffectiveCompanyScopeId(user);
   const timeZoneResolution = useEffectiveCompanyTimeZoneResolution(user);
   const timeZone = timeZoneResolution.timeZone;
+  const companyTimeZoneReady =
+    !timeZoneResolution.fallback &&
+    (timeZoneResolution.source === "selected-company" ||
+      timeZoneResolution.source === "current-user-company" ||
+      timeZoneResolution.source === "current-company-scope" ||
+      timeZoneResolution.source === "company-cache");
   const canEditVisual = hasVisualAdminAccess(user);
   const preferenceScopeId = `demographics-${surface}`;
   const preferenceIdentityKey = `${companyScopeId}|${user?.id ?? ""}|${preferenceScopeId}`;
@@ -365,6 +371,7 @@ export function DemographicsDashboard({
   }, [hasVisibleWidgets, pageActive, preferencesReady, surface]);
 
   React.useEffect(() => {
+    if (!companyTimeZoneReady) return;
     if (surface === "live") return;
     const storageKey = demographicsDateRangeStorageKey({
       companyId: companyScopeId,
@@ -413,6 +420,7 @@ export function DemographicsDashboard({
     };
   }, [
     companyScopeId,
+    companyTimeZoneReady,
     fallbackRange,
     historicalQueryIdentityKey,
     rangeScopeKey,
@@ -478,6 +486,18 @@ export function DemographicsDashboard({
   const requestKey = `${dataScopeKey}|${requestWindow.to.getTime()}|${refreshVersion}`;
 
   React.useEffect(() => {
+    if (!companyTimeZoneReady) {
+      cancelPendingLiveDemographicAggregation(
+        pendingLiveAggregationRef,
+        "A consulta demográfica aguardará o fuso horário da empresa.",
+      );
+      settledRequestKeyRef.current = "";
+      setLoading(false);
+      setRefreshing(false);
+      setLoadProgress(null);
+      setError("");
+      return;
+    }
     const sequence = ++requestSequenceRef.current;
     const controller = new AbortController();
     activeRequestRef.current = controller;
@@ -618,6 +638,7 @@ export function DemographicsDashboard({
     };
   }, [
     companyScopeId,
+    companyTimeZoneReady,
     dataScopeKey,
     hasVisibleWidgets,
     pageActive,
@@ -658,7 +679,7 @@ export function DemographicsDashboard({
   const comparisonReady = dataState?.key === dataScopeKey && dataState.refreshVersion === refreshVersion &&
     dataState.through === requestWindow.to.getTime() && summary.hasData && !loading && !refreshing && !error;
   React.useEffect(() => {
-    if (!pageActive || !preferencesReady || !comparisonVisible || !queryRequested || !rangeReady || !comparisonReady || !companyScopeId || comparisonState?.key === comparisonKey) return;
+    if (!companyTimeZoneReady || !pageActive || !preferencesReady || !comparisonVisible || !queryRequested || !rangeReady || !comparisonReady || !companyScopeId || comparisonState?.key === comparisonKey) return;
     if (surface === "live" && Date.now() < (comparisonRetryRef.current?.retryAt ?? 0)) return;
     const controller = new AbortController();
     comparisonRequestRef.current = controller;
@@ -706,7 +727,7 @@ export function DemographicsDashboard({
       abortRequest(controller, "A comparação demográfica anterior ficou obsoleta.");
       if (comparisonRequestRef.current === controller) comparisonRequestRef.current = null;
     };
-  }, [companyScopeId, comparisonCacheScopeKey, comparisonKey, comparisonReady, comparisonState?.key, comparisonVisible, comparisonWindow, pageActive, preferencesReady, queryRequested, rangeReady, surface, timeZone]);
+  }, [companyScopeId, companyTimeZoneReady, comparisonCacheScopeKey, comparisonKey, comparisonReady, comparisonState?.key, comparisonVisible, comparisonWindow, pageActive, preferencesReady, queryRequested, rangeReady, surface, timeZone]);
   const comparisonSummary = comparisonState?.key === comparisonKey ? comparisonState.summary : undefined;
   const comparisonError = error || (comparisonState?.scopeKey === comparisonCacheScopeKey ? comparisonState.error : undefined);
   const comparisonLoading = queryRequested && comparisonVisible && summary.hasData && !comparisonError && comparisonState?.key !== comparisonKey;
@@ -955,7 +976,7 @@ export function DemographicsDashboard({
   }))], [cards, comparisonError, comparisonLoading, effectiveTheme, loading, temporalModels, temporalSettings, updateTemporalSettings]);
 
   function applyRange(value: OccupancyAnalysisDateRangeInput) {
-    if (surface === "live") return;
+    if (surface === "live" || !companyTimeZoneReady) return;
     if (
       countDemographicsDateRangeDays(value) > MAX_DEMOGRAPHICS_DATE_RANGE_DAYS
     ) {
@@ -977,10 +998,12 @@ export function DemographicsDashboard({
   }
 
   function forceRefresh() {
+    if (!companyTimeZoneReady) return;
     requestFreshData(new Date());
   }
 
   function requestFreshData(requestedAt: Date, revalidate = true) {
+    if (!companyTimeZoneReady) return;
     // Invalidate synchronously, before React commits the next effect, so an
     // older response cannot repopulate this explicitly refreshed cache.
     requestSequenceRef.current += 1;
@@ -1048,6 +1071,7 @@ export function DemographicsDashboard({
                 <AnalysisDateRangePicker
                   key={`${companyScopeId}|${surface}|${user?.id ?? ""}`}
                   contextLabel="análise do módulo Demographics"
+                  disabled={!companyTimeZoneReady}
                   maximumDays={MAX_DEMOGRAPHICS_DATE_RANGE_DAYS}
                   maximumInput={todayInput}
                   onApply={applyRange}
@@ -1092,7 +1116,7 @@ export function DemographicsDashboard({
           >
             <ReportExportActions
               compact
-              disabled={loading || comparisonLoading || !summary.hasData}
+              disabled={!companyTimeZoneReady || loading || comparisonLoading || !summary.hasData}
               getPayload={buildDemographicsReportPayload}
             />
             {/* AiAnalysisAction será incluído quando AiInsightModule aceitar
@@ -1123,7 +1147,7 @@ export function DemographicsDashboard({
               size="icon"
               className="h-8 w-8 shrink-0"
               onClick={forceRefresh}
-              disabled={loading || refreshing}
+              disabled={!companyTimeZoneReady || loading || refreshing}
               aria-label={
                 queryRequested
                   ? "Atualizar dados demográficos"
@@ -1142,6 +1166,15 @@ export function DemographicsDashboard({
         </div>
       </div>
 
+      {!companyTimeZoneReady ? (
+        <div
+          className="rounded-md border bg-muted/20 px-3 py-2 text-sm text-muted-foreground"
+          role="status"
+        >
+          O fuso horário desta empresa precisa ser definido antes da consulta.
+        </div>
+      ) : null}
+
       {error ? (
         <div
           className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
@@ -1151,7 +1184,7 @@ export function DemographicsDashboard({
         </div>
       ) : null}
 
-      {queryRequested && !loading && !error && !summary.hasData ? (
+      {companyTimeZoneReady && queryRequested && !loading && !error && !summary.hasData ? (
         <div className="rounded-md border border-dashed bg-muted/20 px-4 py-10 text-center">
           <Sparkles className="mx-auto mb-2 h-5 w-5 text-muted-foreground" />
           <p className="text-sm font-medium">Nenhuma detecção classificada</p>

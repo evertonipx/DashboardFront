@@ -1,3 +1,9 @@
+import {
+  getOccupancyColorPalette,
+  type OccupancyColorPaletteId,
+} from "@/lib/occupancy-color-palettes";
+import { ensureGraphicContrast } from "@/lib/occupancy-hex-palette";
+
 export type OccupancyChartTheme = "light" | "dark";
 
 export type OccupancyChartPalette = {
@@ -70,4 +76,57 @@ export function getOccupancyChartPalette(
     tooltipBorder: "#D8E3F2",
     tooltipText: "#13233A",
   };
+}
+
+/**
+ * Applies a user-selected categorical palette to the data series while
+ * retaining the theme-owned canvas, axes, grid, tooltip and comparison
+ * neutrals. Every selected series color is corrected against the chart
+ * surface so even dark palettes remain readable in both themes.
+ */
+export function resolveOccupancyChartPalette(
+  theme: OccupancyChartTheme,
+  colorPaletteId: OccupancyColorPaletteId,
+  primaryOverride?: string | null,
+): OccupancyChartPalette {
+  const base = getOccupancyChartPalette(theme);
+  const colors = getOccupancyColorPalette(colorPaletteId).colors;
+  const seriesColor = (index: number) =>
+    ensureGraphicContrast(colors[index % colors.length], base.surface);
+  const normalizedOverride = normalizeHexColor(primaryOverride);
+  const current = ensureGraphicContrast(
+    normalizedOverride ?? colors[0],
+    base.surface,
+  );
+
+  return {
+    ...base,
+    average: seriesColor(1),
+    current,
+    maximumLimit: seriesColor(6),
+    minimumLimit: seriesColor(5),
+    rangeEmphasis: seriesColor(4),
+    rangeEnd: seriesColor(3),
+    rangeStart: seriesColor(2),
+    shadow: colorWithAlpha(current, theme === "dark" ? 0.12 : 0.07),
+  };
+}
+
+/** @deprecated Use {@link resolveOccupancyChartPalette}. */
+export const getConfiguredOccupancyChartPalette =
+  resolveOccupancyChartPalette;
+
+function normalizeHexColor(value?: string | null) {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value)
+    ? value.toUpperCase()
+    : null;
+}
+
+function colorWithAlpha(color: string, alpha: number) {
+  const normalized = normalizeHexColor(color);
+  if (!normalized) return color;
+  const channels = [1, 3, 5].map((offset) =>
+    Number.parseInt(normalized.slice(offset, offset + 2), 16),
+  );
+  return `rgba(${channels.join(", ")}, ${alpha})`;
 }

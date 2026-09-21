@@ -110,6 +110,7 @@ test("Atualizar aborta baseline sincronamente e resposta antiga não repovoa o c
     requestSequenceRef: { current: 1 }, activeRequestRef: { current: null }, comparisonRequestRef,
     pendingLiveAggregationRef: { current: null }, liveCacheRef: { current: null }, partitionCacheRef: { current: cache },
     comparisonCacheRef, liveRetryRef, comparisonRetryRef,
+    companyTimeZoneReady: true,
     surface: "analysis", historicalQueryIdentityKey: "identity", setHistoricalQueryScopeKey() {},
     abortRequest: (target: RuntimeFixture) => target.abort(), setClock() {}, setRefreshVersion() {},
   });

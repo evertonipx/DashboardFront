@@ -43,6 +43,108 @@ test("calendário exclui data civil inexistente e preserva virada de ano", () =>
   assert.equal(month.monthEnd.toISOString(), "2011-12-31T10:00:00.000Z");
 });
 
+test("período histórico inclui o último minuto e respeita o recorte civil aplicado", () => {
+  const period = insights.buildOccupancyDurationInsightAnalysisPeriod({
+    cutoff: new Date("2026-09-01T00:00:00Z"),
+    from: new Date("2026-08-01T00:00:00Z"),
+    timeZone: "UTC",
+    to: new Date("2026-09-01T00:00:00Z"),
+  });
+
+  assert.equal(period.from.toISOString(), "2026-08-01T00:00:00.000Z");
+  assert.equal(period.to.toISOString(), "2026-09-01T00:00:00.000Z");
+  assert.equal(period.monthEnd.toISOString(), "2026-09-01T00:00:00.000Z");
+  assert.equal(period.dateKeys.length, 31);
+  assert.equal(period.dateKeys[0], "2026-08-01");
+  assert.equal(period.dateKeys.at(-1), "2026-08-31");
+  assert.equal(period.clippedToFinalMonth, false);
+  assert.match(period.contextLabel, /período selecionado/);
+
+  const model = insights.buildOccupancyDurationInsightModel(
+    [{ scenarioId: "a", name: "A", hours: [] }],
+    period,
+  );
+  assert.equal(model.days.at(-1).expectedSeconds, 24 * 60 * 60);
+});
+
+test("análise longa detalha apenas a interseção com o mês final", () => {
+  const period = insights.buildOccupancyDurationInsightAnalysisPeriod({
+    cutoff: new Date("2026-09-16T03:00:00Z"),
+    from: new Date("2026-01-01T03:00:00Z"),
+    timeZone: "America/Sao_Paulo",
+    to: new Date("2026-09-16T03:00:00Z"),
+  });
+
+  assert.equal(period.from.toISOString(), "2026-09-01T03:00:00.000Z");
+  assert.equal(period.to.toISOString(), "2026-09-16T03:00:00.000Z");
+  assert.deepEqual(
+    [period.dateKeys[0], period.dateKeys.at(-1), period.dateKeys.length],
+    ["2026-09-01", "2026-09-15", 15],
+  );
+  assert.equal(period.clippedToFinalMonth, true);
+  assert.match(period.contextLabel, /trecho do mês final/);
+});
+
+test("período curto preserva o recorte exato mesmo atravessando meses", () => {
+  const period = insights.buildOccupancyDurationInsightAnalysisPeriod({
+    cutoff: new Date("2026-09-03T00:00:00Z"),
+    from: new Date("2026-08-30T00:00:00Z"),
+    timeZone: "UTC",
+    to: new Date("2026-09-03T00:00:00Z"),
+  });
+
+  assert.equal(period.from.toISOString(), "2026-08-30T00:00:00.000Z");
+  assert.equal(period.to.toISOString(), "2026-09-03T00:00:00.000Z");
+  assert.equal(period.clippedToFinalMonth, false);
+  assert.deepEqual(period.dateKeys, [
+    "2026-08-30",
+    "2026-08-31",
+    "2026-09-01",
+    "2026-09-02",
+  ]);
+});
+
+test("corte histórico parcial é alinhado ao minuto sem sair do período", () => {
+  const period = insights.buildOccupancyDurationInsightAnalysisPeriod({
+    cutoff: new Date("2026-09-02T12:34:56.789Z"),
+    from: new Date("2026-09-01T00:00:00Z"),
+    timeZone: "UTC",
+    to: new Date("2026-09-04T00:00:00Z"),
+  });
+
+  assert.equal(period.to.toISOString(), "2026-09-02T12:34:00.000Z");
+  assert.equal(period.monthEnd.toISOString(), "2026-09-04T00:00:00.000Z");
+  assert.deepEqual(period.dateKeys, [
+    "2026-09-01",
+    "2026-09-02",
+    "2026-09-03",
+  ]);
+});
+
+test("período civil histórico preserva dias DST e rejeita fronteiras ambíguas", () => {
+  const repeatedDay = insights.buildOccupancyDurationInsightAnalysisPeriod({
+    cutoff: new Date("2026-11-02T05:00:00Z"),
+    from: new Date("2026-11-01T04:00:00Z"),
+    timeZone: "America/New_York",
+    to: new Date("2026-11-02T05:00:00Z"),
+  });
+  assert.equal(
+    repeatedDay.to.getTime() - repeatedDay.from.getTime(),
+    25 * 60 * 60_000,
+  );
+  assert.deepEqual(repeatedDay.dateKeys, ["2026-11-01"]);
+
+  assert.throws(
+    () => insights.buildOccupancyDurationInsightAnalysisPeriod({
+      cutoff: new Date("2026-09-02T00:00:00Z"),
+      from: new Date("2026-09-01T01:00:00Z"),
+      timeZone: "UTC",
+      to: new Date("2026-09-02T00:00:00Z"),
+    }),
+    /fronteira civil/,
+  );
+});
+
 test("segmentos cruzando hora e dia mantêm seus estados e segundos", () => {
   const from = Date.parse("2026-09-02T02:58:00Z");
   const summary = minuteSummary(from, ["occupied", "occupied", "transition", "free", "unknown"]);

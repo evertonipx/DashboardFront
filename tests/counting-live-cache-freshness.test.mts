@@ -272,11 +272,13 @@ function makeHarness() {
   const reconciliation = load("lib/aggregate-reconciliation.ts");
   const hourQuery = load("lib/aggregate-hour-query.ts");
   const rangeQuery = load("lib/aggregate-range-query.ts");
+  const countingTime = load("lib/counting-time-zone.ts");
   const bindings = {
     ...time,
     ...reconciliation,
     ...hourQuery,
     ...rangeQuery,
+    ...countingTime,
     DEFAULT_METRIC_TYPE: "count",
     startOfHour: (date: Date) => time.startOfAggregateBucket(date, "hour"),
   };
@@ -314,6 +316,7 @@ function minuteOptions(now: RuntimeFixture, from: RuntimeFixture, to: RuntimeFix
     definition: { from: date(from), to: date(to), granularity: "minute" },
     now: date(now),
     signal: new AbortController().signal,
+    timeZone: "America/Sao_Paulo",
   };
 }
 
@@ -330,6 +333,7 @@ function hourOptions() {
     queryCache: new Map(),
     ranges: [{ from: date("2025-05-01T03:00:00Z"), to: date("2026-09-10T13:00:00Z") }],
     signal: new AbortController().signal,
+    timeZone: "America/Sao_Paulo",
   };
 }
 
@@ -340,6 +344,7 @@ function dayOptions() {
     companyScopeId: "tenant-a",
     from: date("2026-09-10T03:00:00Z"),
     now: date("2026-09-10T13:10:00Z"),
+    timeZone: "America/Sao_Paulo",
     to: date("2026-09-10T12:00:00Z"),
   };
 }

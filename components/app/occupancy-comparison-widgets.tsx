@@ -51,18 +51,39 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { apiFetch } from "@/lib/api";
 import {
   aggregateQueryIso,
   endOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import { companyTimeZoneHour, requireCompanyTimeZone } from "@/lib/company-time-zone";
-import { fetchOccupancyCivilAggregate } from "@/lib/occupancy-civil-aggregate-query";
-import { createOccupancyQueryScheduler } from "@/lib/occupancy-dashboard-query";
+import {
+  fetchOccupancyCivilAggregate,
+  type OccupancyCivilAggregateUnitCache,
+} from "@/lib/occupancy-civil-aggregate-query";
+import {
+  createOccupancyQueryScheduler,
+  OCCUPANCY_LIVE_SNAPSHOT_CACHE_TTL_MS,
+  OCCUPANCY_LIVE_SNAPSHOT_QUERY_ID,
+  OCCUPANCY_LIVE_QUERY_REQUEST_LIMIT,
+  occupancyLiveCivilFallbackRequestLimit,
+  occupancyLiveSnapshotQuery,
+} from "@/lib/occupancy-dashboard-query";
+import {
+  fetchSharedOccupancyQuery,
+  sharedOccupancyCivilCapabilities,
+} from "@/lib/occupancy-shared-query";
 import { occupancyCalendarBoundaryInstant } from "@/lib/occupancy-calendar";
 import { getOccupancyColorPalette } from "@/lib/occupancy-color-palettes";
 import {
+  formatOccupancyCount,
+  formatOccupancyIntegerAxisTick,
+  growOccupancyComparisonAxisMaximum,
+  occupancyComparisonAxisScopeKey,
+  updateOccupancyComparisonAxisMemory,
+} from "@/lib/occupancy-current-comparison-axis";
+import {
   buildOccupancyHeatmapVisualMaps,
+  occupancyHeatmapStateColors,
   occupancyHeatmapPalette,
 } from "@/lib/occupancy-heatmap-visual";
 import {
@@ -88,7 +109,9 @@ import {
   occupancyAggregateBucketKey,
   occupancyAggregateCoverageWarning,
   occupancyAggregateMetadataWarning,
+  occupancyAggregatePresentationWarning,
   requireOccupancyAggregateRows,
+  type OccupancyAggregateMetric,
 } from "@/lib/occupancy-aggregate-validation";
 import {
   buildOccupancyAnnualMaximumPoints,
@@ -103,8 +126,8 @@ import {
   buildOccupancyLiveRaceEntries,
   buildOccupancyMaximumTrendRanges,
   buildOccupancyPeakValues,
-  buildScenariosHoursOccupancyCells,
   localDateKey,
+  mergeOccupancyMaximumTrendOpenPeak,
   OCCUPANCY_FIXED_HOUR_LABELS,
   occupancySnapshotTotalWithinHour,
   occupancyMaximumTrendBucketLabels,
@@ -125,6 +148,18 @@ import {
   occupancyScenarioColor,
 } from "@/lib/occupancy-scenario-color";
 import {
+  buildOccupancyScenarioSnapshotValue,
+  occupancyScenarioSnapshotHasCompleteCoverage,
+} from "@/lib/occupancy-scenario-snapshots";
+import {
+  buildOccupancyScenarioHeatmapRange,
+  buildOccupancyScenarioPeriodHeatmap,
+  occupancyScenarioHeatmapGranularityLabel,
+  occupancyScenarioHeatmapPeriodDescription,
+  updateOccupancyScenarioHeatmapAttemptedBuckets,
+  type OccupancyScenarioHeatmapGranularity,
+} from "@/lib/occupancy-scenario-heatmap";
+import {
   DEFAULT_OCCUPANCY_STATUS_COLORS,
   DEFAULT_OCCUPANCY_WIDGET_SETTINGS,
   loadOccupancyWidgetSettings,
@@ -137,10 +172,14 @@ import {
   type OccupancyStatusColors,
   type OccupancyWidgetSettings,
 } from "@/lib/occupancy-widget-settings";
-import { requireOccupancyHistoryResponse } from "@/lib/occupancy-validation";
+import {
+  requireOccupancyCurrentSnapshotRows,
+} from "@/lib/occupancy-validation";
 import {
   buildOccupancyComparisonSelectionPlan,
   filterOccupancyComparisonRows,
+  occupancyComparisonSnapshotRefreshIntervalMs,
+  resolveOccupancyComparisonInheritedScenarioIds,
   resolveOccupancyComparisonScenarioIds,
   selectOccupancyComparisonSharedSource,
 } from "@/lib/occupancy-comparison-selection";
@@ -156,6 +195,27 @@ import type { CardPreference } from "@/lib/view-preferences";
 const DEFAULT_SNAPSHOT_REFRESH_MS = 5_000;
 const DEFAULT_AGGREGATE_REFRESH_MS = 60_000;
 const DEFAULT_MAXIMUM_TREND_REFRESH_MS = 60 * 60_000;
+const MAXIMUM_TREND_FULL_REFRESH_MS = 24 * 60 * 60_000;
+const HOURLY_AGGREGATE_FULL_REFRESH_MS = 24 * 60 * 60_000;
+const HOURLY_AGGREGATE_RETRY_MS = 5 * 60_000;
+const SCENARIO_HEATMAP_FULL_REFRESH_MS = 24 * 60 * 60_000;
+const SCENARIO_HEATMAP_RETRY_MS = 5 * 60_000;
+const MAX_SCENARIO_HEATMAP_CIVIL_UNIT_CACHE_ENTRIES = 100_000;
+const MAXIMUM_TREND_RETRY_DELAYS_MS = [
+  60_000,
+  120_000,
+  240_000,
+  480_000,
+  900_000,
+] as const;
+const CURRENT_HOUR_MAXIMUM_OVERLAP_MS = 5 * 60_000;
+const CURRENT_HOUR_MAXIMUM_RETRY_DELAYS_MS = [
+  60_000,
+  120_000,
+  240_000,
+  480_000,
+  900_000,
+] as const;
 const MAX_PARALLEL_REQUESTS = 4;
 
 export const OCCUPANCY_COMPARISON_CARD_IDS = [
@@ -179,10 +239,10 @@ const OCCUPANCY_SNAPSHOT_CARD_IDS = new Set([
 const OCCUPANCY_HOURLY_AGGREGATE_CARD_IDS = new Set([
   "occupancy_scenario_max_hour",
   "occupancy_day_hour_heatmap",
-  "occupancy_scenario_hour_heatmap",
 ]);
 const OCCUPANCY_CURRENT_HOUR_MAXIMUM_CARD_IDS = new Set([
   "occupancy_scenario_max_hour",
+  "occupancy_scenario_max_month",
   "occupancy_scenario_max_year",
 ]);
 const OCCUPANCY_MAXIMUM_TREND_CARD_IDS = new Set([
@@ -203,6 +263,12 @@ type SnapshotDataset = {
   snapshots: OccupancyScenarioSnapshot[];
 };
 
+type SnapshotCacheEntry = {
+  completedAt: number;
+  refreshVersion: number;
+  snapshot: OccupancyScenarioSnapshot;
+};
+
 type AggregateDataset = {
   buckets: Date[];
   from: Date | null;
@@ -210,6 +276,29 @@ type AggregateDataset = {
   scopeKey: string;
   series: OccupancyScenarioHourlySeries[];
   to: Date | null;
+};
+
+type HourlyAggregateCacheEntry = {
+  attemptedBucketKeys: Set<number>;
+  completedAt: number;
+  coverageRetryBucketKeys: Set<number>;
+  lastFullAttemptAt: number;
+  retryAt: number;
+  series: OccupancyScenarioHourlySeries;
+};
+
+type ScenarioHeatmapDataset = AggregateDataset & {
+  granularity: OccupancyScenarioHeatmapGranularity;
+};
+
+type ScenarioHeatmapCacheEntry = {
+  attemptedBucketKeys: Set<number>;
+  completedAt: number;
+  coverageRetryBucketKeys: Set<number>;
+  lastFullAttemptAt: number;
+  refreshVersion: number;
+  retryAt: number;
+  series: OccupancyScenarioHourlySeries;
 };
 
 export type OccupancySharedHourlyAggregate = {
@@ -224,6 +313,12 @@ type MaximumTrendDataset = {
   ranges: OccupancyMaximumTrendRanges | null;
   scopeKey: string;
   series: OccupancyScenarioHourlySeries[];
+};
+
+type MaximumTrendCacheEntry = {
+  completedAt: number;
+  rangeKey: string;
+  series: OccupancyScenarioHourlySeries;
 };
 
 type CurrentHourMaximumDataset = {
@@ -256,6 +351,15 @@ type OccupancyScenarioOpenMaximumSeries = {
   warning?: string;
 };
 
+type CurrentHourMaximumCacheEntry = {
+  failures: number;
+  hour: number;
+  minutePeaks: Map<number, number>;
+  retryAt: number;
+  through: number;
+  warning?: string;
+};
+
 type OccupancyMaximumLineGranularity = "hour" | "month" | "year";
 
 type OccupancyMaximumLineSeries = {
@@ -272,6 +376,37 @@ type SettingsState = {
   value: OccupancyWidgetSettings;
 };
 
+type OccupancyScenarioRow = { scenarioId: string };
+type ComparisonRetryState = { failures: number; retryAt: number };
+
+const EMPTY_OCCUPANCY_SNAPSHOTS: OccupancyScenarioSnapshot[] = [];
+const EMPTY_OCCUPANCY_BUCKETS: Date[] = [];
+const EMPTY_OCCUPANCY_HOURLY_SERIES: OccupancyScenarioHourlySeries[] = [];
+const EMPTY_OCCUPANCY_OPEN_MAXIMUM_SERIES: OccupancyScenarioOpenMaximumSeries[] = [];
+const SHARED_OCCUPANCY_SNAPSHOT_CACHE = new Map<string, SnapshotCacheEntry>();
+const SHARED_OCCUPANCY_HOURLY_AGGREGATE_CACHE = new Map<
+  string,
+  HourlyAggregateCacheEntry
+>();
+const SHARED_OCCUPANCY_SCENARIO_HEATMAP_CACHE = new Map<
+  string,
+  ScenarioHeatmapCacheEntry
+>();
+const SHARED_OCCUPANCY_CURRENT_HOUR_MAXIMUM_CACHE = new Map<
+  string,
+  CurrentHourMaximumCacheEntry
+>();
+const SHARED_OCCUPANCY_MAXIMUM_TREND_CACHE = new Map<
+  string,
+  MaximumTrendCacheEntry
+>();
+const SHARED_OCCUPANCY_MAXIMUM_TREND_ATTEMPTS = new Map<string, number>();
+const SHARED_OCCUPANCY_MAXIMUM_TREND_RETRIES = new Map<
+  string,
+  ComparisonRetryState
+>();
+const MAX_SHARED_COMPARISON_CACHE_ENTRIES = 320;
+
 export function useOccupancyComparisonCards({
   aggregateRefreshMs = DEFAULT_AGGREGATE_REFRESH_MS,
   companyScopeId,
@@ -283,6 +418,7 @@ export function useOccupancyComparisonCards({
   monitorMode,
   preferenceScopeId,
   preferences,
+  requestedCardIds,
   snapshotRefreshMs = DEFAULT_SNAPSHOT_REFRESH_MS,
   scenarios,
   timeZone,
@@ -299,6 +435,7 @@ export function useOccupancyComparisonCards({
   monitorMode: boolean;
   preferenceScopeId?: string | null;
   preferences: ReadonlyArray<CardPreference>;
+  requestedCardIds?: ReadonlySet<string>;
   snapshotRefreshMs?: number;
   scenarios: OccupancyScenario[];
   timeZone: string;
@@ -315,14 +452,23 @@ export function useOccupancyComparisonCards({
     settingsReady
       ? settingsState.value
       : DEFAULT_OCCUPANCY_WIDGET_SETTINGS;
+  const requestedPreferences = React.useMemo(
+    () =>
+      requestedCardIds
+        ? preferences.filter((preference) =>
+            requestedCardIds.has(preference.id),
+          )
+        : preferences,
+    [preferences, requestedCardIds],
+  );
   const visibleCardIdsKey = React.useMemo(
     () =>
-      preferences
-        .filter((preference) => preference.visible)
+      requestedPreferences
+        .filter((preference) => preference.visible === true)
         .map((preference) => preference.id)
         .sort()
         .join(","),
-    [preferences],
+    [requestedPreferences],
   );
   const visibleCardIds = React.useMemo(
     () => new Set(visibleCardIdsKey.split(",").filter(Boolean)),
@@ -332,10 +478,12 @@ export function useOccupancyComparisonCards({
     visibleCardIds,
     OCCUPANCY_SNAPSHOT_CARD_IDS,
   );
-  const needsHourlyAggregate = setIntersects(
-    visibleCardIds,
-    OCCUPANCY_HOURLY_AGGREGATE_CARD_IDS,
+  const scenarioHeatmapVisible = visibleCardIds.has(
+    "occupancy_scenario_hour_heatmap",
   );
+  const needsHourlyAggregate =
+    setIntersects(visibleCardIds, OCCUPANCY_HOURLY_AGGREGATE_CARD_IDS) ||
+    (scenarioHeatmapVisible && settings.scenarioHeatmapGranularity === "hour");
   const needsCurrentHourMaximum = setIntersects(
     visibleCardIds,
     OCCUPANCY_CURRENT_HOUR_MAXIMUM_CARD_IDS,
@@ -356,23 +504,16 @@ export function useOccupancyComparisonCards({
     const scenarioById = new Map(
       scopedScenarios.map((scenario) => [scenario.id, scenario]),
     );
-    const availableIds = new Set(scenarioById.keys());
-    const storedSelection = settings.scenarioIds.filter((id) =>
-      availableIds.has(id),
-    );
-    const defaultSelection = scopedScenarios
-      .filter((scenario) => scenario.active)
-      .map((scenario) => scenario.id);
-    const effectiveIds = storedSelection.length
-      ? storedSelection
-      : defaultSelection.length
-        ? defaultSelection
-        : scopedScenarios.map((scenario) => scenario.id);
+    const effectiveIds = resolveOccupancyComparisonInheritedScenarioIds({
+      configuredScenarioIds: settings.scenarioIds,
+      focusScenarioId,
+      scenarios: scopedScenarios,
+    });
     return effectiveIds.flatMap((id) => {
       const scenario = scenarioById.get(id);
       return scenario ? [scenario] : [];
     });
-  }, [scopedScenarios, settings.scenarioIds]);
+  }, [focusScenarioId, scopedScenarios, settings.scenarioIds]);
   const selectedScenarioIds = React.useMemo(
     () => selectedScenarios.map((scenario) => scenario.id),
     [selectedScenarios],
@@ -397,21 +538,43 @@ export function useOccupancyComparisonCards({
   );
   const selectionPlan = React.useMemo(() => buildOccupancyComparisonSelectionPlan({
     scenarios: scopedScenarios,
-    preferences,
+    preferences: requestedPreferences,
     inheritedScenarioIds: selectedScenarioIds,
     inheritedHeatmapScenarioId,
     hexScenarioIds,
-  }), [hexScenarioIds, inheritedHeatmapScenarioId, preferences, scopedScenarios, selectedScenarioIds]);
+    scenarioHeatmapGranularity: settings.scenarioHeatmapGranularity,
+  }), [hexScenarioIds, inheritedHeatmapScenarioId, requestedPreferences, scopedScenarios, selectedScenarioIds, settings.scenarioHeatmapGranularity]);
   const comparisonSelectionKey = selectionPlan.hourly.join(",");
+  const scenarioHeatmapSelectionKey = (
+    selectionPlan.byCard.get("occupancy_scenario_hour_heatmap") ?? []
+  ).join(",");
   const currentHourSelectionKey = selectionPlan.currentHour.join(",");
   const maximumTrendSelectionKey = selectionPlan.trends.join(",");
-  const needsHourlyHeatmap = ["occupancy_day_hour_heatmap", "occupancy_scenario_hour_heatmap"].some(
-    (cardId) => visibleCardIds.has(cardId) && (selectionPlan.byCard.get(cardId)?.length ?? 0) > 0,
-  );
+  const needsHourlyHeatmap =
+    (visibleCardIds.has("occupancy_day_hour_heatmap") &&
+      (selectionPlan.byCard.get("occupancy_day_hour_heatmap")?.length ?? 0) > 0) ||
+    (scenarioHeatmapVisible &&
+      settings.scenarioHeatmapGranularity === "hour" &&
+      scenarioHeatmapSelectionKey.length > 0);
   const hourlyAggregateDayCount = needsHourlyHeatmap ? settings.dayCount : 1;
   const snapshotSelectionKey = selectionPlan.snapshots.join(",");
+  const snapshotRequestGroupCount = selectionPlan.snapshots.length ? 1 : 0;
+  const effectiveSnapshotRefreshMs =
+    occupancyComparisonSnapshotRefreshIntervalMs({
+      baseRefreshMs: snapshotRefreshMs,
+      concurrency: MAX_PARALLEL_REQUESTS,
+      // `/occupancy` returns all current areas in one tenant-scoped batch. The
+      // scenario count below is therefore either one batch or none.
+      scenarioCount: snapshotRequestGroupCount,
+    });
   const snapshotScopeKey = `${companyScopeId}|${timeZone}|${snapshotSelectionKey}`;
   const aggregateScopeKey = `${companyScopeId}|${timeZone}|${comparisonSelectionKey}|${hourlyAggregateDayCount}`;
+  const scenarioHeatmapRangeDayCount =
+    settings.scenarioHeatmapGranularity === "hour" ||
+    settings.scenarioHeatmapGranularity === "day"
+      ? settings.dayCount
+      : 7;
+  const scenarioHeatmapScopeKey = `${companyScopeId}|${timeZone}|${settings.scenarioHeatmapGranularity}|${scenarioHeatmapRangeDayCount}|${scenarioHeatmapSelectionKey}`;
   const maximumTrendScopeKey = `${companyScopeId}|${timeZone}|${maximumTrendSelectionKey}`;
   const currentHourScopeKey = `${companyScopeId}|${timeZone}|${currentHourSelectionKey}`;
   const [snapshotDataset, setSnapshotDataset] =
@@ -421,6 +584,7 @@ export function useOccupancyComparisonCards({
       scopeKey: "",
       snapshots: [],
     });
+  const snapshotCacheRef = React.useRef(SHARED_OCCUPANCY_SNAPSHOT_CACHE);
   const [aggregateDataset, setAggregateDataset] =
     React.useState<AggregateDataset>({
       buckets: [],
@@ -430,6 +594,32 @@ export function useOccupancyComparisonCards({
       series: [],
       to: null,
     });
+  const aggregateDatasetRef = React.useRef(aggregateDataset);
+  const aggregateAvailabilityKey = [
+    aggregateDataset.scopeKey,
+    aggregateDataset.loading ? "loading" : "ready",
+    aggregateDataset.from?.getTime() ?? "",
+    aggregateDataset.to?.getTime() ?? "",
+  ].join("|");
+  const hourlyAggregateCacheRef = React.useRef(
+    SHARED_OCCUPANCY_HOURLY_AGGREGATE_CACHE,
+  );
+  const [scenarioHeatmapDataset, setScenarioHeatmapDataset] =
+    React.useState<ScenarioHeatmapDataset>({
+      buckets: [],
+      from: null,
+      granularity: "hour",
+      loading: false,
+      scopeKey: "",
+      series: [],
+      to: null,
+    });
+  const scenarioHeatmapCacheRef = React.useRef(
+    SHARED_OCCUPANCY_SCENARIO_HEATMAP_CACHE,
+  );
+  const scenarioHeatmapCivilUnitCacheRef = React.useRef<
+    OccupancyCivilAggregateUnitCache
+  >(new Map());
   const [maximumTrendDataset, setMaximumTrendDataset] =
     React.useState<MaximumTrendDataset>({
       loading: false,
@@ -437,6 +627,13 @@ export function useOccupancyComparisonCards({
       scopeKey: "",
       series: [],
     });
+  const maximumTrendDatasetRef = React.useRef(maximumTrendDataset);
+  const maximumTrendSeriesCacheRef = React.useRef(
+    SHARED_OCCUPANCY_MAXIMUM_TREND_CACHE,
+  );
+  const maximumTrendFullRefreshRef = React.useRef(
+    SHARED_OCCUPANCY_MAXIMUM_TREND_ATTEMPTS,
+  );
   const [currentHourMaximumDataset, setCurrentHourMaximumDataset] =
     React.useState<CurrentHourMaximumDataset>({
       bucket: null,
@@ -444,9 +641,16 @@ export function useOccupancyComparisonCards({
       scopeKey: "",
       series: [],
     });
+  const currentHourMaximumDatasetRef = React.useRef(
+    currentHourMaximumDataset,
+  );
   const [manualRefreshVersion, setManualRefreshVersion] = React.useState(0);
   const resourceFreshnessRef = React.useRef<OccupancyComparisonFreshness>(
     createEmptyOccupancyComparisonFreshness(),
+  );
+  const civilAggregateCapabilities = React.useMemo(
+    () => sharedOccupancyCivilCapabilities(companyScopeId, timeZone),
+    [companyScopeId, timeZone],
   );
   const focusSnapshotRef = React.useRef(focusSnapshot);
   const focusHourlyAggregateRef = React.useRef(focusHourlyAggregate);
@@ -470,6 +674,22 @@ export function useOccupancyComparisonCards({
   React.useEffect(() => {
     focusHourlyAggregateRef.current = focusHourlyAggregate;
   }, [focusHourlyAggregate]);
+
+  React.useEffect(() => {
+    aggregateDatasetRef.current = aggregateDataset;
+  }, [aggregateDataset]);
+
+  React.useEffect(() => {
+    scenarioHeatmapCivilUnitCacheRef.current.clear();
+  }, [companyScopeId, timeZone, userId]);
+
+  React.useEffect(() => {
+    maximumTrendDatasetRef.current = maximumTrendDataset;
+  }, [maximumTrendDataset]);
+
+  React.useEffect(() => {
+    currentHourMaximumDatasetRef.current = currentHourMaximumDataset;
+  }, [currentHourMaximumDataset]);
 
   const refresh = React.useCallback(() => {
     setManualRefreshVersion((version) => version + 1);
@@ -546,8 +766,9 @@ export function useOccupancyComparisonCards({
     let disposed = false;
     let timeout: number | undefined;
     let controller: AbortController | null = null;
+    let refreshRunning = false;
 
-    function scheduleNext(delayMs = snapshotRefreshMs) {
+    function scheduleNext(delayMs = effectiveSnapshotRefreshMs) {
       if (disposed) return;
       if (timeout) window.clearTimeout(timeout);
       timeout = window.setTimeout(
@@ -556,7 +777,25 @@ export function useOccupancyComparisonCards({
       );
     }
 
+    function scheduleAfterSnapshotCycle(startedAt: Date) {
+      scheduleNext(
+        effectiveSnapshotRefreshMs - (Date.now() - startedAt.getTime()),
+      );
+    }
+
     async function refreshSnapshots() {
+      if (disposed || refreshRunning) return;
+      refreshRunning = true;
+      try {
+        await runSnapshotRefresh();
+      } catch (error) {
+        if (!disposed && !controller?.signal.aborted) throw error;
+      } finally {
+        refreshRunning = false;
+      }
+    }
+
+    async function runSnapshotRefresh() {
       if (disposed) return;
       if (!settingsReady) return;
       const requestedIds = new Set(
@@ -575,14 +814,9 @@ export function useOccupancyComparisonCards({
         return;
       }
       if (
-        focusSnapshotPending &&
-        requestedIds.has(focusScenarioId)
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
       ) {
-        // The parent is already loading the same focused history snapshot.
-        // Its readiness transition reruns this effect without a duplicate GET.
-        return;
-      }
-      if (document.visibilityState !== "visible") {
         scheduleNext();
         return;
       }
@@ -590,7 +824,7 @@ export function useOccupancyComparisonCards({
         resourceFreshnessRef.current.snapshots,
         {
           now: new Date(),
-          refreshMs: snapshotRefreshMs,
+          refreshMs: effectiveSnapshotRefreshMs,
           refreshVersion: manualRefreshVersion,
           scopeKey: snapshotScopeKey,
           windowKey: snapshotScopeKey,
@@ -602,57 +836,169 @@ export function useOccupancyComparisonCards({
       }
 
       controller?.abort();
-      controller = new AbortController();
-      const sharedFocusSnapshot = selectOccupancyComparisonSharedSource(
+      const requestController = new AbortController();
+      controller = requestController;
+      const scheduleQuery = createOccupancyQueryScheduler(
+        requestController.signal,
+        MAX_PARALLEL_REQUESTS,
+        OCCUPANCY_LIVE_QUERY_REQUEST_LIMIT,
+      );
+      const requestedAt = new Date();
+      const candidateFocusSnapshot = selectOccupancyComparisonSharedSource(
         focusSnapshotRef.current,
         focusScenarioId,
         requestedIds,
       );
-      const requestedAt = sharedFocusSnapshot?.requestedAt ?? new Date();
-      setSnapshotDataset((current) =>
-        current.scopeKey === snapshotScopeKey
-          ? current
-          : {
-              loading: true,
-              requestedAt: null,
-              scopeKey: snapshotScopeKey,
-              snapshots: [],
+      const sharedFocusSnapshot =
+        candidateFocusSnapshot &&
+        requestedAt.getTime() - candidateFocusSnapshot.requestedAt.getTime() <
+          effectiveSnapshotRefreshMs
+          ? candidateFocusSnapshot
+          : null;
+      const cachePrefix = `${userId ?? ""}|${companyScopeId}|${timeZone}|`;
+      const oldestFreshSnapshot = requestedAt.getTime() - effectiveSnapshotRefreshMs;
+      const snapshotsById = new Map<string, OccupancyScenarioSnapshot>();
+      const scenariosToRequest: OccupancyScenario[] = [];
+
+      for (const scenario of requestedScenarios) {
+        const cacheKey = `${cachePrefix}${scenario.id}`;
+        const cached = snapshotCacheRef.current.get(cacheKey);
+        if (cached) {
+          snapshotsById.set(scenario.id, {
+            ...cached.snapshot,
+            name: scenario.name,
+          });
+        }
+        if (
+          !cached ||
+          cached.refreshVersion !== manualRefreshVersion ||
+          cached.completedAt <= oldestFreshSnapshot
+        ) {
+          scenariosToRequest.push(scenario);
+        }
+      }
+
+      if (sharedFocusSnapshot) {
+        const focusScenario = requestedScenarios.find(
+          (scenario) => scenario.id === sharedFocusSnapshot.scenarioId,
+        );
+        if (focusScenario) {
+          const snapshot: OccupancyScenarioSnapshot = {
+            asOf: sharedFocusSnapshot.asOf,
+            error: sharedFocusSnapshot.error,
+            name: focusScenario.name,
+            scenarioId: focusScenario.id,
+            total: sharedFocusSnapshot.total,
+          };
+          snapshotsById.set(focusScenario.id, snapshot);
+          setBoundedComparisonCacheEntry(
+            snapshotCacheRef.current,
+            `${cachePrefix}${focusScenario.id}`,
+            {
+              completedAt: requestedAt.getTime(),
+              refreshVersion: manualRefreshVersion,
+              snapshot,
             },
-      );
-      const snapshots = await mapWithConcurrency(
-        requestedScenarios,
-        MAX_PARALLEL_REQUESTS,
-        async (scenario): Promise<OccupancyScenarioSnapshot> => {
+          );
+          const index = scenariosToRequest.findIndex(
+            (scenario) => scenario.id === focusScenario.id,
+          );
+          if (index >= 0) scenariosToRequest.splice(index, 1);
+        }
+      } else if (
+        focusSnapshotPending &&
+        requestedIds.has(focusScenarioId)
+      ) {
+        // The parent owns the focused snapshot. Load every other scenario now
+        // instead of serializing the whole comparison behind that request.
+        const index = scenariosToRequest.findIndex(
+          (scenario) => scenario.id === focusScenarioId,
+        );
+        if (index >= 0) scenariosToRequest.splice(index, 1);
+      }
+
+      const orderedSnapshots = () =>
+        requestedScenarios.flatMap((scenario) => {
+          const snapshot = snapshotsById.get(scenario.id);
+          return snapshot ? [snapshot] : [];
+        });
+      const publishSnapshots = (loading: boolean) => {
+        if (disposed || requestController.signal.aborted) return;
+        const snapshots = orderedSnapshots();
+        setSnapshotDataset((current) => {
+          // A warm refresh should not publish an identical intermediate state
+          // before the batched response; this halves React commits per pulse.
           if (
-            sharedFocusSnapshot &&
-            scenario.id === sharedFocusSnapshot.scenarioId
+            loading &&
+            snapshots.length > 0 &&
+            current.scopeKey === snapshotScopeKey &&
+            current.snapshots.length > 0
           ) {
-            return {
-              asOf: sharedFocusSnapshot.asOf,
-              error: sharedFocusSnapshot.error,
-              name: scenario.name,
-              scenarioId: scenario.id,
-              total: sharedFocusSnapshot.total,
-            };
+            return current;
           }
-          try {
-            const response = await apiFetch<unknown>(
-              occupancyHistoryPath(scenario.id, requestedAt),
-              { companyScopeId, signal: controller?.signal },
-            );
-            const history = requireOccupancyHistoryResponse(
-              response,
-              scenario.id,
-              { expectedAreas: scenario.areas, requestedAt },
-            );
-            return {
-              asOf: history.as_of,
-              name: scenario.name,
-              scenarioId: scenario.id,
-              total: history.total,
-            };
-          } catch (error) {
-            return {
+          return {
+            loading: loading && snapshots.length === 0,
+            requestedAt,
+            scopeKey: snapshotScopeKey,
+            snapshots,
+          };
+        });
+      };
+
+      publishSnapshots(scenariosToRequest.length > 0);
+      if (!scenariosToRequest.length) {
+        resourceFreshnessRef.current.snapshots =
+          completeOccupancyComparisonResource(
+            manualRefreshVersion,
+            snapshotScopeKey,
+            snapshotScopeKey,
+            requestedAt.getTime(),
+          );
+        scheduleAfterSnapshotCycle(requestedAt);
+        return;
+      }
+
+      try {
+        const snapshotQuery = occupancyLiveSnapshotQuery({ now: requestedAt });
+        const expectedAreas = Array.from(
+          new Map(
+            scenariosToRequest.flatMap((scenario) =>
+              scenario.areas.map((area) => [
+                JSON.stringify([area.camera_id, area.area_id]),
+                {
+                  area_id: area.area_id,
+                  camera_id: area.camera_id,
+                },
+              ] as const),
+            ),
+          ).values(),
+        );
+        let rows: ReturnType<
+          typeof requireOccupancyCurrentSnapshotRows
+        > | null = null;
+        try {
+          const path = snapshotQuery.path;
+          const response = await scheduleQuery(path, () =>
+            fetchSharedOccupancyQuery<unknown>({
+              // The path is quantized per five-second pulse. A short settled
+              // cache lets the focused card and comparisons share this exact
+              // tenant-wide snapshot without leaking into the next pulse.
+              cacheTtlMs: OCCUPANCY_LIVE_SNAPSHOT_CACHE_TTL_MS,
+              companyScopeId,
+              path,
+              priority: "background",
+              scenarioId: OCCUPANCY_LIVE_SNAPSHOT_QUERY_ID,
+              signal: requestController.signal,
+              timeZone,
+            }),
+          );
+          rows = requireOccupancyCurrentSnapshotRows(response, {
+            expectedAreas,
+          });
+        } catch (error) {
+          if (requestController.signal.aborted) throw error;
+          scenariosToRequest.forEach((scenario) => {
+            commitSnapshot(scenario, {
               error: occupancyRequestError(
                 error,
                 "A leitura atual não está disponível.",
@@ -660,34 +1006,106 @@ export function useOccupancyComparisonCards({
               name: scenario.name,
               scenarioId: scenario.id,
               total: null,
-            };
-          }
-        },
-      );
-      if (!disposed && !controller.signal.aborted) {
+            });
+          });
+          rows = null;
+        }
+
+        // `/occupancy` is the only tenant-wide current source. A valid but
+        // incomplete batch must stay unavailable instead of fanning out one
+        // `/history` request per scenario every five seconds. The focused
+        // dashboard owns the single-scenario compatibility probe.
+        if (rows !== null) {
+          scenariosToRequest.forEach((scenario) => {
+            if (
+              !occupancyScenarioSnapshotHasCompleteCoverage(scenario, rows)
+            ) {
+              commitSnapshot(scenario, {
+                error:
+                  "A leitura atual não cobriu todas as áreas do cenário.",
+                name: scenario.name,
+                scenarioId: scenario.id,
+                total: null,
+              });
+              return;
+            }
+
+            let snapshot: OccupancyScenarioSnapshot;
+            try {
+              snapshot = buildOccupancyScenarioSnapshotValue(scenario, rows);
+            } catch (error) {
+              snapshot = {
+                error: occupancyRequestError(
+                  error,
+                  "A leitura atual não está disponível.",
+                ),
+                name: scenario.name,
+                scenarioId: scenario.id,
+                total: null,
+              };
+            }
+            commitSnapshot(scenario, snapshot);
+          });
+        }
+
+        function commitSnapshot(
+          scenario: OccupancyScenario,
+          snapshot: OccupancyScenarioSnapshot,
+        ) {
+          snapshotsById.set(scenario.id, snapshot);
+          setBoundedComparisonCacheEntry(
+            snapshotCacheRef.current,
+            `${cachePrefix}${scenario.id}`,
+            {
+              completedAt: requestedAt.getTime(),
+              refreshVersion: manualRefreshVersion,
+              snapshot,
+            },
+          );
+        }
+      } catch {
+        if (!requestController.signal.aborted && !disposed) {
+          publishSnapshots(false);
+          scheduleAfterSnapshotCycle(requestedAt);
+        }
+        return;
+      }
+      if (!disposed && !requestController.signal.aborted) {
         resourceFreshnessRef.current.snapshots =
           completeOccupancyComparisonResource(
             manualRefreshVersion,
             snapshotScopeKey,
             snapshotScopeKey,
+            requestedAt.getTime(),
           );
-        setSnapshotDataset({
-          loading: false,
-          requestedAt,
-          scopeKey: snapshotScopeKey,
-          snapshots,
-        });
+        publishSnapshots(false);
       }
       if (!disposed) {
-        scheduleNext();
+        scheduleAfterSnapshotCycle(requestedAt);
       }
     }
 
+    function handleAvailabilityChange() {
+      if (
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
+      ) return;
+      if (timeout) window.clearTimeout(timeout);
+      void refreshSnapshots();
+    }
+
     void refreshSnapshots();
+    document.addEventListener("visibilitychange", handleAvailabilityChange);
+    window.addEventListener("online", handleAvailabilityChange);
     return () => {
       disposed = true;
       controller?.abort();
       if (timeout) window.clearTimeout(timeout);
+      document.removeEventListener(
+        "visibilitychange",
+        handleAvailabilityChange,
+      );
+      window.removeEventListener("online", handleAvailabilityChange);
     };
   }, [
     companyScopeId,
@@ -699,7 +1117,9 @@ export function useOccupancyComparisonCards({
     needsSnapshots,
     snapshotScopeKey,
     snapshotSelectionKey,
-    snapshotRefreshMs,
+    effectiveSnapshotRefreshMs,
+    timeZone,
+    userId,
   ]);
 
   React.useEffect(() => {
@@ -709,6 +1129,7 @@ export function useOccupancyComparisonCards({
     let timeout: number | undefined;
     let controller: AbortController | null = null;
     let requestGeneration = 0;
+    let refreshRunning = false;
 
     function scheduleNext(
       boundary?: Date,
@@ -726,6 +1147,18 @@ export function useOccupancyComparisonCards({
     }
 
     async function refreshAggregates() {
+      if (disposed || refreshRunning) return;
+      refreshRunning = true;
+      try {
+        await runAggregateRefresh();
+      } catch (error) {
+        if (!disposed && !controller?.signal.aborted) throw error;
+      } finally {
+        refreshRunning = false;
+      }
+    }
+
+    async function runAggregateRefresh() {
       if (disposed) return;
       if (!settingsReady) return;
       const requestedAt = new Date();
@@ -737,7 +1170,7 @@ export function useOccupancyComparisonCards({
       const requestedIds = new Set(
         comparisonSelectionKey.split(",").filter(Boolean),
       );
-      const requestedScenarios = scopedScenarios.filter((scenario) =>
+      let requestedScenarios = scopedScenarios.filter((scenario) =>
         requestedIds.has(scenario.id),
       );
       if (!companyScopeId || !requestedScenarios.length) {
@@ -751,7 +1184,10 @@ export function useOccupancyComparisonCards({
         });
         return;
       }
-      if (document.visibilityState !== "visible") {
+      if (
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
+      ) {
         scheduleNext(range.to);
         return;
       }
@@ -762,9 +1198,16 @@ export function useOccupancyComparisonCards({
         requestedIds,
       );
       if (sharedFocus.covered && !sharedFocus.series) {
-        // The focused dashboard owns this exact request. Wait for its
-        // certified result instead of racing it with an equivalent GET.
-        return;
+        // The parent owns this exact focused request. Do not serialize every
+        // other scenario behind it: load the remaining rows in parallel and
+        // merge the focused series when its readiness change reruns the hook.
+        requestedScenarios = requestedScenarios.filter(
+          (scenario) => scenario.id !== focusScenarioId,
+        );
+        if (!requestedScenarios.length) {
+          scheduleNext(range.to, false, aggregateRefreshMs);
+          return;
+        }
       }
       const windowKey = occupancyComparisonRangeKey(range);
       const freshnessRemainingMs = occupancyComparisonFreshnessRemainingMs(
@@ -772,7 +1215,9 @@ export function useOccupancyComparisonCards({
         {
           now: requestedAt,
           refreshMs: aggregateRefreshMs,
-          refreshVersion: manualRefreshVersion,
+          // Closed hours stay in the per-scenario cache. The live cadence
+          // revisits only the last (open) hour assembled below.
+          refreshVersion: 0,
           scopeKey: aggregateScopeKey,
           windowKey,
         },
@@ -796,6 +1241,23 @@ export function useOccupancyComparisonCards({
       controller?.abort();
       const requestController = new AbortController();
       controller = requestController;
+      const scheduleQuery = createOccupancyQueryScheduler(
+        requestController.signal,
+        MAX_PARALLEL_REQUESTS,
+        OCCUPANCY_LIVE_QUERY_REQUEST_LIMIT,
+      );
+      const cachePrefix = `${userId ?? ""}|${companyScopeId}|${timeZone}|`;
+      const warmSeries = requestedScenarios.flatMap((scenario) => {
+        if (scenario.id === focusScenarioId && sharedFocus.series) {
+          return [sharedFocus.series];
+        }
+        const cached = hourlyAggregateCacheRef.current.get(
+          `${cachePrefix}${scenario.id}`,
+        );
+        return cached
+          ? [{ ...cached.series, name: scenario.name }]
+          : [];
+      });
       setAggregateDataset((current) =>
         current.scopeKey === aggregateScopeKey &&
         current.from !== null &&
@@ -808,9 +1270,9 @@ export function useOccupancyComparisonCards({
           : {
               buckets: range.buckets,
               from: range.from,
-              loading: true,
+              loading: warmSeries.length !== requestedScenarios.length,
               scopeKey: aggregateScopeKey,
-              series: [],
+              series: warmSeries,
               to: range.to,
             },
       );
@@ -818,19 +1280,74 @@ export function useOccupancyComparisonCards({
         requestedScenarios,
         MAX_PARALLEL_REQUESTS,
         async (scenario): Promise<OccupancyScenarioHourlySeries> => {
+          const cacheKey = `${cachePrefix}${scenario.id}`;
           if (
             scenario.id === focusScenarioId &&
             sharedFocus.series
           ) {
+            setBoundedComparisonCacheEntry(
+              hourlyAggregateCacheRef.current,
+              cacheKey,
+              {
+                attemptedBucketKeys: new Set(
+                  range.buckets.slice(0, -1).map((bucket) =>
+                    occupancyAggregateBucketKey(bucket, "hour"),
+                  ),
+                ),
+                completedAt: requestedAt.getTime(),
+                coverageRetryBucketKeys: new Set<number>(),
+                lastFullAttemptAt: requestedAt.getTime(),
+                retryAt: 0,
+                series: sharedFocus.series,
+              },
+            );
             return sharedFocus.series;
           }
+          const cached = hourlyAggregateCacheRef.current.get(cacheKey);
+          if (cached && cached.retryAt > requestedAt.getTime()) {
+            return { ...cached.series, name: scenario.name };
+          }
+          const requestedBucketKeys = new Set(
+            range.buckets.map((bucket) =>
+              occupancyAggregateBucketKey(bucket, "hour"),
+            ),
+          );
+          const firstUnattemptedBucket = range.buckets.find(
+            (bucket) =>
+              !cached?.attemptedBucketKeys.has(
+                occupancyAggregateBucketKey(bucket, "hour"),
+              ),
+          );
+          const fullRefresh =
+            !cached ||
+            requestedAt.getTime() < cached.lastFullAttemptAt ||
+            requestedAt.getTime() - cached.lastFullAttemptAt >=
+              HOURLY_AGGREGATE_FULL_REFRESH_MS;
+          const sourceFrom = fullRefresh
+            ? range.from
+            : (firstUnattemptedBucket ?? range.buckets.at(-1)!);
+          const sourceBuckets = range.buckets.filter(
+            (bucket) => bucket.getTime() >= sourceFrom.getTime(),
+          );
           try {
             requireCompanyTimeZone(timeZone);
-            const response =
-              await apiFetch<OccupancyScenarioAggregateResponse>(
-                occupancyAggregatePath(scenario.id, range.from, range.to),
-                { companyScopeId, signal: requestController.signal },
-              );
+            const aggregatePath = occupancyAggregatePath(
+              scenario.id,
+              sourceFrom,
+              range.to,
+            );
+            const response = await scheduleQuery(
+              aggregatePath,
+              () => fetchSharedOccupancyQuery<OccupancyScenarioAggregateResponse>({
+                cacheTtlMs: aggregateRefreshMs,
+                companyScopeId,
+                path: aggregatePath,
+                priority: "background",
+                scenarioId: scenario.id,
+                signal: requestController.signal,
+                timeZone,
+              }),
+            );
             const rows = requireOccupancyAggregateRows(
               response,
               "hour",
@@ -847,7 +1364,7 @@ export function useOccupancyComparisonCards({
             const coverage = aggregateOccupancyRowsForRequestedBuckets(
               rows,
               "hour",
-              range.buckets,
+              sourceBuckets,
               {
                 allowDocumentedAggregateResponse: true,
                 expectedTimezone: timeZone,
@@ -855,8 +1372,33 @@ export function useOccupancyComparisonCards({
                 requireCertification: true,
               },
             );
-            return {
-              metrics: coverage.totals,
+            const metrics = new Map(
+              fullRefresh
+                ? []
+                : Array.from(cached?.series.metrics ?? []).filter(([key]) =>
+                    requestedBucketKeys.has(key),
+                  ),
+            );
+            coverage.totals.forEach((metric, bucket) =>
+              metrics.set(bucket, metric),
+            );
+            const coverageState =
+              updateOccupancyScenarioHeatmapAttemptedBuckets({
+                fullRefresh,
+                granularity: "hour",
+                missingBuckets: coverage.missingBuckets,
+                previous: cached?.attemptedBucketKeys ?? new Set<number>(),
+                previousRetry:
+                  cached?.coverageRetryBucketKeys ?? new Set<number>(),
+                refreshedBuckets: sourceBuckets.filter((bucket) =>
+                  coverage.totals.has(
+                    occupancyAggregateBucketKey(bucket, "hour"),
+                  ),
+                ),
+                requestedBuckets: range.buckets,
+              });
+            const nextSeries: OccupancyScenarioHourlySeries = {
+              metrics,
               name: scenario.name,
               scenarioId: scenario.id,
               warning: joinMessages(
@@ -864,20 +1406,60 @@ export function useOccupancyComparisonCards({
                 occupancyAggregateMetadataWarning(response, "hour"),
                 occupancyAggregateCoverageWarning(
                   coverage.missingBuckets.length,
-                  range.buckets.length,
+                  sourceBuckets.length,
                 ),
               ),
             };
+            setBoundedComparisonCacheEntry(
+              hourlyAggregateCacheRef.current,
+              cacheKey,
+              {
+                attemptedBucketKeys: coverageState.attemptedBucketKeys,
+                completedAt: Date.now(),
+                coverageRetryBucketKeys:
+                  coverageState.coverageRetryBucketKeys,
+                lastFullAttemptAt: fullRefresh
+                  ? requestedAt.getTime()
+                  : (cached?.lastFullAttemptAt ?? requestedAt.getTime()),
+                retryAt: 0,
+                series: nextSeries,
+              },
+            );
+            return nextSeries;
           } catch (error) {
-            return {
+            if (requestController.signal.aborted) {
+              return (
+                cached?.series ?? {
+                  metrics: new Map(),
+                  name: scenario.name,
+                  scenarioId: scenario.id,
+                }
+              );
+            }
+            const nextSeries: OccupancyScenarioHourlySeries = {
               error: occupancyRequestError(
                 error,
                 "A série horária não está disponível.",
               ),
-              metrics: new Map(),
+              metrics: cached?.series.metrics ?? new Map(),
               name: scenario.name,
               scenarioId: scenario.id,
             };
+            setBoundedComparisonCacheEntry(
+              hourlyAggregateCacheRef.current,
+              cacheKey,
+              {
+                attemptedBucketKeys:
+                  cached?.attemptedBucketKeys ?? new Set<number>(),
+                completedAt: Date.now(),
+                coverageRetryBucketKeys:
+                  cached?.coverageRetryBucketKeys ?? new Set<number>(),
+                lastFullAttemptAt: cached?.lastFullAttemptAt ?? 0,
+                retryAt: requestedAt.getTime() + HOURLY_AGGREGATE_RETRY_MS,
+                series: nextSeries,
+              },
+            );
+            return nextSeries;
           }
         },
       );
@@ -893,10 +1475,7 @@ export function useOccupancyComparisonCards({
       ) {
         return;
       }
-      if (!sameOccupancyRange(range, latestRange)) {
-        scheduleNext(undefined, true);
-        return;
-      }
+      const rangeChanged = !sameOccupancyRange(range, latestRange);
 
       setAggregateDataset({
         buckets: range.buckets,
@@ -908,27 +1487,32 @@ export function useOccupancyComparisonCards({
       });
       resourceFreshnessRef.current.aggregate =
         completeOccupancyComparisonResource(
-          manualRefreshVersion,
+          0,
           aggregateScopeKey,
           windowKey,
         );
-      scheduleNext(range.to);
+      scheduleNext(range.to, rangeChanged);
     }
 
     function handleVisibilityChange() {
-      if (document.visibilityState !== "visible") return;
+      if (
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
+      ) return;
       if (timeout) window.clearTimeout(timeout);
       void refreshAggregates();
     }
 
     void refreshAggregates();
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleVisibilityChange);
     return () => {
       disposed = true;
       requestGeneration += 1;
       controller?.abort();
       if (timeout) window.clearTimeout(timeout);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleVisibilityChange);
     };
   }, [
     aggregateScopeKey,
@@ -938,12 +1522,434 @@ export function useOccupancyComparisonCards({
     focusHourlyAggregateKey,
     focusScenarioId,
     hourlyAggregateDayCount,
-    manualRefreshVersion,
     needsHourlyAggregate,
     scopedScenarios,
     settingsReady,
     timeZone,
     timeZoneWarning,
+    userId,
+  ]);
+
+  React.useEffect(() => {
+    const granularity = settings.scenarioHeatmapGranularity;
+    if (!scenarioHeatmapVisible || granularity === "hour") return;
+    const civilGranularity =
+      granularity === "minute" ? null : granularity;
+
+    let disposed = false;
+    let timeout: number | undefined;
+    let controller: AbortController | null = null;
+    let requestGeneration = 0;
+    let refreshRunning = false;
+
+    function scheduleNext(delayMs = aggregateRefreshMs) {
+      if (disposed) return;
+      if (timeout) window.clearTimeout(timeout);
+      timeout = window.setTimeout(
+        refreshScenarioHeatmap,
+        Math.max(250, Math.round(delayMs)),
+      );
+    }
+
+    async function refreshScenarioHeatmap() {
+      if (disposed || refreshRunning) return;
+      refreshRunning = true;
+      try {
+        await runScenarioHeatmapRefresh();
+      } catch (error) {
+        if (!disposed && !controller?.signal.aborted) throw error;
+      } finally {
+        refreshRunning = false;
+      }
+    }
+
+    async function runScenarioHeatmapRefresh() {
+      if (disposed || !settingsReady) return;
+      const requestedAt = new Date();
+      const range = buildOccupancyScenarioHeatmapRange(
+        requestedAt,
+        granularity,
+        scenarioHeatmapRangeDayCount,
+        timeZone,
+      );
+      const requestedIds = new Set(
+        scenarioHeatmapSelectionKey.split(",").filter(Boolean),
+      );
+      const requestedScenarios = scopedScenarios.filter((scenario) =>
+        requestedIds.has(scenario.id),
+      );
+      if (!companyScopeId || !requestedScenarios.length) {
+        setScenarioHeatmapDataset({
+          buckets: [],
+          from: null,
+          granularity,
+          loading: false,
+          scopeKey: scenarioHeatmapScopeKey,
+          series: [],
+          to: null,
+        });
+        return;
+      }
+      if (
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
+      ) {
+        scheduleNext();
+        return;
+      }
+
+      const generation = ++requestGeneration;
+      controller?.abort();
+      const requestController = new AbortController();
+      controller = requestController;
+      const cachePrefix = `${userId ?? ""}|${companyScopeId}|${timeZone}|${granularity}|${scenarioHeatmapRangeDayCount}|`;
+      const requestedBucketKeys = new Set(
+        range.buckets.map((bucket) =>
+          occupancyAggregateBucketKey(bucket, granularity),
+        ),
+      );
+      const warmSeries = requestedScenarios.flatMap((scenario) => {
+        const cached = scenarioHeatmapCacheRef.current.get(
+          `${cachePrefix}${scenario.id}`,
+        );
+        return cached
+          ? [filterOccupancySeriesToBucketKeys(cached.series, requestedBucketKeys, scenario.name)]
+          : [];
+      });
+      setScenarioHeatmapDataset((current) =>
+        current.scopeKey === scenarioHeatmapScopeKey &&
+        current.granularity === granularity &&
+        current.from !== null &&
+        current.to !== null &&
+        sameOccupancyRange(
+          { from: current.from, to: current.to },
+          range,
+        )
+          ? current
+          : {
+              buckets: range.buckets,
+              from: range.from,
+              granularity,
+              loading: warmSeries.length !== requestedScenarios.length,
+              scopeKey: scenarioHeatmapScopeKey,
+              series: warmSeries,
+              to: range.to,
+            },
+      );
+
+      const allFresh = requestedScenarios.every((scenario) => {
+        const cached = scenarioHeatmapCacheRef.current.get(
+          `${cachePrefix}${scenario.id}`,
+        );
+        return Boolean(
+          cached &&
+            cached.refreshVersion === manualRefreshVersion &&
+            requestedAt.getTime() - cached.completedAt <
+              aggregateRefreshMs &&
+            range.buckets.slice(0, -1).every((bucket) =>
+              cached.attemptedBucketKeys.has(
+                occupancyAggregateBucketKey(bucket, granularity),
+              ),
+            ),
+        );
+      });
+      if (allFresh) {
+        setScenarioHeatmapDataset({
+          buckets: range.buckets,
+          from: range.from,
+          granularity,
+          loading: false,
+          scopeKey: scenarioHeatmapScopeKey,
+          series: warmSeries,
+          to: range.to,
+        });
+        scheduleNext(aggregateRefreshMs);
+        return;
+      }
+
+      const scheduleQuery = createOccupancyQueryScheduler(
+        requestController.signal,
+        MAX_PARALLEL_REQUESTS,
+        OCCUPANCY_LIVE_QUERY_REQUEST_LIMIT,
+      );
+      const series = await mapWithConcurrency(
+        requestedScenarios,
+        MAX_PARALLEL_REQUESTS,
+        async (scenario): Promise<OccupancyScenarioHourlySeries> => {
+          const cacheKey = `${cachePrefix}${scenario.id}`;
+          const cached = scenarioHeatmapCacheRef.current.get(cacheKey);
+          if (
+            cached &&
+            cached.refreshVersion === manualRefreshVersion &&
+            cached.retryAt > requestedAt.getTime()
+          ) {
+            return filterOccupancySeriesToBucketKeys(
+              cached.series,
+              requestedBucketKeys,
+              scenario.name,
+            );
+          }
+          const firstUnattemptedBucket = range.buckets.find(
+            (bucket) =>
+              !cached?.attemptedBucketKeys.has(
+                occupancyAggregateBucketKey(bucket, granularity),
+              ),
+          );
+          const fullRefresh =
+            !cached ||
+            cached.refreshVersion !== manualRefreshVersion ||
+            requestedAt.getTime() < cached.lastFullAttemptAt ||
+            requestedAt.getTime() - cached.lastFullAttemptAt >=
+              SCENARIO_HEATMAP_FULL_REFRESH_MS;
+          const sourceFrom = fullRefresh
+            ? range.from
+            : (firstUnattemptedBucket ?? range.buckets.at(-1)!);
+          const sourceBuckets = range.buckets.filter(
+            (bucket) => bucket.getTime() >= sourceFrom.getTime(),
+          );
+          try {
+            requireCompanyTimeZone(timeZone);
+            const fetchResponse = (path: string) =>
+              scheduleQuery(path, () =>
+                fetchSharedOccupancyQuery<OccupancyScenarioAggregateResponse>({
+                  bypassCache: fullRefresh && Boolean(cached),
+                  cacheTtlMs: aggregateRefreshMs,
+                  companyScopeId,
+                  path,
+                  priority: granularity === "minute" ? "normal" : "background",
+                  scenarioId: scenario.id,
+                  signal: requestController.signal,
+                  timeZone,
+                }),
+              );
+            const response =
+              granularity === "minute"
+                ? await fetchResponse(
+                    occupancyAggregatePath(
+                      scenario.id,
+                      sourceFrom,
+                      range.to,
+                      granularity,
+                    ),
+                  )
+                : await fetchOccupancyCivilAggregate({
+                    bypassUnitCache: fullRefresh && Boolean(cached),
+                    capabilities: civilAggregateCapabilities,
+                    companyScopeId,
+                    fetchResponse,
+                    from: sourceFrom,
+                    granularity: civilGranularity!,
+                    maximumFallbackRequests:
+                      occupancyLiveCivilFallbackRequestLimit(
+                        civilGranularity!,
+                      ),
+                    openBucket: sourceBuckets.at(-1),
+                    requestedAt,
+                    scenarioId: scenario.id,
+                    signal: requestController.signal,
+                    timeZone,
+                    to: range.to,
+                    unitCache: scenarioHeatmapCivilUnitCacheRef.current,
+                  });
+            const rows = requireOccupancyAggregateRows(
+              response,
+              granularity,
+              scenario.id,
+              timeZone,
+              {
+                allowDocumentedAggregateResponse: true,
+                allowVerifiedCivilAggregateResponse:
+                  granularity !== "minute",
+                expectedTimezone: timeZone,
+                openBucket: sourceBuckets.at(-1),
+                requestedAt,
+                requireCertification: true,
+              },
+            );
+            const coverage = aggregateOccupancyRowsForRequestedBuckets(
+              rows,
+              granularity,
+              sourceBuckets,
+              {
+                allowDocumentedAggregateResponse: true,
+                allowVerifiedCivilAggregateResponse:
+                  granularity !== "minute",
+                expectedTimezone: timeZone,
+                openBucket: sourceBuckets.at(-1),
+                requireCertification: true,
+              },
+            );
+            const metrics = new Map(
+              fullRefresh
+                ? []
+                : Array.from(cached?.series.metrics ?? []).filter(([key]) =>
+                    requestedBucketKeys.has(key),
+                  ),
+            );
+            coverage.totals.forEach((metric, bucket) =>
+              metrics.set(bucket, metric),
+            );
+            const coverageState =
+              updateOccupancyScenarioHeatmapAttemptedBuckets({
+                fullRefresh,
+                granularity,
+                missingBuckets: coverage.missingBuckets,
+                previous: cached?.attemptedBucketKeys ?? new Set<number>(),
+                previousRetry:
+                  cached?.coverageRetryBucketKeys ?? new Set<number>(),
+                refreshedBuckets: sourceBuckets.filter((bucket) =>
+                  coverage.totals.has(
+                    occupancyAggregateBucketKey(bucket, granularity),
+                  ),
+                ),
+                requestedBuckets: range.buckets,
+              });
+            const nextSeries: OccupancyScenarioHourlySeries = {
+              metrics,
+              name: scenario.name,
+              scenarioId: scenario.id,
+              warning: joinMessages(
+                timeZoneWarning,
+                occupancyAggregateMetadataWarning(response, granularity),
+                occupancyAggregateCoverageWarning(
+                  coverage.missingBuckets.length,
+                  sourceBuckets.length,
+                ),
+              ),
+            };
+            setBoundedComparisonCacheEntry(
+              scenarioHeatmapCacheRef.current,
+              cacheKey,
+              {
+                attemptedBucketKeys: coverageState.attemptedBucketKeys,
+                completedAt: Date.now(),
+                coverageRetryBucketKeys:
+                  coverageState.coverageRetryBucketKeys,
+                lastFullAttemptAt: fullRefresh
+                  ? requestedAt.getTime()
+                  : (cached?.lastFullAttemptAt ?? requestedAt.getTime()),
+                refreshVersion: manualRefreshVersion,
+                retryAt: 0,
+                series: nextSeries,
+              },
+            );
+            trimOldestMapEntries(
+              scenarioHeatmapCivilUnitCacheRef.current,
+              MAX_SCENARIO_HEATMAP_CIVIL_UNIT_CACHE_ENTRIES,
+            );
+            return nextSeries;
+          } catch (error) {
+            if (requestController.signal.aborted) {
+              return filterOccupancySeriesToBucketKeys(
+                cached?.series ?? {
+                  metrics: new Map(),
+                  name: scenario.name,
+                  scenarioId: scenario.id,
+                },
+                requestedBucketKeys,
+                scenario.name,
+              );
+            }
+            const nextSeries: OccupancyScenarioHourlySeries = {
+              error: occupancyRequestError(
+                error,
+                `A série por ${occupancyScenarioHeatmapGranularityLabel(granularity)} não está disponível.`,
+              ),
+              metrics: new Map(
+                Array.from(cached?.series.metrics ?? []).filter(([key]) =>
+                  requestedBucketKeys.has(key),
+                ),
+              ),
+              name: scenario.name,
+              scenarioId: scenario.id,
+              warning: cached?.series.warning,
+            };
+            setBoundedComparisonCacheEntry(
+              scenarioHeatmapCacheRef.current,
+              cacheKey,
+              {
+                attemptedBucketKeys:
+                  cached?.attemptedBucketKeys ?? new Set<number>(),
+                completedAt: Date.now(),
+                coverageRetryBucketKeys:
+                  cached?.coverageRetryBucketKeys ?? new Set<number>(),
+                lastFullAttemptAt: cached?.lastFullAttemptAt ?? 0,
+                refreshVersion: cached?.refreshVersion ?? -1,
+                retryAt: requestedAt.getTime() + SCENARIO_HEATMAP_RETRY_MS,
+                series: nextSeries,
+              },
+            );
+            return nextSeries;
+          }
+        },
+      );
+      const latestRange = buildOccupancyScenarioHeatmapRange(
+        new Date(),
+        granularity,
+        scenarioHeatmapRangeDayCount,
+        timeZone,
+      );
+      if (
+        disposed ||
+        requestController.signal.aborted ||
+        generation !== requestGeneration
+      ) {
+        return;
+      }
+      if (!sameOccupancyRange(range, latestRange)) {
+        scheduleNext(0);
+        return;
+      }
+      setScenarioHeatmapDataset({
+        buckets: range.buckets,
+        from: range.from,
+        granularity,
+        loading: false,
+        scopeKey: scenarioHeatmapScopeKey,
+        series,
+        to: range.to,
+      });
+      scheduleNext();
+    }
+
+    function handleAvailabilityChange() {
+      if (
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
+      ) return;
+      if (timeout) window.clearTimeout(timeout);
+      void refreshScenarioHeatmap();
+    }
+
+    void refreshScenarioHeatmap();
+    document.addEventListener("visibilitychange", handleAvailabilityChange);
+    window.addEventListener("online", handleAvailabilityChange);
+    return () => {
+      disposed = true;
+      requestGeneration += 1;
+      controller?.abort();
+      if (timeout) window.clearTimeout(timeout);
+      document.removeEventListener(
+        "visibilitychange",
+        handleAvailabilityChange,
+      );
+      window.removeEventListener("online", handleAvailabilityChange);
+    };
+  }, [
+    aggregateRefreshMs,
+    civilAggregateCapabilities,
+    companyScopeId,
+    manualRefreshVersion,
+    scenarioHeatmapScopeKey,
+    scenarioHeatmapRangeDayCount,
+    scenarioHeatmapSelectionKey,
+    scenarioHeatmapVisible,
+    scopedScenarios,
+    settings.scenarioHeatmapGranularity,
+    settingsReady,
+    timeZone,
+    timeZoneWarning,
+    userId,
   ]);
 
   React.useEffect(() => {
@@ -953,6 +1959,7 @@ export function useOccupancyComparisonCards({
     let timeout: number | undefined;
     let controller: AbortController | null = null;
     let requestGeneration = 0;
+    let refreshRunning = false;
 
     function scheduleNext(
       boundary?: Date,
@@ -970,6 +1977,18 @@ export function useOccupancyComparisonCards({
     }
 
     async function refreshCurrentHourMaximum() {
+      if (disposed || refreshRunning) return;
+      refreshRunning = true;
+      try {
+        await runCurrentHourMaximumRefresh();
+      } catch (error) {
+        if (!disposed && !controller?.signal.aborted) throw error;
+      } finally {
+        refreshRunning = false;
+      }
+    }
+
+    async function runCurrentHourMaximumRefresh() {
       if (disposed || !settingsReady) return;
       const requestedIds = new Set(
         currentHourSelectionKey.split(",").filter(Boolean),
@@ -1010,21 +2029,25 @@ export function useOccupancyComparisonCards({
       const requestedAt = new Date();
       const range = buildOccupancyCurrentHourRange(requestedAt, timeZone);
       const minuteRange = buildOccupancyClosedMinuteRange(requestedAt, timeZone);
+      const aggregateSource = aggregateDatasetRef.current;
       const aggregateCoversCurrentHour = Boolean(
         needsHourlyAggregate &&
-          !aggregateDataset.loading &&
-          aggregateDataset.scopeKey === aggregateScopeKey &&
-          aggregateDataset.from &&
-          aggregateDataset.to &&
-          aggregateDataset.from <= range.from &&
-          aggregateDataset.to >= range.to,
+          !aggregateSource.loading &&
+          aggregateSource.scopeKey === aggregateScopeKey &&
+          aggregateSource.from &&
+          aggregateSource.to &&
+          aggregateSource.from <= range.from &&
+          aggregateSource.to >= range.to,
       );
       if (needsHourlyAggregate && comparisonSelectionKey && !aggregateCoversCurrentHour) {
         // The broader hourly request owns this source. Its state update reruns
         // this effect, avoiding a second request for the same open hour.
         return;
       }
-      if (document.visibilityState !== "visible") {
+      if (
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
+      ) {
         scheduleNext(endOfAggregateBucket(requestedAt, "minute"));
         return;
       }
@@ -1037,19 +2060,17 @@ export function useOccupancyComparisonCards({
         {
           now: requestedAt,
           refreshMs: aggregateRefreshMs,
-          refreshVersion: manualRefreshVersion,
+          refreshVersion: 0,
           scopeKey: currentHourScopeKey,
           windowKey,
         },
       );
       if (freshnessRemainingMs > 0) {
-        if (!needsHourlyAggregate || !comparisonSelectionKey) {
-          scheduleNext(
-            endOfAggregateBucket(requestedAt, "minute"),
-            false,
-            freshnessRemainingMs,
-          );
-        }
+        scheduleNext(
+          endOfAggregateBucket(requestedAt, "minute"),
+          false,
+          freshnessRemainingMs,
+        );
         return;
       }
 
@@ -1057,6 +2078,11 @@ export function useOccupancyComparisonCards({
       controller?.abort();
       const requestController = new AbortController();
       controller = requestController;
+      const scheduleQuery = createOccupancyQueryScheduler(
+        requestController.signal,
+        MAX_PARALLEL_REQUESTS,
+        OCCUPANCY_LIVE_QUERY_REQUEST_LIMIT,
+      );
       setCurrentHourMaximumDataset((current) =>
         current.scopeKey === currentHourScopeKey &&
         current.bucket?.getTime() === range.from.getTime()
@@ -1073,9 +2099,16 @@ export function useOccupancyComparisonCards({
         requestedScenarios,
         MAX_PARALLEL_REQUESTS,
         async (scenario): Promise<OccupancyScenarioOpenMaximumSeries> => {
+          const observedCacheKey = `${userId ?? ""}|${companyScopeId}|${timeZone}|${scenario.id}`;
+          const cachedObservedCandidate =
+            SHARED_OCCUPANCY_CURRENT_HOUR_MAXIMUM_CACHE.get(observedCacheKey);
+          const observedCache =
+            cachedObservedCandidate?.hour === range.from.getTime()
+              ? cachedObservedCandidate
+              : undefined;
           let hourWarning: string | undefined;
-          if (aggregateCoversCurrentHour && aggregateDataset.series.some((item) => item.scenarioId === scenario.id)) {
-            const sharedSeries = aggregateDataset.series.find(
+          if (aggregateCoversCurrentHour && aggregateSource.series.some((item) => item.scenarioId === scenario.id)) {
+            const sharedSeries = aggregateSource.series.find(
               (candidate) => candidate.scenarioId === scenario.id,
             );
             const metric = sharedSeries?.metrics.get(
@@ -1096,20 +2129,25 @@ export function useOccupancyComparisonCards({
                 warning: hourWarning,
               };
             }
-          } else {
+          } else if (!observedCache) {
             try {
-              const response =
-                await apiFetch<OccupancyScenarioAggregateResponse>(
-                  occupancyAggregatePath(
-                    scenario.id,
-                    range.from,
-                    range.to,
-                  ),
-                  {
-                    companyScopeId,
-                    signal: requestController.signal,
-                  },
-                );
+              const hourPath = occupancyAggregatePath(
+                scenario.id,
+                range.from,
+                range.to,
+              );
+              const response = await scheduleQuery(
+                hourPath,
+                () => fetchSharedOccupancyQuery<OccupancyScenarioAggregateResponse>({
+                  cacheTtlMs: aggregateRefreshMs,
+                  companyScopeId,
+                  path: hourPath,
+                  priority: "background",
+                  scenarioId: scenario.id,
+                  signal: requestController.signal,
+                  timeZone,
+                }),
+              );
               const rows = requireOccupancyAggregateRows(
                 response,
                 "hour",
@@ -1187,20 +2225,82 @@ export function useOccupancyComparisonCards({
             };
           }
 
-          try {
-            const minuteResponse =
-              await apiFetch<OccupancyScenarioAggregateResponse>(
-                occupancyAggregatePath(
-                  scenario.id,
-                  minuteRange.from,
-                  minuteRange.to,
-                  "minute",
+          const cachedPeak = observedCache?.minutePeaks.size
+            ? Math.max(...observedCache.minutePeaks.values())
+            : null;
+          if (
+            observedCache &&
+            observedCache.retryAt > requestedAt.getTime()
+          ) {
+            return {
+              error:
+                cachedPeak === null
+                  ? "A atualização da hora será tentada novamente em instantes."
+                  : undefined,
+              name: scenario.name,
+              peaks:
+                cachedPeak === null
+                  ? new Map()
+                  : new Map([
+                      [
+                        occupancyAggregateBucketKey(range.from, "hour"),
+                        cachedPeak,
+                      ],
+                    ]),
+              scenarioId: scenario.id,
+              source: "observed",
+              warning: joinMessages(hourWarning, observedCache.warning),
+            };
+          }
+
+          const sourceFrom = observedCache
+            ? new Date(
+                Math.max(
+                  minuteRange.from.getTime(),
+                  observedCache.through - CURRENT_HOUR_MAXIMUM_OVERLAP_MS,
                 ),
-                {
-                  companyScopeId,
-                  signal: requestController.signal,
-                },
-              );
+              )
+            : minuteRange.from;
+          const sourceBuckets = minuteRange.buckets.filter(
+            (bucket) => bucket >= sourceFrom,
+          );
+          if (!sourceBuckets.length && observedCache) {
+            return {
+              name: scenario.name,
+              peaks:
+                cachedPeak === null
+                  ? new Map()
+                  : new Map([
+                      [
+                        occupancyAggregateBucketKey(range.from, "hour"),
+                        cachedPeak,
+                      ],
+                    ]),
+              scenarioId: scenario.id,
+              source: "observed",
+              warning: joinMessages(hourWarning, observedCache.warning),
+            };
+          }
+
+          try {
+            const minutePath = occupancyAggregatePath(
+              scenario.id,
+              sourceFrom,
+              minuteRange.to,
+              "minute",
+            );
+            const minuteResponse = await scheduleQuery(
+              minutePath,
+              () => fetchSharedOccupancyQuery<OccupancyScenarioAggregateResponse>({
+                cacheTtlMs: aggregateRefreshMs,
+                companyScopeId,
+                path: minutePath,
+                priority: "background",
+                scenarioId: scenario.id,
+                signal: requestController.signal,
+                timeZone,
+              }),
+            );
             const minuteRows = requireOccupancyAggregateRows(
               minuteResponse,
               "minute",
@@ -1215,21 +2315,48 @@ export function useOccupancyComparisonCards({
             const minuteCoverage = aggregateOccupancyRowsForRequestedBuckets(
               minuteRows,
               "minute",
-              minuteRange.buckets,
+              sourceBuckets,
               {
                 allowDocumentedAggregateResponse: true,
                 expectedTimezone: timeZone,
                 requireCertification: true,
               },
             );
-            const minuteMetrics = Array.from(minuteCoverage.totals.values());
-            const peak = minuteMetrics.length
-              ? Math.max(...minuteMetrics.map((metric) => metric.peak))
+            const minutePeaks = new Map(observedCache?.minutePeaks);
+            sourceBuckets.forEach((bucket) =>
+              minutePeaks.delete(
+                occupancyAggregateBucketKey(bucket, "minute"),
+              ),
+            );
+            minuteCoverage.totals.forEach((metric, bucket) =>
+              minutePeaks.set(bucket, metric.peak),
+            );
+            const warning = joinMessages(
+              occupancyAggregateMetadataWarning(minuteResponse, "minute"),
+              occupancyAggregateCoverageWarning(
+                minuteCoverage.missingBuckets.length,
+                sourceBuckets.length,
+              ),
+            );
+            setBoundedComparisonCacheEntry(
+              SHARED_OCCUPANCY_CURRENT_HOUR_MAXIMUM_CACHE,
+              observedCacheKey,
+              {
+                failures: 0,
+                hour: range.from.getTime(),
+                minutePeaks,
+                retryAt: 0,
+                through: minuteRange.to.getTime(),
+                warning,
+              },
+            );
+            const peak = minutePeaks.size
+              ? Math.max(...minutePeaks.values())
               : null;
             return {
               name: scenario.name,
               peaks:
-                peak === null || minuteCoverage.missingBuckets.length
+                peak === null
                   ? new Map()
                   : new Map([
                       [occupancyAggregateBucketKey(range.from, "hour"), peak],
@@ -1238,22 +2365,47 @@ export function useOccupancyComparisonCards({
               source: "observed",
               warning: joinMessages(
                 hourWarning,
-                occupancyAggregateMetadataWarning(minuteResponse, "minute"),
-                occupancyAggregateCoverageWarning(
-                  minuteCoverage.missingBuckets.length,
-                  minuteRange.buckets.length,
-                ),
+                warning,
                 "Hora em andamento composta pelos minutos encerrados e pela leitura ao vivo; permanece marcada como parcial.",
               ),
             };
           } catch (error) {
+            if (requestController.signal.aborted) throw error;
+            const failures = Math.min(
+              (observedCache?.failures ?? 0) + 1,
+              CURRENT_HOUR_MAXIMUM_RETRY_DELAYS_MS.length,
+            );
+            setBoundedComparisonCacheEntry(
+              SHARED_OCCUPANCY_CURRENT_HOUR_MAXIMUM_CACHE,
+              observedCacheKey,
+              {
+                failures,
+                hour: range.from.getTime(),
+                minutePeaks: new Map(observedCache?.minutePeaks),
+                retryAt:
+                  requestedAt.getTime() +
+                  CURRENT_HOUR_MAXIMUM_RETRY_DELAYS_MS[
+                    Math.max(0, failures - 1)
+                  ],
+                through: observedCache?.through ?? minuteRange.from.getTime(),
+                warning: observedCache?.warning,
+              },
+            );
             return {
               error: occupancyRequestError(
                 error,
                 "Não foi possível recompor o máximo da hora aberta.",
               ),
               name: scenario.name,
-              peaks: new Map(),
+              peaks:
+                cachedPeak === null
+                  ? new Map()
+                  : new Map([
+                      [
+                        occupancyAggregateBucketKey(range.from, "hour"),
+                        cachedPeak,
+                      ],
+                    ]),
               scenarioId: scenario.id,
               source: "observed",
               warning: hourWarning,
@@ -1292,45 +2444,48 @@ export function useOccupancyComparisonCards({
       }));
       resourceFreshnessRef.current.currentHourMaximum =
         completeOccupancyComparisonResource(
-          manualRefreshVersion,
+          0,
           currentHourScopeKey,
           windowKey,
         );
-      if (!needsHourlyAggregate || !comparisonSelectionKey) {
-        scheduleNext(endOfAggregateBucket(new Date(), "minute"));
-      }
+      scheduleNext(endOfAggregateBucket(new Date(), "minute"));
     }
 
     function handleVisibilityChange() {
-      if (document.visibilityState !== "visible") return;
+      if (
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
+      ) return;
       if (timeout) window.clearTimeout(timeout);
       void refreshCurrentHourMaximum();
     }
 
     void refreshCurrentHourMaximum();
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleVisibilityChange);
     return () => {
       disposed = true;
       requestGeneration += 1;
       controller?.abort();
       if (timeout) window.clearTimeout(timeout);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleVisibilityChange);
     };
   }, [
     aggregateRefreshMs,
-    aggregateDataset,
+    aggregateAvailabilityKey,
     aggregateScopeKey,
     companyScopeId,
     comparisonSelectionKey,
     currentHourSelectionKey,
     currentHourScopeKey,
-    manualRefreshVersion,
     needsCurrentHourMaximum,
     needsHourlyAggregate,
     scopedScenarios,
     settingsReady,
     timeZone,
     timeZoneWarning,
+    userId,
   ]);
 
   React.useEffect(() => {
@@ -1341,6 +2496,7 @@ export function useOccupancyComparisonCards({
     let controller: AbortController | null = null;
 
     let requestGeneration = 0;
+    let refreshRunning = false;
 
     function scheduleNext(
       boundary?: Date,
@@ -1358,6 +2514,18 @@ export function useOccupancyComparisonCards({
     }
 
     async function refreshMaximumTrends() {
+      if (disposed || refreshRunning) return;
+      refreshRunning = true;
+      try {
+        await runMaximumTrendRefresh();
+      } catch (error) {
+        if (!disposed && !controller?.signal.aborted) throw error;
+      } finally {
+        refreshRunning = false;
+      }
+    }
+
+    async function runMaximumTrendRefresh() {
       if (disposed || !settingsReady) return;
       const requestedAt = new Date();
       const ranges = buildOccupancyMaximumTrendRanges(requestedAt, timeZone);
@@ -1369,30 +2537,47 @@ export function useOccupancyComparisonCards({
         requestedIds.has(scenario.id),
       );
       if (!companyScopeId || !requestedScenarios.length) {
-        setMaximumTrendDataset({
+        const emptyDataset: MaximumTrendDataset = {
           loading: false,
           ranges,
           scopeKey: maximumTrendScopeKey,
           series: [],
-        });
+        };
+        maximumTrendDatasetRef.current = emptyDataset;
+        setMaximumTrendDataset(emptyDataset);
         return;
       }
-      if (document.visibilityState !== "visible") {
+      if (
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
+      ) {
         scheduleNext(nextMonthlyBoundary);
         return;
       }
       const windowKey = occupancyMaximumTrendRangeKey(ranges);
+      const cachePrefix = `${userId ?? ""}|${companyScopeId}|${timeZone}|`;
+      const retryStates = requestedScenarios.flatMap((scenario) => {
+        const retry = SHARED_OCCUPANCY_MAXIMUM_TREND_RETRIES.get(
+          `${cachePrefix}${scenario.id}`,
+        );
+        return retry ? [retry] : [];
+      });
+      const hasRetryReady = retryStates.some(
+        (retry) => retry.retryAt <= requestedAt.getTime(),
+      );
       const freshnessRemainingMs = occupancyComparisonFreshnessRemainingMs(
         resourceFreshnessRef.current.maximumTrend,
         {
           now: requestedAt,
-          refreshMs: maximumTrendRefreshMs,
-          refreshVersion: manualRefreshVersion,
+          refreshMs: aggregateRefreshMs,
+          // Four years of closed history remain warm; the minute cadence reads
+          // only the current-month edge assembled below.
+          refreshVersion: 0,
           scopeKey: maximumTrendScopeKey,
           windowKey,
         },
       );
-      if (freshnessRemainingMs > 0) {
+      if (freshnessRemainingMs > 0 && !hasRetryReady) {
         scheduleNext(
           nextMonthlyBoundary,
           false,
@@ -1417,78 +2602,261 @@ export function useOccupancyComparisonCards({
               series: [],
             },
       );
-      const scheduleQuery = createOccupancyQueryScheduler(requestController.signal);
+      const scheduleQuery = createOccupancyQueryScheduler(
+        requestController.signal,
+        MAX_PARALLEL_REQUESTS,
+        OCCUPANCY_LIVE_QUERY_REQUEST_LIMIT,
+      );
+      const reusableDataset =
+        maximumTrendDatasetRef.current.scopeKey === maximumTrendScopeKey &&
+        maximumTrendDatasetRef.current.ranges &&
+        sameMaximumTrendRanges(
+          maximumTrendDatasetRef.current.ranges,
+          ranges,
+        )
+          ? maximumTrendDatasetRef.current
+          : null;
+      const reusableSeriesById = new Map(
+        (reusableDataset?.series ?? []).map((item) => [
+          item.scenarioId,
+          item,
+        ]),
+      );
       const series = await mapWithConcurrency(
         requestedScenarios,
         MAX_PARALLEL_REQUESTS,
         async (scenario): Promise<OccupancyScenarioHourlySeries> => {
+          const cacheKey = `${cachePrefix}${scenario.id}`;
+          const retained = maximumTrendSeriesCacheRef.current.get(cacheKey);
+          const previous =
+            retained?.rangeKey === windowKey
+              ? retained.series
+              : reusableSeriesById.get(scenario.id);
+          const lastFullRefreshAt =
+            maximumTrendFullRefreshRef.current.get(cacheKey) ?? 0;
+          const retry = SHARED_OCCUPANCY_MAXIMUM_TREND_RETRIES.get(cacheKey);
+          if (retry && retry.retryAt > requestedAt.getTime()) {
+            return (
+              previous ?? {
+                error:
+                  "A atualização dos máximos mensais será tentada novamente em instantes.",
+                metrics: new Map(),
+                name: scenario.name,
+                scenarioId: scenario.id,
+              }
+            );
+          }
+          const fullRefresh =
+            !previous ||
+            requestedAt.getTime() < lastFullRefreshAt ||
+            requestedAt.getTime() - lastFullRefreshAt >=
+              MAXIMUM_TREND_FULL_REFRESH_MS;
+          const currentMonthBucket = ranges.monthlySource.buckets.at(-1)!;
+          // This timestamp represents the last complete-range attempt, not
+          // only perfect coverage. Legitimate empty months or a partial
+          // backend response must not replay four years on the live pulse.
+          if (fullRefresh) {
+            setBoundedComparisonCacheEntry(
+              maximumTrendFullRefreshRef.current,
+              cacheKey,
+              requestedAt.getTime(),
+            );
+          }
+          let nextSeries: OccupancyScenarioHourlySeries;
           try {
             requireCompanyTimeZone(timeZone);
-            // The occupancy API does not accept year. One certified monthly
-            // source feeds both the 12-month chart and the exact annual max.
-            const response = await fetchOccupancyCivilAggregate({
-              scenarioId: scenario.id,
-              granularity: "month",
-              from: ranges.monthlySource.from,
-              to: ranges.monthlySource.to,
-              timeZone,
-              companyScopeId,
-              signal: requestController.signal,
-              requestedAt,
-              openBucket: ranges.monthlySource.buckets.at(-1),
-              fetchResponse: (path) => scheduleQuery(path, () =>
-                apiFetch<OccupancyScenarioAggregateResponse>(path, {
-                  companyScopeId, signal: requestController.signal,
-                })),
-            });
-            const rows = requireOccupancyAggregateRows(
-              response,
-              "month",
-              scenario.id,
-              timeZone,
-              {
-                allowDocumentedAggregateResponse: true,
-                expectedTimezone: timeZone,
-                openBucket: ranges.monthlySource.buckets.at(-1),
+            let metrics: Map<number, OccupancyAggregateMetric>;
+            let refreshWarning: string | undefined;
+            if (fullRefresh) {
+              // The API does not accept year. Audit the four-year monthly
+              // source only on a cold load/day boundary; this is never the
+              // five-second path.
+              const response = await fetchOccupancyCivilAggregate({
+                capabilities: civilAggregateCapabilities,
+                scenarioId: scenario.id,
+                granularity: "month",
+                maximumFallbackRequests:
+                  occupancyLiveCivilFallbackRequestLimit("month"),
+                from: ranges.monthlySource.from,
+                to: ranges.monthlySource.to,
+                timeZone,
+                companyScopeId,
+                signal: requestController.signal,
                 requestedAt,
-                requireCertification: true,
-              },
-            );
-            const coverage = aggregateOccupancyRowsForRequestedBuckets(
-              rows,
-              "month",
-              ranges.monthlySource.buckets,
-              {
-                allowDocumentedAggregateResponse: true,
-                expectedTimezone: timeZone,
-                openBucket: ranges.monthlySource.buckets.at(-1),
-                requireCertification: true,
-              },
-            );
-            return {
-              metrics: coverage.totals,
-              name: scenario.name,
-              scenarioId: scenario.id,
-              warning: joinMessages(
-                timeZoneWarning,
+                openBucket: currentMonthBucket,
+                fetchResponse: (path) => scheduleQuery(path, () =>
+                  fetchSharedOccupancyQuery<OccupancyScenarioAggregateResponse>({
+                    cacheTtlMs: aggregateRefreshMs,
+                    companyScopeId,
+                    path,
+                    priority: "background",
+                    scenarioId: scenario.id,
+                    signal: requestController.signal,
+                    timeZone,
+                  })),
+              });
+              const rows = requireOccupancyAggregateRows(
+                response,
+                "month",
+                scenario.id,
+                timeZone,
+                {
+                  allowDocumentedAggregateResponse: true,
+                  allowVerifiedCivilAggregateResponse: true,
+                  expectedTimezone: timeZone,
+                  openBucket: currentMonthBucket,
+                  requestedAt,
+                  requireCertification: true,
+                },
+              );
+              const coverage = aggregateOccupancyRowsForRequestedBuckets(
+                rows,
+                "month",
+                ranges.monthlySource.buckets,
+                {
+                  allowDocumentedAggregateResponse: true,
+                  allowVerifiedCivilAggregateResponse: true,
+                  expectedTimezone: timeZone,
+                  openBucket: currentMonthBucket,
+                  requireCertification: true,
+                },
+              );
+              metrics = new Map(coverage.totals);
+              refreshWarning = joinMessages(
                 occupancyAggregateMetadataWarning(response, "month"),
                 occupancyAggregateCoverageWarning(
                   coverage.missingBuckets.length,
                   ranges.monthlySource.buckets.length,
                 ),
-              ),
-            };
-          } catch (error) {
-            return {
-              error: occupancyRequestError(
-                error,
-                "Os máximos mensais não estão disponíveis.",
-              ),
-              metrics: new Map(),
+              );
+            } else {
+              // The maximum widgets already demand the current-hour source.
+              // Reuse that certified edge and keep all closed months intact;
+              // in particular, a civil-aggregate fallback never rebuilds the
+              // current month (or four years) every five seconds.
+              const currentHourRange = buildOccupancyCurrentHourRange(
+                requestedAt,
+                timeZone,
+              );
+              const currentHourDataset = currentHourMaximumDatasetRef.current;
+              const openSeries =
+                currentHourDataset.scopeKey === currentHourScopeKey &&
+                currentHourDataset.bucket?.getTime() ===
+                  currentHourRange.from.getTime()
+                  ? currentHourDataset.series.find(
+                      (candidate) => candidate.scenarioId === scenario.id,
+                    )
+                  : undefined;
+              const openPeak = openSeries?.peaks.get(
+                occupancyAggregateBucketKey(currentHourRange.from, "hour"),
+              );
+              metrics = mergeOccupancyMaximumTrendOpenPeak({
+                currentMonth: currentMonthBucket,
+                metrics: previous!.metrics,
+                openPeak,
+              });
+              refreshWarning = joinMessages(
+                previous?.warning,
+                openSeries?.warning,
+                openSeries?.error,
+              );
+            }
+            const missingBuckets = ranges.monthlySource.buckets.filter(
+              (bucket) =>
+                !metrics.has(occupancyAggregateBucketKey(bucket, "month")),
+            ).length;
+            nextSeries = {
+              metrics,
               name: scenario.name,
               scenarioId: scenario.id,
+              warning: joinMessages(
+                timeZoneWarning,
+                refreshWarning,
+                occupancyAggregateCoverageWarning(
+                  missingBuckets,
+                  ranges.monthlySource.buckets.length,
+                ),
+              ),
             };
+            SHARED_OCCUPANCY_MAXIMUM_TREND_RETRIES.delete(cacheKey);
+          } catch (error) {
+            if (requestController.signal.aborted) {
+              if (lastFullRefreshAt > 0) {
+                setBoundedComparisonCacheEntry(
+                  maximumTrendFullRefreshRef.current,
+                  cacheKey,
+                  lastFullRefreshAt,
+                );
+              } else {
+                maximumTrendFullRefreshRef.current.delete(cacheKey);
+              }
+              return (
+                previous ?? {
+                  metrics: new Map(),
+                  name: scenario.name,
+                  scenarioId: scenario.id,
+                }
+              );
+            }
+            if (lastFullRefreshAt > 0) {
+              setBoundedComparisonCacheEntry(
+                maximumTrendFullRefreshRef.current,
+                cacheKey,
+                lastFullRefreshAt,
+              );
+            } else if (fullRefresh) {
+              maximumTrendFullRefreshRef.current.delete(cacheKey);
+            }
+            const failures = Math.min(
+              (SHARED_OCCUPANCY_MAXIMUM_TREND_RETRIES.get(cacheKey)?.failures ??
+                0) + 1,
+              MAXIMUM_TREND_RETRY_DELAYS_MS.length,
+            );
+            setBoundedComparisonCacheEntry(
+              SHARED_OCCUPANCY_MAXIMUM_TREND_RETRIES,
+              cacheKey,
+              {
+                failures,
+                retryAt:
+                  requestedAt.getTime() +
+                  MAXIMUM_TREND_RETRY_DELAYS_MS[Math.max(0, failures - 1)],
+              },
+            );
+            if (previous?.metrics.size) {
+              nextSeries = {
+                ...previous,
+                error: undefined,
+                name: scenario.name,
+                warning: joinMessages(
+                  previous.warning,
+                  occupancyRequestError(
+                    error,
+                    "Não foi possível atualizar o mês em andamento.",
+                  ),
+                ),
+              };
+            } else {
+              nextSeries = {
+                error: occupancyRequestError(
+                  error,
+                  "Os máximos mensais não estão disponíveis.",
+                ),
+                metrics: new Map(),
+                name: scenario.name,
+                scenarioId: scenario.id,
+              };
+            }
           }
+          setBoundedComparisonCacheEntry(
+            maximumTrendSeriesCacheRef.current,
+            cacheKey,
+            {
+              completedAt: requestedAt.getTime(),
+              rangeKey: windowKey,
+              series: nextSeries,
+            },
+          );
+          return nextSeries;
         },
       );
       const latestRanges = buildOccupancyMaximumTrendRanges(new Date(), timeZone);
@@ -1504,92 +2872,168 @@ export function useOccupancyComparisonCards({
         return;
       }
 
-      setMaximumTrendDataset({
+      const nextDataset: MaximumTrendDataset = {
         loading: false,
         ranges,
         scopeKey: maximumTrendScopeKey,
         series,
-      });
+      };
+      maximumTrendDatasetRef.current = nextDataset;
+      setMaximumTrendDataset(nextDataset);
       resourceFreshnessRef.current.maximumTrend =
         completeOccupancyComparisonResource(
-          manualRefreshVersion,
+          0,
           maximumTrendScopeKey,
           windowKey,
         );
-      scheduleNext(nextMonthlyBoundary);
+      const nextRetryAt = requestedScenarios.reduce((earliest, scenario) => {
+        const retryAt = SHARED_OCCUPANCY_MAXIMUM_TREND_RETRIES.get(
+          `${cachePrefix}${scenario.id}`,
+        )?.retryAt;
+        return retryAt === undefined ? earliest : Math.min(earliest, retryAt);
+      }, Number.POSITIVE_INFINITY);
+      scheduleNext(
+        nextMonthlyBoundary,
+        false,
+        Number.isFinite(nextRetryAt)
+          ? Math.max(250, nextRetryAt - Date.now())
+          : maximumTrendRefreshMs,
+      );
     }
 
     function handleVisibilityChange() {
-      if (document.visibilityState !== "visible") return;
+      if (
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false
+      ) return;
       if (timeout) window.clearTimeout(timeout);
       void refreshMaximumTrends();
     }
 
     void refreshMaximumTrends();
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleVisibilityChange);
     return () => {
       disposed = true;
       requestGeneration += 1;
       controller?.abort();
       if (timeout) window.clearTimeout(timeout);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleVisibilityChange);
     };
   }, [
+    aggregateRefreshMs,
+    civilAggregateCapabilities,
     companyScopeId,
+    currentHourScopeKey,
     maximumTrendSelectionKey,
     maximumTrendRefreshMs,
     maximumTrendScopeKey,
-    manualRefreshVersion,
     needsMaximumTrend,
     scopedScenarios,
     settingsReady,
     timeZone,
     timeZoneWarning,
+    userId,
   ]);
 
   const certifiedSnapshots =
-    snapshotDataset.scopeKey === snapshotScopeKey
+    snapshotDataset.scopeKey === snapshotScopeKey || !needsSnapshots
       ? snapshotDataset.snapshots
-      : [];
-  const certifiedAggregate =
-    aggregateDataset.scopeKey === aggregateScopeKey
-      ? aggregateDataset
-      : {
-          buckets: [],
-          from: null,
-          loading: true,
-          scopeKey: aggregateScopeKey,
-          series: [],
-          to: null,
-        };
-  const certifiedMaximumTrend =
-    maximumTrendDataset.scopeKey === maximumTrendScopeKey
-      ? maximumTrendDataset
-      : {
-          loading: true,
-          ranges: null,
-          scopeKey: maximumTrendScopeKey,
-          series: [],
-        };
-  const certifiedCurrentHourMaximum =
-    currentHourMaximumDataset.scopeKey === currentHourScopeKey
-      ? currentHourMaximumDataset
-      : {
-          bucket: null,
-          loading: true,
-          scopeKey: currentHourScopeKey,
-          series: [],
-        };
+      : EMPTY_OCCUPANCY_SNAPSHOTS;
+  const certifiedAggregate = React.useMemo<AggregateDataset>(
+    () =>
+      aggregateDataset.scopeKey === aggregateScopeKey || !needsHourlyAggregate
+        ? aggregateDataset
+        : {
+            buckets: EMPTY_OCCUPANCY_BUCKETS,
+            from: null,
+            loading: true,
+            scopeKey: aggregateScopeKey,
+            series: EMPTY_OCCUPANCY_HOURLY_SERIES,
+            to: null,
+          },
+    [aggregateDataset, aggregateScopeKey, needsHourlyAggregate],
+  );
+  const certifiedScenarioHeatmap = React.useMemo<ScenarioHeatmapDataset>(
+    () => {
+      const granularity = settings.scenarioHeatmapGranularity;
+      if (granularity === "hour") {
+        return { ...certifiedAggregate, granularity };
+      }
+      return (scenarioHeatmapDataset.scopeKey === scenarioHeatmapScopeKey ||
+          !scenarioHeatmapVisible) &&
+        scenarioHeatmapDataset.granularity === granularity
+        ? scenarioHeatmapDataset
+        : {
+            buckets: EMPTY_OCCUPANCY_BUCKETS,
+            from: null,
+            granularity,
+            loading: true,
+            scopeKey: scenarioHeatmapScopeKey,
+            series: EMPTY_OCCUPANCY_HOURLY_SERIES,
+            to: null,
+          };
+    },
+    [
+      certifiedAggregate,
+      scenarioHeatmapDataset,
+      scenarioHeatmapScopeKey,
+      scenarioHeatmapVisible,
+      settings.scenarioHeatmapGranularity,
+    ],
+  );
+  const certifiedMaximumTrend = React.useMemo<MaximumTrendDataset>(
+    () =>
+      maximumTrendDataset.scopeKey === maximumTrendScopeKey ||
+      !needsMaximumTrend
+        ? maximumTrendDataset
+        : {
+            loading: true,
+            ranges: null,
+            scopeKey: maximumTrendScopeKey,
+            series: EMPTY_OCCUPANCY_HOURLY_SERIES,
+          },
+    [maximumTrendDataset, maximumTrendScopeKey, needsMaximumTrend],
+  );
+  const certifiedCurrentHourMaximum = React.useMemo<CurrentHourMaximumDataset>(
+    () =>
+      currentHourMaximumDataset.scopeKey === currentHourScopeKey ||
+      !needsCurrentHourMaximum
+        ? currentHourMaximumDataset
+        : {
+            bucket: null,
+            loading: true,
+            scopeKey: currentHourScopeKey,
+            series: EMPTY_OCCUPANCY_OPEN_MAXIMUM_SERIES,
+          },
+    [
+      currentHourMaximumDataset,
+      currentHourScopeKey,
+      needsCurrentHourMaximum,
+    ],
+  );
   const snapshotLoading =
-    snapshotDataset.scopeKey !== snapshotScopeKey || snapshotDataset.loading;
+    needsSnapshots &&
+    (snapshotDataset.scopeKey !== snapshotScopeKey || snapshotDataset.loading);
   const aggregateLoading =
-    aggregateDataset.scopeKey !== aggregateScopeKey || aggregateDataset.loading;
+    needsHourlyAggregate &&
+    (aggregateDataset.scopeKey !== aggregateScopeKey ||
+      aggregateDataset.loading);
+  const scenarioHeatmapLoading =
+    settings.scenarioHeatmapGranularity === "hour"
+      ? aggregateLoading
+      : scenarioHeatmapVisible &&
+        (scenarioHeatmapDataset.scopeKey !== scenarioHeatmapScopeKey ||
+          scenarioHeatmapDataset.loading);
   const maximumTrendLoading =
-    maximumTrendDataset.scopeKey !== maximumTrendScopeKey ||
-    maximumTrendDataset.loading;
+    needsMaximumTrend &&
+    (maximumTrendDataset.scopeKey !== maximumTrendScopeKey ||
+      maximumTrendDataset.loading);
   const currentHourMaximumLoading =
-    currentHourMaximumDataset.scopeKey !== currentHourScopeKey ||
-    currentHourMaximumDataset.loading;
+    needsCurrentHourMaximum &&
+    (currentHourMaximumDataset.scopeKey !== currentHourScopeKey ||
+      currentHourMaximumDataset.loading);
   const hourlyMaximumBuckets = React.useMemo(() => {
     const anchorBucket =
       certifiedCurrentHourMaximum.bucket ?? certifiedAggregate.buckets.at(-1);
@@ -1599,19 +3043,36 @@ export function useOccupancyComparisonCards({
       (bucket) => localDateKey(bucket, timeZone) === latestDayKey,
     );
   }, [certifiedAggregate.buckets, certifiedCurrentHourMaximum.bucket, timeZone]);
-  const hourlyMaximumSeries = certifiedAggregate.series.length
-    ? certifiedAggregate.series
-    : certifiedCurrentHourMaximum.series.map((scenario) => ({
-        error: scenario.error,
-        metrics: new Map(),
-        name: scenario.name,
-        scenarioId: scenario.scenarioId,
-        warning: scenario.warning,
-      }));
+  const hourlyMaximumSeries = React.useMemo(
+    () =>
+      certifiedAggregate.series.length
+        ? certifiedAggregate.series
+        : certifiedCurrentHourMaximum.series.map((scenario) => ({
+            error: scenario.error,
+            metrics: new Map(),
+            name: scenario.name,
+            scenarioId: scenario.scenarioId,
+            warning: scenario.warning,
+          })),
+    [certifiedAggregate.series, certifiedCurrentHourMaximum.series],
+  );
   const heatmapScenarioId = selectionPlan.byCard.get("occupancy_day_hour_heatmap")?.[0] ?? "";
   const scenarioHourHeatmapDateKeys = React.useMemo(
-    () => Array.from(new Set(certifiedAggregate.buckets.map((bucket) => localDateKey(bucket, timeZone)))),
-    [certifiedAggregate.buckets, timeZone],
+    () =>
+      settings.scenarioHeatmapGranularity === "hour"
+        ? Array.from(
+            new Set(
+              certifiedAggregate.buckets.map((bucket) =>
+                localDateKey(bucket, timeZone),
+              ),
+            ),
+          )
+        : [],
+    [
+      certifiedAggregate.buckets,
+      settings.scenarioHeatmapGranularity,
+      timeZone,
+    ],
   );
   const scenarioHourHeatmapDateKey =
     scenarioHourHeatmapDateKeys.includes(settings.scenarioHourHeatmapDateKey)
@@ -1623,21 +3084,117 @@ export function useOccupancyComparisonCards({
   const selectedHexColorPalette = getOccupancyColorPalette(
     settings.hexColorPaletteId,
   );
-  const resolveCardScenarioIds = (cardId: string, { scenarioSelection }: LayoutCardRenderContext) =>
-    resolveOccupancyComparisonScenarioIds({
-      availableScenarioIds: scopedScenarios.map((scenario) => scenario.id),
-      cardId,
-      inheritedHeatmapScenarioId,
+  const availableScenarioIds = React.useMemo(
+    () => scopedScenarios.map((scenario) => scenario.id),
+    [scopedScenarios],
+  );
+  const resolveCardScenarioIds = React.useCallback(
+    (cardId: string, { scenarioSelection }: LayoutCardRenderContext) =>
+      resolveOccupancyComparisonScenarioIds({
+        availableScenarioIds,
+        cardId,
+        inheritedHeatmapScenarioId,
+        inheritedScenarioIds: selectedScenarioIds,
+        selection: scenarioSelection,
+      }),
+    [availableScenarioIds, inheritedHeatmapScenarioId, selectedScenarioIds],
+  );
+  const rowFilterCache = React.useMemo(
+    () =>
+      new WeakMap<
+        readonly OccupancyScenarioRow[],
+        Map<string, readonly OccupancyScenarioRow[]>
+      >(),
+    [],
+  );
+  const filterRowsForScenarios = React.useCallback(
+    function filterRowsForScenarios<T extends OccupancyScenarioRow>(
+      rows: readonly T[],
+      scenarioIds: readonly string[],
+    ): T[] {
+      const selectionKey = scenarioIds.join("\u001f");
+      let rowsBySelection = rowFilterCache.get(rows);
+      const cached = rowsBySelection?.get(selectionKey);
+      if (cached) return cached as T[];
+
+      const filtered = filterOccupancyComparisonRows(rows, scenarioIds);
+      if (!rowsBySelection) {
+        rowsBySelection = new Map();
+        rowFilterCache.set(rows, rowsBySelection);
+      }
+      rowsBySelection.set(selectionKey, filtered);
+      return filtered;
+    },
+    [rowFilterCache],
+  );
+  const scenarioFilterCache = React.useMemo(
+    () =>
+      new WeakMap<
+        readonly OccupancyScenario[],
+        Map<string, OccupancyScenario[]>
+      >(),
+    [],
+  );
+  const filterScenarios = React.useCallback(
+    (scenarioIds: readonly string[]) => {
+      const selectionKey = scenarioIds.join("\u001f");
+      let scenariosBySelection = scenarioFilterCache.get(scopedScenarios);
+      const cached = scenariosBySelection?.get(selectionKey);
+      if (cached) return cached;
+
+      const scenarioById = new Map(
+        scopedScenarios.map((scenario) => [scenario.id, scenario]),
+      );
+      const filtered = scenarioIds.flatMap((scenarioId) => {
+        const scenario = scenarioById.get(scenarioId);
+        return scenario ? [scenario] : [];
+      });
+      if (!scenariosBySelection) {
+        scenariosBySelection = new Map();
+        scenarioFilterCache.set(scopedScenarios, scenariosBySelection);
+      }
+      scenariosBySelection.set(selectionKey, filtered);
+      return filtered;
+    },
+    [scenarioFilterCache, scopedScenarios],
+  );
+  const heatmapMaximumCache = React.useMemo(
+    () =>
+      new WeakMap<
+        readonly OccupancyScenarioHourlySeries[],
+        Map<OccupancyComparisonMetricKey, number>
+      >(),
+    [],
+  );
+  const heatmapMaximum = React.useCallback(
+    (
+      series: OccupancyScenarioHourlySeries[],
+      metric: OccupancyComparisonMetricKey,
+    ) => {
+      let maximumByMetric = heatmapMaximumCache.get(series);
+      const cached = maximumByMetric?.get(metric);
+      if (cached !== undefined) return cached;
+
+      const maximum = sharedHeatmapMaximum(series, metric);
+      if (!maximumByMetric) {
+        maximumByMetric = new Map();
+        heatmapMaximumCache.set(series, maximumByMetric);
+      }
+      maximumByMetric.set(metric, maximum);
+      return maximum;
+    },
+    [heatmapMaximumCache],
+  );
+  const scenarioCardDefaults = React.useMemo(
+    () => ({
       inheritedScenarioIds: selectedScenarioIds,
-      selection: scenarioSelection,
-    });
-  const scenarioCardDefaults = {
-    inheritedScenarioIds: selectedScenarioIds,
-    inheritedScenarioLabel: "Seleção salva da visão",
-    scenarioConfigurable: true,
-    scenarioSelectionPolicy: "compare" as const,
-  };
-  const cards: ComparisonLayoutCard[] = [
+      inheritedScenarioLabel: "Seleção salva da visão",
+      scenarioConfigurable: true,
+      scenarioSelectionPolicy: "compare" as const,
+    }),
+    [selectedScenarioIds],
+  );
+  const snapshotDependentCards = React.useMemo<ComparisonLayoutCard[]>(() => [
     {
       colorEditable: false,
       defaultHeight: "tall",
@@ -1665,7 +3222,10 @@ export function useOccupancyComparisonCards({
         settings.comparisonChartType === "bars" ? "horizontal" : "vertical",
       node: (context) => {
         const scenarioIds = resolveCardScenarioIds("occupancy_scenario_half_donut", context);
-        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        const snapshots = filterRowsForScenarios(
+          certifiedSnapshots,
+          scenarioIds,
+        );
         return (
         <OccupancyHalfDonutCard
           timeZone={timeZone}
@@ -1674,7 +3234,7 @@ export function useOccupancyComparisonCards({
           loading={snapshotLoading}
           mode={settings.comparisonMode}
           requestedAt={snapshotDataset.requestedAt}
-          snapshots={filter(certifiedSnapshots)}
+          snapshots={snapshots}
           statusColors={DEFAULT_OCCUPANCY_STATUS_COLORS}
         />
         );
@@ -1692,17 +3252,21 @@ export function useOccupancyComparisonCards({
       label: "Ranking ao vivo por cenário",
       previewColors: selectedColorPalette.colors,
       previewKind: "ranking",
+      scenarioOrderingDisabled: true,
       node: (context) => {
         const scenarioIds = resolveCardScenarioIds("occupancy_scenario_bar_race", context);
-        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        const snapshots = filterRowsForScenarios(
+          certifiedSnapshots,
+          scenarioIds,
+        );
         return (
         <OccupancyBarRaceCard
           timeZone={timeZone}
           loading={snapshotLoading}
           colorPalette={selectedColorPalette.colors}
           requestedAt={snapshotDataset.requestedAt}
-          refreshSeconds={Math.max(1, Math.round(snapshotRefreshMs / 1_000))}
-          snapshots={filter(certifiedSnapshots)}
+          refreshSeconds={Math.max(1, Math.round(effectiveSnapshotRefreshMs / 1_000))}
+          snapshots={snapshots}
         />
         );
       },
@@ -1722,49 +3286,31 @@ export function useOccupancyComparisonCards({
       previewKind: "chart",
       node: (context) => {
         const scenarioIds = resolveCardScenarioIds("occupancy_scenario_max_hour", context);
-        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        const snapshots = filterRowsForScenarios(
+          certifiedSnapshots,
+          scenarioIds,
+        );
+        const currentSeries = filterRowsForScenarios(
+          certifiedCurrentHourMaximum.series,
+          scenarioIds,
+        );
+        const series = filterRowsForScenarios(
+          hourlyMaximumSeries,
+          scenarioIds,
+        );
         return (
         <OccupancyScenarioMaximumLineCard
           timeZone={timeZone}
-          allScenarios={scopedScenarios.filter((scenario) => scenarioIds.includes(scenario.id))}
+          allScenarios={filterScenarios(scenarioIds)}
           buckets={hourlyMaximumBuckets}
           colorPalette={selectedColorPalette.colors}
           currentBucket={certifiedCurrentHourMaximum.bucket}
-          currentSnapshots={filter(certifiedSnapshots)}
-          currentSeries={filter(certifiedCurrentHourMaximum.series)}
+          currentSnapshots={snapshots}
+          currentSeries={currentSeries}
           granularity="hour"
           loading={aggregateLoading && currentHourMaximumLoading}
-          refreshSeconds={Math.max(1, Math.round(snapshotRefreshMs / 1_000))}
-          series={filter(hourlyMaximumSeries)}
-        />
-        );
-      },
-      titleEditable: true,
-      zoomEnabled: true,
-    },
-    {
-      colorEditable: false,
-      defaultHeight: "standard",
-      defaultHeightLevel: 4,
-      defaultSize: "wide",
-      ...scenarioCardDefaults,
-      id: "occupancy_scenario_max_month",
-      label: "Máximo por mês por cenário",
-      previewChartType: "line",
-      previewColors: selectedColorPalette.colors,
-      previewKind: "chart",
-      node: (context) => {
-        const scenarioIds = resolveCardScenarioIds("occupancy_scenario_max_month", context);
-        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
-        return (
-        <OccupancyScenarioMaximumLineCard
-          timeZone={timeZone}
-          allScenarios={scopedScenarios.filter((scenario) => scenarioIds.includes(scenario.id))}
-          buckets={certifiedMaximumTrend.ranges?.monthly.buckets ?? []}
-          colorPalette={selectedColorPalette.colors}
-          granularity="month"
-          loading={maximumTrendLoading}
-          series={filter(certifiedMaximumTrend.series)}
+          refreshSeconds={Math.max(1, Math.round(aggregateRefreshMs / 1_000))}
+          series={series}
         />
         );
       },
@@ -1784,22 +3330,37 @@ export function useOccupancyComparisonCards({
       previewKind: "chart",
       node: (context) => {
         const scenarioIds = resolveCardScenarioIds("occupancy_scenario_max_year", context);
-        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
+        const snapshots = filterRowsForScenarios(
+          certifiedSnapshots,
+          scenarioIds,
+        );
+        const currentSeries = filterRowsForScenarios(
+          certifiedCurrentHourMaximum.series,
+          scenarioIds,
+        );
+        const series = filterRowsForScenarios(
+          certifiedMaximumTrend.series,
+          scenarioIds,
+        );
         return (
         <OccupancyScenarioMaximumLineCard
           timeZone={timeZone}
-          allScenarios={scopedScenarios.filter((scenario) => scenarioIds.includes(scenario.id))}
-          buckets={certifiedMaximumTrend.ranges?.annual.buckets ?? []}
+          allScenarios={filterScenarios(scenarioIds)}
+          buckets={
+            certifiedMaximumTrend.ranges?.annual.buckets ??
+            EMPTY_OCCUPANCY_BUCKETS
+          }
           colorPalette={selectedColorPalette.colors}
           currentBucket={certifiedCurrentHourMaximum.bucket}
-          currentSnapshots={filter(certifiedSnapshots)}
-          currentSeries={filter(certifiedCurrentHourMaximum.series)}
+          currentSnapshots={snapshots}
+          currentSeries={currentSeries}
           granularity="year"
           loading={maximumTrendLoading}
           monthlySourceBuckets={
-            certifiedMaximumTrend.ranges?.monthlySource.buckets ?? []
+            certifiedMaximumTrend.ranges?.monthlySource.buckets ??
+            EMPTY_OCCUPANCY_BUCKETS
           }
-          series={filter(certifiedMaximumTrend.series)}
+          series={series}
         />
         );
       },
@@ -1842,119 +3403,267 @@ export function useOccupancyComparisonCards({
       titleEditable: true,
       zoomEnabled: true,
     },
-    {
-      colorEditable: false,
-      defaultHeight: "tall",
-      defaultSize: "full",
-      ...scenarioCardDefaults,
-      id: "occupancy_day_hour_heatmap",
-      configurationContent: !monitorMode ? <OccupancyComparisonOptions
-        cardId="occupancy_day_hour_heatmap"
-        settings={settings}
-        onChange={updateSettings}
-        dateKey={scenarioHourHeatmapDateKey}
-        dateKeys={scenarioHourHeatmapDateKeys}
-        scenarios={scopedScenarios}
-        snapshots={certifiedSnapshots}
-        defaultScenarioIds={selectedScenarioIds}
-      /> : undefined,
-      scenarioSelectionPolicy: "single",
-      inheritedScenarioIds: inheritedHeatmapScenarioId ? [inheritedHeatmapScenarioId] : [],
-      inheritedScenarioLabel: scopedScenarios.find((scenario) => scenario.id === inheritedHeatmapScenarioId)?.name ?? "Cenário da visão",
-      label: "Ocupação por dias x horários",
-      previewColors: selectedColorPalette.colors,
-      previewKind: "heatmap",
-      node: (context) => {
-        const scenarioIds = resolveCardScenarioIds("occupancy_day_hour_heatmap", context);
-        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
-        return (
-        <OccupancyDayHourHeatmapCard
-          timeZone={timeZone}
-          buckets={certifiedAggregate.buckets}
-          colorPalette={selectedColorPalette.colors}
-          dayCount={settings.dayCount}
-          loading={aggregateLoading}
-          maximum={sharedHeatmapMaximum(
-            filter(certifiedAggregate.series),
-            settings.metric,
-          )}
-          metric={settings.metric}
-          scenarioId={scenarioIds[0] ?? ""}
-          series={filter(certifiedAggregate.series)}
-        />
-        );
-      },
-      titleEditable: true,
-      zoomEnabled: true,
-    },
-    {
-      colorEditable: false,
-      defaultHeight: "tall",
-      defaultSize: "full",
-      ...scenarioCardDefaults,
-      id: "occupancy_scenario_hour_heatmap",
-      configurationContent: !monitorMode ? <OccupancyComparisonOptions
-        cardId="occupancy_scenario_hour_heatmap"
-        settings={settings}
-        onChange={updateSettings}
-        dateKey={scenarioHourHeatmapDateKey}
-        dateKeys={scenarioHourHeatmapDateKeys}
-        scenarios={scopedScenarios}
-        snapshots={certifiedSnapshots}
-        defaultScenarioIds={selectedScenarioIds}
-      /> : undefined,
-      label: "Ocupação por cenários x horários",
-      previewColors: selectedColorPalette.colors,
-      previewKind: "heatmap",
-      node: (context) => {
-        const scenarioIds = resolveCardScenarioIds("occupancy_scenario_hour_heatmap", context);
-        const filter = <T extends { scenarioId: string }>(rows: readonly T[]) => filterOccupancyComparisonRows(rows, scenarioIds);
-        return (
-        <OccupancyScenarioHourHeatmapCard
-          timeZone={timeZone}
-          buckets={certifiedAggregate.buckets}
-          colorPalette={selectedColorPalette.colors}
-          loading={aggregateLoading}
-          maximum={sharedHeatmapMaximum(
-            filter(certifiedAggregate.series),
-            settings.metric,
-          )}
-          metric={settings.metric}
-          dateKey={scenarioHourHeatmapDateKey}
-          series={filter(certifiedAggregate.series)}
-        />
-        );
-      },
-      titleEditable: true,
-      zoomEnabled: true,
-    },
-  ];
-
-  const reportAssets = buildOccupancyComparisonReportAssets({
-    timeZone,
-    aggregateBuckets: certifiedAggregate.buckets,
-    aggregateSeries: certifiedAggregate.series,
-    currentHourBucket: certifiedCurrentHourMaximum.bucket,
-    currentHourSeries: certifiedCurrentHourMaximum.series,
-    heatmapScenarioId,
-    hexSnapshots: certifiedSnapshots,
+  ], [
+    aggregateLoading,
+    certifiedCurrentHourMaximum,
+    certifiedMaximumTrend,
+    certifiedSnapshots,
+    filterRowsForScenarios,
+    filterScenarios,
     hourlyMaximumBuckets,
     hourlyMaximumSeries,
-    maximumTrendRanges: certifiedMaximumTrend.ranges,
-    maximumTrendSeries: certifiedMaximumTrend.series,
+    maximumTrendLoading,
+    monitorMode,
+    resolveCardScenarioIds,
+    scenarioCardDefaults,
     scenarioHourHeatmapDateKey,
-    scenarios: scopedScenarios,
-    selectionsByCard: selectionPlan.byCard,
+    scenarioHourHeatmapDateKeys,
+    scopedScenarios,
+    selectedColorPalette.colors,
+    selectedHexColorPalette.colors,
     selectedScenarioIds,
     settings,
-    snapshots: certifiedSnapshots,
-  });
+    snapshotDataset.requestedAt,
+    snapshotLoading,
+    aggregateRefreshMs,
+    effectiveSnapshotRefreshMs,
+    timeZone,
+    updateSettings,
+    currentHourMaximumLoading,
+  ]);
 
-  return { cards, refresh, reportAssets, settings, updateSettings };
+  const snapshotIndependentCards = React.useMemo<ComparisonLayoutCard[]>(
+    () => [
+      {
+        colorEditable: false,
+        defaultHeight: "standard",
+        defaultHeightLevel: 4,
+        defaultSize: "wide",
+        ...scenarioCardDefaults,
+        id: "occupancy_scenario_max_month",
+        label: "Máximo por mês por cenário",
+        previewChartType: "line",
+        previewColors: selectedColorPalette.colors,
+        previewKind: "chart",
+        node: (context) => {
+          const scenarioIds = resolveCardScenarioIds(
+            "occupancy_scenario_max_month",
+            context,
+          );
+          const series = filterRowsForScenarios(
+            certifiedMaximumTrend.series,
+            scenarioIds,
+          );
+          return (
+            <OccupancyScenarioMaximumLineCard
+              timeZone={timeZone}
+              allScenarios={filterScenarios(scenarioIds)}
+              buckets={
+                certifiedMaximumTrend.ranges?.monthly.buckets ??
+                EMPTY_OCCUPANCY_BUCKETS
+              }
+              colorPalette={selectedColorPalette.colors}
+              granularity="month"
+              loading={maximumTrendLoading}
+              series={series}
+            />
+          );
+        },
+        titleEditable: true,
+        zoomEnabled: true,
+      },
+      {
+        colorEditable: false,
+        defaultHeight: "tall",
+        defaultSize: "full",
+        ...scenarioCardDefaults,
+        id: "occupancy_day_hour_heatmap",
+        configurationContent: !monitorMode ? (
+          <OccupancyComparisonOptions
+            cardId="occupancy_day_hour_heatmap"
+            settings={settings}
+            onChange={updateSettings}
+            dateKey={scenarioHourHeatmapDateKey}
+            dateKeys={scenarioHourHeatmapDateKeys}
+            scenarios={scopedScenarios}
+            snapshots={EMPTY_OCCUPANCY_SNAPSHOTS}
+            defaultScenarioIds={selectedScenarioIds}
+          />
+        ) : undefined,
+        scenarioSelectionPolicy: "single",
+        inheritedScenarioIds: inheritedHeatmapScenarioId
+          ? [inheritedHeatmapScenarioId]
+          : [],
+        inheritedScenarioLabel:
+          scopedScenarios.find(
+            (scenario) => scenario.id === inheritedHeatmapScenarioId,
+          )?.name ?? "Cenário da visão",
+        label: "Ocupação por dias x horários",
+        previewColors: selectedColorPalette.colors,
+        previewKind: "heatmap",
+        node: (context) => {
+          const scenarioIds = resolveCardScenarioIds(
+            "occupancy_day_hour_heatmap",
+            context,
+          );
+          const series = filterRowsForScenarios(
+            certifiedAggregate.series,
+            scenarioIds,
+          );
+          return (
+            <OccupancyDayHourHeatmapCard
+              timeZone={timeZone}
+              buckets={certifiedAggregate.buckets}
+              colorPalette={selectedColorPalette.colors}
+              dayCount={settings.dayCount}
+              loading={aggregateLoading}
+              maximum={heatmapMaximum(series, settings.metric)}
+              metric={settings.metric}
+              scenarioId={scenarioIds[0] ?? ""}
+              series={series}
+            />
+          );
+        },
+        titleEditable: true,
+        zoomEnabled: true,
+      },
+      {
+        colorEditable: false,
+        defaultHeight: "tall",
+        defaultSize: "full",
+        ...scenarioCardDefaults,
+        id: "occupancy_scenario_hour_heatmap",
+        configurationContent: !monitorMode ? (
+          <OccupancyComparisonOptions
+            cardId="occupancy_scenario_hour_heatmap"
+            settings={settings}
+            onChange={updateSettings}
+            dateKey={scenarioHourHeatmapDateKey}
+            dateKeys={scenarioHourHeatmapDateKeys}
+            scenarios={scopedScenarios}
+            snapshots={EMPTY_OCCUPANCY_SNAPSHOTS}
+            defaultScenarioIds={selectedScenarioIds}
+          />
+        ) : undefined,
+        label: `Ocupação por cenários x ${occupancyScenarioHeatmapGranularityLabel(
+          settings.scenarioHeatmapGranularity,
+        )}`,
+        previewColors: selectedColorPalette.colors,
+        previewKind: "heatmap",
+        node: (context) => {
+          const scenarioIds = resolveCardScenarioIds(
+            "occupancy_scenario_hour_heatmap",
+            context,
+          );
+          const series = filterRowsForScenarios(
+            certifiedScenarioHeatmap.series,
+            scenarioIds,
+          );
+          return (
+            <OccupancyScenarioHourHeatmapCard
+              timeZone={timeZone}
+              buckets={certifiedScenarioHeatmap.buckets}
+              colorPalette={selectedColorPalette.colors}
+              dayCount={settings.dayCount}
+              granularity={settings.scenarioHeatmapGranularity}
+              loading={scenarioHeatmapLoading}
+              metric={settings.metric}
+              dateKey={scenarioHourHeatmapDateKey}
+              series={series}
+            />
+          );
+        },
+        titleEditable: true,
+        zoomEnabled: true,
+      },
+    ],
+    [
+      aggregateLoading,
+      certifiedAggregate,
+      certifiedMaximumTrend,
+      certifiedScenarioHeatmap,
+      filterRowsForScenarios,
+      filterScenarios,
+      heatmapMaximum,
+      inheritedHeatmapScenarioId,
+      maximumTrendLoading,
+      monitorMode,
+      resolveCardScenarioIds,
+      scenarioCardDefaults,
+      scenarioHourHeatmapDateKey,
+      scenarioHourHeatmapDateKeys,
+      scenarioHeatmapLoading,
+      scopedScenarios,
+      selectedColorPalette.colors,
+      selectedScenarioIds,
+      settings,
+      timeZone,
+      updateSettings,
+    ],
+  );
+  const cards = React.useMemo(() => {
+    const cardById = new Map(
+      [...snapshotDependentCards, ...snapshotIndependentCards].map((card) => [
+        card.id,
+        card,
+      ]),
+    );
+    return OCCUPANCY_COMPARISON_CARD_IDS.flatMap((cardId) => {
+      const card = cardById.get(cardId);
+      return card ? [card] : [];
+    });
+  }, [snapshotDependentCards, snapshotIndependentCards]);
+
+  const getReportAssets = React.useCallback(
+    () =>
+      buildOccupancyComparisonReportAssets({
+        timeZone,
+        aggregateBuckets: certifiedAggregate.buckets,
+        aggregateSeries: certifiedAggregate.series,
+        currentHourBucket: certifiedCurrentHourMaximum.bucket,
+        currentHourSeries: certifiedCurrentHourMaximum.series,
+        heatmapScenarioId,
+        hexSnapshots: certifiedSnapshots,
+        hourlyMaximumBuckets,
+        hourlyMaximumSeries,
+        maximumTrendRanges: certifiedMaximumTrend.ranges,
+        maximumTrendSeries: certifiedMaximumTrend.series,
+        scenarioHeatmapBuckets: certifiedScenarioHeatmap.buckets,
+        scenarioHeatmapSeries: certifiedScenarioHeatmap.series,
+        scenarioHourHeatmapDateKey,
+        scenarios: scopedScenarios,
+        selectionsByCard: selectionPlan.byCard,
+        selectedScenarioIds,
+        settings,
+        snapshots: certifiedSnapshots,
+      }),
+    [
+      certifiedAggregate.buckets,
+      certifiedAggregate.series,
+      certifiedCurrentHourMaximum.bucket,
+      certifiedCurrentHourMaximum.series,
+      certifiedMaximumTrend.ranges,
+      certifiedMaximumTrend.series,
+      certifiedScenarioHeatmap.buckets,
+      certifiedScenarioHeatmap.series,
+      certifiedSnapshots,
+      heatmapScenarioId,
+      hourlyMaximumBuckets,
+      hourlyMaximumSeries,
+      scenarioHourHeatmapDateKey,
+      scopedScenarios,
+      selectedScenarioIds,
+      selectionPlan.byCard,
+      settings,
+      timeZone,
+    ],
+  );
+
+  return { cards, getReportAssets, refresh, settings, updateSettings };
 }
 
 function buildOccupancyComparisonReportAssets({
-  timeZone,
+  timeZone = "UTC",
   aggregateBuckets,
   aggregateSeries,
   currentHourBucket,
@@ -1965,6 +3674,8 @@ function buildOccupancyComparisonReportAssets({
   hourlyMaximumSeries,
   maximumTrendRanges,
   maximumTrendSeries,
+  scenarioHeatmapBuckets = aggregateBuckets,
+  scenarioHeatmapSeries = aggregateSeries,
   scenarioHourHeatmapDateKey,
   scenarios,
   selectionsByCard,
@@ -1982,6 +3693,8 @@ function buildOccupancyComparisonReportAssets({
   hourlyMaximumSeries: OccupancyScenarioHourlySeries[];
   maximumTrendRanges: OccupancyMaximumTrendRanges | null;
   maximumTrendSeries: OccupancyScenarioHourlySeries[];
+  scenarioHeatmapBuckets?: Date[];
+  scenarioHeatmapSeries?: OccupancyScenarioHourlySeries[];
   scenarioHourHeatmapDateKey: string;
   scenarios: OccupancyScenario[];
   selectionsByCard?: ReadonlyMap<string, readonly string[]>;
@@ -2159,7 +3872,10 @@ function buildOccupancyComparisonReportAssets({
 
   const dayHourSeries = aggregateSeries.find((item) => item.scenarioId ===
     (selectionsByCard?.get("occupancy_day_hour_heatmap")?.[0] ?? (selectionsByCard?.has("occupancy_day_hour_heatmap") ? "" : heatmapScenarioId)));
-  const scenarioHourSeries = filterForCard("occupancy_scenario_hour_heatmap", aggregateSeries);
+  const scenarioPeriodSeries = filterForCard(
+    "occupancy_scenario_hour_heatmap",
+    scenarioHeatmapSeries,
+  );
   const dayHourMatrix = dayHourSeries
     ? buildDaysHoursOccupancyCells({
         timeZone,
@@ -2169,15 +3885,38 @@ function buildOccupancyComparisonReportAssets({
       })
     : { cells: [], dayKeys: [] };
   const dayHourLabels = dayHourMatrix.dayKeys.map(formatHeatmapDateKey);
-  const scenarioHourMatrix = scenarioHourHeatmapDateKey
-    ? buildScenariosHoursOccupancyCells({
-        timeZone,
-        buckets: aggregateBuckets,
-        dateKey: scenarioHourHeatmapDateKey,
-        metric: settings.metric,
-        series: scenarioHourSeries,
-      })
-    : { cells: [], scenarioNames: [] };
+  const scenarioHeatmapGranularity = settings.scenarioHeatmapGranularity;
+  const scenarioPeriodMatrix = buildOccupancyScenarioPeriodHeatmap({
+    timeZone,
+    buckets: scenarioHeatmapBuckets,
+    dateKey:
+      scenarioHeatmapGranularity === "hour"
+        ? scenarioHourHeatmapDateKey || undefined
+        : undefined,
+    granularity: scenarioHeatmapGranularity,
+    metric: settings.metric,
+    series: scenarioPeriodSeries,
+  });
+  const scenarioPeriodLabel = occupancyScenarioHeatmapGranularityLabel(
+    scenarioHeatmapGranularity,
+  );
+  const scenarioPeriodTitle = `Ocupação por cenários x ${scenarioPeriodLabel}`;
+  const scenarioPeriodDescription = `Período: ${occupancyScenarioHeatmapPeriodDescription(
+    scenarioHeatmapGranularity,
+    settings.dayCount,
+    scenarioHourHeatmapDateKey,
+  )}. Os cenários não são somados e as lacunas permanecem sem valor.`;
+  const scenarioPeriodNotice = occupancyAggregatePresentationWarning(
+    joinMessages(
+      ...scenarioPeriodSeries.flatMap((scenario) => [
+        scenario.error,
+        scenario.warning,
+      ]),
+    ),
+  );
+  const scenarioPeriodSeriesById = new Map(
+    scenarioPeriodSeries.map((scenario) => [scenario.scenarioId, scenario]),
+  );
 
   return [
     {
@@ -2369,42 +4108,57 @@ function buildOccupancyComparisonReportAssets({
     {
       cardId: "occupancy_scenario_hour_heatmap",
       chart: {
-        description: `Comparação dos cenários nas 24 horas de ${
-          scenarioHourHeatmapDateKey || "data ainda indisponível"
-        }; lacunas permanecem sem valor.`,
+        description: joinMessages(
+          scenarioPeriodDescription,
+          scenarioPeriodNotice
+            ? `Atualização parcial: ${scenarioPeriodNotice}`
+            : undefined,
+        ),
         option: buildHeatmapOption({
-          cells: scenarioHourMatrix.cells,
+          cells: scenarioPeriodMatrix.cells,
+          granularity: scenarioHeatmapGranularity,
           interactive: false,
-          maximum: sharedHeatmapMaximum(scenarioHourSeries, settings.metric),
+          maximum: heatmapCellsMaximum(scenarioPeriodMatrix.cells),
           metric: settings.metric,
           theme,
           widgetColor,
-          xLabels: OCCUPANCY_FIXED_HOUR_LABELS,
-          yLabels: scenarioHourMatrix.scenarioNames,
+          xLabels: scenarioPeriodMatrix.labels,
+          yLabels: scenarioPeriodMatrix.scenarioNames,
         }),
         table: {
           columns: [
-            { key: "date", label: "Data" },
-            { key: "hour", label: "Hora" },
+            ...(scenarioHeatmapGranularity === "hour"
+              ? [{ key: "date", label: "Data" }]
+              : []),
+            {
+              key: "period",
+              label:
+                scenarioHeatmapGranularity === "hour" ? "Hora" : "Período",
+            },
             { key: "scenario", label: "Cenário" },
             { key: "metric", label: "Métrica" },
             { key: "value", label: "Ocupação", numeric: true },
             { key: "certification", label: "Disponibilidade" },
           ],
           description:
-            "A data é a mesma selecionada no widget; cenários não são somados e ausência não representa zero.",
-          rows: scenarioHourMatrix.cells.map((cell) => ({
-            certification:
-              cell.value === null ? "Sem dados" : "Disponível",
-            date: scenarioHourHeatmapDateKey || null,
-            hour: OCCUPANCY_FIXED_HOUR_LABELS[cell.y] ?? `${cell.y}h`,
-            metric: metricLabel(settings.metric),
-            scenario: scenarioHourMatrix.scenarioNames[cell.x] ?? null,
+            "O período é o mesmo selecionado no widget; cenários não são somados e ausência não representa zero.",
+          rows: scenarioPeriodMatrix.cells.map((cell) => ({
+            certification: scenarioHeatmapCertificationLabel(
+              cell.value,
+              scenarioPeriodSeriesById.get(cell.scenarioId),
+            ),
+            date:
+              scenarioHeatmapGranularity === "hour"
+                ? scenarioHourHeatmapDateKey || null
+                : undefined,
+            metric: metricLabel(settings.metric, scenarioHeatmapGranularity),
+            period: scenarioPeriodMatrix.labels[cell.y] ?? null,
+            scenario: scenarioPeriodMatrix.scenarioNames[cell.x] ?? null,
             value: cell.value,
           })),
-          title: "Dados - Ocupação por cenários x horários",
+          title: `Dados - ${scenarioPeriodTitle}`,
         },
-        title: "Ocupação por cenários x horários",
+        title: scenarioPeriodTitle,
       },
     },
   ];
@@ -2555,17 +4309,48 @@ function OccupancyComparisonOptions({
       />}
     </div>;
   }
+  const scenarioPeriodCard = cardId === "occupancy_scenario_hour_heatmap";
+  const showDayCount =
+    cardId === "occupancy_day_hour_heatmap" ||
+    (scenarioPeriodCard && settings.scenarioHeatmapGranularity === "day");
   return <div className="grid min-w-0 gap-3">
-    {cardId === "occupancy_day_hour_heatmap" ? <Select value={String(settings.dayCount)} onValueChange={(value) => onChange({ dayCount: Number(value) as 7 | 14 | 30 })}>
-      <SelectTrigger aria-label="Período do mapa de calor por dias e horários" className="w-full min-w-0"><SelectValue /></SelectTrigger>
+    {scenarioPeriodCard ? (
+      <Select
+        value={settings.scenarioHeatmapGranularity}
+        onValueChange={(scenarioHeatmapGranularity) =>
+          onChange({
+            scenarioHeatmapGranularity:
+              scenarioHeatmapGranularity as OccupancyScenarioHeatmapGranularity,
+          })
+        }
+      >
+        <SelectTrigger
+          aria-label="Granularidade do mapa de calor por cenário"
+          className="h-9 w-full min-w-0"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="minute">Minuto a minuto</SelectItem>
+          <SelectItem value="hour">Hora a hora</SelectItem>
+          <SelectItem value="day">Dia a dia</SelectItem>
+          <SelectItem value="week">Semana a semana</SelectItem>
+          <SelectItem value="month">Mês a mês</SelectItem>
+        </SelectContent>
+      </Select>
+    ) : null}
+    {showDayCount ? <Select value={String(settings.dayCount)} onValueChange={(value) => onChange({ dayCount: Number(value) as 7 | 14 | 30 })}>
+      <SelectTrigger aria-label="Período do mapa de calor por dias e horários" className="h-9 w-full min-w-0"><SelectValue /></SelectTrigger>
       <SelectContent>
         <SelectItem value="7">7 dias</SelectItem>
         <SelectItem value="14">14 dias</SelectItem>
         <SelectItem value="30">30 dias</SelectItem>
       </SelectContent>
-    </Select> : dateKey ? <Input
+    </Select> : null}
+    {scenarioPeriodCard && settings.scenarioHeatmapGranularity === "hour" ? <Input
       aria-label="Data do mapa de calor por cenário"
-      className="w-full min-w-0"
+      className="h-9 w-full min-w-0"
+      disabled={!dateKeys.length}
       min={dateKeys[0]}
       max={dateKeys.at(-1)}
       type="date"
@@ -2574,7 +4359,13 @@ function OccupancyComparisonOptions({
         if (dateKeys.includes(event.target.value)) onChange({ scenarioHourHeatmapDateKey: event.target.value });
       }}
     /> : null}
-    <MetricSelect onChange={(metric) => { onChange({ metric }); }} value={settings.metric} />
+    <MetricSelect
+      granularity={
+        scenarioPeriodCard ? settings.scenarioHeatmapGranularity : "hour"
+      }
+      onChange={(metric) => { onChange({ metric }); }}
+      value={settings.metric}
+    />
   </div>;
 }
 
@@ -2619,10 +4410,40 @@ function OccupancyHalfDonutCard({
     () => buildOccupancyHalfDonutEntries(snapshots, mode),
     [mode, snapshots],
   );
+  const effectiveAt = React.useMemo(
+    () => occupancySnapshotEffectiveAt(snapshots, requestedAt),
+    [requestedAt, snapshots],
+  );
   const barEntries = React.useMemo(
     () => buildOccupancyComparisonBarEntries(snapshots, mode),
     [mode, snapshots],
   );
+  const axisScopeKey = React.useMemo(
+    () =>
+      occupancyComparisonAxisScopeKey(
+        snapshots.map((snapshot) => snapshot.scenarioId),
+      ),
+    [snapshots],
+  );
+  const instantaneousAxisMemory = React.useMemo(
+    () =>
+      updateOccupancyComparisonAxisMemory(
+        { maximum: 1, scopeKey: "" },
+        axisScopeKey,
+        barEntries.map((entry) => entry.total),
+      ),
+    [axisScopeKey, barEntries],
+  );
+  const [rememberedAxisMemory, setRememberedAxisMemory] = React.useState(
+    instantaneousAxisMemory,
+  );
+  const stableAxisMaximum =
+    rememberedAxisMemory.scopeKey === axisScopeKey
+      ? Math.max(
+          rememberedAxisMemory.maximum,
+          instantaneousAxisMemory.maximum,
+        )
+      : instantaneousAxisMemory.maximum;
   const scenarioIndexes = React.useMemo(
     () =>
       new Map(
@@ -2642,6 +4463,7 @@ function OccupancyHalfDonutCard({
             effectiveTheme,
             scenarioIndexes,
             chartContainerWidth,
+            stableAxisMaximum,
           )
         : chartType === "vertical_bars"
           ? buildCurrentComparisonVerticalBarOption(
@@ -2653,6 +4475,7 @@ function OccupancyHalfDonutCard({
               effectiveTheme,
               scenarioIndexes,
               chartContainerWidth,
+              stableAxisMaximum,
             )
         : buildHalfDonutOption(
             entries,
@@ -2673,6 +4496,7 @@ function OccupancyHalfDonutCard({
       entries,
       mode,
       scenarioIndexes,
+      stableAxisMaximum,
       widgetColor,
     ],
   );
@@ -2689,6 +4513,14 @@ function OccupancyHalfDonutCard({
     OCCUPANCY_STATUS_COLOR_PRESETS.find(
       (candidate) => candidate.id === statusColors.preset,
     )?.label ?? "Personalizado";
+
+  React.useEffect(() => {
+    setRememberedAxisMemory((currentMemory) =>
+      updateOccupancyComparisonAxisMemory(currentMemory, axisScopeKey, [
+        instantaneousAxisMemory.maximum,
+      ]),
+    );
+  }, [axisScopeKey, instantaneousAxisMemory.maximum]);
 
   React.useEffect(() => {
     const container = chartContainerRef.current;
@@ -2794,9 +4626,9 @@ function OccupancyHalfDonutCard({
         ) : (
           <EmptyComparisonState text="Nenhum cenário possui leitura disponível neste momento." />
         )}
-        {requestedAt ? (
+        {effectiveAt ? (
           <div className="mt-1 text-[11px] text-muted-foreground">
-            Mesmo instante consultado: {formatDateTime(requestedAt, timeZone)}.
+            Leitura efetiva: {formatDateTime(effectiveAt, timeZone)}.
           </div>
         ) : null}
       </CardContent>
@@ -2840,18 +4672,18 @@ function OccupancyHalfDonutCompactFallback({
           ? "Ocupado"
           : "Desocupado"
         : percentage === null
-          ? formatChartNumber(entry.total)
-          : `${formatChartNumber(entry.total)} · ${formatChartNumber(percentage)}%`;
+          ? formatOccupancyCount(entry.total)
+          : `${formatOccupancyCount(entry.total)} · ${formatChartNumber(percentage)}%`;
     const accessibleLabel =
       mode === "status"
         ? `${indexLabel} · ${entry.name}: ${
             entry.state === "occupied" ? "ocupado" : "desocupado"
           }`
         : percentage === null
-          ? `${indexLabel} · ${entry.name}: ocupação ${formatChartNumber(
+          ? `${indexLabel} · ${entry.name}: ocupação ${formatOccupancyCount(
               entry.total,
             )}; total geral igual a zero`
-          : `${indexLabel} · ${entry.name}: ocupação ${formatChartNumber(
+          : `${indexLabel} · ${entry.name}: ocupação ${formatOccupancyCount(
               entry.total,
             )}, participação ${formatChartNumber(percentage)} por cento`;
     const color = halfDonutEntryColor(
@@ -3287,6 +5119,10 @@ function OccupancyBarRaceCard({
     () => buildOccupancyLiveRaceEntries(snapshots),
     [snapshots],
   );
+  const effectiveAt = React.useMemo(
+    () => occupancySnapshotEffectiveAt(snapshots, requestedAt),
+    [requestedAt, snapshots],
+  );
   const option = React.useMemo(
     () =>
       buildLiveBarRaceOption(
@@ -3309,7 +5145,7 @@ function OccupancyBarRaceCard({
               <WidgetTitleText fallback="Ranking ao vivo por cenário" />
             </CardTitle>
             <CardDescription className="mt-1 [overflow-wrap:anywhere]">
-              Ranking da ocupação total neste instante, atualizado no Ao Vivo a
+              Ranking da ocupação total neste instante, verificado no Ao Vivo a
               cada {refreshSeconds} segundos.
             </CardDescription>
           </div>
@@ -3321,16 +5157,16 @@ function OccupancyBarRaceCard({
         ) : entries.length ? (
           <>
             <EChart
-              ariaDescription={`Ranking da ocupação total neste instante, atualizado a cada ${refreshSeconds} segundos.`}
+              ariaDescription={`Ranking da ocupação total neste instante, verificado a cada ${refreshSeconds} segundos.`}
               ariaLabel="Ranking ao vivo por cenário"
               option={option}
               mergeUpdates
               themeMode="explicit"
               className="h-full min-h-0 w-full flex-1"
             />
-            {requestedAt ? (
+            {effectiveAt ? (
               <div className="text-[11px] text-muted-foreground">
-                Mesmo instante consultado: {formatDateTime(requestedAt, timeZone)}.
+                Leitura efetiva: {formatDateTime(effectiveAt, timeZone)}.
               </div>
             ) : null}
           </>
@@ -3729,7 +5565,10 @@ function OccupancyDayHourHeatmapCard({
         : { cells: [], dayKeys: [] },
     [buckets, metric, selectedSeries, timeZone],
   );
-  const dayLabels = matrix.dayKeys.map(formatHeatmapDateKey);
+  const dayLabels = React.useMemo(
+    () => matrix.dayKeys.map(formatHeatmapDateKey),
+    [matrix.dayKeys],
+  );
   const option = React.useMemo(
     () =>
       buildHeatmapOption({
@@ -3751,6 +5590,7 @@ function OccupancyDayHourHeatmapCard({
       icon={<Grid3X3 className="h-4 w-4 shrink-0 text-primary" />}
       loading={loading}
       metric={metric}
+      notice={joinMessages(selectedSeries?.error, selectedSeries?.warning)}
       title="Ocupação por dias x horários"
 
     >
@@ -3774,17 +5614,19 @@ function OccupancyScenarioHourHeatmapCard({
   buckets,
   colorPalette,
   dateKey,
+  dayCount,
+  granularity,
   loading,
-  maximum,
   metric,
   series,
 }: {
   buckets: Date[];
   colorPalette: readonly string[];
   dateKey: string;
+  dayCount: 7 | 14 | 30;
+  granularity: OccupancyScenarioHeatmapGranularity;
   loading: boolean;
   timeZone: string;
-  maximum: number;
   metric: OccupancyComparisonMetricKey;
   series: OccupancyScenarioHourlySeries[];
 }) {
@@ -3792,58 +5634,74 @@ function OccupancyScenarioHourHeatmapCard({
   const { effectiveTheme } = useTheme();
   const matrix = React.useMemo(
     () =>
-      dateKey
-        ? buildScenariosHoursOccupancyCells({
-            timeZone,
-            buckets,
-            dateKey,
-            metric,
-            series,
-          })
-        : { cells: [], scenarioNames: [] },
-    [buckets, dateKey, metric, series, timeZone],
+      buildOccupancyScenarioPeriodHeatmap({
+        timeZone,
+        buckets,
+        dateKey: granularity === "hour" ? dateKey || undefined : undefined,
+        granularity,
+        metric,
+        series,
+      }),
+    [buckets, dateKey, granularity, metric, series, timeZone],
   );
   const option = React.useMemo(
     () =>
       buildHeatmapOption({
         cells: matrix.cells,
-        maximum,
+        granularity,
+        maximum: heatmapCellsMaximum(matrix.cells),
         metric,
         theme: effectiveTheme,
         widgetColor,
-        xLabels: OCCUPANCY_FIXED_HOUR_LABELS,
+        xLabels: matrix.labels,
         yLabels: matrix.scenarioNames,
       }),
     [
       effectiveTheme,
       matrix.cells,
+      matrix.labels,
       matrix.scenarioNames,
-      maximum,
+      granularity,
       metric,
       widgetColor,
     ],
   );
+  const granularityLabel = occupancyScenarioHeatmapGranularityLabel(granularity);
+  const periodDescription = occupancyScenarioHeatmapPeriodDescription(
+    granularity,
+    dayCount,
+    dateKey,
+  );
+  const sourceNotice = React.useMemo(
+    () =>
+      joinMessages(
+        ...series.flatMap((scenario) => [scenario.error, scenario.warning]),
+      ),
+    [series],
+  );
 
   return (
     <OccupancyHeatmapCardShell
-      description="Compara cada cenário nas 24 horas da data escolhida, sem somar cenários nem preencher lacunas com zero."
+      description={`Período: ${periodDescription}. Os cenários não são somados e as lacunas não são preenchidas com zero.`}
       fallbackColor={colorPalette[0]}
+      granularity={granularity}
       icon={<Grid3X3 className="h-4 w-4 shrink-0 text-primary" />}
       loading={loading}
       metric={metric}
-      title="Ocupação por cenários x horários"
+      notice={sourceNotice}
+      title={`Ocupação por cenários x ${granularityLabel}`}
 
     >
       {matrix.cells.length ? (
         <EChart
-          ariaDescription={`Mapa de ${metricLabel(metric)} com horários de 00h a 23h no eixo horizontal e um cenário por linha na data selecionada.`}
-          ariaLabel="Ocupação por cenários e horários"
+          ariaDescription={`Mapa de ocupação com ${metricLabel(metric, granularity)}; ${granularityLabel} no eixo horizontal e um cenário por linha.`}
+          ariaLabel={`Ocupação por cenários e ${granularityLabel}`}
           option={option}
           themeMode="explicit"
           className="h-full min-h-0 w-full"
         />
       ) : (
-        <EmptyComparisonState text="Nenhuma célula horária está disponível para a data." />
+        <EmptyComparisonState text="Nenhum período está disponível para os cenários selecionados." />
       )}
     </OccupancyHeatmapCardShell>
   );
@@ -3853,28 +5711,36 @@ function OccupancyHeatmapCardShell({
   children,
   description,
   fallbackColor,
+  granularity = "hour",
   icon,
   loading,
   metric,
+  notice,
   title,
 }: {
   children: React.ReactNode;
   description: string;
   fallbackColor: string;
+  granularity?: OccupancyScenarioHeatmapGranularity;
   icon: React.ReactNode;
   loading: boolean;
   metric: OccupancyComparisonMetricKey;
+  notice?: string;
   title: string;
 }) {
+  const visibleNotice = occupancyAggregatePresentationWarning(notice);
   const widgetColor = useWidgetColor(fallbackColor);
   const { effectiveTheme } = useTheme();
   const heatmapColors = React.useMemo(
     () => occupancyHeatmapPalette(widgetColor, effectiveTheme),
     [effectiveTheme, widgetColor],
   );
-  const missingColor = effectiveTheme === "dark" ? "#273244" : "#E2E8F0";
+  const missingColor = occupancyHeatmapStateColors(effectiveTheme).noData;
   return (
-    <Card className="@container flex h-full min-w-0 flex-col overflow-hidden">
+    <Card
+      aria-busy={loading}
+      className="@container flex h-full min-w-0 flex-col overflow-hidden"
+    >
       <CardHeader className="pb-2">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2 @xl:grid-cols-[minmax(0,1fr)_auto]">
           <div className="min-w-0">
@@ -3885,12 +5751,29 @@ function OccupancyHeatmapCardShell({
             <CardDescription className="mt-1 [overflow-wrap:anywhere]">
               {description}
             </CardDescription>
+            {visibleNotice ? (
+              <div
+                className="mt-1.5 flex min-w-0 items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-300"
+                role="status"
+              >
+                <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">
+                  {visibleNotice}
+                </span>
+              </div>
+            ) : null}
           </div>
         </div>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col">
         <div className="h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-          {loading ? <Skeleton className="h-full min-h-0 w-full flex-1" /> : children}
+          {loading ? (
+            <Skeleton
+              aria-label="Carregando mapa de calor de ocupação"
+              className="h-full min-h-0 w-full flex-1"
+              role="status"
+            />
+          ) : children}
         </div>
         <div className="mt-1 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
@@ -3901,10 +5784,14 @@ function OccupancyHeatmapCardShell({
                 backgroundImage: `linear-gradient(90deg, ${heatmapColors.join(", ")})`,
               }}
             />
-            {metricLabel(metric)}
+            {metricLabel(metric, granularity)}
           </span>
           <LegendDot color={missingColor} label="Sem dados" />
-          <span>Escala dos cenários selecionados.</span>
+          <span>
+            {granularity === "minute"
+              ? "Arraste horizontalmente para percorrer os 60 minutos."
+              : "Escala dos cenários selecionados."}
+          </span>
         </div>
       </CardContent>
     </Card>
@@ -3913,9 +5800,11 @@ function OccupancyHeatmapCardShell({
 
 
 function MetricSelect({
+  granularity = "hour",
   onChange,
   value,
 }: {
+  granularity?: OccupancyScenarioHeatmapGranularity;
   onChange: (metric: OccupancyComparisonMetricKey) => void;
   value: OccupancyComparisonMetricKey;
 }) {
@@ -3926,13 +5815,13 @@ function MetricSelect({
     >
       <SelectTrigger
         aria-label="Métrica dos mapas de calor de ocupação"
-        className="h-8 w-full min-w-0"
+        className="h-9 w-full min-w-0"
       >
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value="average">Média horária</SelectItem>
-        <SelectItem value="peak">Pico horário</SelectItem>
+        <SelectItem value="average">{metricLabel("average", granularity)}</SelectItem>
+        <SelectItem value="peak">{metricLabel("peak", granularity)}</SelectItem>
       </SelectContent>
     </Select>
   );
@@ -4067,7 +5956,11 @@ function ChartSkeleton() {
 
 function EmptyComparisonState({ text }: { text: string }) {
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-1 self-stretch items-center justify-center overflow-hidden rounded-md border border-dashed bg-muted/20 px-3 text-center text-xs text-muted-foreground @sm:px-4 @sm:text-sm">
+    <div
+      aria-live="polite"
+      className="flex h-full min-h-0 min-w-0 flex-1 self-stretch items-center justify-center overflow-hidden rounded-md border border-dashed bg-muted/20 px-3 text-center text-xs text-muted-foreground @sm:px-4 @sm:text-sm"
+      role="status"
+    >
       <span className="line-clamp-4 break-words [overflow-wrap:anywhere]">
         {text}
       </span>
@@ -4118,7 +6011,7 @@ function buildHalfDonutOption(
         ? `${entry.indexLabel} ${entry.name}: ${
             entry.state === "occupied" ? "ocupado" : "desocupado"
           }`
-        : `${entry.indexLabel} ${entry.name}: ocupação ${formatChartNumber(
+        : `${entry.indexLabel} ${entry.name}: ocupação ${formatOccupancyCount(
             entry.total,
           )}, participação ${formatChartNumber(entry.percentage)} por cento`,
     )
@@ -4310,7 +6203,7 @@ function buildHalfDonutOption(
             ? data?.state === "occupied"
               ? "Critério: ocupação maior que zero"
               : "Critério: ocupação igual a zero"
-            : `Ocupação atual: ${formatChartNumber(data?.occupancy ?? 0)}`,
+            : `Ocupação atual: ${formatOccupancyCount(data?.occupancy ?? 0)}`,
           mode === "actual"
             ? `Participação: ${formatChartNumber(data?.percentage ?? 0)}%`
             : null,
@@ -4334,6 +6227,10 @@ function buildCurrentComparisonBarOption(
   theme: "dark" | "light",
   scenarioIndexes: ReadonlyMap<string, number>,
   containerWidth: number,
+  axisMaximum = growOccupancyComparisonAxisMaximum(
+    1,
+    entries.map((entry) => entry.total),
+  ),
 ): EnterpriseChartOption {
   const chartPalette = getOccupancyChartPalette(theme);
   // Start conservatively before ResizeObserver reports the card width so the
@@ -4376,10 +6273,13 @@ function buildCurrentComparisonBarOption(
   const entryByScenarioId = new Map(
     indexedEntries.map((entry) => [entry.scenarioId, entry]),
   );
-  const maximum = Math.max(
-    1,
-    ...indexedEntries.map((entry) => entry.chartValue),
-  );
+  const maximum =
+    mode === "status"
+      ? 1
+      : growOccupancyComparisonAxisMaximum(
+          axisMaximum,
+          indexedEntries.map((entry) => entry.total),
+        );
   const accessibleEntries = indexedEntries
     .map((entry) => {
       if (entry.state === "unknown" || entry.total === null) {
@@ -4390,7 +6290,7 @@ function buildCurrentComparisonBarOption(
           entry.state === "occupied" ? "ocupado" : "desocupado"
         }`;
       }
-      return `${entry.indexLabel} ${entry.name}: ocupação ${formatChartNumber(
+      return `${entry.indexLabel} ${entry.name}: ocupação ${formatOccupancyCount(
         entry.total,
       )}, participação ${formatChartNumber(entry.percentage)} por cento`;
     })
@@ -4481,7 +6381,7 @@ function buildCurrentComparisonBarOption(
                   ? "Desocupado"
                   : "Desocupado = 0";
             }
-            return `${formatChartNumber(data.total)} · ${formatChartNumber(
+            return `${formatOccupancyCount(data.total)} · ${formatChartNumber(
               data.percentage ?? 0,
             )}%`;
           },
@@ -4545,8 +6445,8 @@ function buildCurrentComparisonBarOption(
             data.scenarioName ?? "Cenário",
           )}</strong>`,
           data.state === "unknown" || typeof data.total !== "number"
-            ? "Sem dados; ausência não é ocupação zero"
-            : `Ocupação atual: ${formatChartNumber(data.total)}`,
+            ? "Sem dados"
+            : `Ocupação atual: ${formatOccupancyCount(data.total)}`,
           data.state === "unknown"
             ? null
             : `Estado: ${
@@ -4569,11 +6469,13 @@ function buildCurrentComparisonBarOption(
       axisLabel: {
         color: chartPalette.axisText,
         fontSize: 10,
+        formatter: formatOccupancyIntegerAxisTick,
         show: mode === "actual",
       },
       axisLine: { lineStyle: { color: chartPalette.axisLine } },
       axisTick: { show: false },
       max: mode === "status" ? 1 : maximum,
+      minInterval: 1,
       min: 0,
       splitLine: {
         lineStyle: { color: chartPalette.gridLine, type: "dashed" },
@@ -4613,6 +6515,10 @@ function buildCurrentComparisonVerticalBarOption(
   theme: "dark" | "light",
   scenarioIndexes: ReadonlyMap<string, number>,
   containerWidth: number,
+  axisMaximum = growOccupancyComparisonAxisMaximum(
+    1,
+    entries.map((entry) => entry.total),
+  ),
 ): EnterpriseChartOption {
   const chartPalette = getOccupancyChartPalette(theme);
   // Use the mobile layout until ResizeObserver supplies the real card width.
@@ -4653,10 +6559,13 @@ function buildCurrentComparisonVerticalBarOption(
   const entryByScenarioId = new Map(
     indexedEntries.map((entry) => [entry.scenarioId, entry]),
   );
-  const maximum = Math.max(
-    1,
-    ...indexedEntries.map((entry) => entry.chartValue),
-  );
+  const maximum =
+    mode === "status"
+      ? 1
+      : growOccupancyComparisonAxisMaximum(
+          axisMaximum,
+          indexedEntries.map((entry) => entry.total),
+        );
   const pixelsPerScenario = narrowLayout ? 68 : compactLayout ? 72 : 78;
   const maximumVisibleScenarios = Math.max(
     2,
@@ -4677,7 +6586,7 @@ function buildCurrentComparisonVerticalBarOption(
           entry.state === "occupied" ? "ocupado" : "desocupado"
         }`;
       }
-      return `${entry.indexLabel} ${entry.name}: ocupação ${formatChartNumber(
+      return `${entry.indexLabel} ${entry.name}: ocupação ${formatOccupancyCount(
         entry.total,
       )}, participação ${formatChartNumber(entry.percentage)} por cento`;
     })
@@ -4806,7 +6715,7 @@ function buildCurrentComparisonVerticalBarOption(
                   ? "Desoc."
                   : "Desocupado";
             }
-            const total = formatChartNumber(data.total);
+            const total = formatOccupancyCount(data.total);
             const percentage = `${formatChartNumber(data.percentage ?? 0)}%`;
             return narrowLayout ? `${total}\n${percentage}` : `${total} · ${percentage}`;
           },
@@ -4872,8 +6781,8 @@ function buildCurrentComparisonVerticalBarOption(
             data.scenarioName ?? "Cenário",
           )}</strong>`,
           data.state === "unknown" || typeof data.total !== "number"
-            ? "Sem dados; ausência não é ocupação zero"
-            : `Ocupação atual: ${formatChartNumber(data.total)}`,
+            ? "Sem dados"
+            : `Ocupação atual: ${formatOccupancyCount(data.total)}`,
           data.state === "unknown"
             ? null
             : `Estado: ${
@@ -4918,11 +6827,13 @@ function buildCurrentComparisonVerticalBarOption(
       axisLabel: {
         color: chartPalette.axisText,
         fontSize: 10,
+        formatter: formatOccupancyIntegerAxisTick,
         show: mode === "actual",
       },
       axisLine: { show: false },
       axisTick: { show: false },
       max: mode === "status" ? 1 : maximum,
+      minInterval: 1,
       min: 0,
       splitLine: {
         lineStyle: { color: chartPalette.gridLine, type: "dashed" },
@@ -5001,7 +6912,7 @@ function buildLiveBarRaceOption(
           fontWeight: 700,
           formatter: (params: { value?: unknown }) => {
             const value = finiteChartValue(params.value);
-            return value === null ? "—" : formatChartNumber(value);
+            return value === null ? "—" : formatOccupancyCount(value);
           },
           position: "right",
           show: true,
@@ -5027,18 +6938,23 @@ function buildLiveBarRaceOption(
         )}</strong><br />${
           value === null
             ? "Leitura atual indisponível"
-            : `Ocupação atual: ${formatChartNumber(value)}`
+            : `Ocupação atual: ${formatOccupancyCount(value)}`
         }`;
       },
       textStyle: { color: chartPalette.tooltipText, fontSize: 12 },
       trigger: "item",
     },
     xAxis: {
-      axisLabel: { color: chartPalette.axisText, fontSize: 10 },
+      axisLabel: {
+        color: chartPalette.axisText,
+        fontSize: 10,
+        formatter: formatOccupancyIntegerAxisTick,
+      },
       axisLine: { lineStyle: { color: chartPalette.axisLine } },
       axisTick: { show: false },
       max: "dataMax",
       min: 0,
+      minInterval: 1,
       splitLine: {
         lineStyle: { color: chartPalette.gridLine, type: "dashed" },
       },
@@ -5662,6 +7578,7 @@ function hexPositionValueLabel(
 
 function buildHeatmapOption({
   cells,
+  granularity = "hour",
   interactive = true,
   maximum,
   metric,
@@ -5671,6 +7588,7 @@ function buildHeatmapOption({
   yLabels,
 }: {
   cells: OccupancyHeatmapCell[];
+  granularity?: OccupancyScenarioHeatmapGranularity;
   interactive?: boolean;
   maximum: number;
   metric: OccupancyComparisonMetricKey;
@@ -5680,10 +7598,8 @@ function buildHeatmapOption({
   yLabels: string[];
 }): EnterpriseChartOption {
   const chartPalette = getOccupancyChartPalette(theme);
-  const cellBorderColor =
-    theme === "dark"
-      ? "rgba(226, 232, 240, 0.12)"
-      : "rgba(15, 23, 42, 0.09)";
+  const stateColors = occupancyHeatmapStateColors(theme);
+  const cellBorderColor = stateColors.outline;
   const activeCellBorderColor =
     theme === "dark"
       ? "rgba(248, 250, 252, 0.24)"
@@ -5692,8 +7608,41 @@ function buildHeatmapOption({
     theme === "dark"
       ? "rgba(248, 250, 252, 0.12)"
       : "rgba(15, 23, 42, 0.14)";
-  const missingColor = theme === "dark" ? "#273244" : "#E2E8F0";
+  const missingColor = stateColors.noData;
   const scrollRows = interactive && yLabels.length > 14;
+  const scrollColumns = interactive && xLabels.length > 36;
+  const lastXIndex = Math.max(0, xLabels.length - 1);
+  const regularLabelStep = Math.max(1, Math.ceil(xLabels.length / 12));
+  const compactLabelStep = Math.max(1, Math.ceil(xLabels.length / 8));
+  const dataZoom = [
+    ...(scrollRows
+      ? [{
+          type: "slider" as const,
+          yAxisIndex: 0,
+          orient: "vertical" as const,
+          filterMode: "filter" as const,
+          startValue: 0,
+          endValue: 13,
+          right: 2,
+          top: 12,
+          bottom: 84,
+          width: 10,
+          showDetail: false,
+          showDataShadow: false,
+          brushSelect: false,
+          borderColor: chartPalette.axisLine,
+        }]
+      : []),
+    ...(scrollColumns
+      ? [{
+          type: "inside" as const,
+          xAxisIndex: 0,
+          filterMode: "filter" as const,
+          startValue: Math.max(0, xLabels.length - 24),
+          endValue: lastXIndex,
+        }]
+      : []),
+  ];
   // The query/model coordinates remain (day or scenario, hour). Transpose at
   // the chart boundary so tables, bucket identity and missing values stay intact.
   const missing = cells
@@ -5707,24 +7656,7 @@ function buildHeatmapOption({
   return {
     animation: false,
     grid: { bottom: 60, containLabel: true, left: 8, right: scrollRows ? 28 : 12, top: 12 },
-    ...(scrollRows ? {
-      dataZoom: [{
-        type: "slider",
-        yAxisIndex: 0,
-        orient: "vertical",
-        filterMode: "filter",
-        startValue: 0,
-        endValue: 13,
-        right: 2,
-        top: 12,
-        bottom: 84,
-        width: 10,
-        showDetail: false,
-        showDataShadow: false,
-        brushSelect: false,
-        borderColor: chartPalette.axisLine,
-      }],
-    } : {}),
+    ...(dataZoom.length ? { dataZoom } : {}),
     series: [
       {
         data: missing,
@@ -5761,7 +7693,7 @@ function buildHeatmapOption({
           borderRadius: 2,
           borderWidth: 1,
         },
-        name: metricLabel(metric),
+        name: metricLabel(metric, granularity),
         progressive: 1_000,
         type: "heatmap",
       },
@@ -5781,11 +7713,11 @@ function buildHeatmapOption({
         const amount = Number(value[2]);
         return [
           `<strong>${escapeTooltip(yLabels[y] ?? "Categoria")} · ${escapeTooltip(
-            xLabels[x] ?? "Hora",
+            xLabels[x] ?? "Período",
           )}</strong>`,
           record.seriesName === "Sem dados" || amount < 0
             ? "Sem dados"
-            : `${metricLabel(metric)}: ${formatChartNumber(amount)}`,
+            : `${metricLabel(metric, granularity)}: ${formatChartNumber(amount)}`,
         ].join("<br />");
       },
       padding: [10, 12],
@@ -5798,7 +7730,8 @@ function buildHeatmapOption({
         color: chartPalette.axisText,
         fontSize: 9,
         hideOverlap: true,
-        interval: 0,
+        interval: (index: number) =>
+          index % regularLabelStep === 0 || index === lastXIndex,
         showMinLabel: true,
         showMaxLabel: true,
       },
@@ -5829,7 +7762,13 @@ function buildHeatmapOption({
     media: [{
       query: { maxWidth: 760 },
       option: {
-        xAxis: { axisLabel: { interval: (index: number) => index % 3 === 0 || index === 23, hideOverlap: false } },
+        xAxis: {
+          axisLabel: {
+            interval: (index: number) =>
+              index % compactLabelStep === 0 || index === lastXIndex,
+            hideOverlap: false,
+          },
+        },
       },
     }, {
       query: { maxWidth: 480 },
@@ -5857,6 +7796,15 @@ function sharedHeatmapMaximum(
     });
   });
   return Math.max(1, maximum);
+}
+
+function heatmapCellsMaximum(cells: readonly OccupancyHeatmapCell[]) {
+  return Math.max(
+    1,
+    ...cells.flatMap((cell) =>
+      cell.value === null || !Number.isFinite(cell.value) ? [] : [cell.value],
+    ),
+  );
 }
 
 function themedScenarioColor(
@@ -5892,23 +7840,30 @@ function buildThemedScenarioColorMap(
   );
 }
 
-function occupancyHistoryPath(scenarioId: string, at: Date) {
-  const params = new URLSearchParams({ at: at.toISOString() });
-  return `/occupancy/scenarios/${scenarioId}/history?${params.toString()}`;
+function occupancySnapshotEffectiveAt(
+  snapshots: readonly OccupancyScenarioSnapshot[],
+  requestedAt: Date | null,
+) {
+  const instants = snapshots.flatMap((snapshot) => {
+    if (!snapshot.asOf) return [];
+    const instant = Date.parse(snapshot.asOf);
+    return Number.isFinite(instant) ? [instant] : [];
+  });
+  return instants.length ? new Date(Math.min(...instants)) : requestedAt;
 }
 
 function occupancyAggregatePath(
   scenarioId: string,
   from: Date,
   to: Date,
-  granularity: "minute" | "hour" | "month" = "hour",
+  granularity: OccupancyScenarioHeatmapGranularity = "hour",
 ) {
   const params = new URLSearchParams({
     from: aggregateQueryIso(from, granularity),
     granularity,
     to: aggregateQueryIso(to, granularity),
   });
-  return `/occupancy/scenarios/${scenarioId}/aggregate?${params.toString()}`;
+  return `/occupancy/scenarios/${encodeURIComponent(scenarioId)}/aggregate?${params.toString()}`;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -6130,6 +8085,47 @@ function setIntersects(left: ReadonlySet<string>, right: ReadonlySet<string>) {
   return false;
 }
 
+function setBoundedComparisonCacheEntry<T>(
+  cache: Map<string, T>,
+  key: string,
+  value: T,
+) {
+  // Refresh insertion order so active tenant/scenario entries survive the
+  // bounded module cache across route remounts and quick A -> B -> A changes.
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > MAX_SHARED_COMPARISON_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
+function trimOldestMapEntries<Value>(
+  cache: Map<string, Value>,
+  maximumEntries: number,
+) {
+  while (cache.size > maximumEntries) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
+function filterOccupancySeriesToBucketKeys(
+  series: OccupancyScenarioHourlySeries,
+  bucketKeys: ReadonlySet<number>,
+  name = series.name,
+): OccupancyScenarioHourlySeries {
+  return {
+    ...series,
+    metrics: new Map(
+      Array.from(series.metrics).filter(([bucket]) => bucketKeys.has(bucket)),
+    ),
+    name,
+  };
+}
+
 function preserveCurrentHourMetricsOnFailure(
   previous: OccupancyScenarioOpenMaximumSeries[],
   next: OccupancyScenarioOpenMaximumSeries[],
@@ -6159,8 +8155,36 @@ function occupancyScenarioCoverageStart(value: string | undefined) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-function metricLabel(metric: OccupancyComparisonMetricKey) {
+function metricLabel(
+  metric: OccupancyComparisonMetricKey,
+  granularity: OccupancyScenarioHeatmapGranularity = "hour",
+) {
+  if (granularity === "minute") {
+    return metric === "peak" ? "Pico por minuto" : "Média por minuto";
+  }
+  if (granularity === "day") {
+    return metric === "peak" ? "Pico diário" : "Média diária";
+  }
+  if (granularity === "week") {
+    return metric === "peak" ? "Pico semanal" : "Média semanal";
+  }
+  if (granularity === "month") {
+    return metric === "peak" ? "Pico mensal" : "Média mensal";
+  }
   return metric === "peak" ? "Pico horário" : "Média horária";
+}
+
+function scenarioHeatmapCertificationLabel(
+  value: number | null,
+  series?: Pick<OccupancyScenarioHourlySeries, "error" | "warning">,
+) {
+  if (series?.error) {
+    return value === null ? "Fonte indisponível" : "Último valor disponível";
+  }
+  if (occupancyAggregatePresentationWarning(series?.warning)) {
+    return value === null ? "Sem dados · em atualização" : "Em atualização";
+  }
+  return value === null ? "Sem dados" : "Disponível";
 }
 
 function occupancyStateLabel(state: OccupancyHexPosition["state"]) {

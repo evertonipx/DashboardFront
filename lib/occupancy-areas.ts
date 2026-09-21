@@ -228,7 +228,7 @@ export function buildOccupancyAreaOptions(
     const cameraId = row.camera_id?.trim();
     if (!areaId || !cameraId) return;
 
-    const objectClass = row.object_class?.trim().toLowerCase() || undefined;
+    const objectClass = row.object_class?.trim() || undefined;
     const key = buildOccupancyAreaKey(cameraId, areaId);
     const existing = options.get(key);
     if (existing) {

@@ -6,6 +6,8 @@ import {
 } from "@/lib/aggregate-time";
 import { reconcileAggregateRows } from "@/lib/aggregate-reconciliation";
 import { apiFetch } from "@/lib/api";
+import { normalizeCountingAggregateRowsTimeZone } from "@/lib/counting-aggregate-time";
+import { countingStartOfHourInstant } from "@/lib/counting-time-zone";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -60,6 +62,7 @@ export async function fetchMinuteDayAggregateBootstrap({
   metricType = DEFAULT_METRIC_TYPE,
   now = new Date(),
   signal,
+  timeZone,
   to,
 }: {
   cache: MinuteDayAggregateCache;
@@ -69,13 +72,14 @@ export async function fetchMinuteDayAggregateBootstrap({
   metricType?: string;
   now?: Date;
   signal?: AbortSignal;
+  timeZone: string;
   to: Date;
 }) {
   requireFetchOptions(cacheScope, metricType, from, to, now);
   signal?.throwIfAborted();
   const key = minuteDayAggregateCacheKey(cacheScope, metricType, from);
   const cached = cache.get(key);
-  const revision = startOfAggregateBucket(now, "hour").toISOString();
+  const revision = countingStartOfHourInstant(now, timeZone).toISOString();
   if (cached?.status === "ready" && cached.revision === revision) {
     return [...cached.rows];
   }
@@ -108,6 +112,7 @@ export async function fetchMinuteDayAggregateBootstrap({
       from,
       metricType,
       signal,
+      timeZone,
       to,
     });
     signal?.throwIfAborted();
@@ -142,6 +147,7 @@ export async function refreshMinuteDayAggregateCache({
   sourceFrom,
   sourceRows,
   sourceTo,
+  timeZone,
 }: {
   cache: MinuteDayAggregateCache;
   cacheScope: string;
@@ -153,6 +159,7 @@ export async function refreshMinuteDayAggregateCache({
   sourceFrom: Date;
   sourceRows: AggregateEventRow[];
   sourceTo: Date;
+  timeZone: string;
 }) {
   const key = minuteDayAggregateCacheKey(cacheScope, metricType, from);
   const cached = cache.get(key);
@@ -192,6 +199,7 @@ export async function refreshMinuteDayAggregateCache({
         from: coveredTo,
         metricType,
         signal,
+        timeZone,
         to: sourceFrom,
       });
       signal?.throwIfAborted();
@@ -281,6 +289,7 @@ async function fetchMinuteAggregateRange({
   metricType,
   signal,
   splitDepth = 0,
+  timeZone,
   to,
 }: {
   companyScopeId?: string;
@@ -289,6 +298,7 @@ async function fetchMinuteAggregateRange({
   signal?: AbortSignal;
   to: Date;
   splitDepth?: number;
+  timeZone: string;
 }): Promise<AggregateEventRow[]> {
   const params = new URLSearchParams({
     from: aggregateQueryIso(from, "minute"),
@@ -304,8 +314,13 @@ async function fetchMinuteAggregateRange({
     response.granularity,
     "minute",
   );
-  const rows = requireAggregateRowsInRange(
+  const normalizedRows = normalizeCountingAggregateRowsTimeZone(
     response.data,
+    granularity,
+    timeZone,
+  );
+  const rows = requireAggregateRowsInRange(
+    normalizedRows,
     granularity,
     from,
     to,
@@ -330,6 +345,7 @@ async function fetchMinuteAggregateRange({
     metricType,
     signal,
     splitDepth: splitDepth + 1,
+    timeZone,
     to: split,
   });
   const right = await fetchMinuteAggregateRange({
@@ -338,6 +354,7 @@ async function fetchMinuteAggregateRange({
     metricType,
     signal,
     splitDepth: splitDepth + 1,
+    timeZone,
     to,
   });
   return [...left, ...right];

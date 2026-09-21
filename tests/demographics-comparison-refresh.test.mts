@@ -47,6 +47,7 @@ function harness() {
     cutoff: new Date("2026-09-10T13:00:00Z"),
     result: null, calls: [], pending: [], hold: false, failure: false,
     pageActive: true, preferencesReady: true, comparisonVisible: true,
+    companyTimeZoneReady: true,
     queryRequested: true, rangeReady: true, comparisonReady: true,
     surface: "live", mode: "previous-period",
   };
@@ -107,7 +108,7 @@ function harness() {
   };
 }
 
-for (const guard of ["pageActive", "preferencesReady", "comparisonVisible", "queryRequested", "rangeReady", "comparisonReady"]) {
+for (const guard of ["companyTimeZoneReady", "pageActive", "preferencesReady", "comparisonVisible", "queryRequested", "rangeReady", "comparisonReady"]) {
   test(`comparativo não consulta enquanto ${guard} está desabilitado`, async () => {
     const fixture = harness();
     fixture.state[guard] = false;

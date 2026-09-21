@@ -13,6 +13,7 @@ import {
 import type {
   OccupancyComparisonMetricKey,
 } from "@/lib/occupancy-comparison";
+import type { OccupancyScenarioHeatmapGranularity } from "@/lib/occupancy-scenario-heatmap";
 import {
   normalizeOccupancyHexLayout,
   normalizeOccupancyLayoutPreset,
@@ -29,7 +30,7 @@ export type OccupancyComparisonChartType =
   | "vertical_bars";
 export type OccupancyHexDisplayMode = "actual" | "status";
 
-export const OCCUPANCY_WIDGET_SETTINGS_SCHEMA_VERSION = 4 as const;
+export const OCCUPANCY_WIDGET_SETTINGS_SCHEMA_VERSION = 5 as const;
 
 export type OccupancyStatusColorPreset =
   | "availability"
@@ -90,6 +91,7 @@ export type OccupancyWidgetSettings = {
   hexPreset: OccupancyLayoutPreset;
   hexStatusColors: OccupancyStatusColors;
   metric: OccupancyComparisonMetricKey;
+  scenarioHeatmapGranularity: OccupancyScenarioHeatmapGranularity;
   scenarioHourHeatmapDateKey: string;
   scenarioIds: string[];
   schemaVersion: typeof OCCUPANCY_WIDGET_SETTINGS_SCHEMA_VERSION;
@@ -114,6 +116,7 @@ export const DEFAULT_OCCUPANCY_WIDGET_SETTINGS: OccupancyWidgetSettings = {
   hexPreset: "queue",
   hexStatusColors: { ...DEFAULT_OCCUPANCY_STATUS_COLORS },
   metric: "average",
+  scenarioHeatmapGranularity: "hour",
   scenarioHourHeatmapDateKey: "",
   scenarioIds: [],
   schemaVersion: OCCUPANCY_WIDGET_SETTINGS_SCHEMA_VERSION,
@@ -150,12 +153,26 @@ export function normalizeOccupancyWidgetSettings(
         : record.comparisonStatusColors,
     ),
     metric: record.metric === "peak" ? "peak" : "average",
+    scenarioHeatmapGranularity: normalizeScenarioHeatmapGranularity(
+      record.scenarioHeatmapGranularity,
+    ),
     scenarioHourHeatmapDateKey: normalizeDateKey(
       record.scenarioHourHeatmapDateKey,
     ),
     scenarioIds: normalizeIds(record.scenarioIds),
     schemaVersion: OCCUPANCY_WIDGET_SETTINGS_SCHEMA_VERSION,
   };
+}
+
+function normalizeScenarioHeatmapGranularity(
+  value: unknown,
+): OccupancyScenarioHeatmapGranularity {
+  return value === "minute" ||
+    value === "day" ||
+    value === "week" ||
+    value === "month"
+    ? value
+    : "hour";
 }
 
 function normalizeDateKey(value: unknown) {

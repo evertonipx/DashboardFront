@@ -238,6 +238,43 @@ export function buildOccupancyPeakValues(
   );
 }
 
+/**
+ * Advances the still-open month from the already-demanded current-hour
+ * source. Closed monthly buckets remain byte-for-byte untouched and the
+ * monthly maximum is monotonic until the next certified full audit.
+ */
+export function mergeOccupancyMaximumTrendOpenPeak({
+  currentMonth,
+  metrics,
+  openPeak,
+}: {
+  currentMonth: Date;
+  metrics: ReadonlyMap<number, OccupancyAggregateMetric>;
+  openPeak: number | null | undefined;
+}) {
+  requireValidDate(currentMonth, "mês aberto dos máximos");
+  const merged = new Map(metrics);
+  if (openPeak === null || openPeak === undefined) return merged;
+  if (!Number.isFinite(openPeak) || openPeak < 0) {
+    throw new RangeError("O máximo da hora aberta é inválido.");
+  }
+
+  const monthKey = occupancyAggregateBucketKey(currentMonth, "month");
+  const previous = merged.get(monthKey);
+  if (!previous) {
+    merged.set(monthKey, {
+      average: openPeak,
+      minimum: openPeak,
+      peak: openPeak,
+    });
+    return merged;
+  }
+  if (openPeak > previous.peak) {
+    merged.set(monthKey, { ...previous, peak: openPeak });
+  }
+  return merged;
+}
+
 export function buildOccupancyFixedHourlyPeakValues({
   buckets,
   metrics,
@@ -610,7 +647,13 @@ export function buildOccupancyLiveRaceEntries(
     return {
       name: snapshot.name,
       scenarioId: snapshot.scenarioId,
-      value: snapshot.total,
+      // Current occupancy is a discrete count. Some compatible backends expose
+      // the field as a generic JSON number, so the ranking normalizes only its
+      // presentation model instead of leaking fractional ticks and labels.
+      value:
+        snapshot.total === null
+          ? null
+          : Math.max(0, Math.round(snapshot.total)),
     };
   });
 }

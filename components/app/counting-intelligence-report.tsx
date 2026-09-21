@@ -299,6 +299,7 @@ export function buildCountingIntelligenceWidgetCards({
       label: "Ranking dos acessos",
       previewKind: "ranking" as const,
       previewOrder: rankingOrder,
+      scenarioOrderingDisabled: true,
       defaultHeight: "tall" as const,
       defaultSize: "full" as const,
       className: "sm:col-span-2 xl:col-span-4",

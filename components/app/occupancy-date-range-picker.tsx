@@ -442,7 +442,7 @@ export function AnalysisDateRangePicker({
           <span className="min-w-0 flex-1 break-words font-medium">
             {formatAnalysisDateRangeLabel(value)}
           </span>
-          <span className="hidden shrink-0 text-[10px] font-normal text-muted-foreground @2xl:inline">
+          <span className="hidden shrink-0 text-[10px] font-normal text-muted-foreground @4xl:inline">
             {triggerModeLabel}
           </span>
         </Button>

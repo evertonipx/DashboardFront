@@ -48,13 +48,19 @@ import {
   getStoredMasterCompanyScope,
   usesMasterCrossCompanyScope,
   useEffectiveCompanyScopeId,
+  useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
 import { apiFetch } from "@/lib/api";
+import {
+  companyDateTimeLocalInstant,
+  companyDateTimeLocalValue,
+  startOfCompanyTimeZoneDay,
+} from "@/lib/company-time-zone";
 import { canManageViews } from "@/lib/permissions";
 import { requireScenarioRows } from "@/lib/scenario-validation";
 import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type { Scenario } from "@/lib/types";
-import { cn, toDateTimeLocalValue } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { saveLiveViewPreset } from "@/lib/video-wall";
 import {
   buildOpaqueViewUrl,
@@ -147,6 +153,10 @@ export function ViewsManager() {
   const { user } = useAuth();
   const canAccessViews = canManageViews(user);
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const companyTimeZoneResolution =
+    useEffectiveCompanyTimeZoneResolution(user);
+  const companyTimeZone = companyTimeZoneResolution.timeZone;
+  const companyTimeZoneReady = !companyTimeZoneResolution.fallback;
   const masterCrossCompanyScope = usesMasterCrossCompanyScope(
     user,
     companyScopeId,
@@ -169,13 +179,11 @@ export function ViewsManager() {
   const [selectedScenarioIds, setSelectedScenarioIds] = React.useState<string[]>(
     [],
   );
-  const [scenarioCompareFrom, setScenarioCompareFrom] = React.useState(() => {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    return toDateTimeLocalValue(start);
-  });
-  const [scenarioCompareTo, setScenarioCompareTo] = React.useState(() =>
-    toDateTimeLocalValue(new Date()),
+  const [scenarioCompareFrom, setScenarioCompareFrom] = React.useState(
+    () => defaultCompanyDateTimeRange(new Date(), companyTimeZone).from,
+  );
+  const [scenarioCompareTo, setScenarioCompareTo] = React.useState(
+    () => defaultCompanyDateTimeRange(new Date(), companyTimeZone).to,
   );
   const [widgetChart, setWidgetChart] =
     React.useState<ViewChart>("scenario-hour");
@@ -192,14 +200,10 @@ export function ViewsManager() {
   const [widgetScenarioSettingsOpen, setWidgetScenarioSettingsOpen] =
     React.useState(false);
   const [widgetScenarioCompareFrom, setWidgetScenarioCompareFrom] = React.useState(
-    () => {
-      const start = new Date();
-      start.setHours(0, 0, 0, 0);
-      return toDateTimeLocalValue(start);
-    },
+    () => defaultCompanyDateTimeRange(new Date(), companyTimeZone).from,
   );
   const [widgetScenarioCompareTo, setWidgetScenarioCompareTo] = React.useState(
-    () => toDateTimeLocalValue(new Date()),
+    () => defaultCompanyDateTimeRange(new Date(), companyTimeZone).to,
   );
   const [viewWidgetWorkspace, setViewWidgetWorkspace] =
     React.useState<ViewWidgetWorkspace>({
@@ -274,6 +278,33 @@ export function ViewsManager() {
     widgetScenarioComparePeriod,
   )} · ${widgetScenarioSelectionSummary}`;
   const masterScope = getStoredMasterCompanyScope();
+  const singleViewCustomRange = React.useMemo(() => {
+    if (
+      viewWidgets.length ||
+      chart !== "scenario-hour" ||
+      scenarioComparePeriod !== "custom"
+    ) {
+      return null;
+    }
+    return {
+      from: companyDateTimeLocalInstant(scenarioCompareFrom, companyTimeZone),
+      to: companyDateTimeLocalInstant(scenarioCompareTo, companyTimeZone),
+    };
+  }, [
+    chart,
+    companyTimeZone,
+    scenarioCompareFrom,
+    scenarioComparePeriod,
+    scenarioCompareTo,
+    viewWidgets.length,
+  ]);
+  const customRangeReady =
+    !singleViewCustomRange ||
+    Boolean(
+      singleViewCustomRange.from &&
+        singleViewCustomRange.to &&
+        singleViewCustomRange.from < singleViewCustomRange.to,
+    );
   const generatedTargetPath = React.useMemo(() => {
     const params = new URLSearchParams({
       chart,
@@ -326,8 +357,8 @@ export function ViewsManager() {
         );
       }
       if (scenarioComparePeriod === "custom") {
-        const from = parseLocalDateTimeInput(scenarioCompareFrom);
-        const to = parseLocalDateTimeInput(scenarioCompareTo);
+        const from = singleViewCustomRange?.from;
+        const to = singleViewCustomRange?.to;
         if (from) params.set("from", from.toISOString());
         if (to) params.set("to", to.toISOString());
       }
@@ -337,12 +368,11 @@ export function ViewsManager() {
   }, [
     chart,
     companyScopeId,
-    scenarioCompareFrom,
     scenarioCompareGranularity,
     scenarioComparePeriod,
-    scenarioCompareTo,
     scenarioSelectionMode,
     selectedScenarioIdsForScope,
+    singleViewCustomRange,
     title,
     viewWidgets,
   ]);
@@ -362,7 +392,15 @@ export function ViewsManager() {
     setViewReference(user?.id ? createViewLinkReference() : "");
     setSelectedViewWidgetIds(new Set());
     setViewWidgetWorkspace({ companyId: companyScopeId, widgets: [] });
-  }, [companyScopeId, user?.id]);
+  }, [companyScopeId, companyTimeZone, user?.id]);
+
+  React.useEffect(() => {
+    const range = defaultCompanyDateTimeRange(new Date(), companyTimeZone);
+    setScenarioCompareFrom(range.from);
+    setScenarioCompareTo(range.to);
+    setWidgetScenarioCompareFrom(range.from);
+    setWidgetScenarioCompareTo(range.to);
+  }, [companyScopeId, companyTimeZone]);
 
   React.useEffect(() => {
     if (chart !== "scenario-hour") setScenarioSettingsOpen(false);
@@ -467,6 +505,10 @@ export function ViewsManager() {
   }
 
   function addWidget() {
+    if (!companyTimeZoneReady) {
+      toast.error("Defina o fuso horário da empresa antes de criar a visão.");
+      return;
+    }
     if (
       widgetChart === "scenario-hour" &&
       widgetScenarioSelectionMode === "custom" &&
@@ -476,8 +518,14 @@ export function ViewsManager() {
       return;
     }
 
-    const customFrom = parseLocalDateTimeInput(widgetScenarioCompareFrom);
-    const customTo = parseLocalDateTimeInput(widgetScenarioCompareTo);
+    const customFrom = companyDateTimeLocalInstant(
+      widgetScenarioCompareFrom,
+      companyTimeZone,
+    );
+    const customTo = companyDateTimeLocalInstant(
+      widgetScenarioCompareTo,
+      companyTimeZone,
+    );
     if (
       widgetChart === "scenario-hour" &&
       widgetScenarioComparePeriod === "custom" &&
@@ -644,7 +692,15 @@ export function ViewsManager() {
   }
 
   function materializeGeneratedView() {
-    if (!generatedUrl || !user?.id || !viewReference) return "";
+    if (
+      !companyTimeZoneReady ||
+      !customRangeReady ||
+      !generatedUrl ||
+      !user?.id ||
+      !viewReference
+    ) {
+      return "";
+    }
     const reference = saveViewLinkTarget(
       generatedTargetPath,
       user.id,
@@ -1048,9 +1104,10 @@ export function ViewsManager() {
                     variant="outline"
                     onClick={addWidget}
                     disabled={
-                      widgetChart === "scenario-hour" &&
-                      widgetScenarioSelectionMode === "custom" &&
-                      !widgetSelectedScenarioIdsForScope.length
+                      !companyTimeZoneReady ||
+                      (widgetChart === "scenario-hour" &&
+                        widgetScenarioSelectionMode === "custom" &&
+                        !widgetSelectedScenarioIdsForScope.length)
                     }
                   >
                     <Plus className="h-4 w-4" />
@@ -1183,7 +1240,11 @@ export function ViewsManager() {
             </div>
 
             <div className="rounded-md border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
-              {generatedUrl
+              {!companyTimeZoneReady
+                ? "Defina o fuso horário da empresa para gerar esta visão."
+                : !customRangeReady
+                  ? "Informe um período personalizado válido no fuso da empresa."
+                : generatedUrl
                 ? "Link de exibição pronto para salvar, copiar ou abrir."
                 : "Conclua a configuração para gerar o link de exibição."}
             </div>
@@ -1192,7 +1253,9 @@ export function ViewsManager() {
               <Button
                 type="button"
                 onClick={saveGeneratedView}
-                disabled={!generatedUrl}
+                disabled={
+                  !companyTimeZoneReady || !customRangeReady || !generatedUrl
+                }
               >
                 <Save className="h-4 w-4" />
                 Salvar visão
@@ -1201,7 +1264,9 @@ export function ViewsManager() {
                 type="button"
                 variant="outline"
                 onClick={copyUrl}
-                disabled={!generatedUrl}
+                disabled={
+                  !companyTimeZoneReady || !customRangeReady || !generatedUrl
+                }
               >
                 <Copy className="h-4 w-4" />
                 Copiar link
@@ -1210,7 +1275,9 @@ export function ViewsManager() {
                 type="button"
                 variant="outline"
                 onClick={openUrl}
-                disabled={!generatedUrl}
+                disabled={
+                  !companyTimeZoneReady || !customRangeReady || !generatedUrl
+                }
               >
                 <ExternalLink className="h-4 w-4" />
                 Abrir visão
@@ -1337,11 +1404,14 @@ function createWidgetId() {
   return `view-widget-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function parseLocalDateTimeInput(value: string) {
-  if (!value) return null;
-
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
+function defaultCompanyDateTimeRange(now: Date, timeZone: string) {
+  return {
+    from: companyDateTimeLocalValue(
+      startOfCompanyTimeZoneDay(now, timeZone),
+      timeZone,
+    ),
+    to: companyDateTimeLocalValue(now, timeZone),
+  };
 }
 
 function scenarioCompareGranularityLabel(value: ScenarioCompareGranularity) {

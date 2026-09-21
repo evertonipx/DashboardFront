@@ -67,6 +67,12 @@ import {
   fetchOccupancyAreaCatalog,
   requireOccupancyAreaClassCompatibility,
 } from "@/lib/occupancy-area-options";
+import { occupancyObjectClassLabel } from "@/lib/occupancy-object-class";
+import {
+  initialOccupancyScenarioObjectClass,
+  occupancyScenarioObjectClassOptions,
+  retainAreasCompatibleWithObjectClass,
+} from "@/lib/occupancy-scenario-object-class";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
 import { canManageOccupancy } from "@/lib/permissions";
 import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
@@ -83,11 +89,17 @@ type Draft = {
   id?: string;
   active: boolean;
   areas: OccupancyScenarioArea[];
+  config?: number[];
   max_total: string;
   min_total: string;
   name: string;
   object_class: string;
 };
+
+const OCCUPANCY_SCENARIO_NAME_MAX_LENGTH = 255;
+const OCCUPANCY_OBJECT_CLASS_MAX_LENGTH = 50;
+const OCCUPANCY_AREA_ID_MAX_LENGTH = 255;
+const OCCUPANCY_AREA_LABEL_MAX_LENGTH = 100;
 
 const MANUAL_AREA_OPTION = "__manual__";
 const MINUTE_MS = 60_000;
@@ -396,10 +408,13 @@ export function OccupancyScenarioManager() {
 
     const requestedCompanyId = companyScopeId;
     try {
-      await apiFetch(`/occupancy/scenarios/${scenario.id}`, {
-        companyScopeId: requestedCompanyId,
-        method: "DELETE",
-      });
+      await apiFetch(
+        `/occupancy/scenarios/${encodeURIComponent(scenario.id)}`,
+        {
+          companyScopeId: requestedCompanyId,
+          method: "DELETE",
+        },
+      );
       if (requestedCompanyId !== companyScopeIdRef.current) return;
       toast.success("Cenário de ocupação excluído.");
       await loadScenarios();
@@ -459,7 +474,7 @@ export function OccupancyScenarioManager() {
 
         try {
           const response = await apiFetch<unknown>(
-            `/occupancy/scenarios/${scenario.id}`,
+            `/occupancy/scenarios/${encodeURIComponent(scenario.id)}`,
             {
               body: { active },
               companyScopeId: requestedCompanyId,
@@ -531,10 +546,13 @@ export function OccupancyScenarioManager() {
         }
 
         try {
-          await apiFetch(`/occupancy/scenarios/${scenario.id}`, {
-            companyScopeId: requestedCompanyId,
-            method: "DELETE",
-          });
+          await apiFetch(
+            `/occupancy/scenarios/${encodeURIComponent(scenario.id)}`,
+            {
+              companyScopeId: requestedCompanyId,
+              method: "DELETE",
+            },
+          );
           deletedIds.push(scenario.id);
         } catch {
           failedIds.push(scenario.id);
@@ -1007,12 +1025,25 @@ function OccupancyScenarioDialog({
   const [saving, setSaving] = React.useState(false);
   const companyIdRef = React.useRef(companyId);
   const compatibleAreaOptions = React.useMemo(() => {
-    const objectClass = draft.object_class.trim().toLowerCase();
+    const objectClass = draft.object_class.trim();
     return areaOptions.filter(
       (option) =>
-        !option.object_class || option.object_class === objectClass,
+        !option.object_class ||
+        option.object_class.trim() === objectClass,
     );
   }, [areaOptions, draft.object_class]);
+  const objectClassOptions = React.useMemo(
+    () => occupancyScenarioObjectClassOptions(areaOptions, draft.object_class),
+    [areaOptions, draft.object_class],
+  );
+  const initialObjectClass = React.useMemo(
+    () =>
+      initialOccupancyScenarioObjectClass(
+        areaOptions,
+        areaCatalogAuthoritative,
+      ),
+    [areaCatalogAuthoritative, areaOptions],
+  );
 
   React.useLayoutEffect(() => {
     companyIdRef.current = companyId;
@@ -1020,8 +1051,12 @@ function OccupancyScenarioDialog({
 
   React.useEffect(() => {
     if (!open) return;
-    setDraft(scenario ? scenarioToDraft(scenario) : createEmptyDraft());
-  }, [open, scenario]);
+    setDraft(
+      scenario
+        ? scenarioToDraft(scenario)
+        : createEmptyDraft(initialObjectClass),
+    );
+  }, [initialObjectClass, open, scenario]);
 
   function updateArea(index: number, patch: Partial<OccupancyScenarioArea>) {
     setDraft((current) => ({
@@ -1107,7 +1142,7 @@ function OccupancyScenarioDialog({
     try {
       if (draft.id) {
         const response = await apiFetch<unknown>(
-          `/occupancy/scenarios/${draft.id}`,
+          `/occupancy/scenarios/${encodeURIComponent(draft.id)}`,
           {
             method: "PUT",
             body: {
@@ -1168,6 +1203,7 @@ function OccupancyScenarioDialog({
           <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_150px_150px_150px]">
             <FormField label="Nome">
               <Input
+                maxLength={OCCUPANCY_SCENARIO_NAME_MAX_LENGTH}
                 value={draft.name}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, name: event.target.value }))
@@ -1181,13 +1217,24 @@ function OccupancyScenarioDialog({
                 onValueChange={(objectClass) =>
                   setDraft((current) => ({
                     ...current,
+                    areas: retainAreasCompatibleWithObjectClass(
+                      current.areas,
+                      objectClass,
+                      areaOptions,
+                    ),
                     object_class: objectClass,
                   }))
                 }
               >
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecione" />
+                </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="person">Pessoas</SelectItem>
+                  {objectClassOptions.map((objectClass) => (
+                    <SelectItem key={objectClass} value={objectClass}>
+                      {occupancyObjectOptionLabel(objectClass)}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </FormField>
@@ -1378,6 +1425,7 @@ function ScenarioAreaEditor({
       </FormField>
       <FormField label="Rótulo">
         <Input
+          maxLength={OCCUPANCY_AREA_LABEL_MAX_LENGTH}
           value={area.label ?? ""}
           onChange={(event) => onPatch({ label: event.target.value })}
           placeholder="Posto 01"
@@ -1438,13 +1486,21 @@ function buildScenarioPayload(draft: Draft) {
   if (!name) {
     throw new Error("Informe o nome do cenário.");
   }
-  const objectClass = draft.object_class.trim().toLowerCase();
+  if (name.length > OCCUPANCY_SCENARIO_NAME_MAX_LENGTH) {
+    throw new Error("O nome do cenário excede 255 caracteres.");
+  }
+  const objectClass = draft.object_class.trim();
   if (!objectClass) {
     throw new Error("Informe a classe de objeto.");
+  }
+  if (objectClass.length > OCCUPANCY_OBJECT_CLASS_MAX_LENGTH) {
+    throw new Error("A classe de objeto excede 50 caracteres.");
   }
   if (!draft.areas.length) {
     throw new Error("Inclua pelo menos uma área.");
   }
+
+  const config = normalizeScenarioConfig(draft.config);
 
   const identities = new Set<string>();
   const areas = draft.areas.map((area, index) => {
@@ -1453,6 +1509,17 @@ function buildScenarioPayload(draft: Draft) {
     if (!cameraId || !areaId) {
       throw new Error(
         `Selecione uma área válida na posição ${index + 1}.`,
+      );
+    }
+    if (areaId.length > OCCUPANCY_AREA_ID_MAX_LENGTH) {
+      throw new Error(
+        `A identificação da área na posição ${index + 1} excede 255 caracteres.`,
+      );
+    }
+    const label = area.label?.trim() || undefined;
+    if (label && label.length > OCCUPANCY_AREA_LABEL_MAX_LENGTH) {
+      throw new Error(
+        `O rótulo da área na posição ${index + 1} excede 100 caracteres.`,
       );
     }
     const identity = areaOptionKey(cameraId, areaId);
@@ -1466,7 +1533,7 @@ function buildScenarioPayload(draft: Draft) {
     return {
       area_id: areaId,
       camera_id: cameraId,
-      label: area.label?.trim() || undefined,
+      label,
     };
   });
   const minimum = parseOptionalNumber(draft.min_total, "mínimo");
@@ -1481,6 +1548,7 @@ function buildScenarioPayload(draft: Draft) {
 
   return {
     areas,
+    ...(config === undefined ? {} : { config }),
     max_total: maximum,
     min_total: minimum,
     name,
@@ -1578,6 +1646,7 @@ function scenarioToDraft(scenario: OccupancyScenario): Draft {
   return {
     active: scenario.active,
     areas: (scenario.areas ?? []).map((area) => ({ ...area })),
+    config: scenario.config ? [...scenario.config] : undefined,
     id: scenario.id,
     max_total:
       scenario.max_total === null || scenario.max_total === undefined
@@ -1588,18 +1657,18 @@ function scenarioToDraft(scenario: OccupancyScenario): Draft {
         ? ""
         : String(scenario.min_total),
     name: scenario.name,
-    object_class: scenario.object_class || "person",
+    object_class: scenario.object_class,
   };
 }
 
-function createEmptyDraft(): Draft {
+function createEmptyDraft(objectClass = ""): Draft {
   return {
     active: true,
     areas: [],
     max_total: "",
     min_total: "",
     name: "",
-    object_class: "person",
+    object_class: objectClass,
   };
 }
 
@@ -1617,7 +1686,12 @@ function thresholdSummary(scenario: OccupancyScenario) {
 }
 
 function occupancyObjectLabel(value?: string | null) {
-  return value?.trim().toLowerCase() === "person" ? "Pessoas" : "Outro tipo";
+  return occupancyObjectClassLabel(value);
+}
+
+function occupancyObjectOptionLabel(value: string) {
+  const label = occupancyObjectClassLabel(value);
+  return label === "Objetos monitorados" ? value : label;
 }
 
 function areaOptionKey(cameraId: string, areaId: string) {
@@ -1638,4 +1712,16 @@ function parseOptionalNumber(value: string, label: string) {
   }
 
   return parsed;
+}
+
+function normalizeScenarioConfig(config: number[] | undefined) {
+  if (config === undefined) return undefined;
+  if (
+    !Array.isArray(config) ||
+    config.some((value) => !Number.isSafeInteger(value))
+  ) {
+    throw new Error("A configuração interna do cenário é inválida.");
+  }
+
+  return [...config];
 }

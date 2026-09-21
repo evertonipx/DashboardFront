@@ -40,6 +40,8 @@ export type OccupancyCertifiedCutoffSource = {
 export type OccupancyAggregateValidationOptions = {
   /** Accept the documented aggregate schema without inventing certification. */
   allowDocumentedAggregateResponse?: boolean;
+  /** The rows were returned by the IANA-aware civil query adapter. */
+  allowVerifiedCivilAggregateResponse?: boolean;
   allowLegacyUncertifiedInstantBuckets?: boolean;
   expectedTimezone?: string;
   openBucket?: Date;
@@ -341,6 +343,35 @@ export function occupancyAggregateMetadataWarning(
 }
 
 /**
+ * Hides provisional metadata notices that are useful for internal
+ * certification but do not give the operator an actionable decision. Any
+ * Coverage and provisional notices remain available to internal certification
+ * but are intentionally omitted from the operator-facing interface. Timezone
+ * and transport failures joined to the same text remain visible.
+ */
+export function occupancyAggregatePresentationWarning(
+  warning: string | undefined,
+) {
+  if (!warning?.trim()) return undefined;
+  const provisionalNotices = [
+    "Dados recentes em atualização: os valores mais recentes ainda podem mudar.",
+    "Dados do período em atualização: os valores mais recentes ainda podem mudar.",
+  ];
+  const withoutInternalNotices = provisionalNotices.reduce(
+    (message, notice) => message.split(notice).join(""),
+    warning,
+  ).replace(
+    /\b\d+\s+de\s+\d+\s+períodos?\s+est(?:á|ão)\s+sem dados;\s*ausência de dados não representa ocupação zero\.?/giu,
+    "",
+  );
+  const visibleParts = withoutInternalNotices
+    .split("·")
+    .map((part) => part.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  return visibleParts.length ? visibleParts.join(" · ") : undefined;
+}
+
+/**
  * Returns the oldest certified source cut-off. Any missing timestamp, warning
  * or error invalidates the whole report instead of silently replacing the
  * missing cut-off with the browser clock.
@@ -400,6 +431,68 @@ export function occupancyAggregateBucketKey(
   return Date.UTC(date.getFullYear(), 0, 1);
 }
 
+/**
+ * Produces a certified subset of an already returned aggregate payload.
+ *
+ * The live occupancy query broker uses this when a wider request covers a
+ * narrower widget window. Keeping the normalization here is important: SQL
+ * wall-clock buckets must be interpreted in the company timezone before the
+ * half-open interval can be compared, especially across DST transitions.
+ */
+export function selectOccupancyAggregateRowsInInterval(
+  rows: OccupancyScenarioBucketRow[],
+  granularity: AggregateGranularity,
+  from: Date,
+  to: Date,
+  expectedTimezone?: string,
+) {
+  if (
+    !(from instanceof Date) ||
+    Number.isNaN(from.getTime()) ||
+    !(to instanceof Date) ||
+    Number.isNaN(to.getTime()) ||
+    from >= to
+  ) {
+    throw new RangeError("O intervalo agregado de ocupação é inválido.");
+  }
+  if (!Array.isArray(rows)) {
+    throw new Error("As linhas agregadas de ocupação são inválidas.");
+  }
+
+  const options: OccupancyAggregateValidationOptions = {
+    allowDocumentedAggregateResponse: true,
+    expectedTimezone,
+    requireCertification: true,
+  };
+  const validationOptions = resolveRowValidationOptions(
+    rows,
+    granularity,
+    options,
+  );
+  const normalizedRows = normalizeOccupancyInstantBucketRows(
+    rows,
+    granularity,
+    validationOptions.expectedTimezone,
+    validationOptions.allowDocumentedAggregateResponse,
+  );
+  const validatedRows = validateOccupancyRows(
+    normalizedRows,
+    granularity,
+    validationOptions,
+  );
+  requireScenarioTotalsForAreaBuckets(validatedRows, granularity);
+
+  // All rows are normalized and validated as absolute instants above. Using
+  // their epoch keeps containment independent from the browser timezone; a
+  // company civil midnight must not be reinterpreted through local getters.
+  const fromKey = from.getTime();
+  const toKey = to.getTime();
+  return normalizedRows.filter((_, index) => {
+    const key = validatedRows[index].bucket.getTime();
+    return key >= fromKey && key < toKey;
+  });
+}
+
 function resolveResponseValidationOptions(
   response: OccupancyScenarioAggregateResponse,
   granularity: AggregateGranularity,
@@ -440,9 +533,13 @@ function acceptsDocumentedAggregate(
   granularity: AggregateGranularity,
   options: OccupancyAggregateValidationOptions,
 ) {
-  return options.allowDocumentedAggregateResponse === true &&
-    (granularity === "minute" || granularity === "hour" ||
-      granularity === "day" || granularity === "week" || granularity === "month");
+  return (
+    options.allowDocumentedAggregateResponse === true &&
+    (granularity === "minute" || granularity === "hour")
+  ) || (
+    options.allowVerifiedCivilAggregateResponse === true &&
+    (granularity === "day" || granularity === "week" || granularity === "month")
+  );
 }
 
 function canRelaxLegacyInstantCertification(

@@ -33,12 +33,22 @@ export type OccupancyDurationInsightScenario = {
 };
 
 export type OccupancyDurationInsightMonth = {
+  /** Human-readable scope used when the same model renders historical data. */
+  contextLabel?: string;
+  /** True when a long analysis was reduced to its final calendar month. */
+  clippedToFinalMonth?: boolean;
   from: Date;
   to: Date;
   monthEnd: Date;
   dateKeys: string[];
   timeZone: string;
 };
+
+export type OccupancyDurationInsightAnalysisPeriod =
+  OccupancyDurationInsightMonth & {
+    contextLabel: string;
+    clippedToFinalMonth: boolean;
+  };
 
 export type OccupancyDurationInsightCell = OccupancyDurationInsightSeconds & {
   x: number;
@@ -92,6 +102,88 @@ export function buildOccupancyDurationInsightMonth(
     monthEnd,
     dateKeys,
     timeZone: canonicalTimeZone,
+  };
+}
+
+/**
+ * Builds the detailed civil slice used by historical duration widgets.
+ *
+ * The heatmap model deliberately accepts at most 32 civil days. When an
+ * analysis spans more than that, only the intersection with its final month is
+ * returned. This keeps the 24-hour grid readable, bounds the aggregate query,
+ * and never pulls observations from outside the applied analysis interval.
+ * `to` is exclusive; a closed period should therefore pass the next civil-day
+ * boundary so the final 23:59 minute remains part of the result.
+ */
+export function buildOccupancyDurationInsightAnalysisPeriod({
+  cutoff,
+  from,
+  timeZone,
+  to,
+}: {
+  cutoff: Date;
+  from: Date;
+  timeZone: string;
+  to: Date;
+}): OccupancyDurationInsightAnalysisPeriod {
+  const rangeFrom = requireMinuteAlignedDate(from, "início do período");
+  const rangeTo = requireMinuteAlignedDate(to, "fim do período");
+  const requestedCutoff = requireValidDate(cutoff);
+  if (rangeFrom >= rangeTo) {
+    throw new RangeError("O período histórico de duração é inválido.");
+  }
+
+  const canonicalTimeZone = requireCompanyTimeZone(timeZone);
+  requireCivilDayBoundary(from, canonicalTimeZone, "início");
+  requireCivilDayBoundary(to, canonicalTimeZone, "fim");
+
+  const finalDayParts = companyZonedDateParts(
+    new Date(rangeTo - 1),
+    canonicalTimeZone,
+  );
+  const firstDayParts = companyZonedDateParts(from, canonicalTimeZone);
+  const civilCalendarDayCount = Math.round(
+    (Date.UTC(finalDayParts.year, finalDayParts.month - 1, finalDayParts.day) -
+      Date.UTC(firstDayParts.year, firstDayParts.month - 1, firstDayParts.day)) /
+      (24 * 60 * MINUTE_MS),
+  ) + 1;
+  const finalMonthStart = civilCalendarDayCount > 32
+    ? firstExistingCivilDayOfMonth(
+        finalDayParts.year,
+        finalDayParts.month,
+        canonicalTimeZone,
+      )
+    : from;
+  const periodFrom = new Date(Math.max(rangeFrom, finalMonthStart.getTime()));
+  const clippedToFinalMonth = periodFrom.getTime() !== rangeFrom;
+  const dateKeys = listCivilDateKeys(
+    periodFrom,
+    new Date(rangeTo),
+    canonicalTimeZone,
+  );
+  if (!dateKeys.length || dateKeys.length > 32) {
+    throw new RangeError(
+      "O período detalhado de duração deve conter de 1 a 32 dias civis.",
+    );
+  }
+
+  const cutoffMinute = Math.floor(requestedCutoff / MINUTE_MS) * MINUTE_MS;
+  const elapsedTo = Math.min(rangeTo, Math.max(periodFrom.getTime(), cutoffMinute));
+  const firstLabel = shortDate(dateKeys[0]);
+  const lastLabel = shortDate(dateKeys.at(-1)!);
+  const rangeLabel =
+    firstLabel === lastLabel ? firstLabel : `${firstLabel} a ${lastLabel}`;
+
+  return {
+    clippedToFinalMonth,
+    contextLabel: clippedToFinalMonth
+      ? `trecho do mês final no período selecionado (${rangeLabel})`
+      : `período selecionado (${rangeLabel})`,
+    dateKeys,
+    from: periodFrom,
+    monthEnd: new Date(rangeTo),
+    timeZone: canonicalTimeZone,
+    to: new Date(elapsedTo),
   };
 }
 
@@ -344,6 +436,64 @@ function existingCivilDay(parts: { year: number; month: number; day: number }, t
   }
 }
 
+function firstExistingCivilDayOfMonth(
+  year: number,
+  month: number,
+  timeZone: string,
+) {
+  for (let day = 1; day <= 3; day += 1) {
+    const start = existingCivilDay({ day, month, year }, timeZone);
+    if (start) return start;
+  }
+  throw new RangeError("O mês civil do período não possui um início válido.");
+}
+
+function listCivilDateKeys(from: Date, to: Date, timeZone: string) {
+  const start = companyZonedDateParts(from, timeZone);
+  const end = companyZonedDateParts(new Date(to.getTime() - 1), timeZone);
+  const cursor = new Date(Date.UTC(start.year, start.month - 1, start.day, 12));
+  const final = Date.UTC(end.year, end.month - 1, end.day, 12);
+  const dateKeys: string[] = [];
+
+  while (cursor.getTime() <= final) {
+    const parts = {
+      day: cursor.getUTCDate(),
+      month: cursor.getUTCMonth() + 1,
+      year: cursor.getUTCFullYear(),
+    };
+    const boundary = existingCivilDay(parts, timeZone);
+    if (
+      boundary &&
+      boundary.getTime() >= from.getTime() &&
+      boundary.getTime() < to.getTime()
+    ) {
+      dateKeys.push(civilDateKey(parts));
+    }
+    if (dateKeys.length > 32) {
+      throw new RangeError(
+        "O período detalhado de duração excede 32 dias civis.",
+      );
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+
+  return dateKeys;
+}
+
+function requireCivilDayBoundary(
+  value: Date,
+  timeZone: string,
+  label: string,
+) {
+  const parts = companyZonedDateParts(value, timeZone);
+  const boundary = existingCivilDay(parts, timeZone);
+  if (!boundary || boundary.getTime() !== value.getTime()) {
+    throw new RangeError(
+      `O ${label} do período de duração não é uma fronteira civil da empresa.`,
+    );
+  }
+}
+
 function civilDateKey({ year, month, day }: { year: number; month: number; day: number }) {
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
@@ -361,6 +511,14 @@ function requireValidDate(value: Date) {
     throw new RangeError("O instante da duração é inválido.");
   }
   return value.getTime();
+}
+
+function requireMinuteAlignedDate(value: Date, label: string) {
+  const instant = requireValidDate(value);
+  if (instant % MINUTE_MS !== 0) {
+    throw new RangeError(`O ${label} de duração não está alinhado ao minuto.`);
+  }
+  return instant;
 }
 
 function requireMinuteDate(value: Date) {

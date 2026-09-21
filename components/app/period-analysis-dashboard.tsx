@@ -76,7 +76,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { hasVisualAdminAccess } from "@/lib/access";
 import {
   aggregateBucketInRange,
-  endOfAggregateBucket,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
@@ -93,6 +92,7 @@ import {
   reconcileAggregateRows,
   rollupAggregateRows,
 } from "@/lib/aggregate-reconciliation";
+import { reconcileCountingCalendarRows } from "@/lib/counting-aggregate-reconciliation";
 import { apiFetch } from "@/lib/api";
 import { readCameraGroups } from "@/lib/camera-groups";
 import { companyDateKey } from "@/lib/company-time-zone";
@@ -106,7 +106,13 @@ import {
   useEffectiveCompanyScopeId,
   useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
-import { requireCertifiedCountingRuntimeTimeZone } from "@/lib/counting-time-zone";
+import {
+  countingCalendarDate,
+  countingCalendarRangeToInstants,
+  countingEndOfHourInstant,
+  countingStartOfHourInstant,
+  requireCertifiedCountingTimeZone,
+} from "@/lib/counting-time-zone";
 import { canReadInfrastructureCatalogs } from "@/lib/permissions";
 import {
   buildCountingAnalysisRangePlan,
@@ -480,14 +486,15 @@ export function PeriodAnalysisDashboard({
   const companyTimeZoneResolution = React.useMemo(
     () => ({
       fallback: rawCompanyTimeZoneResolution.fallback,
-      source: rawCompanyTimeZoneResolution.fallback
-        ? ("fallback" as const)
-        : ("deployment-default" as const),
+      source: rawCompanyTimeZoneResolution.source,
       timeZone: rawCompanyTimeZoneResolution.timeZone,
+      warning: rawCompanyTimeZoneResolution.warning,
     }),
     [
       rawCompanyTimeZoneResolution.fallback,
+      rawCompanyTimeZoneResolution.source,
       rawCompanyTimeZoneResolution.timeZone,
+      rawCompanyTimeZoneResolution.warning,
     ],
   );
   const companyTimeZone = companyTimeZoneResolution.timeZone;
@@ -1024,7 +1031,7 @@ export function PeriodAnalysisDashboard({
       trendHistory: boolean;
     };
     try {
-      requireCertifiedCountingRuntimeTimeZone(companyTimeZoneResolution);
+      requireCertifiedCountingTimeZone(companyTimeZoneResolution);
     } catch (error) {
       if (requestRef.current) abortRequest(requestRef.current);
       requestRef.current = null;
@@ -1083,6 +1090,24 @@ export function PeriodAnalysisDashboard({
     const announceErrors = !hasLoadedDataRef.current;
     if (announceErrors) setLoadingData(true);
     const now = new Date();
+    const companyToday = countingCalendarDate(now, companyTimeZone, "day");
+    const selectedPeriodInstants = countingCalendarRangeToInstants(
+      period,
+      companyTimeZone,
+    );
+    const selectedPeriodIsOpen =
+      companyToday >= period.from && companyToday < period.to;
+    const calendarCoverageTo = selectedPeriodIsOpen
+      ? companyToday
+      : period.to;
+    const instantCoverageTo = selectedPeriodIsOpen
+      ? new Date(
+          Math.min(
+            selectedPeriodInstants.to.getTime(),
+            addMinutes(startOfMinute(now), 1).getTime(),
+          ),
+        )
+      : selectedPeriodInstants.to;
     const dayCacheOptions = {
       cache: dailyAggregateCacheRef.current,
       cacheScope: `analysis:${companyScopeId ?? "jwt-company"}:${companyTimeZone}`,
@@ -1090,19 +1115,15 @@ export function PeriodAnalysisDashboard({
     };
 
     const referenceDate = new Date(period.to.getTime() - 1);
-    const periodCoverageTo =
-      now >= period.from && now < period.to
-        ? addMinutes(startOfMinute(now), 1)
-        : period.to;
     const dayRange = {
       from: requirements.trendHistory
         ? addDays(operationalPeriod.from, -29)
         : operationalPeriod.from,
-      to: periodCoverageTo,
+      to: calendarCoverageTo,
     };
     const monthRange = {
       from: new Date(referenceDate.getFullYear(), 0, 1),
-      to: periodCoverageTo,
+      to: calendarCoverageTo,
     };
     const baselineRanges = requirements.baseline.map((baseline) => [
       baseline,
@@ -1114,16 +1135,20 @@ export function PeriodAnalysisDashboard({
         periodAnalysisBaselineRange(
           {
             from: operationalPeriod.from,
-            to: periodCoverageTo,
+            to: calendarCoverageTo,
           },
           baseline,
         ),
       ]),
     );
+    const hourlyDetailInstants = countingCalendarRangeToInstants(
+      hourlyDetailRange,
+      companyTimeZone,
+    );
     const boundedHourlyRange = {
-      from: hourlyDetailRange.from,
+      from: hourlyDetailInstants.from,
       to: new Date(
-        Math.min(hourlyDetailRange.to.getTime(), periodCoverageTo.getTime()),
+        Math.min(hourlyDetailInstants.to.getTime(), instantCoverageTo.getTime()),
       ),
     };
     const requiredHourRanges =
@@ -1139,6 +1164,7 @@ export function PeriodAnalysisDashboard({
           now,
           companyScopeId,
           controller.signal,
+          companyTimeZone,
         )
       : Promise.resolve(emptyDataset("hour"));
     const contextHourPromise = requirements.contextHour
@@ -1148,7 +1174,8 @@ export function PeriodAnalysisDashboard({
       ? canonicalHourPromise
       : Promise.resolve(emptyDataset("hour"));
     const minuteRangeWithinLimit =
-      estimatedMinuteBucketCount(period) <= MAX_ANALYSIS_MINUTE_BUCKETS;
+      estimatedMinuteBucketCount(selectedPeriodInstants) <=
+      MAX_ANALYSIS_MINUTE_BUCKETS;
     const minutePromise = requirements.minute
       ? !minuteRangeWithinLimit
         ? Promise.resolve({
@@ -1159,9 +1186,10 @@ export function PeriodAnalysisDashboard({
           })
         : fetchAnalysisDataset(
             "minute",
-            period,
+            selectedPeriodInstants,
             companyScopeId,
             controller.signal,
+            companyTimeZone,
           )
       : Promise.resolve(emptyDataset("minute"));
     const requestedConsolidatedDayRanges = [
@@ -1180,11 +1208,13 @@ export function PeriodAnalysisDashboard({
         requestedConsolidatedDayRanges,
         companyScopeId,
         controller.signal,
+        companyTimeZone,
         dayCacheOptions,
       );
     const currentMinuteRange = analysisCurrentMinuteRange(
       requiredHourRanges,
       now,
+      companyTimeZone,
     );
     const reconciliationMinutePromise = currentMinuteRange
       ? requirements.minute
@@ -1194,6 +1224,7 @@ export function PeriodAnalysisDashboard({
             currentMinuteRange,
             companyScopeId,
             controller.signal,
+            companyTimeZone,
           )
       : Promise.resolve(emptyDataset("minute"));
 
@@ -1260,6 +1291,7 @@ export function PeriodAnalysisDashboard({
                 rawDay,
                 exactHour,
                 boundedHourlyRange,
+                companyTimeZone,
               )
             : rawDay;
           const monthDays = requiredHourRanges.length
@@ -1267,6 +1299,7 @@ export function PeriodAnalysisDashboard({
                 rawMonthDays,
                 exactHour,
                 boundedHourlyRange,
+                companyTimeZone,
               )
             : rawMonthDays;
           const month = requirements.month
@@ -1470,14 +1503,10 @@ export function PeriodAnalysisDashboard({
   ): Promise<ReportPayload> {
     signal?.throwIfAborted();
     const now = new Date();
+    const companyToday = countingCalendarDate(now, companyTimeZone, "day");
     const sourceTo =
-      now >= period.from && now < period.to
-        ? new Date(
-            Math.min(
-              period.to.getTime(),
-              addMinutes(startOfMinute(now), 1).getTime(),
-            ),
-          )
+      companyToday >= period.from && companyToday < period.to
+        ? companyToday
         : period.to;
     const dailySourceRange = { from: period.from, to: sourceTo };
     let aiDayDataset = data.day;
@@ -1486,6 +1515,7 @@ export function PeriodAnalysisDashboard({
         [dailySourceRange],
         companyScopeId,
         signal,
+        companyTimeZone,
         {
           cache: dailyAggregateCacheRef.current,
           cacheScope: `analysis:${companyScopeId ?? "jwt-company"}:${companyTimeZone}`,
@@ -1502,16 +1532,7 @@ export function PeriodAnalysisDashboard({
       );
     }
 
-    const dataCompleteUntil = periodAnalysisDataCompleteUntil(
-      period,
-      now,
-    );
-    const dailyTo = new Date(
-      Math.min(
-        period.to.getTime(),
-        addDays(startOfDay(dataCompleteUntil), 1).getTime(),
-      ),
-    );
+    const dailyTo = sourceTo;
     const dayCount = requireAiDailyRangeWithinLimit(period.from, dailyTo);
     const dailyPoints = buildCombinedScenarioPoints({
       from: period.from,
@@ -2896,6 +2917,7 @@ function composePeriodAnalysisReport({
   const dataCompleteUntil = periodAnalysisDataCompleteUntil(
     period,
     generatedAt,
+    timeZone,
   );
   return {
     charts: models.flatMap(({ chartType, defaultTitle, model, title }) =>
@@ -2961,9 +2983,11 @@ function composePeriodAnalysisReport({
 function periodAnalysisDataCompleteUntil(
   period: PeriodAnalysisRange,
   now: Date,
+  timeZone: string,
 ) {
-  const inclusiveEnd = new Date(period.to.getTime() - 1);
-  return now >= period.from && now < period.to
+  const instants = countingCalendarRangeToInstants(period, timeZone);
+  const inclusiveEnd = new Date(instants.to.getTime() - 1);
+  return now >= instants.from && now < instants.to
     ? new Date(Math.min(now.getTime(), inclusiveEnd.getTime()))
     : inclusiveEnd;
 }
@@ -3008,6 +3032,7 @@ function fetchAnalysisDataset(
   range: PeriodAnalysisRange,
   companyScopeId?: string | null,
   signal?: AbortSignal,
+  timeZone?: string,
 ): Promise<PeriodAnalysisDataset> {
   const execute = async (): Promise<PeriodAnalysisDataset> => {
     try {
@@ -3019,6 +3044,7 @@ function fetchAnalysisDataset(
           granularity,
           metricType: DEFAULT_METRIC_TYPE,
           signal,
+          timeZone,
           to: range.to,
         }),
       };
@@ -3061,8 +3087,9 @@ function fetchAnalysisDataset(
 
 async function fetchAnalysisConsolidatedDayDatasets(
   ranges: PeriodAnalysisRange[],
-  companyScopeId?: string | null,
-  signal?: AbortSignal,
+  companyScopeId: string | null | undefined,
+  signal: AbortSignal | undefined,
+  timeZone: string,
   cacheOptions?: {
     cache: AnalysisDayCache;
     cacheScope: string;
@@ -3107,6 +3134,7 @@ async function fetchAnalysisConsolidatedDayDatasets(
         dataset: rollupAnalysisDataset(
           await fetchAnalysisExactHourlyDataset(
             range,
+            timeZone,
             companyScopeId,
             signal,
           ),
@@ -3345,20 +3373,28 @@ function setAnalysisDayCacheEntry(
 
 async function fetchAnalysisExactHourlyDataset(
   range: PeriodAnalysisRange,
+  timeZone: string,
   companyScopeId?: string | null,
   signal?: AbortSignal,
 ): Promise<PeriodAnalysisDataset> {
-  const fullHours = alignedAnalysisHourRange(range);
+  const fullHours = alignedAnalysisHourRange(range, timeZone);
   const hourlyPromise = fullHours
-    ? fetchAnalysisDataset("hour", fullHours, companyScopeId, signal)
+    ? fetchAnalysisDataset(
+        "hour",
+        fullHours,
+        companyScopeId,
+        signal,
+        timeZone,
+      )
     : Promise.resolve(emptyDataset("hour"));
   const boundaryPromise = Promise.all(
-    analysisPartialHourRanges(range).map(async (partialRange) => ({
+    analysisPartialHourRanges(range, timeZone).map(async (partialRange) => ({
       dataset: await fetchAnalysisDataset(
         "minute",
         partialRange,
         companyScopeId,
         signal,
+        timeZone,
       ),
       range: partialRange,
     })),
@@ -3403,13 +3439,14 @@ function splitAnalysisRangeAtDayBoundaries(range: PeriodAnalysisRange) {
 
 function alignedAnalysisHourRange(
   range: PeriodAnalysisRange,
+  timeZone: string,
 ): PeriodAnalysisRange | null {
-  const fromHour = startOfHour(range.from);
+  const fromHour = countingStartOfHourInstant(range.from, timeZone);
   const from =
     fromHour.getTime() === range.from.getTime()
       ? range.from
-      : endOfAggregateBucket(fromHour, "hour");
-  const to = startOfHour(range.to);
+      : countingEndOfHourInstant(fromHour, timeZone);
+  const to = countingStartOfHourInstant(range.to, timeZone);
   return from < to ? { from, to } : null;
 }
 
@@ -3430,6 +3467,7 @@ async function fetchAnalysisHourlyDatasets(
   now: Date,
   companyScopeId?: string | null,
   signal?: AbortSignal,
+  timeZone?: string,
 ): Promise<PeriodAnalysisDataset> {
   try {
     return {
@@ -3441,6 +3479,7 @@ async function fetchAnalysisHourlyDatasets(
         now,
         ranges,
         signal,
+        timeZone,
       }),
     };
   } catch (error) {
@@ -3485,6 +3524,7 @@ function mergeExactHoursIntoDays(
   dayDataset: PeriodAnalysisDataset,
   exactHours: PeriodAnalysisDataset,
   range: PeriodAnalysisRange,
+  timeZone: string,
 ) {
   if (
     // Hourly detail may cover only 31 days of a much larger failed request.
@@ -3500,13 +3540,14 @@ function mergeExactHoursIntoDays(
   return {
     ...dayDataset,
     error: undefined,
-    rows: reconcileAggregateRows(
+    rows: reconcileCountingCalendarRows(
       dayDataset.rows,
       "day",
       exactHours.rows,
-      exactHours.granularity,
+      "hour",
       range.from,
       range.to,
+      timeZone,
     ),
   };
 }
@@ -3615,14 +3656,15 @@ function reconcileAnalysisMinuteDataset(
 
 function analysisPartialHourRanges(
   range: PeriodAnalysisRange,
+  timeZone: string,
 ): PeriodAnalysisRange[] {
   const ranges = new Map<string, PeriodAnalysisRange>();
-  const fromHour = startOfHour(range.from);
+  const fromHour = countingStartOfHourInstant(range.from, timeZone);
   if (fromHour.getTime() !== range.from.getTime()) {
     const to = new Date(
       Math.min(
         range.to.getTime(),
-        endOfAggregateBucket(fromHour, "hour").getTime(),
+        countingEndOfHourInstant(fromHour, timeZone).getTime(),
       ),
     );
     if (range.from < to) {
@@ -3633,9 +3675,10 @@ function analysisPartialHourRanges(
     }
   }
 
-  if (startOfHour(range.to).getTime() !== range.to.getTime()) {
+  const alignedTo = countingStartOfHourInstant(range.to, timeZone);
+  if (alignedTo.getTime() !== range.to.getTime()) {
     const lastIncluded = new Date(range.to.getTime() - 1);
-    const toHour = startOfHour(lastIncluded);
+    const toHour = countingStartOfHourInstant(lastIncluded, timeZone);
     const from = new Date(Math.max(range.from.getTime(), toHour.getTime()));
     if (from < range.to) {
       ranges.set(`${from.toISOString()}|${range.to.toISOString()}`, {
@@ -3711,11 +3754,12 @@ function reconcileAnalysisHourlyBoundaries(
 function analysisCurrentMinuteRange(
   ranges: PeriodAnalysisRange[],
   now: Date,
+  timeZone: string,
 ) {
-  const from = startOfHour(now);
+  const from = countingStartOfHourInstant(now, timeZone);
   const to = new Date(
     Math.min(
-      endOfAggregateBucket(from, "hour").getTime(),
+      countingEndOfHourInstant(now, timeZone).getTime(),
       addMinutes(startOfMinute(now), 1).getTime(),
     ),
   );
@@ -3760,10 +3804,6 @@ function emptyDataset(
 
 function startOfMinute(date: Date) {
   return startOfAggregateBucket(date, "minute");
-}
-
-function startOfHour(date: Date) {
-  return startOfAggregateBucket(date, "hour");
 }
 
 function startOfDay(date: Date) {

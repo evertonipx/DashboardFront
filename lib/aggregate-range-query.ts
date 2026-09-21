@@ -7,6 +7,11 @@ import {
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import { apiFetch } from "@/lib/api";
+import { normalizeCountingAggregateRowsTimeZone } from "@/lib/counting-aggregate-time";
+import {
+  countingEndOfHourInstant,
+  countingStartOfHourInstant,
+} from "@/lib/counting-time-zone";
 import type {
   AggregateEventRow,
   AggregateEventsResponse,
@@ -33,6 +38,7 @@ export async function fetchCompleteAggregateRange({
   metricType = DEFAULT_METRIC_TYPE,
   request,
   signal,
+  timeZone,
   to,
 }: {
   companyScopeId?: string;
@@ -41,6 +47,7 @@ export async function fetchCompleteAggregateRange({
   metricType?: string;
   request?: CompleteAggregateRequest;
   signal?: AbortSignal;
+  timeZone?: string;
   to: Date;
 }): Promise<AggregateEventRow[]> {
   requireCompleteAggregateOptions(from, to, metricType);
@@ -60,6 +67,7 @@ export async function fetchCompleteAggregateRange({
     metricType,
     signal,
     splitDepth: 0,
+    timeZone,
     to,
   });
 }
@@ -71,6 +79,7 @@ async function fetchCompleteAggregatePartition({
   metricType,
   signal,
   splitDepth,
+  timeZone,
   to,
 }: {
   execute: CompleteAggregateRequest;
@@ -79,6 +88,7 @@ async function fetchCompleteAggregatePartition({
   metricType: string;
   signal?: AbortSignal;
   splitDepth: number;
+  timeZone?: string;
   to: Date;
 }): Promise<AggregateEventRow[]> {
   signal?.throwIfAborted();
@@ -94,8 +104,13 @@ async function fetchCompleteAggregatePartition({
     response.granularity,
     granularity,
   );
-  const rows = requireAggregateRowsInRange(
+  const normalizedRows = normalizeCountingAggregateRowsTimeZone(
     response.data,
+    responseGranularity,
+    timeZone,
+  );
+  const rows = requireAggregateRowsInRange(
+    normalizedRows,
     responseGranularity,
     from,
     to,
@@ -104,7 +119,7 @@ async function fetchCompleteAggregatePartition({
 
   if (rows.length < AGGREGATE_RESPONSE_ROW_CEILING) return rows;
 
-  const split = splitCompleteAggregateRange(from, to, granularity);
+  const split = splitCompleteAggregateRange(from, to, granularity, timeZone);
   if (!split || splitDepth >= MAX_COMPLETENESS_SPLIT_DEPTH) {
     throw new Error(
       `A consulta ${granularity} atingiu o limite seguro em um único intervalo e não pode ser certificada como completa.`,
@@ -122,6 +137,7 @@ async function fetchCompleteAggregatePartition({
         metricType,
         signal,
         splitDepth: splitDepth + 1,
+        timeZone,
         to: partition.to,
       })),
     );
@@ -134,19 +150,26 @@ export function splitCompleteAggregateRange(
   from: Date,
   to: Date,
   granularity: AggregateGranularity,
+  timeZone?: string,
 ): readonly [
   Readonly<{ from: Date; to: Date }>,
   Readonly<{ from: Date; to: Date }>,
 ] | null {
   if (from >= to) return null;
 
-  const firstBucketEnd = endOfAggregateBucket(from, granularity);
+  const firstBucketEnd =
+    granularity === "hour" && timeZone
+      ? countingEndOfHourInstant(from, timeZone)
+      : endOfAggregateBucket(from, granularity);
   if (firstBucketEnd >= to) return null;
 
   const midpoint = new Date(
     from.getTime() + Math.floor((to.getTime() - from.getTime()) / 2),
   );
-  let boundary = startOfAggregateBucket(midpoint, granularity);
+  let boundary =
+    granularity === "hour" && timeZone
+      ? countingStartOfHourInstant(midpoint, timeZone)
+      : startOfAggregateBucket(midpoint, granularity);
   if (boundary <= from) boundary = firstBucketEnd;
   if (boundary >= to) return null;
 

@@ -20,11 +20,10 @@ const documented = { allowDocumentedAggregateResponse: true, requireCertificatio
 process.env.TZ = "UTC";
 
 for (const [granularity, bucket] of [
-  ["minute", "2026-09-11T12:01:00Z"], ["hour", "2026-09-11T12:00:00Z"],
-  ["day", "2026-09-11T03:00:00Z"], ["week", "2026-09-07T03:00:00Z"],
-  ["month", "2026-09-01T03:00:00Z"],
+  ["minute", "2026-09-11T12:01:00Z"],
+  ["hour", "2026-09-11T12:00:00Z"],
 ] as const) {
-  test(`contrato Swagger ${granularity} dispensa extensões de certificação sem inventá-las`, () => {
+  test(`contrato Swagger ${granularity} usa instantes explícitos sem inventar certificação`, () => {
     const source = envelope(granularity, [row(bucket, 2)]);
     const copy = structuredClone(source);
     const rows = validation.requireOccupancyAggregateRows(source, granularity, "scenario-a",
@@ -41,6 +40,25 @@ for (const [granularity, bucket] of [
     assert.equal(validation.resolveCertifiedOccupancyDataCutoff([{ asOf: source.as_of }]), null);
     assert.deepEqual(validation.requireOccupancyAggregateRows(envelope(granularity, []),
       granularity, "scenario-a", "America/Sao_Paulo", documented), []);
+  });
+}
+
+for (const [granularity, bucket] of [
+  ["day", "2026-09-11T03:00:00Z"],
+  ["week", "2026-09-07T03:00:00Z"],
+  ["month", "2026-09-01T03:00:00Z"],
+] as const) {
+  test(`agregado civil ${granularity} sem timezone/completude não é aceito diretamente`, () => {
+    assert.throws(
+      () => validation.requireOccupancyAggregateRows(
+        envelope(granularity, [row(bucket, 2)]),
+        granularity,
+        "scenario-a",
+        "America/Sao_Paulo",
+        documented,
+      ),
+      /não informou complete/,
+    );
   });
 }
 
@@ -85,11 +103,11 @@ test("total de áreas constantes ou sincronizadas é aceito sem somar os máximo
 });
 
 test("coarse RFC3339 é instante, não uma data civil rebatizada", () => {
-  assert.throws(() => validation.requireOccupancyAggregateRows(envelope("day", [row("2026-09-11T00:00:00Z", 1)]),
+  assert.throws(() => validation.requireOccupancyAggregateRows(certifiedEnvelope("day", [row("2026-09-11T00:00:00Z", 1)]),
     "day", "scenario-a", "America/Sao_Paulo", documented), validation.OccupancyCivilBucketAlignmentError);
-  assert.throws(() => validation.requireOccupancyAggregateRows(envelope("day", [row("2026-02-30T00:00:00Z", 1)]),
+  assert.throws(() => validation.requireOccupancyAggregateRows(certifiedEnvelope("day", [row("2026-02-30T00:00:00Z", 1)]),
     "day", "scenario-a", "America/Sao_Paulo", documented), /inválido/);
-  const rows = validation.requireOccupancyAggregateRows(envelope("day", [row("2026-09-11T03:00:00Z", 1)]),
+  const rows = validation.requireOccupancyAggregateRows(certifiedEnvelope("day", [row("2026-09-11T03:00:00Z", 1)]),
     "day", "scenario-a", "America/Sao_Paulo", documented);
   assert.equal(rows[0].bucket, "2026-09-11");
   assert.throws(() => validation.aggregateOccupancyRowsForRequestedBuckets(rows, "day",
@@ -111,13 +129,31 @@ test("horas abertas de offsets 30/45 minutos são independentes do navegador UTC
 });
 
 test("as_of do dia aberto usa o início civil da empresa, inclusive DST à meia-noite", () => {
-  const source = { ...envelope("day", [row("2026-09-06T04:00:00Z", 1)]), as_of: "2026-09-06T04:10:00Z" };
+  const source = certifiedEnvelope(
+    "day",
+    [row("2026-09-06T04:00:00Z", 1)],
+    {
+      as_of: "2026-09-06T04:10:00Z",
+      complete: false,
+      status: "partial",
+      timezone: "America/Santiago",
+    },
+  );
+  source.data = source.data.map((item: RuntimeFixture) => ({
+    ...item,
+    complete: false,
+    status: "partial",
+  }));
   assert.doesNotThrow(() => validation.requireOccupancyAggregateRows(source, "day", "scenario-a",
     "America/Santiago", { ...documented, openBucket: new Date(2026, 8, 6), requestedAt: new Date("2026-09-06T04:20:00Z") }));
 });
 
 test("coarse alinhado usa uma consulta e mantém os valores originais", async () => {
-  const fixture = createFixture((call) => envelope(call.granularity, [row("2026-09-11T03:00:00Z", 7)]));
+  const fixture = createFixture((call) => certifiedEnvelope(
+    call.granularity,
+    [row("2026-09-11T03:00:00Z", 7)],
+    { as_of: call.to.toISOString() },
+  ));
   const result = await fixture.fetch();
   assert.equal(fixture.calls.length, 1);
   assert.equal(fixture.calls[0].from.toISOString(), "2026-09-11T03:00:00.000Z");
@@ -126,17 +162,54 @@ test("coarse alinhado usa uma consulta e mantém os valores originais", async ()
   assert.equal(result.data[0].bucket, "2026-09-11");
 });
 
+test("coarse civil alinhado sem certificação é recomposto por horas", async () => {
+  const fixture = createFixture((call) =>
+    call.granularity === "day"
+      ? envelope("day", [row("2026-09-11T03:00:00Z", 7)])
+      : responseFor(call),
+  );
+  const result = await fixture.fetch();
+  assert.deepEqual(
+    fixture.calls.map((call) => call.granularity),
+    ["day", "hour"],
+  );
+  assert.equal(result.data[0].scenario_total_avg, 1);
+  assert.equal(result.timezone, "America/Sao_Paulo");
+  assert.equal(result.complete, true);
+  assert.equal(result.status, "complete");
+  assert.deepEqual([...fixture.capabilities.values()], [false]);
+});
+
 test("dia UTC divergente usa fallback horário e identidade de capacidade por tenant", async () => {
   const fixture = createFixture();
   const result = await fixture.fetch();
   assert.equal(fixture.calls.length, 2);
   assert.equal(result.data[0].scenario_total_avg, 1);
   assert.equal(result.data[0].scenario_total_final, undefined);
-  assert.equal(result.as_of, undefined);
+  assert.equal(result.as_of, "2026-09-12T03:00:00.000Z");
+  assert.equal(result.timezone, "America/Sao_Paulo");
   await fixture.fetch();
   assert.equal(fixture.calls.length, 3, "a capacidade do batch evita repetir coarse incompatível");
   await fixture.fetch({ companyScopeId: "company-b" });
   assert.equal(fixture.calls.length, 5, "outra empresa não herda a decisão");
+});
+
+test("cenários concorrentes compartilham a descoberta de fallback civil", async () => {
+  const fixture = createFixture();
+  await Promise.all([
+    fixture.fetch({ maximumFallbackRequests: 4, scenarioId: "scenario-a" }),
+    fixture.fetch({ maximumFallbackRequests: 4, scenarioId: "scenario-b" }),
+  ]);
+  assert.equal(
+    fixture.calls.filter((call) => call.granularity === "day").length,
+    1,
+    "somente o primeiro cenário deve sondar a capacidade coarse",
+  );
+  assert.equal(
+    fixture.calls.filter((call) => call.granularity === "hour").length,
+    2,
+    "cada série ainda mantém sua própria resposta horária",
+  );
 });
 
 for (const [timeZone, day, expectedHours] of [
@@ -172,7 +245,8 @@ test("fallback não converte ausência em zero nem soma picos de áreas", async 
   assert.deepEqual((await missing.fetch()).data, []);
   const zero = createFixture((call) => responseFor(call, 0));
   assert.deepEqual((await zero.fetch()).data, [{ bucket: "2026-09-11",
-    scenario_total_avg: 0, scenario_total_min: 0, scenario_total_max: 0 }]);
+    complete: true, scenario_total_avg: 0, scenario_total_min: 0,
+    scenario_total_max: 0, status: "complete" }]);
 });
 
 test("hora em curso usa somente minutos fechados até requestedAt", async () => {
@@ -184,12 +258,91 @@ test("hora em curso usa somente minutos fechados até requestedAt", async () => 
   assert.equal(spans.at(-1).to.toISOString(), "2026-09-11T04:17:00.000Z");
 });
 
+test("fallback ao vivo reutiliza unidades fechadas e busca somente o novo minuto", async () => {
+  const fixture = createFixture();
+  const unitCache = new Map();
+  const live = {
+    openBucket: new Date(2026, 8, 11),
+    requestedAt: new Date("2026-09-11T04:17:42Z"),
+    unitCache,
+  };
+  await fixture.fetch(live);
+  assert.ok(unitCache.size > 1);
+
+  fixture.calls.splice(0);
+  await fixture.fetch(live);
+  assert.equal(
+    fixture.calls.length,
+    0,
+    "o mesmo minuto fechado não deve ser consultado novamente a cada 5s",
+  );
+
+  await fixture.fetch({
+    ...live,
+    requestedAt: new Date("2026-09-11T04:18:42Z"),
+  });
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls[0].granularity, "minute");
+  assert.equal(fixture.calls[0].to - fixture.calls[0].from, 60_000);
+
+  fixture.calls.splice(0);
+  await fixture.fetch({ ...live, bypassUnitCache: true });
+  assert.equal(
+    fixture.calls.length,
+    2,
+    "a auditoria explícita deve reler hora fechada e minutos do bucket civil",
+  );
+});
+
+test("unidade fechada ausente só é revista quando a borda de minuto avança", async () => {
+  const fixture = createFixture((call) => {
+    const response = responseFor(call, 1);
+    if (call.granularity === "minute") response.data.pop();
+    return response;
+  });
+  const unitCache = new Map();
+  const live = {
+    openBucket: new Date(2026, 8, 11),
+    requestedAt: new Date("2026-09-11T04:17:42Z"),
+    unitCache,
+  };
+
+  assert.deepEqual((await fixture.fetch(live)).data, []);
+  fixture.calls.splice(0);
+  assert.deepEqual(
+    (
+      await fixture.fetch({
+        ...live,
+        requestedAt: new Date("2026-09-11T04:17:47Z"),
+      })
+    ).data,
+    [],
+  );
+  assert.equal(
+    fixture.calls.length,
+    0,
+    "uma ausência já certificada para o cutoff não deve gerar GET a cada pulso",
+  );
+
+  await fixture.fetch({
+    ...live,
+    requestedAt: new Date("2026-09-11T04:18:02Z"),
+  });
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls[0].granularity, "minute");
+  assert.equal(
+    fixture.calls[0].to - fixture.calls[0].from,
+    2 * 60_000,
+    "a nova borda revisa a lacuna anterior junto do minuto recém-fechado",
+  );
+});
+
 test("média fracionária constante não ultrapassa min/max por arredondamento", async () => {
   const fixture = createFixture((call) => responseFor(call, 0.1));
   const result = await fixture.fetch();
   assert.equal(result.data[0].scenario_total_avg, 0.1);
   assert.doesNotThrow(() => validation.requireOccupancyAggregateRows(result, "day", "scenario-a",
-    "America/Sao_Paulo", documented));
+    "America/Sao_Paulo", { ...documented, allowVerifiedCivilAggregateResponse: true }));
 });
 
 test("escopo errado, schema inválido e falha de rede não disparam fallback", async () => {
@@ -206,14 +359,35 @@ test("escopo errado, schema inválido e falha de rede não disparam fallback", a
   }
 });
 
-test("aborto não publica resultado nem registra capacidade", async () => {
+test("aborto não publica resultado, mas preserva a incompatibilidade já comprovada", async () => {
   const controller = new AbortController();
   const fixture = createFixture((call) => {
     if (call.granularity === "hour") controller.abort();
     return responseFor(call);
   });
   await assert.rejects(fixture.fetch({ signal: controller.signal }), { name: "AbortError" });
-  assert.equal(fixture.capabilities.size, 0);
+  assert.deepEqual([...fixture.capabilities.values()], [false]);
+});
+
+test("fallback longo falha fechado antes de multiplicar chamadas", async () => {
+  const fixture = createFixture();
+  await assert.rejects(
+    fixture.fetch({
+      from: new Date(2022, 0, 1),
+      granularity: "month",
+      maximumFallbackRequests: 0,
+      to: new Date(2026, 0, 1),
+    }),
+    (error: RuntimeFixture) => {
+      assert.equal(error.name, "OccupancyCivilFallbackRequestLimitError");
+      assert.equal(error.maximumRequests, 0);
+      assert.equal(error.plannedRequests, 24);
+      return true;
+    },
+  );
+  assert.equal(fixture.calls.length, 1, "somente a sondagem coarse pode chegar à rede");
+  assert.equal(fixture.calls[0].granularity, "month");
+  assert.deepEqual([...fixture.capabilities.values()], [false]);
 });
 
 test("limite de quatro anos é validado antes de consultas e horas são particionadas", async () => {
@@ -222,8 +396,8 @@ test("limite de quatro anos é validado antes de consultas e horas são particio
   assert.equal(fixture.calls.length, 0);
   await fixture.fetch({ granularity: "month", from: new Date(2026, 6, 1), to: new Date(2026, 8, 1) });
   const hours = fixture.calls.filter((call) => call.granularity === "hour");
-  assert.equal(hours.length, 2);
-  assert.ok(hours.every((call) => call.to - call.from <= 31 * 24 * 3_600_000));
+  assert.equal(hours.length, 1);
+  assert.ok(hours.every((call) => call.to - call.from <= 62 * 24 * 3_600_000));
 });
 
 function checked(response: RuntimeFixture) {
@@ -232,17 +406,44 @@ function checked(response: RuntimeFixture) {
 function row(bucket: RuntimeFixture, value = 1) {
   return { bucket, scenario_total_avg: value, scenario_total_min: value, scenario_total_max: value };
 }
-function envelope(granularity: RuntimeFixture, data: RuntimeFixture): { granularity: RuntimeFixture; data: RuntimeFixture; scenario_id: string; as_of?: string; timezone?: string } { return { granularity, data, scenario_id: "scenario-a" }; }
+function envelope(granularity: RuntimeFixture, data: RuntimeFixture, scenarioId = "scenario-a"): { granularity: RuntimeFixture; data: RuntimeFixture; scenario_id: string; as_of?: string; timezone?: string } { return { granularity, data, scenario_id: scenarioId }; }
+function certifiedEnvelope(
+  granularity: RuntimeFixture,
+  data: RuntimeFixture,
+  overrides: Record<string, RuntimeFixture> = {},
+) {
+  return {
+    ...envelope(
+      granularity,
+      data.map((item: RuntimeFixture) => ({
+        ...item,
+        ...(item.area_avg === undefined
+          ? {}
+          : { area_final: item.area_avg }),
+        complete: true,
+        ...(item.scenario_total_avg === undefined
+          ? {}
+          : { scenario_total_final: item.scenario_total_avg }),
+        status: "complete",
+      })),
+    ),
+    as_of: "2026-09-12T03:00:00.000Z",
+    complete: true,
+    status: "complete",
+    timezone: "America/Sao_Paulo",
+    ...overrides,
+  };
+}
 function responseFor(call: RuntimeFixture, value = 1) {
   if (call.granularity !== "hour" && call.granularity !== "minute") {
-    return envelope(call.granularity, [row(`${call.from.toISOString().slice(0, 10)}T00:00:00Z`, value)]);
+    return envelope(call.granularity, [row(`${call.from.toISOString().slice(0, 10)}T00:00:00Z`, value)], call.scenarioId);
   }
   const data: RuntimeFixture[] = [];
   const step = call.granularity === "hour" ? 3_600_000 : 60_000;
   for (let cursor = call.from.getTime(); cursor < call.to.getTime(); cursor += step) {
     data.push(row(new Date(cursor).toISOString(), value));
   }
-  return envelope(call.granularity, data);
+  return envelope(call.granularity, data, call.scenarioId);
 }
 function createFixture(responder = responseFor) {
   const calls: RuntimeFixture[] = [];
@@ -253,7 +454,8 @@ function createFixture(responder = responseFor) {
     capabilities, fetchResponse: async (path: string) => {
       const url = new URL(path, "http://fixture.invalid");
       const call = { from: new Date(url.searchParams.get("from")!), to: new Date(url.searchParams.get("to")!),
-        granularity: url.searchParams.get("granularity") };
+        granularity: url.searchParams.get("granularity"),
+        scenarioId: decodeURIComponent(url.pathname.split("/").at(-2)!) };
       calls.push(call);
       return responder(call);
     }, ...overrides,

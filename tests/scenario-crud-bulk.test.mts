@@ -29,17 +29,21 @@ for (const [label, pathname, collectionPath] of [
   test(`${label}: ações em lote reaproveitam somente as mutações documentadas`, () => {
     const source = readSource(pathname);
     const escapedPath = collectionPath.replace("/", "\\/");
+    const scenarioIdExpression =
+      label === "Ocupação"
+        ? "encodeURIComponent\\(scenario\\.id\\)"
+        : "scenario\\.id";
 
     assert.match(
       source,
       new RegExp(
-        `apiFetch\\(\\\`\\/${escapedPath}\\/\\$\\{scenario\\.id\\}\\\`, \\{[\\s\\S]*?body: \\{ active \\},[\\s\\S]*?method: "PUT"`,
+        `apiFetch(?:<unknown>)?\\([\\s\\S]*?\\\`\\/${escapedPath}\\/\\$\\{${scenarioIdExpression}\\}\\\`[\\s\\S]*?body: \\{ active \\},[\\s\\S]*?method: "PUT"`,
       ),
     );
     assert.match(
       source,
       new RegExp(
-        `apiFetch\\(\\\`\\/${escapedPath}\\/\\$\\{scenario\\.id\\}\\\`, \\{[\\s\\S]*?method: "DELETE"`,
+        `apiFetch(?:<unknown>)?\\([\\s\\S]*?\\\`\\/${escapedPath}\\/\\$\\{${scenarioIdExpression}\\}\\\`[\\s\\S]*?method: "DELETE"`,
       ),
     );
     assert.match(source, /for \(const scenario of candidates\)/);
@@ -124,7 +128,7 @@ test("Ocupação descarta conclusão tardia sem relatar falha após troca de ten
   assert.doesNotMatch(source, /requireUnchangedCompanyScope/);
   assert.match(
     source,
-    /await apiFetch\(`\/occupancy\/scenarios\/\$\{scenario\.id\}`[\s\S]*?if \(requestedCompanyId !== companyScopeIdRef\.current\) return;[\s\S]*?catch \{\s*if \(requestedCompanyId !== companyScopeIdRef\.current\) return;/,
+    /await apiFetch\(\s*`\/occupancy\/scenarios\/\$\{encodeURIComponent\(scenario\.id\)\}`[\s\S]*?if \(requestedCompanyId !== companyScopeIdRef\.current\) return;[\s\S]*?catch \{\s*if \(requestedCompanyId !== companyScopeIdRef\.current\) return;/,
   );
   assert.ok(
     (source.match(/if \(companyId !== companyIdRef\.current\) return;/g)?.length ?? 0) >=

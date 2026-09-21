@@ -8,19 +8,111 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import test from "node:test";
 
+import {
+  occupancyDurationMinuteTransportTtl,
+  occupancyDurationNextMinuteRefreshDelay,
+  occupancyDurationReconciliationFrom,
+} from "../lib/occupancy-duration-refresh.ts";
+
 const require = createRequire(import.meta.url);
 const ts: typeof import("typescript") = require("typescript");
 const HOUR = 3_600_000;
+const CLOSED_CACHE_TTL = 6 * HOUR;
+const liveDurationSource = readFileSync(
+  resolve("components/app/occupancy-duration-widgets.tsx"),
+  "utf8",
+);
+const durationInsightQuerySource = readFileSync(
+  resolve("lib/occupancy-duration-insights-query.ts"),
+  "utf8",
+);
 
-test("horas fechadas reutilizam em 30min e aceitam correção 1→0 no TTL de 1h com período idêntico", async (t) => {
+test("cards de duração preservam histórico entre remounts e limitam retries", () => {
+  assert.match(
+    liveDurationSource,
+    /const DURATION_FULL_REFRESH_MS = 6 \* 60 \* 60_000/,
+  );
+  assert.match(
+    liveDurationSource,
+    /sharedDurationScenarioCaches = new Map/,
+  );
+  assert.match(
+    liveDurationSource,
+    /authenticatedUserId[\s\S]*?companyScopeId\.trim\(\)[\s\S]*?timeZone\.trim\(\)/,
+    "o cache precisa incluir usuário JWT, empresa e fuso",
+  );
+  assert.match(
+    liveDurationSource,
+    /occupancyDurationReconciliationFrom\([\s\S]*?range\.to\.getTime\(\)[\s\S]*?cached\.to/,
+    "a atualização incremental deve compartilhar a borda recente canônica",
+  );
+  assert.match(
+    liveDurationSource,
+    /occupancyDurationNextMinuteRefreshDelay\(\)/,
+    "agregados de minutos devem acordar somente após a próxima borda",
+  );
+  assert.match(
+    liveDurationSource,
+    /occupancyDurationMinuteTransportTtl\([\s\S]*?range\.requestedAt\.getTime\(\)/,
+    "remounts devem reutilizar a resposta exata até o próximo minuto",
+  );
+  assert.doesNotMatch(
+    liveDurationSource,
+    /lastCompletedRangeEnd/,
+    "a borda idêntica não pode voltar ao polling de cinco segundos",
+  );
+  assert.match(
+    liveDurationSource,
+    /durationFailureBackoffMilliseconds\(attempts, retryBaseMs\)/,
+  );
+  assert.doesNotMatch(
+    liveDurationSource.match(
+      /fetchSharedOccupancyQuery<OccupancyScenarioAggregateResponse>\(\{[\s\S]*?\}\);/,
+    )?.[0] ?? "",
+    /bypassCache:\s*true/,
+    "remount idêntico deve poder reutilizar o transporte curto",
+  );
+});
+
+test("cadência e reconciliação de duração são alinhadas ao minuto fechado", () => {
+  assert.equal(occupancyDurationNextMinuteRefreshDelay(10_000), 51_000);
+  assert.equal(occupancyDurationMinuteTransportTtl(59_500), 1_500);
+  assert.equal(occupancyDurationNextMinuteRefreshDelay(61_000), 60_000);
+  assert.equal(
+    occupancyDurationReconciliationFrom(0, 10 * 60_000, 9 * 60_000),
+    5 * 60_000,
+    "pulso normal relê exatamente os cinco minutos finais",
+  );
+  assert.equal(
+    occupancyDurationReconciliationFrom(0, 10 * 60_000, 2 * 60_000),
+    2 * 60_000,
+    "retomada cobre a lacuna sem perder minutos",
+  );
+  assert.throws(
+    () => occupancyDurationNextMinuteRefreshDelay(Number.NaN),
+    /inválido/,
+  );
+  assert.match(
+    durationInsightQuerySource,
+    /occupancyDurationReconciliationFrom\([\s\S]*?span\.from,[\s\S]*?span\.to,[\s\S]*?cached\.to/,
+    "timeline e insights precisam construir a mesma borda móvel",
+  );
+  assert.match(
+    durationInsightQuerySource,
+    /granularity === "minute"[\s\S]*?occupancyDurationMinuteTransportTtl\(\)/,
+    "as duas superfícies precisam compartilhar a validade do GET exato",
+  );
+});
+
+test("horas fechadas reutilizam e aceitam correção 1→0 no TTL de 6h com período idêntico", async (t) => {
   let now = Date.parse("2026-09-11T05:00:00Z"); t.mock.method(Date, "now", () => now);
   const fixture = createFixture();
   const first = await fixture.fetch();
   assert.equal(total(first, "confirmedOccupiedSeconds"), 3600);
-  fixture.setValue(0); now += HOUR / 2;
+  fixture.setValue(0); now += CLOSED_CACHE_TTL / 2;
   assert.equal(total(await fixture.fetch(), "confirmedOccupiedSeconds"), 3600);
   assert.equal(fixture.calls.length, 1);
-  now += HOUR / 2;
+  now += CLOSED_CACHE_TTL / 2;
   const refreshed = await fixture.fetch();
   assert.equal(fixture.calls.length, 2);
   assert.equal(total(refreshed, "confirmedOccupiedSeconds"), 0);
@@ -31,16 +123,16 @@ test("horas fechadas reutilizam em 30min e aceitam correção 1→0 no TTL de 1h
 test("aumento corrigido também substitui cache e nova validade parte da revalidação", async (t) => {
   let now = 1_000_000; t.mock.method(Date, "now", () => now);
   const fixture = createFixture(); fixture.setValue(0);
-  await fixture.fetch(); now += HOUR; fixture.setValue(2);
+  await fixture.fetch(); now += CLOSED_CACHE_TTL; fixture.setValue(2);
   assert.equal(total(await fixture.fetch(), "confirmedOccupiedSeconds"), 3600);
-  now += HOUR - 1; await fixture.fetch();
+  now += CLOSED_CACHE_TTL - 1; await fixture.fetch();
   assert.equal(fixture.calls.length, 2);
 });
 
 test("erro ou aborto na revalidação não promove nem altera o cache anterior", async (t) => {
   let now = 1_000_000; t.mock.method(Date, "now", () => now);
   const fixture = createFixture(); await fixture.fetch();
-  const before = structuredClone(fixture.cache); now += HOUR;
+  const before = structuredClone(fixture.cache); now += CLOSED_CACHE_TTL;
   fixture.setFailure(new Error("temporarily unavailable"));
   await assert.rejects(fixture.fetch(), /temporarily unavailable/);
   assert.deepEqual(fixture.cache, before);
@@ -94,7 +186,11 @@ function createFixture() {
     if (modules.has(path)) return modules.get(path);
     const loaded: { exports: RuntimeFixture } = { exports: {} }; modules.set(path, loaded.exports);
     const output = ts.transpileModule(readFileSync(resolve(path), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-    new Function("module", "exports", "require", output)(loaded, loaded.exports, (name: RuntimeFixture) => name === "@/lib/api" ? { apiFetch } : name.startsWith("@/") ? load(`${name.slice(2)}.ts`) : require(name));
+    new Function("module", "exports", "require", output)(loaded, loaded.exports, (name: RuntimeFixture) => name === "@/lib/api" ? {
+      ApiError: class ApiError extends Error { status = 500; },
+      apiFetch,
+      getStoredSession: () => ({ access_token: "fixture-token" }),
+    } : name.startsWith("@/") ? load(`${name.slice(2)}.ts`) : require(name));
     return loaded.exports;
   }
 }
