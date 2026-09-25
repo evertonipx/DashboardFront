@@ -58,7 +58,6 @@ import {
 } from "@/components/app/occupancy-custom-widget-editor";
 import { OccupancyPaletteSelect } from "@/components/app/occupancy-palette-select";
 import { useAuth } from "@/components/app/auth-provider";
-import { ReportExportActions } from "@/components/app/report-export-actions";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
 import { useUserGridReady } from "@/components/app/use-user-grid-ready";
 import {
@@ -2699,19 +2698,6 @@ export function OccupancyScenarioDashboard() {
                       className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1 [&_[data-monitor-mode-trigger]]:shrink-0 [&_[data-premium-control]]:shrink-0"
                       role="group"
                     >
-                      <ReportExportActions
-                        compact
-                        disabled={
-                          initialLoading ||
-                          occupancyDurationLoading ||
-                          occupancyDurationInsights.loading ||
-                          occupancyLoitering.loading ||
-                          !selectedScenario ||
-                          Boolean(occupancyCertificationError) ||
-                          hasIncompleteOccupancyCoverage
-                        }
-                        getPayload={getOccupancyReportPayload}
-                      />
                       <AiAnalysisAction
                         disabled={
                           initialLoading ||

@@ -2465,6 +2465,11 @@ test("exportação individual preserva uma linha e um ponto por sessão real", (
     reportsSource,
     /<ReportExportActions[\s\S]*?getPayload=\{getOccupancyReportPayload\}/,
   );
+  assert.doesNotMatch(
+    liveSource,
+    /<ReportExportActions/,
+    "Ao Vivo usa o payload certificado para IA, mas não deve expor exportação direta",
+  );
 
   const serialized = JSON.stringify(chart);
   assert.ok(!serialized.includes("technical-scenario-id"));

@@ -313,7 +313,7 @@ test("Ao Vivo prioriza a leitura essencial e só monta relatórios sob demanda",
   assert.match(
     source,
     /await Promise\.all\(\[[\s\S]*?loadOccupancyComparisonReportAssets\(signal\),[\s\S]*?occupancyLoitering\.loadReportAssets\(signal\),[\s\S]*?loadOccupancyDurationReportSnapshot\(signal\),[\s\S]*?\]\)/,
-    "exportação e IA devem aguardar comparativos, permanência e duração solicitados explicitamente",
+    "a análise de IA deve aguardar comparativos, permanência e duração solicitados explicitamente",
   );
   assert.doesNotMatch(
     source,
@@ -321,8 +321,8 @@ test("Ao Vivo prioriza a leitura essencial e só monta relatórios sob demanda",
   );
   assert.equal(
     (source.match(/getPayload=\{getOccupancyReportPayload\}/g) ?? []).length,
-    2,
-    "exportação e IA devem compartilhar o relatório lazy",
+    1,
+    "a análise de IA deve receber o relatório lazy no Ao Vivo",
   );
   assert.match(
     source,

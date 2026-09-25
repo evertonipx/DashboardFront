@@ -936,7 +936,7 @@ test("dashboard preserva os nove widgets originais e integra cinco widgets tempo
   assert.match(dashboard, /menuKey=\{DEMOGRAPHICS_MENU_KEY\}/);
   assert.match(dashboard, /const preferenceScopeId = `demographics-\$\{surface\}`/);
   assert.match(dashboard, /preferenceScopeId=\{preferenceScopeId\}/);
-  assert.match(dashboard, /<ReportExportActions/);
+  assert.match(dashboard, /\{surface !== "live" \? \([\s\S]*?<ReportExportActions/);
   assert.match(dashboard, /valueLabels="always"/);
   assert.match(dashboard, /max: 100/);
   assert.doesNotMatch(dashboard, /Não identificado/);

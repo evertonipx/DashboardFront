@@ -40,7 +40,6 @@ import {
   EChart,
   type EnterpriseChartOption,
 } from "@/components/app/deferred-echart";
-import { ReportExportActions } from "@/components/app/report-export-actions";
 import { applyChartTypePreference } from "@/lib/chart-type-preference";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
@@ -4904,17 +4903,6 @@ export function RealtimeDashboard({
                   >
                     <RefreshCw className={cn("h-4 w-4", loadingCharts && "animate-spin")} />
                   </Button>
-                  <ReportExportActions
-                    compact
-                    disabled={
-                      initialLoading ||
-                      loadingAnnualHistory ||
-                      !selectedScope ||
-                      Boolean(liveReportCertificationError) ||
-                      Boolean(liveAnnualComparisonError)
-                    }
-                    getPayload={buildConfiguredLiveReportPayload}
-                  />
                   <AiAnalysisAction
                     disabled={
                       initialLoading ||

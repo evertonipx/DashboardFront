@@ -3876,14 +3876,18 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
     />Contexto<|>Estado<|Sincronização desta visão|dashboardSettings\.liveRefreshSeconds\}s|>Alertas<|>Aparência<|>Ações</,
     "a barra compacta não deve reintroduzir as segmentações removidas",
   );
-  assert.match(compactToolbarSource, /<ReportExportActions[\s\S]*?compact/);
+  assert.doesNotMatch(
+    compactToolbarSource,
+    /<ReportExportActions/,
+    "Ao Vivo de Ocupação não deve exibir exportação direta quando a ação não é suportada",
+  );
   assert.match(
     compactToolbarSource,
     /aria-label="Ações da visão de ocupação"\s+className="ml-auto flex min-w-0 flex-wrap/,
   );
   assert.match(
     compactToolbarSource,
-    /<ReportExportActions[\s\S]*?<ReorderModeButton[\s\S]*?aria-label="Configurar widgets de ocupação"[\s\S]*?aria-label="Configurações operacionais"[\s\S]*?aria-label="Atualizar dados de ocupação"[\s\S]*?<MonitorModeButton/,
+    /<AiAnalysisAction[\s\S]*?<ReorderModeButton[\s\S]*?aria-label="Configurar widgets de ocupação"[\s\S]*?aria-label="Configurações operacionais"[\s\S]*?aria-label="Atualizar dados de ocupação"[\s\S]*?<MonitorModeButton/,
   );
   assert.doesNotMatch(
     compactToolbarSource,
@@ -3994,11 +3998,15 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
     liveToolbar,
     /data-toolbar-actions/,
   );
-  assert.match(liveToolbar, /<ReportExportActions[\s\S]*?compact/);
+  assert.doesNotMatch(
+    liveToolbar,
+    /<ReportExportActions/,
+    "Ao Vivo de Contagem não deve exibir exportação direta quando a ação não é suportada",
+  );
   assert.match(liveToolbar, /<MonitorModeButton[\s\S]*?compact/);
   assert.match(
     liveToolbar,
-    /aria-label="Ações da visão ao vivo de Contagem"[\s\S]*?<ReportExportActions[\s\S]*?<ReorderModeButton[\s\S]*?aria-label="Configurar widgets"[\s\S]*?<Target[\s\S]*?<MonitorModeButton/,
+    /aria-label="Ações da visão ao vivo de Contagem"[\s\S]*?<AiAnalysisAction[\s\S]*?<ReorderModeButton[\s\S]*?aria-label="Configurar widgets"[\s\S]*?<Target[\s\S]*?<MonitorModeButton/,
   );
   assert.equal((liveToolbar.match(/<ReorderModeButton/g) ?? []).length, 1);
   assert.equal(
@@ -7890,7 +7898,7 @@ test("compatibilidade legada só relaxa certificação de buckets instantâneos 
   );
 });
 
-test("falha de uma série de ocupação não derruba o snapshot ao vivo nem libera exportação parcial", () => {
+test("falha de uma série de ocupação não derruba o snapshot ao vivo nem libera relatório parcial para IA", () => {
   const source = readFileSync(
     resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
     "utf8",
@@ -7908,8 +7916,8 @@ test("falha de uma série de ocupação não derruba o snapshot ao vivo nem libe
   );
   assert.match(
     source,
-    /<ReportExportActions[\s\S]*?disabled=\{[\s\S]*?hasIncompleteOccupancyCoverage/,
-    "séries com erros ou lacunas não podem liberar uma exportação completa",
+    /<AiAnalysisAction[\s\S]*?disabled=\{[\s\S]*?hasIncompleteOccupancyCoverage/,
+    "séries com erros ou lacunas não podem liberar uma análise completa",
   );
 });
 

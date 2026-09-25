@@ -1114,11 +1114,13 @@ export function DemographicsDashboard({
             data-toolbar-actions
             role="group"
           >
-            <ReportExportActions
-              compact
-              disabled={!companyTimeZoneReady || loading || comparisonLoading || !summary.hasData}
-              getPayload={buildDemographicsReportPayload}
-            />
+            {surface !== "live" ? (
+              <ReportExportActions
+                compact
+                disabled={!companyTimeZoneReady || loading || comparisonLoading || !summary.hasData}
+                getPayload={buildDemographicsReportPayload}
+              />
+            ) : null}
             {/* AiAnalysisAction será incluído quando AiInsightModule aceitar
                 explicitamente `demographics`; não mascaramos o módulo como counting. */}
             {canEditVisual ? (
