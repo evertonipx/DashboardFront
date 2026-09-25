@@ -1966,7 +1966,7 @@ test("comparativos máximos substituem séries ao trocar cenário ou empresa", (
   );
   assert.match(
     source,
-    /const hourlyMaximumBuckets = React\.useMemo\([\s\S]*?certifiedCurrentHourMaximum\.bucket[\s\S]*?buckets=\{hourlyMaximumBuckets\}[\s\S]*?currentBucket=\{certifiedCurrentHourMaximum\.bucket\}/,
+    /const liveCurrentHourBucket = snapshotHourBucket[\s\S]*?const hourlyMaximumBuckets = React\.useMemo\([\s\S]*?liveCurrentHourBucket[\s\S]*?buckets=\{hourlyMaximumBuckets\}[\s\S]*?currentBucket=\{liveCurrentHourBucket\}/,
     "a hora aberta deve ancorar o dia exibido e não pode reutilizar buckets do dia anterior",
   );
   assert.match(

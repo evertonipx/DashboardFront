@@ -217,6 +217,11 @@ type CardLayoutProps = {
   showOrganizerTrigger?: boolean;
   showReorderTrigger?: boolean;
   savedViewSourceMenus?: CardMenuKey[];
+  savedViewSources?: Array<{
+    menuKey: CardMenuKey;
+    namespace: WidgetViewPresetNamespace;
+    label: string;
+  }>;
   showCardConfigurationActions?: boolean;
   scenarios?: ScenarioPickerOption[];
   viewScopeName?: string | null;
@@ -243,6 +248,7 @@ export function CardLayout({
   showOrganizerTrigger = true,
   showReorderTrigger = true,
   savedViewSourceMenus = [],
+  savedViewSources = [],
   showCardConfigurationActions = false,
   scenarios = [],
   viewScopeName,
@@ -736,6 +742,7 @@ export function CardLayout({
           presetNamespace={resolvedPresetNamespace}
           scopes={viewScopes}
           sourceMenuKeys={savedViewSourceMenus}
+          savedViewSources={savedViewSources}
           userId={user?.id}
         />
       ) : null}

@@ -169,6 +169,22 @@ test("Widgets salvos certificam empresa, usuário, menu e superfície antes de m
   );
 });
 
+test("Widgets salvos distinguem fontes por menu e namespace sem perder fontes legadas", () => {
+  const layout = readSource("components/app/card-layout.tsx");
+  const dialog = readSource("components/app/widget-view-presets.tsx");
+
+  assert.match(layout, /savedViewSources\?: Array<\{[\s\S]*?menuKey: CardMenuKey;[\s\S]*?namespace: WidgetViewPresetNamespace;[\s\S]*?label: string;/);
+  assert.match(layout, /sourceMenuKeys=\{savedViewSourceMenus\}[\s\S]*?savedViewSources=\{savedViewSources\}/);
+  assert.match(dialog, /sourceMenuKey\) => sourceMenuKey !== menuKey/);
+  assert.match(dialog, /source\.menuKey === menuKey && source\.namespace === presetNamespace/);
+  assert.match(dialog, /JSON\.stringify\(\[source\.menuKey, source\.namespace\]\)/);
+  assert.match(dialog, /loadWidgetViewPresets\(\s*source\.menuKey,\s*companyId,\s*userId,\s*source\.namespace,/);
+  assert.match(dialog, /sourceCatalogKey = JSON\.stringify\(normalizedSavedViewSources\)/);
+  assert.match(dialog, /group\.menuKey === source\.menuKey &&\s*group\.namespace === source\.namespace/);
+  assert.match(dialog, /applySourcePreset\(group, preset\)/);
+  assert.match(dialog, /presetNamespace === "occupancy-analysis" \? "Análises" : menu\.label/);
+});
+
 test("Video wall limpa seleção entre escopos e rejeita cenário fora do catálogo atual", () => {
   const source = readSource("components/app/video-wall-manager.tsx");
 

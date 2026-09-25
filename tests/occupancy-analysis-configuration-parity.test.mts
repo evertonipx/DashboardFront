@@ -58,6 +58,36 @@ test("catálogo compartilhado e aparência histórica permanecem em escopos dist
   );
 });
 
+test("Análises abre a visão salva no Ao Vivo sem sobrescrever a configuração original", () => {
+  const importer = between(
+    analysisSource,
+    "function applySavedLiveOccupancyView",
+    "const reportCardIdSet",
+  );
+
+  assertContains(
+    analysisSource,
+    /onApplySavedViewSource=\{analysis \? applySavedLiveOccupancyView : undefined\}/,
+  );
+  assertContains(
+    analysisSource,
+    /savedViewSources=\{analysis \? OCCUPANCY_LIVE_VIEW_SOURCES : \[\]\}/,
+  );
+  assertContains(analysisSource, /namespace: "occupancy-live" as const/);
+  assertContains(importer, /userGridReadiness === "pending"/);
+  assertContains(importer, /const targetViewId = `analysis:\$\{targetScope\.id\}`/);
+  assertContains(importer, /buildOccupancyLiveAnalysisImport\(\{/);
+  assertContains(importer, /if \(!imported\.importedCount\)/);
+  assertContains(importer, /saveOccupancyWidgetSettings\(/);
+  assertContains(importer, /saveOccupancyDashboardSettings\(/);
+  assertContains(
+    importer,
+    /saveCardPreferences\(\s*"occupancy",\s*imported\.preferences,\s*targetCardIds,\s*companyScopeId,\s*userId,\s*targetViewId/,
+  );
+  assertContains(importer, /setSelectedId\(targetScope\.id\)/);
+  assert.doesNotMatch(importer, /applyWidgetViewPreset|clearMenuStorage/);
+});
+
 test("widgets personalizados preservam séries, cor, tipo de gráfico e ações no Análises", () => {
   const analysisCards = between(
     analysisSource,

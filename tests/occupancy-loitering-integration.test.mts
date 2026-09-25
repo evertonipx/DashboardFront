@@ -1729,30 +1729,31 @@ test("card individual usa sessions e o diálogo mantém seu detalhamento sob dem
 test("gráfico individual preserva uma sessão por ponto no horário e duração reais", () => {
   const widgets = loadLoiteringWidgets();
   const endedAt = "2026-09-16T17:14:40.000Z";
+  const entries = [
+    {
+      areaLabel: "Parado & espera",
+      durationSeconds: 21,
+      endedAt,
+      key: "first",
+      scenarioLabel: "<Entrada>",
+    },
+    {
+      areaLabel: "Parado & espera",
+      durationSeconds: 7,
+      endedAt,
+      key: "second",
+      scenarioLabel: "<Entrada>",
+    },
+    {
+      areaLabel: "Fila",
+      durationSeconds: 46.5,
+      endedAt: "2026-09-16T17:15:40.000Z",
+      key: "third",
+      scenarioLabel: "Saída",
+    },
+  ];
   const option = widgets.buildOccupancyLoiteringSessionsChartOption(
-    [
-      {
-        areaLabel: "Parado & espera",
-        durationSeconds: 21,
-        endedAt,
-        key: "first",
-        scenarioLabel: "<Entrada>",
-      },
-      {
-        areaLabel: "Parado & espera",
-        durationSeconds: 7,
-        endedAt,
-        key: "second",
-        scenarioLabel: "<Entrada>",
-      },
-      {
-        areaLabel: "Fila",
-        durationSeconds: 46.5,
-        endedAt: "2026-09-16T17:15:40.000Z",
-        key: "third",
-        scenarioLabel: "Saída",
-      },
-    ],
+    entries,
     "light",
     "#1267C4",
     "America/Sao_Paulo",
@@ -1764,6 +1765,22 @@ test("gráfico individual preserva uma sessão por ponto no horário e duração
   assert.equal(option.xAxis.type, "time");
   assert.equal(option.yAxis.type, "value");
   assert.equal(scatterSeries.length, 2, "cada área conserva sua série de pontos");
+  for (const themeOption of [
+    option,
+    widgets.buildOccupancyLoiteringSessionsChartOption(
+      entries,
+      "dark",
+      "#1267C4",
+      "America/Sao_Paulo",
+    ) as RuntimeFixture,
+  ]) {
+    for (const pointSeries of themeOption.series.filter(
+      (candidate: RuntimeFixture) => candidate.type === "scatter",
+    )) {
+      assert.equal(pointSeries.itemStyle.borderWidth, 0, "pontos sobrepostos não devem ter contorno");
+      assert.equal(pointSeries.itemStyle.borderColor, undefined);
+    }
+  }
   assert.deepEqual(
     series.filter((candidate) => candidate.type === "line").map((candidate) => candidate.name),
     ["Tendência linear"],
@@ -2406,6 +2423,12 @@ test("exportação individual preserva uma linha e um ponto por sessão real", (
   assert.ok(chart);
   const option = chart.option as RuntimeFixture;
   assert.equal(chart.title, "Permanências registradas");
+  assert.ok(
+    option.series
+      .filter((series: RuntimeFixture) => series.type === "scatter")
+      .every((series: RuntimeFixture) => series.itemStyle.borderWidth === 0),
+    "o PDF deve usar os mesmos pontos sem contorno da tela",
+  );
   assert.equal(
     option.series
       .filter((series: RuntimeFixture) => series.type === "scatter")

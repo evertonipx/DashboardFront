@@ -122,6 +122,7 @@ import {
   type OccupancyAggregateMetric,
 } from "@/lib/occupancy-aggregate-validation";
 import {
+  advanceOccupancyMaximumTrendLivePeaks,
   buildOccupancyAnnualMaximumPoints,
   buildOccupancyClosedMinuteRange,
   buildOccupancyComparisonBarEntries,
@@ -133,11 +134,11 @@ import {
   buildOccupancyHourlyRange,
   buildOccupancyLiveRaceEntries,
   buildOccupancyMaximumTrendRanges,
-  buildOccupancyPeakValues,
+  buildOccupancyMonthlyMaximumValues,
   localDateKey,
   mergeOccupancyMaximumTrendOpenPeak,
   OCCUPANCY_FIXED_HOUR_LABELS,
-  occupancySnapshotTotalWithinHour,
+  occupancyLiveScenarioPeak,
   occupancyMaximumTrendBucketLabels,
   occupancyHalfDonutMinimumAngle,
   type OccupancyComparisonBarEntry,
@@ -1929,6 +1930,7 @@ export function useOccupancyComparisonCards({
                 expectedTimezone: timeZone,
                 openBucket: range.buckets.at(-1),
                 requestedAt,
+                receivedAt: new Date(),
                 requireCertification: true,
               },
             );
@@ -2324,6 +2326,7 @@ export function useOccupancyComparisonCards({
                     timeZone,
                     to: range.to,
                     unitCache: scenarioHeatmapCivilUnitCacheRef.current,
+                    useResponseReceiptTime: true,
                   });
             const rows = requireOccupancyAggregateRows(
               response,
@@ -2337,6 +2340,7 @@ export function useOccupancyComparisonCards({
                 expectedTimezone: timeZone,
                 openBucket: sourceBuckets.at(-1),
                 requestedAt,
+                receivedAt: new Date(),
                 requireCertification: true,
               },
             );
@@ -2735,6 +2739,7 @@ export function useOccupancyComparisonCards({
                   expectedTimezone: timeZone,
                   openBucket: range.from,
                   requestedAt,
+                  receivedAt: new Date(),
                   requireCertification: true,
                 },
               );
@@ -3263,6 +3268,7 @@ export function useOccupancyComparisonCards({
                 signal: requestController.signal,
                 requestedAt,
                 openBucket: currentMonthBucket,
+                useResponseReceiptTime: true,
                 fetchResponse: (path) => scheduleQuery(path, () =>
                   fetchSharedOccupancyQuery<OccupancyScenarioAggregateResponse>({
                     cacheTtlMs: aggregateRefreshMs,
@@ -3285,6 +3291,7 @@ export function useOccupancyComparisonCards({
                   expectedTimezone: timeZone,
                   openBucket: currentMonthBucket,
                   requestedAt,
+                  receivedAt: new Date(),
                   requireCertification: true,
                 },
               );
@@ -3340,6 +3347,18 @@ export function useOccupancyComparisonCards({
                 openSeries?.error,
               );
             }
+            const published = maximumTrendDatasetRef.current;
+            const publishedPeak = published.scopeKey === maximumTrendScopeKey &&
+              published.ranges && sameMaximumTrendRanges(published.ranges, ranges)
+                ? published.series.find((item) => item.scenarioId === scenario.id)?.metrics.get(
+                    occupancyAggregateBucketKey(currentMonthBucket, "month"),
+                  )?.peak
+                : undefined;
+            metrics = mergeOccupancyMaximumTrendOpenPeak({
+              currentMonth: currentMonthBucket,
+              metrics,
+              openPeak: publishedPeak,
+            });
             const missingBuckets = ranges.monthlySource.buckets.filter(
               (bucket) =>
                 !metrics.has(occupancyAggregateBucketKey(bucket, "month")),
@@ -3982,13 +4001,26 @@ export function useOccupancyComparisonCards({
     stableManualPeriod,
     timeZone,
   ]);
+  const snapshotHourBucket = React.useMemo(() => {
+    if (historicalMode || snapshotDataset.scopeKey !== snapshotScopeKey ||
+        !snapshotDataset.requestedAt) return null;
+    try {
+      return buildOccupancyCurrentHourRange(snapshotDataset.requestedAt, timeZone).from;
+    } catch {
+      return null;
+    }
+  }, [historicalMode, snapshotDataset.requestedAt, snapshotDataset.scopeKey, snapshotScopeKey, timeZone]);
+  const liveCurrentHourBucket = snapshotHourBucket &&
+    (!certifiedCurrentHourMaximum.bucket || snapshotHourBucket > certifiedCurrentHourMaximum.bucket)
+      ? snapshotHourBucket
+      : certifiedCurrentHourMaximum.bucket;
   const hourlyMaximumBuckets = React.useMemo(() => {
     return occupancyLatestCompanyDayBuckets(
       certifiedAggregate.buckets,
-      certifiedCurrentHourMaximum.bucket,
+      liveCurrentHourBucket,
       timeZone,
     );
-  }, [certifiedAggregate.buckets, certifiedCurrentHourMaximum.bucket, timeZone]);
+  }, [certifiedAggregate.buckets, liveCurrentHourBucket, timeZone]);
   const hourlyMaximumSeries = React.useMemo(
     () =>
       certifiedAggregate.series.length
@@ -4143,6 +4175,34 @@ export function useOccupancyComparisonCards({
   const historicalContextLabel = historicalMode
     ? stableManualPeriod?.contextLabel
     : undefined;
+  React.useEffect(() => {
+    if (historicalMode || !queryEnabled || !needsMaximumTrend ||
+        !liveCurrentHourBucket || !certifiedMaximumTrend.ranges) return;
+    const ranges = certifiedMaximumTrend.ranges;
+    const currentMonth = ranges.monthlySource.buckets.at(-1);
+    if (!currentMonth) return;
+    setMaximumTrendDataset((current) => {
+      if (current.scopeKey !== maximumTrendScopeKey || !current.ranges ||
+          !sameMaximumTrendRanges(current.ranges, ranges)) return current;
+      let series: OccupancyScenarioHourlySeries[];
+      try {
+        series = advanceOccupancyMaximumTrendLivePeaks({
+          currentMonth,
+          currentSeries: certifiedCurrentHourMaximum.series,
+          liveBucket: liveCurrentHourBucket,
+          scenarios: current.series,
+          snapshots: certifiedSnapshots,
+          timeZone,
+        });
+      } catch {
+        return current;
+      }
+      return series === current.series ? current : { ...current, series };
+    });
+  }, [certifiedCurrentHourMaximum.series, certifiedMaximumTrend.ranges,
+    certifiedMaximumTrend.series,
+    certifiedSnapshots, historicalMode, liveCurrentHourBucket,
+    maximumTrendScopeKey, needsMaximumTrend, queryEnabled, timeZone]);
   const snapshotDependentCards = React.useMemo<ComparisonLayoutCard[]>(() => [
     {
       colorEditable: false,
@@ -4266,7 +4326,7 @@ export function useOccupancyComparisonCards({
           allScenarios={filterScenarios(scenarioIds)}
           buckets={hourlyMaximumBuckets}
           colorPalette={selectedColorPalette.colors}
-          currentBucket={certifiedCurrentHourMaximum.bucket}
+          currentBucket={liveCurrentHourBucket}
           currentSnapshots={snapshots}
           currentSeries={currentSeries}
           granularity="hour"
@@ -4279,6 +4339,43 @@ export function useOccupancyComparisonCards({
           }
           series={series}
         />
+        );
+      },
+      titleEditable: true,
+      zoomEnabled: true,
+    },
+    {
+      colorEditable: false,
+      defaultHeight: "standard",
+      defaultHeightLevel: 4,
+      defaultSize: "wide",
+      ...scenarioCardDefaults,
+      id: "occupancy_scenario_max_month",
+      label: historicalMode
+        ? "Máximo mensal · 12 meses fechados"
+        : "Máximo por mês por cenário",
+      previewChartType: "line",
+      previewColors: selectedColorPalette.colors,
+      previewKind: "chart",
+      node: (context) => {
+        const scenarioIds = resolveCardScenarioIds("occupancy_scenario_max_month", context);
+        const snapshots = filterRowsForScenarios(certifiedSnapshots, scenarioIds);
+        const currentSeries = filterRowsForScenarios(certifiedCurrentHourMaximum.series, scenarioIds);
+        const series = filterRowsForScenarios(certifiedMaximumTrend.series, scenarioIds);
+        return (
+          <OccupancyScenarioMaximumLineCard
+            timeZone={timeZone}
+            allScenarios={filterScenarios(scenarioIds)}
+            buckets={certifiedMaximumTrend.ranges?.monthly.buckets ?? EMPTY_OCCUPANCY_BUCKETS}
+            colorPalette={selectedColorPalette.colors}
+            currentBucket={liveCurrentHourBucket}
+            currentSnapshots={snapshots}
+            currentSeries={currentSeries}
+            granularity="month"
+            historicalContextLabel={historicalContextLabel}
+            loading={maximumTrendLoading}
+            series={series}
+          />
         );
       },
       titleEditable: true,
@@ -4320,7 +4417,7 @@ export function useOccupancyComparisonCards({
             EMPTY_OCCUPANCY_BUCKETS
           }
           colorPalette={selectedColorPalette.colors}
-          currentBucket={certifiedCurrentHourMaximum.bucket}
+          currentBucket={liveCurrentHourBucket}
           currentSnapshots={snapshots}
           currentSeries={currentSeries}
           granularity="year"
@@ -4385,6 +4482,7 @@ export function useOccupancyComparisonCards({
     filterScenarios,
     hourlyMaximumBuckets,
     hourlyMaximumSeries,
+    liveCurrentHourBucket,
     maximumTrendLoading,
     monitorMode,
     resolveCardScenarioIds,
@@ -4408,47 +4506,6 @@ export function useOccupancyComparisonCards({
 
   const snapshotIndependentCards = React.useMemo<ComparisonLayoutCard[]>(
     () => [
-      {
-        colorEditable: false,
-        defaultHeight: "standard",
-        defaultHeightLevel: 4,
-        defaultSize: "wide",
-        ...scenarioCardDefaults,
-        id: "occupancy_scenario_max_month",
-        label: historicalMode
-          ? "Máximo mensal · 12 meses fechados"
-          : "Máximo por mês por cenário",
-        previewChartType: "line",
-        previewColors: selectedColorPalette.colors,
-        previewKind: "chart",
-        node: (context) => {
-          const scenarioIds = resolveCardScenarioIds(
-            "occupancy_scenario_max_month",
-            context,
-          );
-          const series = filterRowsForScenarios(
-            certifiedMaximumTrend.series,
-            scenarioIds,
-          );
-          return (
-            <OccupancyScenarioMaximumLineCard
-              timeZone={timeZone}
-              allScenarios={filterScenarios(scenarioIds)}
-              buckets={
-                certifiedMaximumTrend.ranges?.monthly.buckets ??
-                EMPTY_OCCUPANCY_BUCKETS
-              }
-              colorPalette={selectedColorPalette.colors}
-              granularity="month"
-              historicalContextLabel={historicalContextLabel}
-              loading={maximumTrendLoading}
-              series={series}
-            />
-          );
-        },
-        titleEditable: true,
-        zoomEnabled: true,
-      },
       {
         colorEditable: false,
         defaultHeight: "tall",
@@ -4559,15 +4616,11 @@ export function useOccupancyComparisonCards({
     [
       aggregateLoading,
       certifiedAggregate,
-      certifiedMaximumTrend,
       certifiedScenarioHeatmap,
       filterRowsForScenarios,
-      filterScenarios,
       heatmapMaximum,
       inheritedHeatmapScenarioId,
-      maximumTrendLoading,
       historicalContextLabel,
-      historicalMode,
       monitorMode,
       resolveCardScenarioIds,
       scenarioCardDefaults,
@@ -5224,9 +5277,9 @@ function buildOccupancyComparisonReportAssets({
   const monthlyMaximum = buildMaximumLineSeries({
     timeZone,
     buckets: monthlyBuckets,
-    currentBucket: null,
-    currentSnapshots: [],
-    currentSeries: [],
+    currentBucket: historicalContextLabel ? null : currentHourBucket,
+    currentSnapshots: historicalContextLabel ? [] : filterForCard("occupancy_scenario_max_month", snapshots),
+    currentSeries: historicalContextLabel ? [] : filterForCard("occupancy_scenario_max_month", currentHourSeries),
     granularity: "month",
     markLastBucketPartial: !historicalContextLabel,
     monthlySourceBuckets: [],
@@ -5867,6 +5920,7 @@ function occupancyHistoricalAggregateIsComplete({
     return Boolean(
       scenarioSeries &&
         !scenarioSeries.error &&
+        !scenarioSeries.provisional &&
         requiredBuckets.every((bucket) =>
           scenarioSeries.metrics.has(
             occupancyAggregateBucketKey(bucket, granularity),
@@ -6144,7 +6198,12 @@ async function loadOccupancyComparisonReportAggregate({
   );
   if (!requestedScenarios.length) return [];
   signal.throwIfAborted();
-  const openBucket = range.buckets.at(-1);
+  const openBucket = occupancyComparisonOpenBucket(
+    range.buckets.at(-1),
+    granularity,
+    requestedAt,
+    timeZone,
+  );
   const capabilities = sharedOccupancyCivilCapabilities(
     companyScopeId,
     timeZone,
@@ -6180,7 +6239,8 @@ async function loadOccupancyComparisonReportAggregate({
                 maximumFallbackRequests:
                   occupancyLiveCivilFallbackRequestLimit(granularity),
                 openBucket,
-                requestedAt,
+                requestedAt: openBucket ? requestedAt : undefined,
+                useResponseReceiptTime: Boolean(openBucket),
                 scenarioId: scenario.id,
                 signal,
                 timeZone,
@@ -6206,7 +6266,8 @@ async function loadOccupancyComparisonReportAggregate({
               granularity !== "minute" && granularity !== "hour",
             expectedTimezone: timeZone,
             openBucket,
-            requestedAt,
+            requestedAt: openBucket ? requestedAt : undefined,
+            receivedAt: openBucket ? new Date() : undefined,
             requireCertification: true,
           },
         );
@@ -6226,6 +6287,8 @@ async function loadOccupancyComparisonReportAggregate({
         return {
           metrics: new Map(coverage.totals),
           name: scenario.name,
+          provisional: rows.some((row) =>
+            row.complete === false || row.status === "partial"),
           scenarioId: scenario.id,
           warning: joinMessages(
             timeZoneWarning,
@@ -6250,6 +6313,26 @@ async function loadOccupancyComparisonReportAggregate({
       }
     },
   );
+}
+
+function occupancyComparisonOpenBucket(
+  candidate: Date | undefined,
+  granularity: OccupancyScenarioHeatmapGranularity,
+  requestedAt: Date,
+  timeZone: string,
+): Date | undefined {
+  if (!candidate) return undefined;
+  const bounds = occupancyHistoricalBucketBounds(
+    candidate,
+    granularity,
+    timeZone,
+  );
+  // Historical reports use the final millisecond before `to` as their
+  // reference. That bucket is closed for the aggregate query, whereas a
+  // bucket with time still remaining may be shown but not certified closed.
+  return requestedAt >= bounds.from && requestedAt.getTime() + 1 < bounds.to.getTime()
+    ? candidate
+    : undefined;
 }
 
 function buildMaximumReportAsset({
@@ -9169,27 +9252,13 @@ function buildMaximumLineSeries({
   return series.map((scenario) => {
     const currentScenario = currentSeriesById.get(scenario.scenarioId);
     const currentSnapshot = currentSnapshotsById.get(scenario.scenarioId);
-    const aggregatePeak =
-      currentBucket && currentScenario
-        ? currentScenario.peaks.get(
-            occupancyAggregateBucketKey(currentBucket, "hour"),
-          )
-        : undefined;
-    const snapshotPeak =
-      currentBucket && currentSnapshot
-        ? occupancySnapshotTotalWithinHour(currentSnapshot, currentBucket, timeZone)
-        : undefined;
-    const observedCurrentPeaks = [aggregatePeak, snapshotPeak].filter(
-      (value): value is number => value !== undefined,
-    );
-    const currentPeak = observedCurrentPeaks.length
-      ? Math.max(...observedCurrentPeaks)
-      : currentScenario
-        ? currentScenario.error
-          ? undefined
-          : null
-        : undefined;
-    const annualPointsWithSourceState =
+    const currentPeak = occupancyLiveScenarioPeak({
+      bucket: currentBucket,
+      current: currentScenario,
+      snapshot: currentSnapshot,
+      timeZone,
+    });
+    const annualPoints =
       granularity === "year"
         ? buildOccupancyAnnualMaximumPoints({
             timeZone,
@@ -9201,15 +9270,9 @@ function buildMaximumLineSeries({
             livePeak: currentPeak,
             metrics: scenario.metrics,
             monthlyBuckets: monthlySourceBuckets,
+            openYear: markLastBucketPartial ? buckets.at(-1)?.getFullYear() : null,
           })
         : null;
-    const annualPoints =
-      annualPointsWithSourceState && !markLastBucketPartial
-        ? annualPointsWithSourceState.map((point) => ({
-            ...point,
-            partial: false,
-          }))
-        : annualPointsWithSourceState;
 
     return {
       error: joinMessages(
@@ -9247,11 +9310,13 @@ function buildMaximumLineSeries({
                 openPeakMode:
                   currentScenario?.source === "hour" ? "replace" : "maximum",
               })
-            : buildOccupancyPeakValues(
+            : buildOccupancyMonthlyMaximumValues({
                 buckets,
-                scenario.metrics,
-                granularity,
-              ),
+                liveBucket: currentBucket,
+                livePeak: currentPeak,
+                metrics: scenario.metrics,
+                timeZone,
+              }),
       warning: joinMessages(scenario.warning, currentScenario?.warning),
     };
   });

@@ -68,6 +68,10 @@ export type OccupancyCivilAggregateQueryOptions = {
   signal?: AbortSignal;
   requestedAt?: Date;
   openBucket?: Date;
+  /** Deterministic receipt time, primarily for verification fixtures. */
+  receivedAt?: Date;
+  /** Use the actual HTTP receipt as the upper bound of an open live bucket. */
+  useResponseReceiptTime?: boolean;
   fetchResponse?: (path: string) => Promise<OccupancyScenarioAggregateResponse>;
   /** Owned by the caller/batch; never shared globally between tenants. */
   capabilities?: Map<string, boolean>;
@@ -98,8 +102,9 @@ export type OccupancyCivilAggregateUnitCache = Map<
  * Prefer a civil aggregate when the API actually returns civil boundaries.
  * UTC calendar aggregates cannot be renamed as company days. Fall back to
  * complete UTC hours and minute edges, then compose scenario metrics in time
- * (never across independent areas). A missing unit makes its civil bucket
- * unavailable. No final value or source certification is synthesized.
+ * (never across independent areas). Missing units make a closed civil bucket
+ * unavailable. The open bucket may show its observed units as a partial
+ * preview. No final value or source certification is synthesized.
  */
 export async function fetchOccupancyCivilAggregate(
   options: OccupancyCivilAggregateQueryOptions,
@@ -142,6 +147,8 @@ export async function fetchOccupancyCivilAggregate(
       aggregatePath(scenarioId, granularity, from, to),
     );
     signal?.throwIfAborted();
+    const receivedAt = options.receivedAt ??
+      (options.useResponseReceiptTime ? new Date() : undefined);
     // Validate identity, metrics and IANA alignment before deciding that a
     // schema is merely missing capability metadata. Tenant/schema failures
     // must never be disguised as a reason to issue a second request.
@@ -153,6 +160,9 @@ export async function fetchOccupancyCivilAggregate(
       {
         allowDocumentedAggregateResponse: true,
         expectedTimezone: timeZone,
+        openBucket: options.openBucket,
+        requestedAt: options.requestedAt,
+        receivedAt,
       },
     );
     if (!hasCertifiedCivilEnvelope(response)) {
@@ -163,7 +173,7 @@ export async function fetchOccupancyCivilAggregate(
       granularity,
       scenarioId,
       timeZone,
-      validation,
+      { ...validation, receivedAt },
     );
     const expectedLabels = new Set(buckets.map((bucket) => bucket.label));
     if (data.some((row) => !expectedLabels.has(row.bucket.slice(0, 10)))) {
@@ -310,13 +320,24 @@ export async function fetchOccupancyCivilAggregate(
     }
   }));
   signal?.throwIfAborted();
+  const openBucketLabel = options.openBucket
+    ? civilMarker(options.openBucket).toISOString().slice(0, 10)
+    : null;
   const data = buckets.flatMap((bucket): OccupancyScenarioBucketRow[] => {
-    if (!bucket.units.length || bucket.units.some((unit) => !metrics.has(unit.from))) return [];
+    const observedUnits = bucket.units.filter((unit) => metrics.has(unit.from));
+    const openBucket = bucket.label === openBucketLabel && bucket.to > cutoff;
+    // A civil period still in progress can show its observed units without
+    // treating missing hours or minutes as zero. Closed periods retain the
+    // strict coverage requirement before they become historical data.
+    if (
+      !observedUnits.length ||
+      (!openBucket && observedUnits.length !== bucket.units.length)
+    ) return [];
     let weightedAverage = 0;
     let seconds = 0;
     let minimum = Number.POSITIVE_INFINITY;
     let peak = 0;
-    bucket.units.forEach((unit) => {
+    observedUnits.forEach((unit) => {
       const metric = metrics.get(unit.from)!;
       const duration = (unit.to - unit.from) / 1_000;
       weightedAverage += metric.average * duration;
@@ -328,7 +349,7 @@ export async function fetchOccupancyCivilAggregate(
     if (!Number.isFinite(rawAverage)) throw new Error("O agregado civil de ocupação excedeu o limite numérico.");
     // Floating-point accumulation can overshoot an otherwise constant bound.
     const average = Math.min(peak, Math.max(minimum, rawAverage));
-    const complete = bucket.to <= cutoff;
+    const complete = !openBucket && bucket.to <= cutoff;
     return [{
       bucket: bucket.label,
       complete,
@@ -370,9 +391,10 @@ function hasCertifiedCivilEnvelope(
       (
         row.complete !== undefined &&
         row.status !== undefined &&
-        (row.area_avg === undefined || row.area_final !== undefined) &&
-        (row.scenario_total_avg === undefined ||
-          row.scenario_total_final !== undefined)
+        ((row.complete === false && row.status === "partial") ||
+          ((row.area_avg === undefined || row.area_final !== undefined) &&
+            (row.scenario_total_avg === undefined ||
+              row.scenario_total_final !== undefined)))
       ),
   );
 }

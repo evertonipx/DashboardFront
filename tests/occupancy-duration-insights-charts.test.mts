@@ -205,16 +205,12 @@ test("rótulos dos heatmaps não colidem e preservam 00h/23h em tamanhos interme
   }
 });
 
-test("composição diária mostra só tempo confirmado e mantém lacunas neutras", () => {
+test("composição diária soma 100% entre ocupado e desocupado e mantém lacunas vazias", () => {
   const option = build("occupancy_duration_daily_profile", "light");
   for (let index = 0; index < model.days.length; index++) {
     const values = option.series.map((item: RuntimeFixture) => item.data[index]);
-    if (model.days[index].expectedSeconds > 0) {
-      const expectedPercent = 100 * (
-        model.days[index].confirmedOccupiedSeconds + model.days[index].confirmedFreeSeconds
-      ) / model.days[index].expectedSeconds;
-      assert.ok(Math.abs(values.reduce((sum: RuntimeFixture, value: RuntimeFixture) => sum + value, 0) - expectedPercent) < 1e-9);
-      assert.ok(expectedPercent <= 100);
+    if (model.days[index].confirmedOccupiedSeconds + model.days[index].confirmedFreeSeconds > 0) {
+      assert.ok(Math.abs(values[0] + values[1] - 100) < 1e-9);
     } else {
       assert.deepEqual(values, [null, null]);
     }
@@ -228,6 +224,77 @@ test("composição diária mostra só tempo confirmado e mantém lacunas neutras
   assert.deepEqual(option.legend.data.map((item: RuntimeFixture) => item.name), ["Ocupado", "Desocupado"]);
   assert.doesNotMatch(option.tooltip.formatter([{ dataIndex: 0 }]), /Transição/);
   assert.equal(option.yAxis.max, 100);
+});
+
+test("evolução diária apresenta 90% ocupado e 10% desocupado com cobertura parcial", () => {
+  const selected = [{ scenarioId: "partial-day", name: "Entrada", hours: [hour("2026-09-01", 0, 3240, 360, 0, 0)] }];
+  const selectedModel = modelModule.buildOccupancyDurationInsightModel(selected, month);
+  const option = charts.buildOccupancyDurationInsightOption({ kind: "occupancy_duration_daily_profile", model: selectedModel, month, scenarioNames: ["Entrada"], theme: "light" });
+  assert.deepEqual(option.series.map((item: RuntimeFixture) => item.data[0]), [90, 10]);
+  assert.deepEqual(option.series.map((item: RuntimeFixture) => item.data[1]), [null, null]);
+  const tooltip = option.tooltip.formatter([{ dataIndex: 0 }]);
+  assert.match(tooltip, /Ocupado: <strong>90%<\/strong>/);
+  assert.match(tooltip, /Desocupado: <strong>10%<\/strong>/);
+  assert.match(tooltip, /Tempo confirmado: 1h de 1d/);
+  assert.doesNotMatch(tooltip, /Transição|Sem tempo confirmado/);
+  assert.match(option.tooltip.formatter([{ dataIndex: 1 }]), /Sem leitura confirmada/);
+
+  const report = charts.buildOccupancyDurationInsightReport({ kind: "occupancy_duration_daily_profile", series: selected, month });
+  assert.deepEqual([report.table.rows[0].occupiedPercent, report.table.rows[0].freePercent], [90, 10]);
+  assert.deepEqual([report.table.rows[1].occupiedPercent, report.table.rows[1].freePercent], [null, null]);
+  assert.ok(report.table.columns.some((column: RuntimeFixture) => column.key === "confirmed"));
+  assert.equal(report.table.columns.some((column: RuntimeFixture) => column.key === "unconfirmed"), false);
+});
+
+test("os três heatmaps usam a base confirmada e deixam a baixa cobertura transparente", () => {
+  const partialSeries = [{
+    scenarioId: "partial-heatmap",
+    name: "Entrada",
+    hours: [
+      hour("2026-09-01", 0, 60, 0, 0, 3540),
+      hour("2026-09-01", 1, 3240, 360, 0, 0),
+    ],
+  }];
+  const partialModel = modelModule.buildOccupancyDurationInsightModel(partialSeries, month);
+  for (const [kind, x0, y0, label] of [
+    ["occupancy_duration_month_heatmap", 0, 0, "01/09/2026 · 00h"],
+    ["occupancy_duration_scenario_heatmap", 0, 0, "Entrada · 00h"],
+    ["occupancy_duration_week_heatmap", 1, 0, "Ter · 00h"],
+  ] as const) {
+    const option = charts.buildOccupancyDurationInsightOption({
+      kind, model: partialModel, month, scenarioNames: ["Entrada"], theme: "light",
+    });
+    const sparse = option.series[0].data.find((item: RuntimeFixture) =>
+      item.value[0] === x0 && item.value[1] === y0);
+    assert.ok(sparse, kind);
+    assert.equal(sparse.value[2], 100, `${kind}: ausência não entra no denominador`);
+    assert.ok(sparse.itemStyle.opacity < 1, `${kind}: cobertura parcial não pode parecer plena`);
+    const tooltip = option.tooltip.formatter({ data: sparse });
+    assert.match(tooltip, /Ocupado: <strong>100%<\/strong>/);
+    assert.match(tooltip, /Desocupado: <strong>0%<\/strong>/);
+    assert.match(tooltip, /Cobertura confirmada: 1min de/);
+    const [x1, y1] = kind === "occupancy_duration_scenario_heatmap"
+      ? [1, 0] : [x0, 1];
+    const measured = option.series[0].data.find((item: RuntimeFixture) =>
+      item.value[0] === x1 && item.value[1] === y1);
+    assert.equal(measured.value[2], 90, `${kind}: 54 min ocupado + 6 min livre = 90/10`);
+    assert.match(option.tooltip.formatter({ data: measured }), /Desocupado: <strong>10%<\/strong>/);
+    const report = charts.buildOccupancyDurationInsightReport({ kind, series: partialSeries, month });
+    const row = report.table.rows.find((item: RuntimeFixture) => item.period === label);
+    assert.deepEqual([row.occupiedPercent, row.freePercent], [100, 0], kind);
+    const measuredRow = report.table.rows.find((item: RuntimeFixture) => item.period === label.replace("00h", "01h"));
+    assert.deepEqual([measuredRow.occupiedPercent, measuredRow.freePercent], [90, 10], `${kind}: exportação e gráfico devem coincidir`);
+    assert.ok(report.table.columns.some((item: RuntimeFixture) => item.key === "freePercent"));
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 900, height: 430 });
+    try {
+      chart.setOption(option, { notMerge: true, lazyUpdate: false });
+      chart.renderToSVGString();
+      const graphic = chart.getModel().getSeriesByIndex(0).getData().getItemGraphicEl(0);
+      assert.ok(graphic.style.opacity < 1, `${kind}: a transparência deve chegar ao gráfico renderizado`);
+    } finally {
+      chart.dispose();
+    }
+  }
 });
 
 test("seleções grandes preservam todos os cenários com navegação vertical legível", () => {
@@ -265,7 +332,7 @@ test("rótulos diários estreitos mantêm todos os dígitos sobre fundo contrast
       try {
         chart.setOption(option, { notMerge: true, lazyUpdate: false });
         const label = chart.getModel().getSeriesByIndex(0).getData().getItemGraphicEl(0).getTextContent();
-        assert.equal(label.style.text, width <= 950 ? "{value|37%}" : "{value|37,4%}");
+        assert.equal(label.style.text, width <= 950 ? "{value|100%}" : "{value|99,8%}");
         assert.equal(label.style.fill, theme === "dark" ? "#E2E8F0" : "#13233A");
         assert.equal(label.style.rich.value.backgroundColor, theme === "dark" ? "rgba(15,23,42,0.94)" : "rgba(255,255,255,0.94)");
         assert.deepEqual(label.style.rich.value.padding, [1, 2, 1, 2]);
@@ -275,7 +342,7 @@ test("rótulos diários estreitos mantêm todos os dígitos sobre fundo contrast
         assert.equal(smallLabel.style.padding, undefined);
         assert.equal(smallLabel.getBoundingRect().width, 0, "segmentos pequenos não devem desenhar pílulas vazias");
         const svg = chart.renderToSVGString();
-        assert.match(svg, width <= 950 ? />37%<\/text>/ : />37,4%<\/text>/);
+        assert.match(svg, width <= 950 ? />100%<\/text>/ : />99,8%<\/text>/);
       } finally {
         chart.dispose();
       }
@@ -302,7 +369,7 @@ test("exportação usa tema claro, unidades legíveis e ausência nunca vira 0% 
     assert.ok(report.table.rows.length);
     assert.ok(report.table.rows.every((row: RuntimeFixture) => typeof row.elapsed === "string"));
     assert.ok(report.table.rows.every((row: RuntimeFixture) => /[hmsd]/.test(row.occupied)));
-    assert.ok(report.table.columns.some((column: RuntimeFixture) => column.key === "unconfirmed"));
+    assert.ok(report.table.columns.some((column: RuntimeFixture) => column.key === (kind === "occupancy_duration_daily_profile" ? "confirmed" : "unconfirmed")));
     assert.equal(report.table.columns.some((column: RuntimeFixture) => column.key === "transition"), false);
     const displayed = build(kind, "light");
     assert.deepEqual(report.option.xAxis.data, displayed.xAxis.data, "a exportação deve preservar a orientação horizontal exibida");

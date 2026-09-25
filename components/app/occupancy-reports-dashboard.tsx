@@ -185,14 +185,23 @@ import { occupancyObjectClassLabel } from "@/lib/occupancy-object-class";
 import {
   DEFAULT_OCCUPANCY_DASHBOARD_SETTINGS,
   loadOccupancyDashboardSettings,
+  normalizeOccupancyDashboardSettings,
+  OCCUPANCY_DASHBOARD_SETTINGS_KEY,
   OCCUPANCY_DASHBOARD_SETTINGS_UPDATED_EVENT,
   saveOccupancyDashboardSettings,
   type OccupancyMetricVisibility,
 } from "@/lib/occupancy-dashboard-settings";
 import {
   loadOccupancyWidgetSettings,
+  normalizeOccupancyWidgetSettings,
+  OCCUPANCY_WIDGET_SETTINGS_KEY,
   OCCUPANCY_WIDGET_SETTINGS_UPDATED_EVENT,
+  saveOccupancyWidgetSettings,
 } from "@/lib/occupancy-widget-settings";
+import {
+  buildOccupancyLiveAnalysisImport,
+  occupancyPresetStorageValue,
+} from "@/lib/occupancy-live-analysis-import";
 import { buildOccupancyDurationInsightAnalysisPeriod } from "@/lib/occupancy-duration-insights";
 import { occupancyComparisonBucketStarts } from "@/lib/occupancy-report-comparison";
 import {
@@ -229,7 +238,12 @@ import type {
   ReportPayload,
   ReportTable,
 } from "@/lib/report-export";
-import type { CardChartType, CardPreference } from "@/lib/view-preferences";
+import {
+  saveCardPreferences,
+  type CardChartType,
+  type CardPreference,
+} from "@/lib/view-preferences";
+import type { WidgetViewPreset } from "@/lib/widget-view-presets";
 import { USER_GRID_HYDRATED_EVENT } from "@/lib/user-grid";
 import { cn, formatDateTime, formatTime } from "@/lib/utils";
 
@@ -359,6 +373,13 @@ const MAX_OCCUPANCY_REPORT_BUCKETS = 500;
 const MAX_OCCUPANCY_MINUTE_REPORT_BUCKETS = 1_600;
 const EMPTY_OCCUPANCY_REPORT_DATA: Record<string, OccupancyReportState> = {};
 const EMPTY_OCCUPANCY_CUSTOM_WIDGETS: OccupancyCustomWidget[] = [];
+const OCCUPANCY_LIVE_VIEW_SOURCES = [
+  {
+    label: "Ao Vivo",
+    menuKey: "occupancy" as const,
+    namespace: "occupancy-live" as const,
+  },
+];
 
 export function OccupancyReportsDashboard({
   analysis = false,
@@ -2134,6 +2155,117 @@ export function OccupancyReportsDashboard({
     }),
   ];
   const reportCardIds = occupancyReportLayoutCards.map((card) => card.id);
+  function applySavedLiveOccupancyView(preset: WidgetViewPreset) {
+    if (
+      !analysis ||
+      !canEditVisual ||
+      !companyScopeId ||
+      !userId ||
+      userGridReadiness === "pending" ||
+      preset.snapshot.menuKey !== "occupancy"
+    ) {
+      return false;
+    }
+
+    const sourceScope = preset.snapshot.sourceScope;
+    const availableScenarioScopes = scopeOptions.filter(
+      (scope) => scope.mode === "scenario" && scope.scenario,
+    );
+    const sourceMatches = sourceScope
+      ? availableScenarioScopes.filter(
+          (scope) =>
+            scope.id === sourceScope.id ||
+            scope.name.trim().toLocaleLowerCase("pt-BR") ===
+              sourceScope.name.trim().toLocaleLowerCase("pt-BR"),
+        )
+      : [];
+    const targetScope =
+      sourceMatches.find((scope) => scope.id === sourceScope?.id) ??
+      (sourceMatches.length === 1 ? sourceMatches[0] : null) ??
+      (!sourceScope && selectedScope?.scenario ? selectedScope : null);
+    if (!targetScope?.scenario) {
+      toast.error("O cenário desta visão não está disponível em Análises de Ocupação.");
+      return false;
+    }
+
+    const targetViewId = `analysis:${targetScope.id}`;
+    const availableScenarioIds = scenarios.map((scenario) => scenario.id);
+    const availableScenarioIdSet = new Set(availableScenarioIds);
+    const targetCustomCardIds = loadOccupancyCustomWidgets(companyScopeId, {
+      userId,
+      viewId: targetScope.scenario.id,
+    }).map((widget) => `occupancy_custom_${widget.id}`);
+    const targetCardIds = Array.from(new Set([
+      ...reportCardIds.filter((id) => !id.startsWith("occupancy_custom_")),
+      "occupancy_scenario_detail",
+      ...targetCustomCardIds,
+    ]));
+    const imported = buildOccupancyLiveAnalysisImport({
+      snapshot: preset.snapshot,
+      targetCardIds,
+      availableScenarioIds,
+    });
+    if (!imported.importedCount) {
+      toast.error("A visão salva não possui widgets compatíveis com Análises de Ocupação.");
+      return false;
+    }
+
+    const sourceWidgetSettings = occupancyPresetStorageValue(
+      preset.snapshot,
+      OCCUPANCY_WIDGET_SETTINGS_KEY,
+    );
+    const settings = normalizeOccupancyWidgetSettings(sourceWidgetSettings);
+    saveOccupancyWidgetSettings(
+      {
+        ...settings,
+        capacities: Object.fromEntries(
+          Object.entries(settings.capacities).filter(([id]) =>
+            availableScenarioIdSet.has(id),
+          ),
+        ),
+        heatmapScenarioId: availableScenarioIdSet.has(settings.heatmapScenarioId)
+          ? settings.heatmapScenarioId
+          : "",
+        scenarioIds: settings.scenarioIds.filter((id) =>
+          availableScenarioIdSet.has(id),
+        ),
+        scenarioHourHeatmapDateKey: "",
+      },
+      companyScopeId,
+      userId,
+      targetViewId,
+    );
+    const sourceDashboardSettings = occupancyPresetStorageValue(
+      preset.snapshot,
+      OCCUPANCY_DASHBOARD_SETTINGS_KEY,
+    );
+    saveOccupancyDashboardSettings(
+      normalizeOccupancyDashboardSettings(sourceDashboardSettings),
+      companyScopeId,
+      userId,
+      targetViewId,
+    );
+    saveCardPreferences(
+      "occupancy",
+      imported.preferences,
+      targetCardIds,
+      companyScopeId,
+      userId,
+      targetViewId,
+    );
+    if (selectedId !== targetScope.id || scopeMode !== "scenario") {
+      invalidateChartDataset();
+      setScopeMode("scenario");
+      setSelectedId(targetScope.id);
+    }
+    toast.success(
+      `Visão “${preset.name}” carregada em Análises com ${imported.importedCount} widget(s)` +
+        (imported.unsupportedCount
+          ? `; ${imported.unsupportedCount} item(ns) exclusivos do Ao Vivo foram ignorados.`
+          : "."),
+    );
+    return true;
+  }
   const reportCardIdSet = new Set(reportCardIds);
   const reportPreferenceById = new Map(
     layoutPreferences.map((preference) => [preference.id, preference]),
@@ -3156,6 +3288,7 @@ export function OccupancyReportsDashboard({
           }
           menuKey="occupancy"
           monitorMode={monitorMode}
+          onApplySavedViewSource={analysis ? applySavedLiveOccupancyView : undefined}
           onOrganizerOpenChange={setLayoutOrganizerOpen}
           onPreferencesChange={handleLayoutPreferencesChange}
           onReorderModeChange={setLayoutReorderMode}
@@ -3165,6 +3298,7 @@ export function OccupancyReportsDashboard({
           }
           preferenceScopeId={reportPreferenceScopeId}
           reorderMode={layoutReorderMode}
+          savedViewSources={analysis ? OCCUPANCY_LIVE_VIEW_SOURCES : []}
           scenarios={
             analysis
               ? scenarios.map((scenario) => ({
@@ -4056,6 +4190,7 @@ async function loadOccupancyReportState(
               from: segment.from, to: segment.to, timeZone: expectedTimeZone,
               companyScopeId: companyScopeId ?? undefined, signal, requestedAt,
               openBucket: segment.openBucket, fetchResponse, capabilities: civilCapabilities,
+              useResponseReceiptTime: Boolean(segment.openBucket),
             })
           : await fetchResponse(path);
         const rows = requireOccupancyAggregateRows(
@@ -4072,6 +4207,7 @@ async function loadOccupancyReportState(
               segment.granularity === "month",
             openBucket: segment.openBucket,
             requestedAt: segment.openBucket ? requestedAt : undefined,
+            receivedAt: segment.openBucket ? new Date() : undefined,
             requireCertification: true,
           },
         );
@@ -4219,6 +4355,14 @@ function buildScenarioPoints(
         requireCertification: true,
       },
     );
+  const hasPartialBucket = rows.some(
+    (row) => row.complete === false || row.status === "partial",
+  );
+  const partialBucketWarning = hasPartialBucket
+    ? definition.granularity === "minute" || definition.granularity === "hour"
+      ? "Dados recentes em atualização: os valores mais recentes ainda podem mudar."
+      : "Dados do período em atualização: os valores mais recentes ainda podem mudar."
+    : undefined;
 
   const points = requestedBuckets.map((bucketStart) => {
     const total = totals.get(
@@ -4248,9 +4392,10 @@ function buildScenarioPoints(
     // Normalizar cada segmento isoladamente criaria dois eixos de 24 horas e
     // faria um ponto vazio apagar o ponto real ao consolidá-los.
     points,
-    incomplete: missingBuckets.length > 0,
+    incomplete: missingBuckets.length > 0 || hasPartialBucket,
     warning: joinOccupancyWarnings(
       metadataWarning,
+      partialBucketWarning,
       occupancyAggregateCoverageWarning(
         missingBuckets.length,
         requestedBuckets.length,

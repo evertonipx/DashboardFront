@@ -117,6 +117,11 @@ explícita; bucket desconhecido também é retornado com status incompleto, nunc
 omitido. Eventos repetidos são idempotentes por `external_event_id`, e eventos
 fora de ordem recompõem agregados e alertas afetados.
 
+Ao validar um bucket aberto, o frontend aceita `as_of` gerado durante o trajeto
+da requisição, desde que não ultrapasse o horário em que a resposta chegou nem
+o fim do próprio bucket. Uma consulta histórica sem horário de recebimento
+continua limitada ao instante solicitado.
+
 O `line_count_id` pertence ao fluxo de contagem e não pode excluir fotografias
 de ocupação. `last_seen_at` acompanha o último snapshot válido e não substitui a
 política de validade do estado.
@@ -196,7 +201,9 @@ Enquanto essas lacunas permanecerem, o Dashboard não consome diretamente os
 buckets civis `day`, `week` ou `month` sem `timezone` e completude certificados.
 Ele recompõe média, mínimo e máximo a partir de intervalos absolutos `hour` e,
 nas bordas fracionárias, `minute`, calculados no IANA associado à empresa.
-Unidades ausentes invalidam o bucket civil em vez de virarem zero. As consultas
+Unidades ausentes invalidam buckets civis fechados em vez de virarem zero. O
+bucket ainda aberto pode exibir a média das unidades disponíveis como prévia
+parcial, sem criar zeros para as lacunas nem certificar o relatório. As consultas
 são agrupadas, deduplicadas e mantidas em cache por empresa, cenário, fuso e
 intervalo; widgets ocultos não abrem a fonte. Semestre e ano continuam fora do
 contrato direto da API e são compostos somente a partir dessas fontes civis já

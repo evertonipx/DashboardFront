@@ -15,6 +15,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cache = new Map();
 const retry = load("lib/occupancy-live-retry.ts");
 const dashboardQuery = load("lib/occupancy-dashboard-query.ts");
+const occupancyMetrics = load("lib/occupancy-metrics.ts");
 const source = readFileSync(
   resolve(root, "components/app/occupancy-scenario-dashboard.tsx"),
   "utf8",
@@ -81,6 +82,91 @@ const output = ts.transpileModule(
 const live = new Function(...Object.keys(bindings), output)(
   ...Object.values(bindings),
 );
+
+test("Máximo hoje combina pico diário e leitura atual somente no dia civil da empresa", () => {
+  const now = new Date("2026-09-25T03:10:00Z"); // 00:10 em São Paulo
+  const todayBucket = new Date(2026, 8, 25).toISOString();
+  const yesterdayBucket = new Date(2026, 8, 24).toISOString();
+  const points = [
+    { bucket: yesterdayBucket, average: 40, current: null, minimum: 2, peak: 60 },
+    { bucket: todayBucket, average: 5, current: null, minimum: 1, peak: 8 },
+  ];
+  const resolve = (reading: { asOf: string | null; value: number | null } | null) =>
+    occupancyMetrics.resolveOccupancyTodayMetric({
+      now,
+      points,
+      reading,
+      timeZone: "America/Sao_Paulo",
+    });
+
+  assert.deepEqual(resolve({ asOf: "2026-09-25T03:09:00Z", value: 12 }), {
+    average: 5, current: null, minimum: 1, peak: 12,
+  });
+  assert.equal(resolve({ asOf: "2026-09-25T03:09:00Z", value: 3 }).peak, 8,
+    "a última leitura menor não reduz o máximo diário");
+  assert.equal(resolve({ asOf: "2026-09-25T02:59:00Z", value: 99 }).peak, 8,
+    "pico da véspera não pode contaminar o novo dia civil");
+  assert.equal(resolve({ asOf: "2026-09-25T03:11:00Z", value: 99 }).peak, 8,
+    "uma leitura futura não pode ser publicada como máximo já observado");
+  assert.equal(resolve(null).peak, 8);
+});
+
+test("Máximo hoje preserva ausência, zero certificado e borda após meia-noite", () => {
+  const now = new Date("2026-09-25T03:10:00Z");
+  const points = [{
+    bucket: new Date(2026, 8, 24).toISOString(),
+    average: 4, current: null, minimum: 0, peak: 9,
+  }];
+  const input = { now, points, timeZone: "America/Sao_Paulo" };
+  assert.deepEqual(
+    occupancyMetrics.resolveOccupancyTodayMetric({ ...input, reading: null }),
+    { average: null, current: null, minimum: null, peak: null },
+    "a última linha de ontem não representa hoje",
+  );
+  assert.deepEqual(
+    occupancyMetrics.resolveOccupancyTodayMetric({
+      ...input,
+      reading: { asOf: "2026-09-25T03:09:00Z", value: 0 },
+    }),
+    { average: null, current: null, minimum: null, peak: 0 },
+    "zero só aparece quando é uma leitura efetiva de hoje",
+  );
+  assert.deepEqual(
+    occupancyMetrics.resolveOccupancyTodayMetric({
+      ...input,
+      reading: { asOf: null, value: 7 },
+    }),
+    { average: null, current: null, minimum: null, peak: null },
+    "valor sem instante não é observação certificada",
+  );
+  assert.match(source, /const currentTodayMetric = React\.useMemo\([\s\S]*?resolveOccupancyTodayMetric\(\{[\s\S]*?reading: lastReading/);
+  assert.match(source, /const history = occupancyLiveHistoryRequired\(visible, customWidgets\) \|\|[\s\S]*?visible\.has\("occupancy_peak"\)/);
+  assert.match(source, /widget\.metric === "peak" &&[\s\S]*?visible\.has\(`occupancy_custom_\$\{widget\.id\}`\)/);
+});
+
+test("Máximo hoje não recua de 12 para 3 enquanto agregado diário está atrasado", () => {
+  const scopeA = JSON.stringify(["company-a", "scenario-a", "America/Sao_Paulo", "2026-09-25"]);
+  const scopeB = JSON.stringify(["company-a", "scenario-b", "America/Sao_Paulo", "2026-09-25"]);
+  const nextDay = JSON.stringify(["company-a", "scenario-a", "America/Sao_Paulo", "2026-09-26"]);
+  const otherCompany = JSON.stringify(["company-b", "scenario-a", "America/Sao_Paulo", "2026-09-25"]);
+  const advance = occupancyMetrics.advanceOccupancyTodayPeakMemory;
+  const first = advance(new Map(), scopeA, 12);
+  const afterDrop = advance(first, scopeA, 3);
+  assert.equal(afterDrop, first, "um valor menor não provoca nova renderização");
+  assert.equal(afterDrop.get(scopeA), 12);
+  const withOtherScenario = advance(afterDrop, scopeB, 2);
+  assert.equal(withOtherScenario.get(scopeA), 12);
+  assert.equal(withOtherScenario.get(scopeB), 2);
+  assert.equal(withOtherScenario.get(nextDay), undefined, "virada do dia não herda o máximo anterior");
+  assert.equal(withOtherScenario.get(otherCompany), undefined, "outra empresa não herda o máximo anterior");
+  assert.equal(advance(withOtherScenario, scopeA, null), withOtherScenario,
+    "ausência não sobrescreve um pico certificado");
+  assert.equal(advance(withOtherScenario, nextDay, 0).get(nextDay), 0);
+
+  assert.match(source, /setObservedTodayPeaks\(\(memory\) =>[\s\S]*?advanceOccupancyTodayPeakMemory\(/);
+  assert.match(source, /const todayPeakScopeKey = JSON\.stringify\(\[[\s\S]*?companyScopeId,[\s\S]*?selectedScenario\?\.id[\s\S]*?companyDateKey\(clock, companyTimeZone\)/);
+  assert.match(source, /rememberedTodayPeak === undefined[\s\S]*?Math\.max\(currentTodayMetric\.peak \?\? rememberedTodayPeak, rememberedTodayPeak\)/);
+});
 
 test("Última leitura preserva somente o último valor certificado após falha de atualização", () => {
   const history = {
@@ -650,6 +736,11 @@ test("metadados opcionais não bloqueiam dados válidos; lacunas reais permanece
   assert.equal(state.points[10].current, null);
   assert.equal(state.points[11].average, null);
   assert.equal(live.buildOccupancyChartState(definition, []).incomplete, true);
+  const partial = live.buildOccupancyChartState(definition, [
+    { ...rows[0], complete: false, status: "partial" },
+  ]);
+  assert.equal(partial.points[10].average, 8);
+  assert.equal(partial.incomplete, true, "o bucket aberto deve plotar sem certificar o período");
   assert.match(
     source,
     /const hasIncompleteOccupancyCoverage\s*=\s*occupancyDataPlan\.granularities\.some/,
@@ -662,6 +753,31 @@ test("metadados opcionais não bloqueiam dados válidos; lacunas reais permanece
     source,
     /loading=\{initialLoading \|\| !certifiedChartData\[definition.id\]\}/,
   );
+});
+
+test("Dia, Semana e Mês ao vivo exibem a leitura parcial do bucket atual", () => {
+  const definitions = live.buildOccupancyChartDefinitions(
+    new Date("2026-09-11T12:00:00Z"),
+    "America/Sao_Paulo",
+  );
+  for (const granularity of ["day", "week", "month"]) {
+    const definition = definitions.find((item: RuntimeFixture) =>
+      item.granularity === granularity);
+    const bucket = live.listBucketStarts(definition).at(-1);
+    const dateKey = [bucket.getFullYear(),
+      String(bucket.getMonth() + 1).padStart(2, "0"),
+      String(bucket.getDate()).padStart(2, "0")].join("-");
+    const state = live.buildOccupancyChartState(definition, [{
+      bucket: dateKey,
+      complete: false,
+      scenario_total_avg: 8,
+      scenario_total_min: 3,
+      scenario_total_max: 10,
+      status: "partial",
+    }]);
+    assert.equal(state.points.at(-1).average, 8, granularity);
+    assert.equal(state.incomplete, true, granularity);
+  }
 });
 
 function metricRow(bucket: string, value: number) {

@@ -169,7 +169,7 @@ export function buildOccupancyComparisonSelectionPlan({
   }
   return {
     byCard,
-    snapshots: union(["occupancy_scenario_half_donut", "occupancy_scenario_bar_race", "occupancy_scenario_max_hour", "occupancy_scenario_max_year", "occupancy_duration_transitions"], true),
+    snapshots: union(["occupancy_scenario_half_donut", "occupancy_scenario_bar_race", "occupancy_scenario_max_hour", "occupancy_scenario_max_month", "occupancy_scenario_max_year", "occupancy_duration_transitions"], true),
     hourly: union([
       "occupancy_scenario_max_hour",
       "occupancy_day_hour_heatmap",
@@ -177,8 +177,8 @@ export function buildOccupancyComparisonSelectionPlan({
         ? ["occupancy_scenario_hour_heatmap"]
         : []),
     ]),
-    // Both month/year trends advance from the same open-hour maximum. This
-    // keeps their five-second edge current without re-reading the month.
+    // Both month/year trends combine the open-hour peak with the shared live
+    // snapshot. Neither re-reads the long monthly source on every pulse.
     currentHour: union([
       "occupancy_scenario_max_hour",
       "occupancy_scenario_max_month",

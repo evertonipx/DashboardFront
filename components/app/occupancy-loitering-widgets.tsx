@@ -296,8 +296,7 @@ export function buildOccupancyLoiteringSessionsChartOption(
       emphasis: { focus: "series", scale: 1.35 },
       id: `loitering-session-${index}`,
       itemStyle: {
-        borderColor: palette.surface,
-        borderWidth: 1.5,
+        borderWidth: 0,
         color: colors[index % colors.length],
         opacity: 0.88,
       },

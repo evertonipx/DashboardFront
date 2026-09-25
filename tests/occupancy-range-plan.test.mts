@@ -205,7 +205,7 @@ test("dashboard consulta segmentos por granularidade e só cacheia cobertura fec
   );
   assert.match(
     source,
-    /function buildScenarioPoints[\s\S]*?return \{\s*\/\/ Os segmentos fechado e aberto[\s\S]*?points,\s*incomplete: missingBuckets\.length > 0,\s*warning:/,
+    /function buildScenarioPoints[\s\S]*?return \{\s*\/\/ Os segmentos fechado e aberto[\s\S]*?points,\s*incomplete: missingBuckets\.length > 0 \|\| hasPartialBucket,\s*warning:/,
     "cada segmento horário deve permanecer cru até a união final",
   );
   assert.match(

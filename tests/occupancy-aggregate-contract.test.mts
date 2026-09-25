@@ -148,6 +148,83 @@ test("as_of do dia aberto usa o início civil da empresa, inclusive DST à meia-
     "America/Santiago", { ...documented, openBucket: new Date(2026, 8, 6), requestedAt: new Date("2026-09-06T04:20:00Z") }));
 });
 
+test("bucket aberto aceita as_of entre envio e recebimento, mas nunca depois do recebimento ou do próprio bucket", () => {
+  const openBucket = new Date("2026-09-11T04:00:00Z");
+  const requestedAt = new Date("2026-09-11T04:17:42Z");
+  const receivedAt = new Date("2026-09-11T04:17:44Z");
+  const options = { ...documented, openBucket, requestedAt, receivedAt };
+  const partial = (asOf: string) => certifiedEnvelope("hour", [row(openBucket.toISOString(), 2)], {
+    as_of: asOf,
+    complete: false,
+    status: "partial",
+  });
+  const response = partial("2026-09-11T04:17:43Z");
+  response.data = response.data.map((item: RuntimeFixture) => ({
+    ...item, complete: false, scenario_total_final: undefined, status: "partial",
+  }));
+  assert.doesNotThrow(() => validation.requireOccupancyAggregateRows(
+    response, "hour", "scenario-a", "America/Sao_Paulo", options,
+  ));
+  assert.throws(() => validation.requireOccupancyAggregateRows(
+    response, "hour", "scenario-a", "America/Sao_Paulo", { ...options, receivedAt: undefined },
+  ), /fora da janela/);
+  assert.throws(() => validation.requireOccupancyAggregateRows(
+    { ...response, as_of: "2026-09-11T04:17:45Z" }, "hour", "scenario-a", "America/Sao_Paulo", options,
+  ), /fora da janela/);
+  assert.throws(() => validation.requireOccupancyAggregateRows(
+    { ...response, as_of: "2026-09-11T05:00:00Z" }, "hour", "scenario-a", "America/Sao_Paulo",
+    { ...options, receivedAt: new Date("2026-09-11T05:01:00Z") },
+  ), /fora da janela/);
+});
+
+test("consulta civil aceita resposta recebida após o envio sem certificar bucket parcial", async () => {
+  const openBucket = new Date(2026, 8, 11);
+  const requestedAt = new Date("2026-09-11T04:17:42Z");
+  const receivedAt = new Date("2026-09-11T04:17:44Z");
+  const fixture = createFixture((call) => {
+    const response = certifiedEnvelope(call.granularity, [row(call.from.toISOString(), 2)], {
+      as_of: "2026-09-11T04:17:43Z", complete: false, status: "partial",
+    });
+    response.data = response.data.map((item: RuntimeFixture) => ({
+      ...item, complete: false, scenario_total_final: undefined, status: "partial",
+    }));
+    return response;
+  });
+  const result = await fixture.fetch({ openBucket, requestedAt, receivedAt });
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(result.data.length, 1);
+  assert.equal(result.data[0].scenario_total_avg, 2);
+  assert.equal(result.data[0].complete, false);
+  assert.equal(result.data[0].status, "partial");
+});
+
+for (const [granularity, from, openBucket, to, closedBucket, asOf, requestedAt] of [
+  ["day", new Date(2026, 8, 10), new Date(2026, 8, 11), new Date(2026, 8, 12),
+    "2026-09-10T03:00:00Z", "2026-09-10T18:00:00Z", "2026-09-11T15:00:00Z"],
+  ["week", new Date(2026, 8, 7), new Date(2026, 8, 14), new Date(2026, 8, 21),
+    "2026-09-07T03:00:00Z", "2026-09-10T18:00:00Z", "2026-09-16T15:00:00Z"],
+  ["month", new Date(2026, 7, 1), new Date(2026, 8, 1), new Date(2026, 9, 1),
+    "2026-08-01T03:00:00Z", "2026-08-20T18:00:00Z", "2026-09-11T15:00:00Z"],
+] as const) {
+  test(`${granularity}: histórico fechado continua visível quando o período atual não tem leitura`, async () => {
+    const fixture = createFixture((call) => certifiedEnvelope(
+      call.granularity,
+      [row(closedBucket, 4)],
+      { as_of: asOf, complete: false, status: "partial" },
+    ));
+    const result = await fixture.fetch({
+      from,
+      granularity,
+      openBucket,
+      requestedAt: new Date(requestedAt),
+      to,
+    });
+    assert.equal(fixture.calls.length, 1);
+    assert.deepEqual(result.data.map((item: RuntimeFixture) => item.bucket), [closedBucket.slice(0, 10)]);
+    assert.equal(result.data[0].scenario_total_avg, 4);
+  });
+}
+
 test("coarse alinhado usa uma consulta e mantém os valores originais", async () => {
   const fixture = createFixture((call) => certifiedEnvelope(
     call.granularity,
@@ -160,6 +237,69 @@ test("coarse alinhado usa uma consulta e mantém os valores originais", async ()
   assert.equal(fixture.calls[0].to.toISOString(), "2026-09-12T03:00:00.000Z");
   assert.equal(result.data[0].scenario_total_avg, 7);
   assert.equal(result.data[0].bucket, "2026-09-11");
+});
+
+for (const [granularity, from, to] of [
+  ["day", new Date(2026, 8, 11), new Date(2026, 8, 12)],
+  ["week", new Date(2026, 8, 7), new Date(2026, 8, 14)],
+  ["month", new Date(2026, 8, 1), new Date(2026, 9, 1)],
+] as const) {
+  test(`agregado civil ${granularity} parcial certificado plota o bucket aberto`, async () => {
+    const fixture = createFixture((call) => {
+      const response = certifiedEnvelope(
+        call.granularity,
+        [row(call.from.toISOString(), 7)],
+        {
+          as_of: "2026-09-11T04:10:00Z",
+          complete: false,
+          status: "partial",
+        },
+      );
+      response.data = response.data.map((item: RuntimeFixture) => ({
+        ...item,
+        complete: false,
+        scenario_total_final: undefined,
+        status: "partial",
+      }));
+      return response;
+    });
+
+    const result = await fixture.fetch({
+      from,
+      granularity,
+      openBucket: from,
+      requestedAt: new Date("2026-09-11T04:17:42Z"),
+      to,
+    });
+
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(result.complete, false);
+    assert.equal(result.status, "partial");
+    assert.equal(result.data.length, 1);
+    assert.equal(result.data[0].scenario_total_avg, 7);
+    assert.equal(result.data[0].scenario_total_final, undefined);
+    assert.equal(result.data[0].complete, false);
+    assert.equal(result.data[0].status, "partial");
+  });
+}
+
+test("bucket civil fechado parcial continua inválido e não dispara fallback", async () => {
+  const fixture = createFixture((call) => {
+    const response = certifiedEnvelope(
+      call.granularity,
+      [row(call.from.toISOString(), 7)],
+      { complete: false, status: "partial" },
+    );
+    response.data = response.data.map((item: RuntimeFixture) => ({
+      ...item,
+      complete: false,
+      status: "partial",
+    }));
+    return response;
+  });
+
+  await assert.rejects(fixture.fetch(), /incompleto/);
+  assert.equal(fixture.calls.length, 1);
 });
 
 test("coarse civil alinhado sem certificação é recomposto por horas", async () => {
@@ -249,6 +389,31 @@ test("fallback não converte ausência em zero nem soma picos de áreas", async 
     scenario_total_max: 0, status: "complete" }]);
 });
 
+test("fallback do dia aberto plota unidades disponíveis sem preencher lacunas com zero", async () => {
+  const fixture = createFixture((call) => {
+    const response = responseFor(call, call.granularity === "minute" ? 4 : 2);
+    if (call.granularity === "hour") response.data.splice(1, 1);
+    if (call.granularity === "minute") response.data.pop();
+    return response;
+  });
+
+  const result = await fixture.fetch({
+    openBucket: new Date(2026, 8, 11),
+    requestedAt: new Date("2026-09-11T06:17:42Z"),
+  });
+
+  assert.deepEqual(fixture.calls.map((call) => call.granularity), ["day", "hour", "minute"]);
+  assert.equal(result.complete, false);
+  assert.equal(result.status, "partial");
+  assert.equal(result.data.length, 1);
+  assert.equal(result.data[0].complete, false);
+  assert.equal(result.data[0].status, "partial");
+  assert.equal(result.data[0].scenario_total_min, 2);
+  assert.equal(result.data[0].scenario_total_max, 4);
+  assert.ok(Math.abs(result.data[0].scenario_total_avg - 304 / 136) < 1e-12);
+  assert.equal(result.data[0].scenario_total_final, undefined);
+});
+
 test("hora em curso usa somente minutos fechados até requestedAt", async () => {
   const fixture = createFixture();
   const result = await fixture.fetch({ openBucket: new Date(2026, 8, 11), requestedAt: new Date("2026-09-11T04:17:42Z") });
@@ -307,7 +472,11 @@ test("unidade fechada ausente só é revista quando a borda de minuto avança", 
     unitCache,
   };
 
-  assert.deepEqual((await fixture.fetch(live)).data, []);
+  const first = await fixture.fetch(live);
+  assert.deepEqual(first.data, [{
+    bucket: "2026-09-11", complete: false, scenario_total_avg: 1,
+    scenario_total_min: 1, scenario_total_max: 1, status: "partial",
+  }]);
   fixture.calls.splice(0);
   assert.deepEqual(
     (
@@ -316,7 +485,7 @@ test("unidade fechada ausente só é revista quando a borda de minuto avança", 
         requestedAt: new Date("2026-09-11T04:17:47Z"),
       })
     ).data,
-    [],
+    first.data,
   );
   assert.equal(
     fixture.calls.length,

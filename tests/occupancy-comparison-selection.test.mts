@@ -212,6 +212,174 @@ test("merge da borda mantém meses fechados e máximo mensal monotônico", () =>
   );
 });
 
+test("máximo mensal combina agregado, hora e leitura atual sem regredir nem cruzar mês civil", () => {
+  const august = new Date(2026, 7, 1);
+  const september = new Date(2026, 8, 1);
+  const buckets = [august, september];
+  const metrics = new Map([
+    [Date.UTC(2026, 7, 1), { average: 4, minimum: 1, peak: 18 }],
+    [Date.UTC(2026, 8, 1), { average: 3, minimum: 0, peak: 10 }],
+  ]);
+  const liveBucket = new Date("2026-09-15T15:00:00.000Z");
+  const monthly = (livePeak: number | null, source = metrics) =>
+    comparison.buildOccupancyMonthlyMaximumValues({
+      buckets, liveBucket, livePeak, metrics: source,
+      timeZone: "America/Sao_Paulo",
+    });
+  assert.deepEqual(monthly(14), [18, 14]);
+  assert.deepEqual(monthly(7), [18, 10]);
+  assert.deepEqual(monthly(14, new Map([[Date.UTC(2026, 7, 1), metrics.get(Date.UTC(2026, 7, 1))!]])), [18, 14]);
+  assert.deepEqual(comparison.buildOccupancyMonthlyMaximumValues({
+    buckets, liveBucket: null, livePeak: 14, metrics,
+    timeZone: "America/Sao_Paulo",
+  }), [18, 10], "um relatório histórico não incorpora leitura ao vivo");
+  assert.deepEqual(comparison.buildOccupancyMonthlyMaximumValues({
+    buckets: [new Date(2025, 11, 1), new Date(2026, 0, 1)],
+    liveBucket: new Date("2026-01-01T01:15:00.000Z"),
+    livePeak: 99,
+    metrics: new Map([[Date.UTC(2025, 11, 1), { average: 2, minimum: 0, peak: 11 }]]),
+    timeZone: "America/Sao_Paulo",
+  }), [11, null], "01:15Z ainda pertence a dezembro em São Paulo");
+});
+
+test("a borda anual usa o maior valor certificado da hora ou do snapshot", () => {
+  const bucket = new Date("2026-09-15T15:00:00.000Z");
+  const current = { peaks: new Map([[bucket.getTime(), 12]]) };
+  const snapshot = { asOf: "2026-09-15T15:00:30.000Z", total: 14 };
+  const peak = comparison.occupancyLiveScenarioPeak({
+    bucket, current, snapshot, timeZone: "America/Sao_Paulo",
+  });
+  assert.equal(peak, 14);
+  assert.equal(comparison.occupancyLiveScenarioPeak({
+    bucket, current,
+    snapshot: { asOf: "2026-09-15T14:59:59.000Z", total: 40 },
+    timeZone: "America/Sao_Paulo",
+  }), 12, "leitura da hora anterior não contamina o pico atual");
+  assert.deepEqual(comparison.buildOccupancyAnnualMaximumPoints({
+    annualBuckets: [new Date(2026, 0, 1)],
+    liveBucket: bucket,
+    livePeak: peak,
+    metrics: new Map([[Date.UTC(2026, 8, 1), { average: 3, minimum: 0, peak: 10 }]]),
+    monthlyBuckets: [new Date(2026, 8, 1)],
+    timeZone: "America/Sao_Paulo",
+  }), [{ partial: true, value: 14 }]);
+  assert.deepEqual(comparison.buildOccupancyAnnualMaximumPoints({
+    annualBuckets: [new Date(2025, 0, 1)],
+    metrics: new Map([[Date.UTC(2025, 0, 1), { average: 3, minimum: 0, peak: 10 }]]),
+    monthlyBuckets: [new Date(2025, 0, 1), new Date(2025, 1, 1)],
+    openYear: null,
+  }), [{ partial: false, value: null }], "ano fechado com mês ausente não é certificado pelo PDF");
+  assert.deepEqual(comparison.buildOccupancyAnnualMaximumPoints({
+    annualBuckets: [new Date(2025, 0, 1), new Date(2026, 0, 1)],
+    liveBucket: new Date("2026-01-01T01:15:00.000Z"),
+    livePeak: 99,
+    metrics: new Map([
+      [Date.UTC(2025, 11, 1), { average: 3, minimum: 0, peak: 12 }],
+      [Date.UTC(2026, 0, 1), { average: 3, minimum: 0, peak: 5 }],
+    ]),
+    monthlyBuckets: [new Date(2025, 11, 1), new Date(2026, 0, 1)],
+    openYear: 2026,
+    timeZone: "America/Sao_Paulo",
+  }), [{ partial: false, value: 12 }, { partial: true, value: 5 }],
+  "hora ainda em dezembro civil não deve inflar janeiro nem reabrir o ano fechado");
+});
+
+test("novo pico do mês permanece após a ocupação cair e não atravessa a virada civil", () => {
+  const currentMonth = new Date(2026, 8, 1);
+  const liveBucket = new Date("2026-09-15T15:00:00.000Z");
+  const scenarios = [{ scenarioId: "a", name: "Entrada", metrics: new Map([
+    [Date.UTC(2026, 8, 1), { average: 3, minimum: 0, peak: 10 }],
+  ]) }];
+  const advance = (previous: RuntimeFixture, value: number, bucket = liveBucket) =>
+    comparison.advanceOccupancyMaximumTrendLivePeaks({
+      currentMonth,
+      currentSeries: [],
+      liveBucket: bucket,
+      scenarios: previous,
+      snapshots: [{ scenarioId: "a", name: "Entrada", occupied: value > 0,
+        total: value, asOf: new Date(bucket.getTime() + 30_000).toISOString() }],
+      timeZone: "America/Sao_Paulo",
+    });
+  const raised = advance(scenarios, 14);
+  assert.equal(raised[0].metrics.get(Date.UTC(2026, 8, 1))?.peak, 14);
+  const lowered = advance(raised, 3);
+  assert.strictEqual(lowered, raised, "leitura menor não cria novo estado nem reduz o máximo");
+  assert.deepEqual(comparison.buildOccupancyMonthlyMaximumValues({
+    buckets: [currentMonth], liveBucket, livePeak: 3,
+    metrics: lowered[0].metrics, timeZone: "America/Sao_Paulo",
+  }), [14]);
+  const previousMonthHour = new Date("2026-09-01T02:00:00.000Z");
+  assert.strictEqual(advance(raised, 99, previousMonthHour), raised,
+    "leitura de agosto não contamina o máximo de setembro");
+});
+
+test("os três gráficos de máximo usam o mesmo pico ao vivo e o PDF mantém a borda mensal", () => {
+  const syntax = ts.createSourceFile("comparison.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const declaration = syntax.statements.find((node) =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "buildMaximumLineSeries");
+  assert.ok(declaration);
+  const helpers = {
+    ...comparison,
+    joinMessages: (...messages: Array<string | undefined>) => messages.filter(Boolean).join(" ") || undefined,
+    occupancyScenarioCoverageStart: () => null,
+    occupancyAggregateBucketKey: load("lib/occupancy-aggregate-validation.ts").occupancyAggregateBucketKey,
+    companyTimeZoneHour: load("lib/company-time-zone.ts").companyTimeZoneHour,
+  };
+  const compiled = ts.transpileModule(`${declaration.getText(syntax)}\nmodule.exports = buildMaximumLineSeries;`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const loaded: { exports: RuntimeFixture } = { exports: {} };
+  new Function("module", ...Object.keys(helpers), compiled)(loaded, ...Object.values(helpers));
+
+  const hourBucket = new Date("2026-09-15T15:00:00.000Z");
+  const scenario = { id: "a", name: "Entrada" };
+  const snapshot = { scenarioId: "a", name: "Entrada", asOf: "2026-09-15T15:00:30.000Z", total: 14, occupied: true };
+  const openHour = { scenarioId: "a", name: "Entrada", peaks: new Map([[hourBucket.getTime(), 12]]), source: "hour" };
+  const monthlyMetric = { average: 3, minimum: 0, peak: 10 };
+  const common = {
+    timeZone: "America/Sao_Paulo",
+    currentBucket: hourBucket,
+    currentSnapshots: [snapshot],
+    currentSeries: [openHour],
+    scenarios: [scenario],
+  };
+  const monthly = loaded.exports({
+    ...common,
+    buckets: [new Date(2026, 8, 1)],
+    granularity: "month",
+    monthlySourceBuckets: [],
+    series: [{ scenarioId: "a", name: "Entrada", metrics: new Map([[Date.UTC(2026, 8, 1), monthlyMetric]]) }],
+  });
+  assert.deepEqual(monthly[0].values, [14]);
+  assert.deepEqual(monthly[0].partialIndexes, [0]);
+
+  const annual = loaded.exports({
+    ...common,
+    buckets: [new Date(2026, 0, 1)],
+    granularity: "year",
+    monthlySourceBuckets: [new Date(2026, 8, 1)],
+    series: [{ scenarioId: "a", name: "Entrada", metrics: new Map([[Date.UTC(2026, 8, 1), monthlyMetric]]) }],
+  });
+  assert.deepEqual(annual[0].values, [14]);
+  assert.deepEqual(annual[0].partialIndexes, [0]);
+
+  const hourly = loaded.exports({
+    ...common,
+    buckets: [hourBucket],
+    granularity: "hour",
+    monthlySourceBuckets: [],
+    series: [{ scenarioId: "a", name: "Entrada", metrics: new Map([[hourBucket.getTime(), monthlyMetric]]) }],
+  });
+  assert.equal(hourly[0].values[12], 14);
+
+  const reportStart = source.indexOf("const monthlyMaximum = buildMaximumLineSeries({");
+  const reportEnd = source.indexOf("const annualBuckets", reportStart);
+  const reportMonth = source.slice(reportStart, reportEnd);
+  assert.match(reportMonth, /currentBucket: historicalContextLabel \? null : currentHourBucket/);
+  assert.match(reportMonth, /filterForCard\("occupancy_scenario_max_month", snapshots\)/);
+  assert.match(reportMonth, /filterForCard\("occupancy_scenario_max_month", currentHourSeries\)/);
+});
+
 test("heatmaps horários preservam dias fechados e consultam somente a borda nova", () => {
   assert.match(
     source,
@@ -455,10 +623,14 @@ test("requisições são deduplicadas e limitadas à família de widgets visíve
     preference("occupancy_scenario_max_year", ["d"], false),
     preference("occupancy_scenario_max_hour", ["d"], false),
   ]);
-  assert.deepEqual(result.snapshots, ["a"]);
+  assert.deepEqual(result.snapshots, ["a", "c"]);
   assert.deepEqual(result.hourly, ["b"]);
   assert.deepEqual(result.currentHour, ["c"]);
   assert.deepEqual(result.trends, ["c"]);
+  const monthOnly = plan([preference("occupancy_scenario_max_month", ["c"])]);
+  assert.deepEqual(monthOnly.snapshots, ["c"]);
+  assert.deepEqual(monthOnly.currentHour, ["c"]);
+  assert.deepEqual(monthOnly.trends, ["c"]);
 });
 
 test("mapa por cenários reutiliza a fonte horária somente na granularidade hora", () => {
@@ -544,7 +716,7 @@ test("exportação inclui card visível fora da viewport e preserva sua seleçã
     ["c", "a"],
     "a ordem salva do card offscreen deve chegar intacta à exportação",
   );
-  assert.deepEqual(report.snapshots, ["a"]);
+  assert.deepEqual(report.snapshots, ["a", "c"]);
   assert.deepEqual(report.trends, ["a", "c"]);
   assert.ok(!report.trends.includes("d"), "card oculto não pode solicitar rede");
 });
@@ -637,6 +809,64 @@ test("foco pendente fora da seleção não bloqueia nem contamina séries horár
   assert.deepEqual(loaded.exports({ ...range, series }, "a", range, new Set(["b"])), { covered: false, series: null });
   assert.equal(loaded.exports({ ...range, series }, "a", range, new Set(["a", "b"])).series, series);
   assert.match(source, /resolveSharedOccupancyHourlyAggregate\(\s*focusHourlyAggregateRef\.current,\s*focusScenarioId,\s*range,\s*requestedIds,/);
+});
+
+test("comparativo só permite bucket parcial enquanto o instante solicitado está dentro dele", () => {
+  const declarations = ts.createSourceFile("comparison.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const declaration = declarations.statements.find((node) =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "occupancyComparisonOpenBucket");
+  assert.ok(declaration, "o contrato da borda aberta deve continuar explícito");
+  const compiled = ts.transpileModule(
+    `${declaration.getText(declarations)}\nmodule.exports = occupancyComparisonOpenBucket;`,
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const loaded: { exports: RuntimeFixture } = { exports: {} };
+  const from = new Date("2026-09-11T03:00:00Z");
+  const to = new Date("2026-09-12T03:00:00Z");
+  new Function("module", "occupancyHistoricalBucketBounds", compiled)(
+    loaded,
+    () => ({ from, to }),
+  );
+
+  const bucket = new Date(2026, 8, 11);
+  assert.equal(loaded.exports(bucket, "day", new Date("2026-09-11T15:00:00Z"), "America/Sao_Paulo"), bucket);
+  assert.equal(loaded.exports(bucket, "day", new Date(to.getTime() - 1), "America/Sao_Paulo"), undefined,
+    "o último milissegundo do histórico é um fechamento, não cobertura parcial certificada");
+  assert.equal(loaded.exports(bucket, "day", to, "America/Sao_Paulo"), undefined);
+  assert.equal(loaded.exports(bucket, "day", new Date(from.getTime() - 1), "America/Sao_Paulo"), undefined);
+  assert.equal((source.match(/requestedAt: openBucket \? requestedAt : undefined/g) ?? []).length, 2,
+    "a consulta e a validação só usam o instante parcial quando há bucket aberto");
+});
+
+test("comparativo exibe bucket aberto sem certificar a exportação", () => {
+  const declarations = ts.createSourceFile("comparison.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const declaration = declarations.statements.find((node) =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "occupancyHistoricalAggregateIsComplete");
+  assert.ok(declaration);
+  const compiled = ts.transpileModule(
+    `${declaration.getText(declarations)}\nmodule.exports = occupancyHistoricalAggregateIsComplete;`,
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const loaded: { exports: RuntimeFixture } = { exports: {} };
+  new Function("module", "occupancyAggregateBucketKey", "occupancyScenarioCoverageStart", "companyCalendarDate", compiled)(
+    loaded,
+    (bucket: Date) => bucket.getTime(),
+    () => null,
+    () => null,
+  );
+  const bucket = new Date("2026-09-11T03:00:00Z");
+  const shared = {
+    granularity: "day",
+    range: { buckets: [bucket] },
+    scenarioIds: ["scenario-a"],
+  };
+  const series = {
+    metrics: new Map([[bucket.getTime(), { average: 3, minimum: 1, peak: 5 }]]),
+    name: "Cenário A",
+    scenarioId: "scenario-a",
+  };
+  assert.equal(loaded.exports({ ...shared, series: [series] }), true);
+  assert.equal(loaded.exports({ ...shared, series: [{ ...series, provisional: true }] }), false);
 });
 
 test("consulta independente não reutiliza data antiga da leitura de outro cenário", () => {

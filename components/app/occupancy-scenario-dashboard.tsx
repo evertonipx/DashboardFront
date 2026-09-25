@@ -174,7 +174,10 @@ import {
   buildFixedOccupancyHourlyPoints,
   occupancyFixedHourLabelInterval,
 } from "@/lib/occupancy-hour-axis";
-import { latestOccupancyMetric } from "@/lib/occupancy-metrics";
+import {
+  advanceOccupancyTodayPeakMemory,
+  resolveOccupancyTodayMetric,
+} from "@/lib/occupancy-metrics";
 import {
   nextOccupancyLiveRetry,
   occupancyLiveRetryReady,
@@ -1351,6 +1354,7 @@ export function OccupancyScenarioDashboard() {
                         timeZone: companyTimeZone,
                         to: queryDefinition.to,
                         unitCache: civilAggregateUnitCacheRef.current,
+                        useResponseReceiptTime: true,
                       });
                 const rows = requireOccupancyAggregateRows(
                   response,
@@ -1364,6 +1368,7 @@ export function OccupancyScenarioDashboard() {
                       definition.granularity !== "hour",
                     openBucket: listBucketStarts(queryDefinition).at(-1),
                     requestedAt: now,
+                    receivedAt: new Date(),
                     requireCertification: true,
                   },
                 );
@@ -1990,12 +1995,45 @@ export function OccupancyScenarioDashboard() {
     },
     [certifiedHistoryAreas, certifiedHistoryError],
   );
-  const todayMetric = React.useMemo(
+  const currentTodayMetric = React.useMemo(
     () =>
-      latestOccupancyMetric(
-        certifiedChartData.occupancy_chart_day?.points ?? [],
+      resolveOccupancyTodayMetric({
+        now: clock,
+        points: certifiedChartData.occupancy_chart_day?.points ?? [],
+        reading: lastReading,
+        timeZone: companyTimeZone,
+      }),
+    [certifiedChartData.occupancy_chart_day?.points, clock, companyTimeZone, lastReading],
+  );
+  const todayPeakScopeKey = JSON.stringify([
+    companyScopeId,
+    selectedScenario?.id ?? "",
+    companyTimeZone,
+    companyDateKey(clock, companyTimeZone),
+  ]);
+  const [observedTodayPeaks, setObservedTodayPeaks] = React.useState<
+    ReadonlyMap<string, number>
+  >(() => new Map());
+  React.useEffect(() => {
+    if (!companyScopeId || !selectedScenario) return;
+    setObservedTodayPeaks((memory) =>
+      advanceOccupancyTodayPeakMemory(
+        memory,
+        todayPeakScopeKey,
+        currentTodayMetric.peak,
       ),
-    [certifiedChartData.occupancy_chart_day?.points],
+    );
+  }, [companyScopeId, currentTodayMetric.peak, selectedScenario, todayPeakScopeKey]);
+  const rememberedTodayPeak = observedTodayPeaks.get(todayPeakScopeKey);
+  const todayMetric = React.useMemo(
+    () => ({
+      ...currentTodayMetric,
+      peak:
+        rememberedTodayPeak === undefined
+          ? currentTodayMetric.peak
+          : Math.max(currentTodayMetric.peak ?? rememberedTodayPeak, rememberedTodayPeak),
+    }),
+    [currentTodayMetric, rememberedTodayPeak],
   );
   // Falhas de uma série agregada ficam no próprio widget. O catálogo e o
   // snapshot ao vivo continuam válidos e não devem derrubar todo o módulo.
@@ -3489,7 +3527,13 @@ function buildOccupancyLiveDataPlan(
     if (visible.has(cardId)) granularities.add(granularity);
   });
 
-  const history = occupancyLiveHistoryRequired(visible, customWidgets);
+  const history = occupancyLiveHistoryRequired(visible, customWidgets) ||
+    visible.has("occupancy_peak") ||
+    customWidgets.some((widget) =>
+      widget.kind === "metric" &&
+      widget.metric === "peak" &&
+      visible.has(`occupancy_custom_${widget.id}`),
+    );
   let alerts = ["occupancy_alerts", "occupancy_alert_list"].some((cardId) =>
     visible.has(cardId),
   );
@@ -3967,7 +4011,8 @@ function buildOccupancyChartState(
   return {
     rows,
     points,
-    incomplete: missingBucketCount > 0,
+    incomplete: missingBucketCount > 0 || rows.some((row) =>
+      row.complete === false || row.status === "partial"),
     warning: joinOccupancyWarnings(
       metadataWarning,
       occupancyAggregateCoverageWarning(

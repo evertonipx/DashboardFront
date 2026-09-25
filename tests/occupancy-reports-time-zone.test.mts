@@ -163,6 +163,44 @@ test("Relatórios: intervalos de calendário e hora atual seguem a empresa em ou
   });
 });
 
+test("Relatórios e Análises exibem buckets civis abertos sem certificar a leitura parcial", () => {
+  const aggregate = load("lib/occupancy-aggregate-validation.ts");
+  inTimeZones(["UTC", "Asia/Tokyo"], () => {
+    const now = new Date("2026-09-11T12:00:00Z");
+    const definitions = reports.buildOccupancyReportDefinitions(
+      now, now, false, undefined, "America/Sao_Paulo",
+    );
+    for (const granularity of ["day", "week", "month"]) {
+      const definition = definitions.find(
+        (item: RuntimeFixture) => item.granularity === granularity,
+      );
+      const buckets = reports.listBucketStarts(definition);
+      const rows = buckets.map((bucket: Date, index: number) => ({
+        bucket: calendar.occupancyCalendarDateKey(bucket),
+        complete: index !== buckets.length - 1,
+        scenario_total_avg: index + 1,
+        scenario_total_max: index + 1,
+        scenario_total_min: index + 1,
+        status: index === buckets.length - 1 ? "partial" : "complete",
+      }));
+      const state = reports.buildScenarioPoints(definition, rows);
+      assert.equal(state.points.at(-1).average, buckets.length, granularity);
+      assert.equal(state.incomplete, true, granularity);
+      assert.ok(state.warning, granularity);
+      assert.equal(aggregate.occupancyAggregatePresentationWarning(state.warning), undefined);
+      assert.equal(aggregate.resolveCertifiedOccupancyDataCutoff([
+        { asOf: now.toISOString(), warning: state.warning },
+      ]), null, granularity);
+
+      const closed = reports.buildScenarioPoints(definition, rows.map((row: RuntimeFixture) => ({
+        ...row, complete: true, status: "complete",
+      })));
+      assert.equal(closed.incomplete, false, granularity);
+      assert.equal(closed.warning, undefined, granularity);
+    }
+  });
+});
+
 test("comparativo minuto no retorno DST nunca inverte intervalo nem duplica consultas", () => {
   inTimeZones(["UTC", "America/New_York", "Asia/Tokyo"], () => {
     const definition = {

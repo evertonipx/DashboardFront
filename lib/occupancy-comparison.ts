@@ -66,6 +66,7 @@ export type OccupancyScenarioHourlySeries = {
   error?: string;
   metrics: Map<number, OccupancyAggregateMetric>;
   name: string;
+  provisional?: boolean;
   scenarioId: string;
   warning?: string;
 };
@@ -239,6 +240,90 @@ export function buildOccupancyPeakValues(
   );
 }
 
+export function buildOccupancyMonthlyMaximumValues({
+  buckets,
+  liveBucket,
+  livePeak,
+  metrics,
+  timeZone,
+}: {
+  buckets: readonly Date[];
+  liveBucket?: Date | null;
+  livePeak?: number | null;
+  metrics: ReadonlyMap<number, OccupancyAggregateMetric>;
+  timeZone?: string;
+}) {
+  const lastMonth = buckets.at(-1);
+  if (!lastMonth || !liveBucket) {
+    return buildOccupancyPeakValues(buckets, metrics, "month");
+  }
+  requireValidDate(liveBucket, "hora ao vivo dos máximos mensais");
+  const liveMonth = timeZone
+    ? companyCalendarDate(liveBucket, timeZone, "month")
+    : startOfAggregateBucket(liveBucket, "month");
+  // At a civil-month rollover the previous hour may still be loading. It
+  // must not alter the last closed month of the newly selected window.
+  if (occupancyAggregateBucketKey(liveMonth, "month") !==
+      occupancyAggregateBucketKey(lastMonth, "month")) {
+    return buildOccupancyPeakValues(buckets, metrics, "month");
+  }
+  return buildOccupancyPeakValues(
+    buckets,
+    mergeOccupancyMaximumTrendOpenPeak({
+      currentMonth: liveMonth,
+      metrics,
+      openPeak: livePeak,
+    }),
+    "month",
+  );
+}
+
+export function advanceOccupancyMaximumTrendLivePeaks({
+  currentMonth,
+  currentSeries,
+  liveBucket,
+  scenarios,
+  snapshots,
+  timeZone,
+}: {
+  currentMonth: Date;
+  currentSeries: readonly { error?: string; peaks: ReadonlyMap<number, number>; scenarioId: string }[];
+  liveBucket: Date;
+  scenarios: OccupancyScenarioHourlySeries[];
+  snapshots: readonly OccupancyScenarioSnapshot[];
+  timeZone: string;
+}): OccupancyScenarioHourlySeries[] {
+  requireValidDate(currentMonth, "mês dos máximos observados");
+  requireValidDate(liveBucket, "hora dos máximos observados");
+  const liveMonth = companyCalendarDate(liveBucket, timeZone, "month");
+  if (occupancyAggregateBucketKey(liveMonth, "month") !==
+      occupancyAggregateBucketKey(currentMonth, "month")) return scenarios;
+  const monthKey = occupancyAggregateBucketKey(currentMonth, "month");
+  const currentById = new Map(currentSeries.map((item) => [item.scenarioId, item]));
+  const snapshotsById = new Map(snapshots.map((item) => [item.scenarioId, item]));
+  let changed = false;
+  const advanced = scenarios.map((scenario) => {
+    const peak = occupancyLiveScenarioPeak({
+      bucket: liveBucket,
+      current: currentById.get(scenario.scenarioId),
+      snapshot: snapshotsById.get(scenario.scenarioId),
+      timeZone,
+    });
+    if (peak === null || peak === undefined ||
+        peak <= (scenario.metrics.get(monthKey)?.peak ?? Number.NEGATIVE_INFINITY)) return scenario;
+    changed = true;
+    return {
+      ...scenario,
+      metrics: mergeOccupancyMaximumTrendOpenPeak({
+        currentMonth,
+        metrics: scenario.metrics,
+        openPeak: peak,
+      }),
+    };
+  });
+  return changed ? advanced : scenarios;
+}
+
 /**
  * Advances the still-open month from the already-demanded current-hour
  * source. Closed monthly buckets remain byte-for-byte untouched and the
@@ -375,6 +460,7 @@ export function buildOccupancyAnnualMaximumValues({
   livePeak,
   metrics,
   monthlyBuckets,
+  openYear,
   timeZone,
 }: {
   annualBuckets: readonly Date[];
@@ -383,6 +469,7 @@ export function buildOccupancyAnnualMaximumValues({
   livePeak?: number | null;
   metrics: ReadonlyMap<number, OccupancyAggregateMetric>;
   monthlyBuckets: readonly Date[];
+  openYear?: number | null;
   timeZone?: string;
 }) {
   return buildOccupancyAnnualMaximumPoints({
@@ -392,6 +479,7 @@ export function buildOccupancyAnnualMaximumValues({
     livePeak,
     metrics,
     monthlyBuckets,
+    openYear,
     timeZone,
   }).map((point) => point.value);
 }
@@ -403,6 +491,7 @@ export function buildOccupancyAnnualMaximumPoints({
   livePeak,
   metrics,
   monthlyBuckets,
+  openYear,
   timeZone,
 }: {
   annualBuckets: readonly Date[];
@@ -411,6 +500,7 @@ export function buildOccupancyAnnualMaximumPoints({
   livePeak?: number | null;
   metrics: ReadonlyMap<number, OccupancyAggregateMetric>;
   monthlyBuckets: readonly Date[];
+  openYear?: number | null;
   timeZone?: string;
 }): OccupancyAnnualMaximumPoint[] {
   annualBuckets.forEach((bucket) =>
@@ -443,8 +533,9 @@ export function buildOccupancyAnnualMaximumPoints({
       ? companyZonedDateParts(liveBucket, timeZone).year
       : liveBucket.getFullYear()
     : undefined;
-  const openYear =
-    liveYear ?? monthlyBuckets.at(-1)?.getFullYear();
+  const effectiveOpenYear = openYear === undefined
+    ? liveYear ?? monthlyBuckets.at(-1)?.getFullYear()
+    : openYear;
 
   return annualBuckets.map((yearBucket) => {
     const year = yearBucket.getFullYear();
@@ -461,6 +552,7 @@ export function buildOccupancyAnnualMaximumPoints({
     });
     if (
       liveYear === year &&
+      effectiveOpenYear === year &&
       livePeak !== undefined &&
       livePeak !== null
     ) {
@@ -469,7 +561,7 @@ export function buildOccupancyAnnualMaximumPoints({
 
     if (!observedPeaks.length) return { partial: false, value: null };
     const maximum = Math.max(...observedPeaks);
-    if (year === openYear) {
+    if (year === effectiveOpenYear) {
       // O ano aberto pode ser publicado com a melhor observação disponível,
       // desde que continue explicitamente parcial. Meses ausentes não viram 0.
       return { partial: true, value: maximum };
@@ -632,6 +724,29 @@ export function occupancySnapshotTotalWithinHour(
     return undefined;
   }
   return snapshot.total;
+}
+
+export function occupancyLiveScenarioPeak({
+  bucket,
+  current,
+  snapshot,
+  timeZone,
+}: {
+  bucket: Date | null;
+  current?: { error?: string; peaks: ReadonlyMap<number, number> };
+  snapshot?: Pick<OccupancyScenarioSnapshot, "asOf" | "total">;
+  timeZone?: string;
+}): number | null | undefined {
+  if (!bucket) return undefined;
+  const aggregatePeak = current?.peaks.get(occupancyAggregateBucketKey(bucket, "hour"));
+  const snapshotPeak = snapshot
+    ? occupancySnapshotTotalWithinHour(snapshot, bucket, timeZone)
+    : undefined;
+  const observed = [aggregatePeak, snapshotPeak].filter(
+    (value): value is number => value !== undefined,
+  );
+  if (observed.length) return Math.max(...observed);
+  return current && !current.error ? null : undefined;
 }
 
 export function filterOccupancySnapshots(

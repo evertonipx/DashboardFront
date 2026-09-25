@@ -46,6 +46,8 @@ export type OccupancyAggregateValidationOptions = {
   expectedTimezone?: string;
   openBucket?: Date;
   requestedAt?: Date;
+  /** Client time when the matching HTTP response finished arriving. */
+  receivedAt?: Date;
   requireCertification?: boolean;
 };
 
@@ -114,18 +116,6 @@ export function requireOccupancyAggregateRows(
     "as_of da resposta agregada de ocupação",
     validationOptions.requireCertification,
   );
-  if (
-    openBucket !== undefined &&
-    (validationOptions.requireCertification || responseAsOf !== undefined)
-  ) {
-    requireOccupancyOpenBucketAsOf(
-      responseAsOf,
-      requestedGranularity,
-      openBucket,
-      options.requestedAt,
-      expectedTimezone ?? options.expectedTimezone,
-    );
-  }
   const returnedTimezone = requireOptionalTimeZone(
     response.timezone,
     validationOptions.requireCertification,
@@ -187,6 +177,32 @@ export function requireOccupancyAggregateRows(
       expectedTimezone: canonicalExpectedTimezone,
     },
   );
+  if (
+    options.receivedAt !== undefined &&
+    responseAsOf !== undefined &&
+    responseAsOf > requireValidDate(options.receivedAt, "recebimento do agregado de ocupação")
+  ) {
+    throw new Error("A API retornou as_of fora da janela certificável do agregado de ocupação.");
+  }
+  // A response can contain only closed historical rows when the current
+  // period has no observation yet. Its older as_of is valid; it must not
+  // erase those rows merely because an open bucket was requested as well.
+  if (
+    openBucket !== undefined &&
+    rows.some((row) =>
+      occupancyAggregateBucketKey(row.bucket, requestedGranularity) ===
+      occupancyAggregateBucketKey(openBucket, requestedGranularity)) &&
+    (validationOptions.requireCertification || responseAsOf !== undefined)
+  ) {
+    requireOccupancyOpenBucketAsOf(
+      responseAsOf,
+      requestedGranularity,
+      openBucket,
+      options.requestedAt,
+      expectedTimezone ?? options.expectedTimezone,
+      options.receivedAt,
+    );
+  }
   requireScenarioTotalsForAreaBuckets(rows, requestedGranularity);
   return normalizedRows;
 }
@@ -662,25 +678,6 @@ function validateOccupancyRows(
     requireOptionalTrimmedId(row.area_id, "area_id", index);
     requireOptionalTrimmedId(row.camera_id, "camera_id", index);
 
-    const area = requireMetricTuple(
-      row.area_avg,
-      row.area_min,
-      row.area_max,
-      row.area_final,
-      index,
-      options.requireCertification,
-    );
-    const scenarioTotal = requireMetricTuple(
-      row.scenario_total_avg,
-      row.scenario_total_min,
-      row.scenario_total_max,
-      row.scenario_total_final,
-      index,
-      options.requireCertification,
-    );
-    if (!area && !scenarioTotal) {
-      throw invalidRowError(index);
-    }
     const bucket = parseAggregateBucket(row.bucket, granularity);
     if (!bucket) {
       throw invalidRowError(index);
@@ -689,6 +686,28 @@ function validateOccupancyRows(
       options.openBucket !== undefined &&
       occupancyAggregateBucketKey(bucket, granularity) ===
         occupancyAggregateBucketKey(options.openBucket, granularity);
+    const isPartialOpenBucket =
+      isExpectedOpenBucket && row.complete === false && row.status === "partial";
+
+    const area = requireMetricTuple(
+      row.area_avg,
+      row.area_min,
+      row.area_max,
+      row.area_final,
+      index,
+      options.requireCertification && !isPartialOpenBucket,
+    );
+    const scenarioTotal = requireMetricTuple(
+      row.scenario_total_avg,
+      row.scenario_total_min,
+      row.scenario_total_max,
+      row.scenario_total_final,
+      index,
+      options.requireCertification && !isPartialOpenBucket,
+    );
+    if (!area && !scenarioTotal) {
+      throw invalidRowError(index);
+    }
     requireOptionalComplete(
       row.complete,
       `bucket na posição ${index}`,
@@ -892,8 +911,9 @@ function isRealRfc3339Date(match: RegExpExecArray) {
 /**
  * Certifies the temporal cut-off of an aggregate that contains an open
  * bucket. Closed buckets may legitimately be recomputed later, but an open
- * bucket can only describe observations made between its start and the exact
- * instant requested by the client.
+ * bucket can only describe observations made between its start and the time
+ * the client received the response. With no receipt time, a historical query
+ * remains bounded by its explicitly requested instant.
  */
 export function requireOccupancyOpenBucketAsOf(
   value: unknown,
@@ -901,6 +921,7 @@ export function requireOccupancyOpenBucketAsOf(
   openBucket: Date,
   requestedAt: Date | undefined,
   timeZone?: string,
+  receivedAt?: Date,
 ) {
   const asOf =
     value instanceof Date
@@ -941,7 +962,16 @@ export function requireOccupancyOpenBucketAsOf(
       "O instante solicitado não pertence ao bucket aberto de ocupação.",
     );
   }
-  if (asOf < bucketStart || asOf > requestCutoff) {
+  const receiptCutoff = receivedAt === undefined
+    ? requestCutoff
+    : requireValidDate(receivedAt, "recebimento do agregado de ocupação");
+  if (receiptCutoff < requestCutoff) {
+    throw new Error("A resposta de ocupação foi recebida antes da consulta.");
+  }
+  // The backend captures as_of after the browser starts its HTTP request.
+  // That in-flight interval is valid evidence, but never a future timestamp
+  // beyond the moment the browser actually received the response.
+  if (asOf < bucketStart || asOf >= bucketEnd || asOf > receiptCutoff) {
     throw new Error(
       "A API retornou as_of fora da janela certificável do bucket aberto de ocupação.",
     );

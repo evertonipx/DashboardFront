@@ -142,9 +142,20 @@ export function OccupancyDurationInsightCard({
         ) : null}
         {model && !loading ? (
           <ul className="sr-only" aria-label={`${title}: valores por dia`}>
-            {model.days.filter((day) => day.expectedSeconds > 0).map((day) => (
-              <li key={day.dateKey}>{formatDateKey(day.dateKey)}: {formatPercent(day.confirmedOccupiedSeconds, day.expectedSeconds)} ocupado, {formatOccupancyDuration(day.confirmedOccupiedSeconds)}; {formatOccupancyDuration(day.confirmedFreeSeconds)} desocupado; {formatOccupancyDuration(unconfirmedSeconds(day))} sem tempo confirmado.</li>
-            ))}
+            {model.days.filter((day) => day.expectedSeconds > 0).map((day) => {
+              const [occupiedPercent, freePercent] = dailyProfilePercentages(day);
+              return (
+                <li key={day.dateKey}>
+                  {formatDateKey(day.dateKey)}: {heatmap
+                    ? occupiedPercent === null
+                      ? "sem leitura confirmada."
+                      : `${PERCENT.format(occupiedPercent)}% ocupado, ${PERCENT.format(freePercent!)}% desocupado entre o tempo confirmado; ${formatOccupancyDuration(confirmedSeconds(day))} confirmado de ${formatOccupancyDuration(day.expectedSeconds)} decorrido; ${formatOccupancyDuration(unconfirmedSeconds(day))} sem tempo confirmado.`
+                    : occupiedPercent === null
+                      ? "sem leitura confirmada."
+                      : `${PERCENT.format(occupiedPercent)}% ocupado, ${PERCENT.format(freePercent!)}% desocupado; ${formatOccupancyDuration(confirmedSeconds(day))} de tempo confirmado.`}
+                </li>
+              );
+            })}
           </ul>
         ) : null}
       </CardContent>
@@ -183,10 +194,19 @@ function buildHeatmapOption({ kind, model, month, scenarioNames, theme, widgetCo
   const scrollScenarios = scenarioView && scenarioNames.length > 12;
   const xLabels = scenarioView ? HOURS : weekView ? WEEKDAYS : month.dateKeys.map((date) => date.slice(-2));
   const yLabels = scenarioView ? scenarioNames : HOURS;
-  const cellData = cells.map((cell, cellIndex) => ({
-    cellIndex,
-    value: [cell.x, cell.y, percent(cell.confirmedOccupiedSeconds, cell.expectedSeconds)],
-  }));
+  const cellData = cells.map((cell, cellIndex) => {
+    const confirmed = confirmedSeconds(cell);
+    return {
+      cellIndex,
+      // Intensity describes the occupied share of confirmed time. Opacity
+      // separately indicates how much of the elapsed interval was observed.
+      ...(confirmed > 0 ? {
+        itemStyle: { opacity: 0.35 + 0.65 * confirmed / cell.expectedSeconds },
+      } : {}),
+      value: [cell.x, cell.y, confirmed > 0
+        ? percent(cell.confirmedOccupiedSeconds, confirmed) : 0],
+    };
+  });
   const state = (cell: InsightCell) => durationHeatmapCellState(cell);
   const tooltipFormatter = (params: unknown) => {
     const data = record(record(Array.isArray(params) ? params[0] : params).data);
@@ -235,6 +255,7 @@ function buildDailyProfileOption({ model, scenarioNames, theme, widgetColor = "#
   const palette = getOccupancyChartPalette(theme);
   const colors = insightColors(theme, widgetColor);
   const stateColors = [colors.occupied, colors.free];
+  const dailyPercentages = model.days.map(dailyProfilePercentages);
   return {
     animation: false,
     backgroundColor: "transparent",
@@ -244,7 +265,7 @@ function buildDailyProfileOption({ model, scenarioNames, theme, widgetColor = "#
     tooltip: { trigger: "axis", confine: true, axisPointer: { type: "shadow" }, backgroundColor: palette.tooltipBackground, borderColor: palette.tooltipBorder, textStyle: { color: palette.tooltipText, fontSize: 12 }, formatter: (params: unknown) => {
       const first = record(Array.isArray(params) ? params[0] : params);
       const day = typeof first.dataIndex === "number" ? model.days[first.dataIndex] : undefined;
-      return day ? durationTooltip(formatDateKey(day.dateKey), day, scenarioNames.length) : "";
+      return day ? dailyProfileTooltip(formatDateKey(day.dateKey), day, scenarioNames.length) : "";
     } },
     xAxis: { type: "category", data: model.days.map((day) => day.dateKey.slice(-2)), axisTick: { show: false }, axisLine: { lineStyle: { color: palette.axisLine } }, axisLabel: { color: palette.axisText, fontSize: 10, showMinLabel: true, showMaxLabel: true } },
     yAxis: { type: "value", min: 0, max: 100, interval: 25, axisLine: { show: false }, axisLabel: { formatter: "{value}%", color: palette.axisText, fontSize: 10 }, splitLine: { lineStyle: { color: palette.gridLine, type: "dashed" } } },
@@ -252,7 +273,7 @@ function buildDailyProfileOption({ model, scenarioNames, theme, widgetColor = "#
       id: `duration-profile-${key}`, name: STATE_LABELS[index], type: "bar", stack: "tempo", barMaxWidth: 32, animation: false,
       itemStyle: { color: stateColors[index] },
       emphasis: { focus: "none" },
-      data: model.days.map((day) => day.expectedSeconds > 0 ? percent(day[key], day.expectedSeconds) : null),
+      data: dailyPercentages.map((shares) => shares[index]),
       label: {
         show: true, position: "inside", rotate: 0, align: "center", verticalAlign: "middle", distance: 0,
         fontSize: 9, lineHeight: 11, color: theme === "dark" ? "#E2E8F0" : "#13233A",
@@ -302,23 +323,28 @@ export function buildOccupancyDurationInsightReport({
     : (scenarioView ? model.scenarioHours : weekView ? model.weekHours : model.dayHours).map((cell) => ({ ...cell, label: scenarioView ? `${scenarioNames[cell.y] ?? "Cenário"} · ${HOURS[cell.x]}` : weekView ? `${WEEKDAYS[cell.x]} · ${HOURS[cell.y]}` : `${formatDateKey(month.dateKeys[cell.x] ?? "")} · ${HOURS[cell.y]}` }));
   const table: ReportTable = {
     title,
-    description: `${describeInsight(kind, series.length, periodLabel)} Percentuais calculados sobre o tempo decorrido dos cenários selecionados.`,
+    description: `${describeInsight(kind, series.length, periodLabel)} Percentuais calculados sobre o tempo confirmado dos cenários selecionados.`,
     columns: [
       { key: "period", label: scenarioView ? "Cenário / hora" : weekView ? "Dia da semana / hora" : dailyView ? "Dia" : "Dia / hora", width: 34 },
       { key: "occupiedPercent", label: "Ocupado (%)", numeric: true },
+      { key: "freePercent", label: "Desocupado (%)", numeric: true },
       { key: "occupied", label: "Ocupado confirmado" },
       { key: "free", label: "Desocupado confirmado" },
-      { key: "unconfirmed", label: "Sem tempo confirmado" },
+      ...(dailyView ? [{ key: "confirmed", label: "Tempo confirmado" }] : [{ key: "unconfirmed", label: "Sem tempo confirmado" }]),
       { key: "elapsed", label: series.length > 1 && !scenarioView ? "Tempo somado dos cenários" : "Tempo decorrido" },
     ],
-    rows: rows.filter((row) => row.expectedSeconds > 0).map((row) => ({
-      period: row.label,
-      occupiedPercent: row.confirmedOccupiedSeconds + row.confirmedFreeSeconds > 0 ? Number(percent(row.confirmedOccupiedSeconds, row.expectedSeconds).toFixed(1)) : null,
-      occupied: formatOccupancyDuration(row.confirmedOccupiedSeconds),
-      free: formatOccupancyDuration(row.confirmedFreeSeconds),
-      unconfirmed: formatOccupancyDuration(unconfirmedSeconds(row)),
-      elapsed: formatOccupancyDuration(row.expectedSeconds),
-    })),
+    rows: rows.filter((row) => row.expectedSeconds > 0).map((row) => {
+      const [occupiedPercent, freePercent] = dailyProfilePercentages(row);
+      return {
+        period: row.label,
+        occupiedPercent,
+        freePercent,
+        ...(dailyView ? { confirmed: formatOccupancyDuration(confirmedSeconds(row)) } : { unconfirmed: formatOccupancyDuration(unconfirmedSeconds(row)) }),
+        occupied: formatOccupancyDuration(row.confirmedOccupiedSeconds),
+        free: formatOccupancyDuration(row.confirmedFreeSeconds),
+        elapsed: formatOccupancyDuration(row.expectedSeconds),
+      };
+    }),
   };
   return { title, description: table.description, option: buildOccupancyDurationInsightOption({ kind, model, month, scenarioNames, theme: "light", widgetColor }), table };
 }
@@ -331,26 +357,53 @@ function describeInsight(
   const composition = scenarioCount === 1 ? "Cenário selecionado" : `${scenarioCount} cenários · tempos somados`;
   const period = periodLabel?.trim() || "mês";
   if (kind === "occupancy_duration_daily_profile") {
-    return `${composition}. Tempo ocupado e desocupado no ${period}; intervalos sem confirmação ficam neutros.`;
+    return `${composition}. Proporção diária do tempo confirmado no ${period}: ocupado e desocupado somam 100%.`;
   }
   const detail = kind === "occupancy_duration_month_heatmap"
     ? periodLabel ? "Dias do período × horas" : "Dias do mês × horas"
     : kind === "occupancy_duration_week_heatmap"
       ? "Dias da semana × horas"
       : "Cada cenário × horas";
-  return `${detail} · % do tempo ocupado confirmado no ${period}. ${composition}.`;
+  return `${detail} · proporção ocupado/desocupado do tempo confirmado no ${period}; a transparência indica cobertura. ${composition}.`;
 }
 
 function durationTooltip(heading: string, duration: InsightDuration, scenarioCount: number) {
   const lines = [`<strong>${escapeHtml(heading)}</strong>`];
   if (duration.expectedSeconds <= 0) return [...lines, "Intervalo ainda não decorrido."].join("<br/>");
-  const hasConfirmation = duration.confirmedOccupiedSeconds + duration.confirmedFreeSeconds > 0;
-  lines.push(hasConfirmation ? `Ocupado: <strong>${formatPercent(duration.confirmedOccupiedSeconds, duration.expectedSeconds)}</strong>` : "Sem tempo ocupado ou desocupado confirmado.");
-  STATE_KEYS.forEach((key, index) => lines.push(`${STATE_LABELS[index]}: ${escapeHtml(formatOccupancyDuration(duration[key]))} · ${formatPercent(duration[key], duration.expectedSeconds)}`));
+  const [occupiedPercent, freePercent] = dailyProfilePercentages(duration);
+  if (occupiedPercent === null) {
+    lines.push("Sem tempo ocupado ou desocupado confirmado.");
+  } else {
+    lines.push(`Ocupado: <strong>${PERCENT.format(occupiedPercent)}%</strong> · ${escapeHtml(formatOccupancyDuration(duration.confirmedOccupiedSeconds))}`);
+    lines.push(`Desocupado: <strong>${PERCENT.format(freePercent!)}%</strong> · ${escapeHtml(formatOccupancyDuration(duration.confirmedFreeSeconds))}`);
+    lines.push(`Cobertura confirmada: ${escapeHtml(formatOccupancyDuration(confirmedSeconds(duration)))} de ${escapeHtml(formatOccupancyDuration(duration.expectedSeconds))}`);
+  }
   if (unconfirmedSeconds(duration) > 0) lines.push(`Sem tempo confirmado: ${escapeHtml(formatOccupancyDuration(unconfirmedSeconds(duration)))}`);
   lines.push(`${scenarioCount > 1 ? `Tempo somado de ${scenarioCount} cenários` : "Tempo decorrido"}: ${escapeHtml(formatOccupancyDuration(duration.expectedSeconds))}`);
   if (scenarioCount > 1) lines.push("Durações simultâneas de cenários são somadas.");
   return lines.join("<br/>");
+}
+
+function dailyProfileTooltip(heading: string, duration: InsightDuration, scenarioCount: number) {
+  const lines = [`<strong>${escapeHtml(heading)}</strong>`];
+  if (duration.expectedSeconds <= 0) return [...lines, "Dia ainda não decorrido."].join("<br/>");
+  const [occupiedPercent, freePercent] = dailyProfilePercentages(duration);
+  if (occupiedPercent === null) return [...lines, "Sem leitura confirmada no dia."].join("<br/>");
+  lines.push(`Ocupado: <strong>${PERCENT.format(occupiedPercent)}%</strong> · ${escapeHtml(formatOccupancyDuration(duration.confirmedOccupiedSeconds))}`);
+  lines.push(`Desocupado: <strong>${PERCENT.format(freePercent!)}%</strong> · ${escapeHtml(formatOccupancyDuration(duration.confirmedFreeSeconds))}`);
+  lines.push(`Tempo confirmado${scenarioCount > 1 ? ` somado de ${scenarioCount} cenários` : ""}: ${escapeHtml(formatOccupancyDuration(confirmedSeconds(duration)))} de ${escapeHtml(formatOccupancyDuration(duration.expectedSeconds))}`);
+  return lines.join("<br/>");
+}
+
+function confirmedSeconds(duration: InsightDuration) {
+  return duration.confirmedOccupiedSeconds + duration.confirmedFreeSeconds;
+}
+
+function dailyProfilePercentages(duration: InsightDuration): [number | null, number | null] {
+  const confirmed = confirmedSeconds(duration);
+  if (confirmed <= 0) return [null, null];
+  const occupied = Number(percent(duration.confirmedOccupiedSeconds, confirmed).toFixed(1));
+  return [occupied, Number((100 - occupied).toFixed(1))];
 }
 
 function insightColors(theme: OccupancyChartTheme, widgetColor: string) {
@@ -384,10 +437,6 @@ function unconfirmedSeconds(duration: InsightDuration) {
 
 function percent(seconds: number, expected: number) {
   return expected > 0 ? Math.max(0, Math.min(100, seconds / expected * 100)) : 0;
-}
-
-function formatPercent(seconds: number, expected: number) {
-  return `${PERCENT.format(percent(seconds, expected))}%`;
 }
 
 function formatDateKey(value: string) {

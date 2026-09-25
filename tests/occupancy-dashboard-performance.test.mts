@@ -781,7 +781,10 @@ test("uma falha libera a fila e permite uma nova tentativa explícita", async ()
   assert.throws(() => query.createOccupancyQueryScheduler(undefined, 0), /concorrência/);
 });
 
-test("snapshot ao vivo não invalida heatmaps nem recompõe seus rótulos diários", () => {
+test("snapshot ao vivo atualiza máximo mensal sem invalidar heatmaps nem seus rótulos", () => {
+  const dependentStart = comparisonSource.indexOf(
+    "const snapshotDependentCards = React.useMemo",
+  );
   const independentStart = comparisonSource.indexOf(
     "const snapshotIndependentCards = React.useMemo",
   );
@@ -789,13 +792,17 @@ test("snapshot ao vivo não invalida heatmaps nem recompõe seus rótulos diári
     "const cards = React.useMemo",
     independentStart,
   );
-  assert.ok(independentStart >= 0 && cardsStart > independentStart);
+  assert.ok(dependentStart >= 0 && independentStart > dependentStart && cardsStart > independentStart);
+
+  const dependentCards = comparisonSource.slice(dependentStart, independentStart);
+  assert.match(dependentCards, /id: "occupancy_scenario_max_month"/);
+  assert.match(dependentCards, /currentSnapshots=\{snapshots\}/);
 
   const independentCards = comparisonSource.slice(
     independentStart,
     cardsStart,
   );
-  assert.match(independentCards, /id: "occupancy_scenario_max_month"/);
+  assert.doesNotMatch(independentCards, /id: "occupancy_scenario_max_month"/);
   assert.match(independentCards, /id: "occupancy_day_hour_heatmap"/);
   assert.match(independentCards, /id: "occupancy_scenario_hour_heatmap"/);
   assert.doesNotMatch(

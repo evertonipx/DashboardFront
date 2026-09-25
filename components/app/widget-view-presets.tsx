@@ -65,12 +65,22 @@ export type WidgetViewPresetsDialogProps = {
   presetNamespace?: WidgetViewPresetNamespace;
   scopes?: WidgetViewScope[];
   sourceMenuKeys?: CardMenuKey[];
+  savedViewSources?: Array<{
+    menuKey: CardMenuKey;
+    namespace: WidgetViewPresetNamespace;
+    label: string;
+  }>;
   userId?: string | null;
 };
+
+type SavedViewSource = NonNullable<
+  WidgetViewPresetsDialogProps["savedViewSources"]
+>[number];
 
 type SourcePresetGroup = {
   label: string;
   menuKey: CardMenuKey;
+  namespace: WidgetViewPresetNamespace;
   presets: WidgetViewPreset[];
 };
 
@@ -99,9 +109,12 @@ export function WidgetViewPresetsDialog({
   presetNamespace = menuKey,
   scopes = [],
   sourceMenuKeys = [],
+  savedViewSources = [],
   userId,
 }: WidgetViewPresetsDialogProps) {
   const menu = getCardMenuDefinition(menuKey);
+  const sourceDestinationLabel =
+    presetNamespace === "occupancy-analysis" ? "Análises" : menu.label;
   const [storedPresets, setStoredPresets] = React.useState<WidgetViewPreset[]>(
     [],
   );
@@ -122,10 +135,42 @@ export function WidgetViewPresetsDialog({
   const [scopeFilter, setScopeFilter] = React.useState("");
   const currentScopeId = currentScope?.id ?? "";
   const currentScopeName = currentScope?.name ?? "";
+  const sourceMenuKeysValue = sourceMenuKeys.join("|");
+  const savedViewSourcesValue = JSON.stringify(savedViewSources);
+  const normalizedSavedViewSources = React.useMemo(() => {
+    const explicitSources = JSON.parse(savedViewSourcesValue) as SavedViewSource[];
+    const legacySources = (sourceMenuKeysValue
+      ? sourceMenuKeysValue.split("|")
+      : []) as CardMenuKey[];
+    const seen = new Set<string>();
+
+    return [
+      ...explicitSources,
+      ...legacySources
+        .filter((sourceMenuKey) => sourceMenuKey !== menuKey)
+        .map((sourceMenuKey) => ({
+          label: getCardMenuDefinition(sourceMenuKey).label,
+          menuKey: sourceMenuKey,
+          namespace: sourceMenuKey,
+        })),
+    ].filter((source) => {
+      const key = JSON.stringify([source.menuKey, source.namespace]);
+      if (
+        (source.menuKey === menuKey && source.namespace === presetNamespace) ||
+        seen.has(key)
+      ) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }, [menuKey, presetNamespace, savedViewSourcesValue, sourceMenuKeysValue]);
+  const sourceCatalogKey = JSON.stringify(normalizedSavedViewSources);
   const presetScopeKey = presetCatalogScopeKey({
     companyId,
     menuKey,
     presetNamespace,
+    sourceCatalogKey,
     userId,
   });
   const presetCatalogCertified =
@@ -134,18 +179,6 @@ export function WidgetViewPresetsDialog({
   const sourcePresetGroups = presetCatalogCertified
     ? storedSourcePresetGroups
     : EMPTY_SOURCE_PRESET_GROUPS;
-  const sourceMenuKeysValue = sourceMenuKeys.join("|");
-  const normalizedSourceMenuKeys = React.useMemo(
-    () =>
-      Array.from(
-        new Set(
-          (sourceMenuKeysValue
-            ? sourceMenuKeysValue.split("|")
-            : []) as CardMenuKey[],
-        ),
-      ).filter((sourceMenuKey) => sourceMenuKey !== menuKey),
-    [menuKey, sourceMenuKeysValue],
-  );
   const normalizedScopes = React.useMemo(
     () => uniqueScopes(scopes),
     [scopes],
@@ -192,11 +225,17 @@ export function WidgetViewPresetsDialog({
       userId,
       presetNamespace,
     );
-    const nextSourcePresetGroups = normalizedSourceMenuKeys.map(
-      (sourceMenuKey) => ({
-        label: getCardMenuDefinition(sourceMenuKey).label,
-        menuKey: sourceMenuKey,
-        presets: loadWidgetViewPresets(sourceMenuKey, companyId, userId),
+    const nextSourcePresetGroups = normalizedSavedViewSources.map(
+      (source) => ({
+        label: source.label,
+        menuKey: source.menuKey,
+        namespace: source.namespace,
+        presets: loadWidgetViewPresets(
+          source.menuKey,
+          companyId,
+          userId,
+          source.namespace,
+        ),
       }),
     );
     if (currentPresetScopeKeyRef.current !== requestedScopeKey) return;
@@ -215,7 +254,7 @@ export function WidgetViewPresetsDialog({
   }, [
     companyId,
     menuKey,
-    normalizedSourceMenuKeys,
+    normalizedSavedViewSources,
     presetNamespace,
     presetScopeKey,
     userId,
@@ -283,12 +322,16 @@ export function WidgetViewPresetsDialog({
   function requirePresetForScope(
     preset: WidgetViewPreset | string,
     scope: CertifiedPresetScope,
-    source = false,
+    source?: SavedViewSource,
   ) {
     if (currentPresetScopeKeyRef.current !== scope.key) return null;
     const presetId = typeof preset === "string" ? preset : preset.id;
     const candidates = source
-      ? storedSourcePresetGroups.flatMap((group) => group.presets)
+      ? storedSourcePresetGroups.find(
+          (group) =>
+            group.menuKey === source.menuKey &&
+            group.namespace === source.namespace,
+        )?.presets ?? []
       : storedPresets;
     return candidates.find((candidate) => candidate.id === presetId) ?? null;
   }
@@ -374,10 +417,10 @@ export function WidgetViewPresetsDialog({
     void scheduleReload(scope);
   }
 
-  function applySourcePreset(preset: WidgetViewPreset) {
+  function applySourcePreset(source: SavedViewSource, preset: WidgetViewPreset) {
     const scope = requireCertifiedPresetScope();
     if (!scope) return;
-    const certifiedPreset = requirePresetForScope(preset, scope, true);
+    const certifiedPreset = requirePresetForScope(preset, scope, source);
     if (!certifiedPreset || !onApplySourcePreset?.(certifiedPreset)) return;
     requestUserGridSync();
     onOpenChange(false);
@@ -955,14 +998,17 @@ export function WidgetViewPresetsDialog({
 
           {onApplySourcePreset
             ? sourcePresetGroups.map((group) => (
-                <section key={group.menuKey} className="space-y-2 pt-2">
+                <section
+                  key={JSON.stringify([group.menuKey, group.namespace])}
+                  className="space-y-2 pt-2"
+                >
                   <div className="flex flex-wrap items-end justify-between gap-2 border-t pt-4">
                     <div>
                       <div className="text-sm font-semibold">
                         Visões de {group.label}
                       </div>
                       <div className="text-xs text-muted-foreground">
-                        Abra em {menu.label} uma composição salva anteriormente.
+                        Abra em {sourceDestinationLabel} uma composição salva anteriormente.
                       </div>
                     </div>
                     <Badge variant="outline">{group.presets.length}</Badge>
@@ -971,7 +1017,7 @@ export function WidgetViewPresetsDialog({
                   {group.presets.length ? (
                     group.presets.map((preset) => (
                       <div
-                        key={`${group.menuKey}-${preset.id}`}
+                        key={JSON.stringify([group.menuKey, group.namespace, preset.id])}
                         className="flex flex-col gap-3 rounded-md border bg-card p-3 sm:flex-row sm:items-center sm:justify-between"
                       >
                         <div className="min-w-0">
@@ -992,10 +1038,10 @@ export function WidgetViewPresetsDialog({
                         <Button
                           type="button"
                           size="sm"
-                          onClick={() => applySourcePreset(preset)}
+                          onClick={() => applySourcePreset(group, preset)}
                         >
                           <Play className="h-3.5 w-3.5" />
-                          Abrir em {menu.label}
+                          Abrir em {sourceDestinationLabel}
                         </Button>
                       </div>
                     ))
@@ -1058,11 +1104,13 @@ function presetCatalogScopeKey({
   companyId,
   menuKey,
   presetNamespace,
+  sourceCatalogKey,
   userId,
 }: {
   companyId?: string | null;
   menuKey: CardMenuKey;
   presetNamespace: WidgetViewPresetNamespace;
+  sourceCatalogKey: string;
   userId?: string | null;
 }) {
   const surface =
@@ -1078,6 +1126,7 @@ function presetCatalogScopeKey({
     userId?.trim() ?? "",
     menuKey,
     surface,
+    sourceCatalogKey,
   ]);
 }
 
