@@ -74,17 +74,18 @@ test("calendário distingue 0% confirmado, ausência e futuro sem omitir dia 1 o
   assert.ok(future);
   assert.notEqual(option.series[1].itemStyle.color, option.visualMap[0].inRange.color[0]);
   assert.notEqual(option.series[2].itemStyle.color, option.series[1].itemStyle.color);
-  assert.match(option.tooltip.formatter({ data: zero }), /Ocupado confirmado: <strong>0%<\/strong>/);
+  assert.match(option.tooltip.formatter({ data: zero }), /Ocupado: <strong>0%<\/strong>/);
   assert.match(option.tooltip.formatter({ data: zero }), /01\/09\/2026 · 01h/);
-  assert.match(option.tooltip.formatter({ data: missing }), /Sem tempo ocupado ou livre confirmado/);
+  assert.match(option.tooltip.formatter({ data: missing }), /Sem tempo ocupado ou desocupado confirmado/);
   assert.match(option.tooltip.formatter({ data: future }), /Intervalo ainda não decorrido/);
   assert.equal(option.series.reduce((sum: RuntimeFixture, item: RuntimeFixture) => sum + item.data.length, 0), month.dateKeys.length * 24);
   const mixedCoverage = option.series[1].data.find((point: RuntimeFixture) => point.value[0] === 0 && point.value[1] === 2);
-  assert.ok(mixedCoverage, "uma lacuna parcial não pode pintar a célula inteira como transição");
-  assert.equal(option.series[3].data.some((point: RuntimeFixture) => point.value[0] === 0 && point.value[1] === 2), false);
-  const transition = option.series[3].data.find((point: RuntimeFixture) => point.value[0] === 0 && point.value[1] === 4);
-  assert.ok(transition);
-  assert.notEqual(option.series[3].itemStyle.color, option.series[1].itemStyle.color);
+  assert.ok(mixedCoverage, "uma lacuna parcial não pode pintar a célula inteira como ocupação confirmada");
+  const mixedMinute = option.series[1].data.find((point: RuntimeFixture) => point.value[0] === 0 && point.value[1] === 4);
+  assert.ok(mixedMinute, "minuto misto deve ficar neutro sem inventar tempo ocupado ou desocupado");
+  assert.equal(option.series.length, 3);
+  assert.doesNotMatch(option.tooltip.formatter({ data: mixedMinute }), /Transição/);
+  assert.match(option.tooltip.formatter({ data: mixedMinute }), /Sem tempo confirmado: 1h/);
 });
 
 for (const theme of ["light", "dark"]) {
@@ -93,7 +94,7 @@ for (const theme of ["light", "dark"]) {
       (item: RuntimeFixture) => item.endsWith("heatmap"),
     )) {
       // An orange metric palette reproduces the riskiest visual combination:
-      // missing data must not inherit either the heat scale or transition hue.
+      // unconfirmed time must not inherit the heat scale.
       const option = charts.buildOccupancyDurationInsightOption({
         kind,
         model,
@@ -103,19 +104,12 @@ for (const theme of ["light", "dark"]) {
         widgetColor: "#F97316",
       });
       const missing = option.series.find(
-        (item: RuntimeFixture) => item.name === "Sem dados",
-      );
-      const transition = option.series.find(
-        (item: RuntimeFixture) => item.name === "Transição",
+        (item: RuntimeFixture) => item.name === "Sem tempo confirmado",
       );
       assert.ok(missing?.data.length > 0, `${kind}: a fixture deve conter ausência`);
-      assert.ok(transition?.data.length > 0, `${kind}: a fixture deve conter transição`);
+      assert.ok(missing.data.length >= 2, `${kind}: ausência e minutos mistos devem ficar neutros`);
       assertNeutralNoDataColor(missing.itemStyle.color, theme, kind);
-      assert.notDeepEqual(
-        echarts.color.parse(missing.itemStyle.color),
-        echarts.color.parse(transition.itemStyle.color),
-        `${kind}: ausência e transição precisam ter semânticas distintas`,
-      );
+      assert.equal(option.series.some((item: RuntimeFixture) => item.name === "Transição"), false);
       assert.deepEqual(
         option.visualMap[1].inRange.color.map((color: string) =>
           echarts.color.parse(color)),
@@ -211,14 +205,18 @@ test("rótulos dos heatmaps não colidem e preservam 00h/23h em tamanhos interme
   }
 });
 
-test("composição diária fecha em 100%, futuro permanece vazio e legenda acompanha cada cor", () => {
+test("composição diária mostra só tempo confirmado e mantém lacunas neutras", () => {
   const option = build("occupancy_duration_daily_profile", "light");
   for (let index = 0; index < model.days.length; index++) {
     const values = option.series.map((item: RuntimeFixture) => item.data[index]);
     if (model.days[index].expectedSeconds > 0) {
-      assert.ok(Math.abs(values.reduce((sum: RuntimeFixture, value: RuntimeFixture) => sum + value, 0) - 100) < 1e-9);
+      const expectedPercent = 100 * (
+        model.days[index].confirmedOccupiedSeconds + model.days[index].confirmedFreeSeconds
+      ) / model.days[index].expectedSeconds;
+      assert.ok(Math.abs(values.reduce((sum: RuntimeFixture, value: RuntimeFixture) => sum + value, 0) - expectedPercent) < 1e-9);
+      assert.ok(expectedPercent <= 100);
     } else {
-      assert.deepEqual(values, [null, null, null, null]);
+      assert.deepEqual(values, [null, null]);
     }
   }
   option.series.forEach((item: RuntimeFixture, index: number) => {
@@ -226,7 +224,9 @@ test("composição diária fecha em 100%, futuro permanece vazio e legenda acomp
     assert.equal(item.itemStyle.color, option.legend.data[index].itemStyle.color);
     assert.equal(item.itemStyle.color, option.color[index]);
   });
-  assert.equal(new Set(option.color).size, 4);
+  assert.equal(new Set(option.color).size, 2);
+  assert.deepEqual(option.legend.data.map((item: RuntimeFixture) => item.name), ["Ocupado", "Desocupado"]);
+  assert.doesNotMatch(option.tooltip.formatter([{ dataIndex: 0 }]), /Transição/);
   assert.equal(option.yAxis.max, 100);
 });
 
@@ -255,7 +255,7 @@ test("rótulos diários estreitos mantêm todos os dígitos sobre fundo contrast
     ...model,
     days: model.days.map((day: RuntimeFixture, index: number) => index === 0 ? {
       ...day, expectedSeconds: 86400, confirmedOccupiedSeconds: 32340,
-      confirmedFreeSeconds: 54000, transitionSeconds: 60, unknownSeconds: 0,
+      confirmedFreeSeconds: 60, transitionSeconds: 60, unknownSeconds: 53940,
     } : day),
   };
   for (const theme of ["light", "dark"]) {
@@ -302,7 +302,8 @@ test("exportação usa tema claro, unidades legíveis e ausência nunca vira 0% 
     assert.ok(report.table.rows.length);
     assert.ok(report.table.rows.every((row: RuntimeFixture) => typeof row.elapsed === "string"));
     assert.ok(report.table.rows.every((row: RuntimeFixture) => /[hmsd]/.test(row.occupied)));
-    assert.ok(report.table.columns.some((column: RuntimeFixture) => column.key === "unknown"));
+    assert.ok(report.table.columns.some((column: RuntimeFixture) => column.key === "unconfirmed"));
+    assert.equal(report.table.columns.some((column: RuntimeFixture) => column.key === "transition"), false);
     const displayed = build(kind, "light");
     assert.deepEqual(report.option.xAxis.data, displayed.xAxis.data, "a exportação deve preservar a orientação horizontal exibida");
     assert.deepEqual(report.option.yAxis.data, displayed.yAxis.data, "a exportação deve preservar a orientação vertical exibida");
@@ -310,8 +311,11 @@ test("exportação usa tema claro, unidades legíveis e ausência nunca vira 0% 
   const report = charts.buildOccupancyDurationInsightReport({ kind: "occupancy_duration_month_heatmap", series, month });
   const missing = report.table.rows.find((row: RuntimeFixture) => row.period === "01/09/2026 · 03h");
   const zero = report.table.rows.find((row: RuntimeFixture) => row.period === "01/09/2026 · 01h");
+  const mixed = report.table.rows.find((row: RuntimeFixture) => row.period === "01/09/2026 · 04h");
   assert.equal(missing.occupiedPercent, null);
   assert.equal(zero.occupiedPercent, 0);
+  assert.equal(mixed.occupiedPercent, null);
+  assert.equal(mixed.unconfirmed, "1h");
   assert.ok(report.table.rows.every((row: RuntimeFixture) => !row.period.startsWith("03/09/2026")));
 });
 

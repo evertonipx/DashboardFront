@@ -57,8 +57,8 @@ const sharedInsightModels = new WeakMap<
 const HOURS = Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, "0")}h`);
 const WEEKDAYS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"];
 const PERCENT = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
-const STATE_LABELS = ["Ocupado confirmado", "Transição", "Livre confirmado", "Sem dados"];
-const STATE_KEYS = ["confirmedOccupiedSeconds", "transitionSeconds", "confirmedFreeSeconds", "unknownSeconds"] as const;
+const STATE_LABELS = ["Ocupado", "Desocupado"];
+const STATE_KEYS = ["confirmedOccupiedSeconds", "confirmedFreeSeconds"] as const;
 
 export function OccupancyDurationInsightCard({
   defaultWidgetColor = "#1267C4",
@@ -136,14 +136,14 @@ export function OccupancyDurationInsightCard({
           </div>
         )}
         {!compact && !monitorMode && series.length > 0 ? (
-          <p className="shrink-0 truncate text-[10px] leading-4 text-muted-foreground" title="Tempo em que cada cenário esteve ocupado. Não representa o tempo individual de permanência de uma pessoa ou veículo.">
+          <p className="shrink-0 truncate text-[10px] leading-4 text-muted-foreground" title="Tempo em que cada cenário esteve ocupado. Não equivale à permanência individual de cada objeto monitorado.">
             Tempo por cenário · detalhes ao passar o mouse
           </p>
         ) : null}
         {model && !loading ? (
           <ul className="sr-only" aria-label={`${title}: valores por dia`}>
             {model.days.filter((day) => day.expectedSeconds > 0).map((day) => (
-              <li key={day.dateKey}>{formatDateKey(day.dateKey)}: {formatPercent(day.confirmedOccupiedSeconds, day.expectedSeconds)} ocupado confirmado, {formatOccupancyDuration(day.confirmedOccupiedSeconds)}; {formatOccupancyDuration(day.unknownSeconds)} sem dados.</li>
+              <li key={day.dateKey}>{formatDateKey(day.dateKey)}: {formatPercent(day.confirmedOccupiedSeconds, day.expectedSeconds)} ocupado, {formatOccupancyDuration(day.confirmedOccupiedSeconds)}; {formatOccupancyDuration(day.confirmedFreeSeconds)} desocupado; {formatOccupancyDuration(unconfirmedSeconds(day))} sem tempo confirmado.</li>
             ))}
           </ul>
         ) : null}
@@ -215,20 +215,18 @@ function buildHeatmapOption({ kind, model, month, scenarioNames, theme, widgetCo
     yAxis: { type: "category", data: yLabels, inverse: true, splitArea: { show: false }, axisTick: { show: false }, axisLine: { show: false }, axisLabel: { color: palette.axisText, fontSize: 10, interval: "auto", hideOverlap: true, width: scenarioView ? 116 : 38, overflow: "truncate", showMinLabel: true, showMaxLabel: true } },
     visualMap: [
       { id: "duration-intensity", type: "continuous", min: 0, max: 100, dimension: 2, seriesIndex: [0], orient: "horizontal", left: "center", bottom: 22, itemHeight: 104, itemWidth: 7, text: ["100%", "0%"], textGap: 6, calculable: false, inRange: { color: colors.heat }, textStyle: { color: palette.axisText, fontSize: 10 }, precision: 0 },
-      ...[colors.unknown, colors.future, colors.transition].map((color, index) => ({ id: `duration-state-${index}`, type: "continuous", show: false, min: 0, max: 100, dimension: 2, seriesIndex: [index + 1], inRange: { color: [color, color] } })),
+      ...[colors.unknown, colors.future].map((color, index) => ({ id: `duration-state-${index}`, type: "continuous", show: false, min: 0, max: 100, dimension: 2, seriesIndex: [index + 1], inRange: { color: [color, color] } })),
     ],
-    legend: { bottom: 0, left: "center", icon: "roundRect", selectedMode: false, itemWidth: 9, itemHeight: 7, itemGap: 12, textStyle: { color: palette.legendText, fontSize: 10 }, data: ["Transição", "Sem dados", "Ainda não decorrido"] },
     ...(scrollScenarios ? { dataZoom: [{ type: "slider", yAxisIndex: 0, orient: "vertical", startValue: 0, endValue: 11, right: 2, top: 8, bottom: 59, width: 8, showDetail: false, brushSelect: false, filterMode: "filter", borderColor: "transparent", backgroundColor: colors.future, fillerColor: colors.unknown, handleSize: "100%" }] } : {}),
     series: [
-      { ...baseSeries, name: "Ocupado confirmado", data: cellData.filter((data) => state(cells[data.cellIndex]) === "confirmed") },
-      { ...baseSeries, name: "Sem dados", itemStyle: { ...baseSeries.itemStyle, color: colors.unknown }, data: cellData.filter((data) => state(cells[data.cellIndex]) === "unknown") },
+      { ...baseSeries, name: "Tempo ocupado", data: cellData.filter((data) => state(cells[data.cellIndex]) === "confirmed") },
+      { ...baseSeries, name: "Sem tempo confirmado", itemStyle: { ...baseSeries.itemStyle, color: colors.unknown }, data: cellData.filter((data) => state(cells[data.cellIndex]) === "unknown") },
       { ...baseSeries, name: "Ainda não decorrido", itemStyle: { ...baseSeries.itemStyle, color: colors.future }, data: cellData.filter((data) => state(cells[data.cellIndex]) === "future") },
-      { ...baseSeries, name: "Transição", itemStyle: { ...baseSeries.itemStyle, color: colors.transition }, data: cellData.filter((data) => state(cells[data.cellIndex]) === "transition") },
     ],
     media: [
       { query: { maxWidth: 760 }, option: { xAxis: { axisLabel: { interval: scenarioView ? (index: number) => index % 3 === 0 || index === 23 : 0 } } } },
       { query: { maxWidth: 460 }, option: { yAxis: { axisLabel: { width: scenarioView ? 75 : 32, fontSize: 9 } }, xAxis: { axisLabel: { fontSize: 9, interval: weekView ? 0 : (index: number) => index === xLabels.length - 1 || (index % 4 === 0 && index < xLabels.length - 2) } } } },
-      { query: { maxHeight: 240 }, option: { grid: { top: 4, bottom: 50 }, yAxis: { axisLabel: { interval: scenarioView ? "auto" : (index: number) => index % 4 === 0 || index === 23, fontSize: 9 } }, visualMap: [{ id: "duration-intensity", itemHeight: 80, bottom: 18 }], legend: { textStyle: { fontSize: 9 }, itemGap: 8 }, ...(scrollScenarios ? { dataZoom: [{ endValue: 5, bottom: 50 }] } : {}) } },
+      { query: { maxHeight: 240 }, option: { grid: { top: 4, bottom: 50 }, yAxis: { axisLabel: { interval: scenarioView ? "auto" : (index: number) => index % 4 === 0 || index === 23, fontSize: 9 } }, visualMap: [{ id: "duration-intensity", itemHeight: 80, bottom: 18 }], ...(scrollScenarios ? { dataZoom: [{ endValue: 5, bottom: 50 }] } : {}) } },
     ],
   };
 }
@@ -236,7 +234,7 @@ function buildHeatmapOption({ kind, model, month, scenarioNames, theme, widgetCo
 function buildDailyProfileOption({ model, scenarioNames, theme, widgetColor = "#1267C4" }: InsightOptionInput): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
   const colors = insightColors(theme, widgetColor);
-  const stateColors = [colors.occupied, colors.transition, colors.free, colors.unknown];
+  const stateColors = [colors.occupied, colors.free];
   return {
     animation: false,
     backgroundColor: "transparent",
@@ -309,18 +307,16 @@ export function buildOccupancyDurationInsightReport({
       { key: "period", label: scenarioView ? "Cenário / hora" : weekView ? "Dia da semana / hora" : dailyView ? "Dia" : "Dia / hora", width: 34 },
       { key: "occupiedPercent", label: "Ocupado (%)", numeric: true },
       { key: "occupied", label: "Ocupado confirmado" },
-      { key: "transition", label: "Transição" },
-      { key: "free", label: "Livre confirmado" },
-      { key: "unknown", label: "Sem dados" },
+      { key: "free", label: "Desocupado confirmado" },
+      { key: "unconfirmed", label: "Sem tempo confirmado" },
       { key: "elapsed", label: series.length > 1 && !scenarioView ? "Tempo somado dos cenários" : "Tempo decorrido" },
     ],
     rows: rows.filter((row) => row.expectedSeconds > 0).map((row) => ({
       period: row.label,
       occupiedPercent: row.confirmedOccupiedSeconds + row.confirmedFreeSeconds > 0 ? Number(percent(row.confirmedOccupiedSeconds, row.expectedSeconds).toFixed(1)) : null,
       occupied: formatOccupancyDuration(row.confirmedOccupiedSeconds),
-      transition: formatOccupancyDuration(row.transitionSeconds),
       free: formatOccupancyDuration(row.confirmedFreeSeconds),
-      unknown: formatOccupancyDuration(row.unknownSeconds),
+      unconfirmed: formatOccupancyDuration(unconfirmedSeconds(row)),
       elapsed: formatOccupancyDuration(row.expectedSeconds),
     })),
   };
@@ -335,7 +331,7 @@ function describeInsight(
   const composition = scenarioCount === 1 ? "Cenário selecionado" : `${scenarioCount} cenários · tempos somados`;
   const period = periodLabel?.trim() || "mês";
   if (kind === "occupancy_duration_daily_profile") {
-    return `${composition}. Distribuição do tempo decorrido no ${period} entre ocupado, transição, livre e sem dados.`;
+    return `${composition}. Tempo ocupado e desocupado no ${period}; intervalos sem confirmação ficam neutros.`;
   }
   const detail = kind === "occupancy_duration_month_heatmap"
     ? periodLabel ? "Dias do período × horas" : "Dias do mês × horas"
@@ -349,8 +345,9 @@ function durationTooltip(heading: string, duration: InsightDuration, scenarioCou
   const lines = [`<strong>${escapeHtml(heading)}</strong>`];
   if (duration.expectedSeconds <= 0) return [...lines, "Intervalo ainda não decorrido."].join("<br/>");
   const hasConfirmation = duration.confirmedOccupiedSeconds + duration.confirmedFreeSeconds > 0;
-  lines.push(hasConfirmation ? `Ocupado confirmado: <strong>${formatPercent(duration.confirmedOccupiedSeconds, duration.expectedSeconds)}</strong>` : "Sem tempo ocupado ou livre confirmado.");
+  lines.push(hasConfirmation ? `Ocupado: <strong>${formatPercent(duration.confirmedOccupiedSeconds, duration.expectedSeconds)}</strong>` : "Sem tempo ocupado ou desocupado confirmado.");
   STATE_KEYS.forEach((key, index) => lines.push(`${STATE_LABELS[index]}: ${escapeHtml(formatOccupancyDuration(duration[key]))} · ${formatPercent(duration[key], duration.expectedSeconds)}`));
+  if (unconfirmedSeconds(duration) > 0) lines.push(`Sem tempo confirmado: ${escapeHtml(formatOccupancyDuration(unconfirmedSeconds(duration)))}`);
   lines.push(`${scenarioCount > 1 ? `Tempo somado de ${scenarioCount} cenários` : "Tempo decorrido"}: ${escapeHtml(formatOccupancyDuration(duration.expectedSeconds))}`);
   if (scenarioCount > 1) lines.push("Durações simultâneas de cenários são somadas.");
   return lines.join("<br/>");
@@ -363,7 +360,6 @@ function insightColors(theme: OccupancyChartTheme, widgetColor: string) {
   const stateColors = occupancyHeatmapStateColors(theme);
   return {
     occupied: color,
-    transition: stateColors.transition,
     free: theme === "dark" ? "#256D66" : "#A7E3D0",
     unknown: stateColors.noData,
     future: stateColors.future,
@@ -377,12 +373,13 @@ function durationHeatmapCellState(cell: InsightCell) {
   if (cell.confirmedOccupiedSeconds + cell.confirmedFreeSeconds > 0) {
     return "confirmed" as const;
   }
-  // Missing coverage takes precedence over transition. This prevents a cell
-  // with a brief detected transition and a long uncovered interval from being
-  // painted amber as if its whole state had been certified.
-  if (cell.unknownSeconds > 0) return "unknown" as const;
-  if (cell.transitionSeconds > 0) return "transition" as const;
+  // A mixed minute has no certified split between occupied and free seconds.
+  // Keep it neutral instead of presenting a third operational state.
   return "unknown" as const;
+}
+
+function unconfirmedSeconds(duration: InsightDuration) {
+  return duration.transitionSeconds + duration.unknownSeconds;
 }
 
 function percent(seconds: number, expected: number) {

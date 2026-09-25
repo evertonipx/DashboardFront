@@ -130,7 +130,10 @@ Para usar um backend em outro host:
 - Em desenvolvimento, onde o fallback dinamico ainda existe, nao aceite `X-Forwarded-Host` enviado diretamente por clientes nao confiaveis.
 - `NEXT_PUBLIC_IPXDATA_API_BASE_URL` deve ficar como `/api/v1` na maioria dos casos. Isso evita problemas de CORS usando o proxy do Next.
 - `NEXT_PUBLIC_REPORT_HISTORY_START_YEAR` define o primeiro ano consultado pela matriz anual de Relatorios. O padrao e `2020`; ajuste para o inicio real da base antes do build e mantenha o valor estavel.
-- A tela de login pode ser customizada por empresa via `NEXT_PUBLIC_IPXDATA_LOGIN_BRANDS`. A empresa e resolvida antes do login por query string, como `/login?empresa=cliente-a`, ou por subdominio, como `cliente-a.seudominio.com`.
+- O logo salvo para a empresa no Superadmin e publicado pelo frontend em um espelho restrito a identidade visual. O ultimo logo sincronizado pelo Master aparece em `/login`, sem parametro; `/login?empresa=<company_id>` continua mostrando a marca especifica dessa empresa. Se houver apenas um logo publicado antes desta atualizacao, ele tambem e usado em `/login`. Na ausencia de logo publicado, o login usa a marca neutra IPXData, nao o antigo `/jk.png`.
+- A copia publica do logo de login fica em `IPXDATA_PUBLIC_BRANDING_DIR` ou, por padrao, `.ipxdata/login-branding`. Preserve esse diretorio entre atualizacoes e use um volume compartilhado se houver varias replicas. O backend continua sendo a fonte do upload; salvar a empresa no Master sincroniza a copia publica. Para logos ja existentes, abra a empresa no Master e salve novamente.
+- A sincronizacao do logo requer `IPXDATA_API_URL` configurada tambem no desenvolvimento; ela nao usa o fallback de host do proxy para evitar que uma requisicao controle o destino de uma leitura autenticada.
+- A configuracao estatica `NEXT_PUBLIC_IPXDATA_LOGIN_BRANDS` continua disponivel como alternativa para logos em `public/brands`, mas nao e necessaria para os logos sincronizados do Superadmin.
 - O vinculo `Location -> Worker` implementado no frontend fica salvo no navegador por empresa ate o backend expor `worker_id` em `Location` ou uma tabela de relacao. Em producao multiusuario, o backend precisa persistir esse vinculo para todos enxergarem a mesma configuracao.
 - Tema, sidebar, modulo selecionado, filtros, periodos, layouts, widgets personalizados, presets, visoes e video wall sao persistidos em `GET/PUT /api/v1/users/me/grid`, sempre no usuario autenticado pelo JWT. O `localStorage` e somente cache imediato, fonte de migracao e outbox temporario para alteracoes ainda nao confirmadas; nao e a fonte definitiva dessas preferencias. Escritas e exclusoes pendentes sobrevivem a reload/rotacao do JWT e so saem do outbox depois da confirmacao remota.
 - Grupos locais de cameras e vinculos camera-worker/location-worker continuam no navegador porque representam configuracao operacional compartilhada, nao preferencia pessoal. Eles precisam de uma rota de dominio no backend para que todos os usuarios da empresa enxerguem o mesmo valor; nao devem ser colocados no `user-grid` de um usuario.
@@ -139,7 +142,26 @@ Para usar um backend em outro host:
 
 ## Login customizado por empresa
 
-Para configurar uma tela simples com logo da empresa + IPXData, adicione os logos em `public/brands/<chave>/logo.png` e configure o `.env.production` antes do build:
+Cadastre o logo no Master. O ultimo logo sincronizado passa a aparecer em:
+
+```text
+https://dashboard.seudominio.com/login
+```
+
+Para identificar uma empresa especifica em uma instalacao multiempresa, use:
+
+```text
+https://dashboard.seudominio.com/login?empresa=<company_id>
+```
+
+Como fallback para uma instalacao antiga de uma empresa sem logo-padrao publicado, configure o UUID no `.env.production` antes do build:
+
+```env
+NEXT_PUBLIC_IPXDATA_DEFAULT_LOGIN_COMPANY_ID=<company_id>
+IPXDATA_PUBLIC_BRANDING_DIR=/volume-persistente/ipxdata/login-branding
+```
+
+Como alternativa estatica, adicione logos em `public/brands/<chave>/logo.png` e configure:
 
 ```env
 NEXT_PUBLIC_IPXDATA_LOGIN_BRANDS=[{"key":"cliente-a","companyName":"Cliente A","logoUrl":"/brands/cliente-a/logo.png","accentColor":"#0B4EA2","subtitle":"IPXData"}]
@@ -152,7 +174,7 @@ https://dashboard.seudominio.com/login?empresa=cliente-a
 https://cliente-a.seudominio.com/login
 ```
 
-Se nenhuma empresa for informada, o login padrao IPXData continua sendo exibido.
+Se nao houver logo publicado nem empresa-padrao configurada, o login neutro IPXData continua sendo exibido. A identidade visual e publica, mas nenhuma rota administrativa nem token e exposto na pagina de login.
 
 ## Checklist de producao
 
@@ -163,7 +185,7 @@ Se nenhuma empresa for informada, o login padrao IPXData continua sendo exibido.
 - `npm ci` executado sem erro
 - `npm run check:production` executado sem erro
 - Login testado com usuario comum, admin e superadmin
-- Login customizado testado com `/login?empresa=<chave>` para cada cliente
+- Logo padrao testado em `/login` e marca especifica em `/login?empresa=<chave>` para cada cliente
 - Tela Ao vivo validada para cenario, local e sublocal
 - Tela Visões validada com URL autenticada
 - Workers conferidos por empresa no superadmin/manager

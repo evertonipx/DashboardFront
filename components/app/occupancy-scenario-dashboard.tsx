@@ -142,9 +142,10 @@ import {
   OCCUPANCY_LIVE_SNAPSHOT_QUERY_ID,
   occupancyLiveHistoryRequired,
   occupancyLiveSnapshotQuery,
+  resolveOccupancyLastReading,
+  type OccupancyLastReading,
 } from "@/lib/occupancy-dashboard-query";
 import { ensureGraphicContrast } from "@/lib/occupancy-hex-palette";
-import { occupancyObjectClassLabel } from "@/lib/occupancy-object-class";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import {
   DEFAULT_OCCUPANCY_TREND_SERIES,
@@ -398,6 +399,11 @@ export function OccupancyScenarioDashboard() {
   >({});
   const [history, setHistory] =
     React.useState<OccupancyScenarioHistoryResponse | null>(null);
+  const [aggregateLastReading, setAggregateLastReading] = React.useState<{
+    asOf: string;
+    scopeKey: string;
+    total: number;
+  } | null>(null);
   const historyRef = React.useRef<{
     scopeKey: string;
     value: OccupancyScenarioHistoryResponse | null;
@@ -452,6 +458,9 @@ export function OccupancyScenarioDashboard() {
       value: history,
     };
   }, [activeDataScopeKey, history]);
+  React.useEffect(() => {
+    setAggregateLastReading(null);
+  }, [activeDataScopeKey]);
 
   const liveRequestRef = React.useRef<AbortController | null>(null);
   const secondaryRequestRef = React.useRef<AbortController | null>(null);
@@ -1222,6 +1231,7 @@ export function OccupancyScenarioDashboard() {
                 timeZone: companyTimeZone,
               })
                 .then((data) => ({
+                  aggregateReading: null,
                   data,
                   error: "",
                   requested: true as const,
@@ -1230,6 +1240,10 @@ export function OccupancyScenarioDashboard() {
                 .catch((error) => {
                   if (isAbortError(error)) throw error;
                   return {
+                    aggregateReading:
+                      error instanceof OccupancyAggregateOnlyReadingError
+                        ? error.reading
+                        : null,
                     data: null,
                     error: occupancyDashboardErrorMessage(
                       error,
@@ -1240,6 +1254,7 @@ export function OccupancyScenarioDashboard() {
                   };
                 })
             : Promise.resolve({
+                aggregateReading: null,
                 data: null,
                 error: "",
                 requested: false as const,
@@ -1429,6 +1444,7 @@ export function OccupancyScenarioDashboard() {
         }
         if (historyResult.requested) {
           if (historyResult.succeeded) {
+            setAggregateLastReading(null);
             historyRef.current = {
               scopeKey: requestedScopeKey,
               value: historyResult.data,
@@ -1437,6 +1453,12 @@ export function OccupancyScenarioDashboard() {
             setHistoryRequestedAt(new Date(requestStartedAt));
             setHistoryError("");
           } else {
+            if (historyResult.aggregateReading) {
+              setAggregateLastReading({
+                ...historyResult.aggregateReading,
+                scopeKey: requestedScopeKey,
+              });
+            }
             setHistoryError(historyResult.error);
           }
         }
@@ -1935,6 +1957,22 @@ export function OccupancyScenarioDashboard() {
   const currentTotal = certifiedHistoryError
     ? null
     : (certifiedHistory?.total ?? null);
+  const lastReading = React.useMemo(
+    () =>
+      resolveOccupancyLastReading(
+        certifiedHistory,
+        certifiedHistoryError,
+        aggregateLastReading?.scopeKey === activeDataScopeKey
+          ? aggregateLastReading
+          : null,
+      ),
+    [
+      activeDataScopeKey,
+      aggregateLastReading,
+      certifiedHistory,
+      certifiedHistoryError,
+    ],
+  );
   const certifiedHistoryAreas = certifiedHistory?.areas;
   const activeAreas = React.useMemo(
     () => {
@@ -2104,14 +2142,18 @@ export function OccupancyScenarioDashboard() {
             <MetricCard
               icon={UsersRound}
               label="Última leitura"
-              value={currentTotal}
+              value={lastReading.value}
               loading={initialLoading}
               tone={thresholdStatus?.tone ?? "primary"}
               description={
-                certifiedHistoryError
-                  ? "dados temporariamente indisponíveis"
-                  : certifiedHistory?.as_of
-                    ? `Atualizado em ${formatDateTime(certifiedHistory.as_of, companyTimeZone)}`
+                lastReading.aggregateOnly && lastReading.asOf
+                  ? `Leitura agregada em ${formatDateTime(lastReading.asOf, companyTimeZone)} · detalhes da área indisponíveis`
+                  : certifiedHistoryError
+                  ? lastReading.asOf
+                    ? `Última leitura certificada em ${formatDateTime(lastReading.asOf, companyTimeZone)} · atualização indisponível`
+                    : "dados temporariamente indisponíveis"
+                  : lastReading.asOf
+                    ? `Atualizado em ${formatDateTime(lastReading.asOf, companyTimeZone)}`
                     : (selectedScenario?.name ?? "Cenário obrigatório")
               }
             />
@@ -2211,11 +2253,10 @@ export function OccupancyScenarioDashboard() {
       activeAreas,
       certifiedAlerts,
       certifiedAlertsError,
-      certifiedHistory,
       certifiedHistoryError,
       companyTimeZone,
-      currentTotal,
       initialLoading,
+      lastReading,
       selectedScenario,
       thresholdStatus,
       todayMetric,
@@ -2502,6 +2543,7 @@ export function OccupancyScenarioDashboard() {
       customWidgets,
       generatedAt: lastUpdated ?? clock,
       history: certifiedHistoryError ? null : certifiedHistory,
+      lastReading,
       metricVisibility,
       occupancyComparisonReportAssets,
       occupancyDurationDataCompleteUntil:
@@ -3112,8 +3154,7 @@ function OccupancyScenarioDetailCard({
           {resolvedTitle}
         </CardTitle>
         <CardDescription className="[overflow-wrap:anywhere]">
-          Monitoramento de {occupancyObjectClassLabel(scenario.object_class)}
-          com limites de alerta do cenário.
+          Monitoramento dos objetos configurados com os limites de alerta do cenário.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -3817,6 +3858,13 @@ function occupancyScenarioHistoryPath(scenarioId: string, at: Date) {
   return `/occupancy/scenarios/${encodeURIComponent(scenarioId)}/history?${params.toString()}`;
 }
 
+class OccupancyAggregateOnlyReadingError extends Error {
+  constructor(readonly reading: { asOf: string; total: number }) {
+    super("A leitura agregada chegou sem os detalhes necessários para certificar o estado atual.");
+    this.name = "OccupancyAggregateOnlyReadingError";
+  }
+}
+
 async function loadFocusedLiveSnapshot({
   companyScopeId,
   force,
@@ -3847,11 +3895,29 @@ async function loadFocusedLiveSnapshot({
       signal,
       timeZone,
     });
-    return requireOccupancyHistoryResponse(response, scenario.id, {
+    const scope = {
       expectedAreas: scenario.areas,
-      requireAreaSnapshots: true,
       requestedAt,
-    });
+    };
+    // O total e seu horário são úteis para o card Última leitura, mesmo sem
+    // snapshots por área. O restante da tela continua exigindo a certificação
+    // completa e não recebe esse total como ocupação atual.
+    const aggregateReading = requireOccupancyHistoryResponse(
+      response,
+      scenario.id,
+      scope,
+    );
+    try {
+      return requireOccupancyHistoryResponse(response, scenario.id, {
+        ...scope,
+        requireAreaSnapshots: true,
+      });
+    } catch {
+      throw new OccupancyAggregateOnlyReadingError({
+        asOf: aggregateReading.as_of as string,
+        total: aggregateReading.total,
+      });
+    }
   };
 
   try {
@@ -3897,6 +3963,9 @@ async function loadFocusedLiveSnapshot({
       return await loadHistoryFallback();
     } catch (historyError) {
       if (isAbortError(historyError) || signal.aborted) throw historyError;
+      if (historyError instanceof OccupancyAggregateOnlyReadingError) {
+        throw historyError;
+      }
       throw snapshotError;
     }
   }
@@ -4187,7 +4256,7 @@ function buildOccupancyChartOption(
       valueFormatter: (value) =>
         value === null || value === undefined
           ? "-"
-          : `${formatOccupancyValue(Number(value))} pessoas`,
+          : formatOccupancyValue(Number(value)),
     },
     xAxis: {
       axisLabel: {
@@ -4299,7 +4368,7 @@ function buildOccupancyChartOption(
           valueFormatter: (value: number | null | undefined) =>
             value === null || value === undefined
               ? "-"
-              : `${formatOccupancyValue(Number(value))} pessoas`,
+              : formatOccupancyValue(Number(value)),
         },
         type: "line",
         z: 3,
@@ -4341,7 +4410,7 @@ function buildOccupancyChartOption(
           valueFormatter: (value: number | null | undefined) =>
             value === null || value === undefined
               ? "-"
-              : `${formatOccupancyValue(Number(value))} pessoas`,
+              : formatOccupancyValue(Number(value)),
         },
         type: series.effect ? "effectScatter" : "scatter",
         z: series.z,
@@ -4618,6 +4687,7 @@ function buildOccupancyDashboardReport({
   customWidgets,
   generatedAt,
   history,
+  lastReading,
   metricVisibility,
   occupancyComparisonReportAssets,
   occupancyDurationDataCompleteUntil,
@@ -4647,6 +4717,7 @@ function buildOccupancyDashboardReport({
   customWidgets: OccupancyCustomWidget[];
   generatedAt: Date;
   history: OccupancyScenarioHistoryResponse | null;
+  lastReading: OccupancyLastReading;
   metricVisibility: OccupancyMetricVisibility;
   occupancyComparisonReportAssets: ReturnType<
     typeof useOccupancyComparisonCards
@@ -4698,11 +4769,13 @@ function buildOccupancyDashboardReport({
     [
       "occupancy_current_total",
       {
-        description: history?.as_of
-          ? `Fonte em ${formatDateTime(history.as_of, timeZone)}`
+        description: lastReading.asOf
+          ? lastReading.aggregateOnly
+            ? `Leitura agregada em ${formatDateTime(lastReading.asOf, timeZone)} · detalhes da área indisponíveis`
+            : `${lastReading.updateUnavailable ? "Última leitura certificada em" : "Fonte em"} ${formatDateTime(lastReading.asOf, timeZone)}${lastReading.updateUnavailable ? " · atualização indisponível" : ""}`
           : "Leitura atual indisponível",
         label: resolveTitle("occupancy_current_total", "Última leitura"),
-        value: reportOccupancyValue(currentTotal),
+        value: reportOccupancyValue(lastReading.value),
       },
     ],
     [
@@ -4920,7 +4993,7 @@ function buildOccupancyDashboardReport({
         : []),
       ...(occupancyLoiteringReportAssets.length
         ? [
-            "A permanência considera registros concluídos e estatísticas de duração por área; cada registro representa um intervalo observado, não necessariamente uma pessoa única.",
+            "A permanência considera registros concluídos e estatísticas de duração por área; cada registro representa um intervalo observado, não necessariamente um objeto único.",
           ]
         : []),
       ...occupancyDurationReportWarnings.map(

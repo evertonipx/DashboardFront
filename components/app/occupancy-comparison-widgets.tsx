@@ -6009,7 +6009,9 @@ async function loadOccupancyComparisonReportSnapshots({
             response,
             scenario.id,
             {
-              expectedAreas: scenario.areas,
+              // A configuração atual não redefine a composição no instante
+              // histórico solicitado; a resposta já é validada por cenário,
+              // tempo, identidade das áreas e soma do total.
               requestedAt: referenceAt,
             },
           );

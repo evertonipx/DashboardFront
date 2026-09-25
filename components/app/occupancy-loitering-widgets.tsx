@@ -54,6 +54,11 @@ import {
   shiftOccupancyCompanyDay,
 } from "@/lib/occupancy-calendar";
 import {
+  companyDateKey,
+  startOfCompanyTimeZoneCivilDay,
+  startOfCompanyTimeZoneDay,
+} from "@/lib/company-time-zone";
+import {
   occupancyLoiteringKey,
   type OccupancyLoiteringSessionRow,
   type OccupancyLoiteringSummaryModel,
@@ -97,12 +102,14 @@ export const OCCUPANCY_LOITERING_SUMMARY_CARD_IDS = [
 export const OCCUPANCY_LOITERING_SUMMARY_CONSUMER_CARD_IDS = [
   OCCUPANCY_DURATION_AVERAGE_CARD_ID,
   ...OCCUPANCY_LOITERING_SUMMARY_CARD_IDS,
+  "occupancy_loitering_accumulated_session_time",
 ] as const;
 
 /** Every card in this family, including the sessions endpoint consumer. */
 export const OCCUPANCY_LOITERING_CARD_IDS = [
   OCCUPANCY_LOITERING_CARD_ID,
   ...OCCUPANCY_LOITERING_SUMMARY_CARD_IDS,
+  "occupancy_loitering_accumulated_session_time",
 ] as const;
 
 export type OccupancyLoiteringPeriod = {
@@ -122,6 +129,7 @@ export type LoiteringChartEntry = {
 };
 
 export type OccupancyLoiteringSummaryMetric =
+  | "accumulated"
   | "average"
   | "maximum"
   | "minimum"
@@ -133,7 +141,7 @@ type DurationScale = {
   toAxis: (value: number) => number;
 };
 
-const MAX_LOITERING_SESSION_CHART_POINTS = 240;
+const MAX_LOITERING_REPORT_SESSION_CHART_POINTS = 240;
 const LOITERING_SESSION_COLORS = [
   "#0F766E",
   "#7C3AED",
@@ -216,8 +224,13 @@ export function buildOccupancyLoiteringSessionsChartOption(
   theme: "dark" | "light",
   widgetColor = "#1267C4",
   timeZone = "UTC",
+  dayStart?: Date,
 ): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
+  const dayStartMs = dayStart?.getTime();
+  const dayEndMs = dayStart
+    ? shiftOccupancyCompanyDay(dayStart, 1, timeZone).getTime()
+    : undefined;
   const ordered = entries
     .map((entry, index) => ({
       entry,
@@ -227,7 +240,12 @@ export function buildOccupancyLoiteringSessionsChartOption(
     .filter(
       (candidate) =>
         Number.isFinite(candidate.timestamp) &&
-        Number.isFinite(candidate.entry.durationSeconds),
+        Number.isFinite(candidate.entry.durationSeconds) &&
+        candidate.entry.durationSeconds >= 0 &&
+        (dayStartMs === undefined ||
+          (candidate.timestamp >= dayStartMs &&
+            dayEndMs !== undefined &&
+            candidate.timestamp < dayEndMs)),
     )
     .sort(
       (left, right) =>
@@ -247,10 +265,15 @@ export function buildOccupancyLoiteringSessionsChartOption(
   const durationScale = buildDurationScale(
     ordered.map(({ entry }) => entry.durationSeconds),
   );
+  const trend = buildOccupancyLoiteringSessionTrend(ordered, durationScale);
 
   const firstTimestamp = ordered[0]?.timestamp ?? 0;
   const lastTimestamp = ordered.at(-1)?.timestamp ?? firstTimestamp;
-  const spansMultipleDays = lastTimestamp - firstTimestamp >= 36 * 60 * 60_000;
+  const spansMultipleDays =
+    !dayStart &&
+    ordered.length > 0 &&
+    companyDateKey(new Date(firstTimestamp), timeZone) !==
+      companyDateKey(new Date(lastTimestamp), timeZone);
   const axisFormatter = new Intl.DateTimeFormat("pt-BR", {
     ...(spansMultipleDays
       ? { day: "2-digit", month: "short" }
@@ -258,74 +281,81 @@ export function buildOccupancyLoiteringSessionsChartOption(
     timeZone,
   });
   const showLabels = ordered.length <= 16;
-  const showZoom = ordered.length > 40;
-  const showLegend = grouped.size > 1;
+  const showLegend = grouped.size > 1 || trend !== null;
   const colors = [widgetColor, ...LOITERING_SESSION_COLORS];
-  const series = Array.from(grouped.entries())
+  const scatterSeries = Array.from(grouped.entries())
     .sort(([left], [right]) => left.localeCompare(right, "pt-BR"))
     .map(([seriesLabel, points], index) => ({
-    data: points.map(({ entry, timestamp }) => ({
-      areaLabel: entry.areaLabel,
-      durationSeconds: entry.durationSeconds,
-      endedAt: entry.endedAt,
-      scenarioLabel: entry.scenarioLabel,
-      value: [timestamp, durationScale.toAxis(entry.durationSeconds)],
-    })),
-    emphasis: { focus: "series", scale: 1.35 },
-    id: `loitering-session-${index}`,
-    itemStyle: {
-      borderColor: palette.surface,
-      borderWidth: 1.5,
-      color: colors[index % colors.length],
-      opacity: 0.88,
-    },
-    label: {
-      color: palette.axisText,
-      formatter: (raw: unknown) => {
-        const data = chartSessionDatum(raw);
-        return data
-          ? formatHumanDuration(data.durationSeconds, true)
-          : "";
+      data: points.map(({ entry, timestamp }) => ({
+        areaLabel: entry.areaLabel,
+        durationSeconds: entry.durationSeconds,
+        endedAt: entry.endedAt,
+        scenarioLabel: entry.scenarioLabel,
+        value: [timestamp, durationScale.toAxis(entry.durationSeconds)],
+      })),
+      emphasis: { focus: "series", scale: 1.35 },
+      id: `loitering-session-${index}`,
+      itemStyle: {
+        borderColor: palette.surface,
+        borderWidth: 1.5,
+        color: colors[index % colors.length],
+        opacity: 0.88,
       },
-      fontSize: 9,
-      fontWeight: 600,
-      position: "top",
-      show: showLabels,
-    },
-    labelLayout: { hideOverlap: true },
-    name: seriesLabel,
-    symbol: "circle",
-    symbolSize: ordered.length > 120 ? 7 : ordered.length > 40 ? 8 : 10,
+      label: {
+        color: palette.axisText,
+        formatter: (raw: unknown) => {
+          const data = chartSessionDatum(raw);
+          return data
+            ? formatHumanDuration(data.durationSeconds, true)
+            : "";
+        },
+        fontSize: 9,
+        fontWeight: 600,
+        position: "top",
+        show: showLabels,
+      },
+      labelLayout: { hideOverlap: true },
+      name: seriesLabel,
+      progressive: 1_000,
+      progressiveThreshold: 3_000,
+      symbol: "circle",
+      symbolSize: ordered.length > 120 ? 7 : ordered.length > 40 ? 8 : 10,
       type: "scatter",
+      z: 3,
     }));
+  const series = [
+    ...scatterSeries,
+    ...(trend
+      ? [{
+          clip: true,
+          data: trend,
+          id: "loitering-session-linear-trend",
+          itemStyle: { color: palette.previousAverage },
+          label: { show: false },
+          lineStyle: {
+            color: palette.previousAverage,
+            opacity: 0.95,
+            type: "dashed",
+            width: 2.5,
+          },
+          name: durationScale.logarithmic
+            ? "Tendência linear · escala adaptativa"
+            : "Tendência linear",
+          showSymbol: false,
+          silent: true,
+          smooth: false,
+          tooltip: { show: false },
+          type: "line",
+          z: 2,
+        }]
+      : []),
+  ];
 
   return {
     animation: false,
     backgroundColor: "transparent",
-    dataZoom: showZoom
-      ? [
-          {
-            bottom: showLegend ? 24 : 5,
-            brushSelect: false,
-            end: 100,
-            filterMode: "none",
-            height: 10,
-            showDetail: false,
-            start: 0,
-            type: "slider",
-            xAxisIndex: 0,
-          },
-          {
-            end: 100,
-            filterMode: "none",
-            start: 0,
-            type: "inside",
-            xAxisIndex: 0,
-          },
-        ]
-      : undefined,
     grid: {
-      bottom: showZoom ? (showLegend ? 62 : 42) : showLegend ? 42 : 28,
+      bottom: showLegend ? 42 : 28,
       containLabel: true,
       left: 8,
       right: 18,
@@ -364,17 +394,25 @@ export function buildOccupancyLoiteringSessionsChartOption(
     xAxis: {
       axisLabel: {
         color: palette.axisText,
-        formatter: (value: number) => axisFormatter.format(value),
+        formatter: (value: number) =>
+          dayStart &&
+          (value - dayStart.getTime()) % 3_600_000 !== 0
+            ? ""
+            : axisFormatter.format(value),
         fontSize: 9,
         hideOverlap: true,
       },
       axisLine: { lineStyle: { color: palette.axisLine } },
       axisPointer: { label: { formatter: ({ value }: { value: number }) => axisFormatter.format(value) } },
-      boundaryGap: ["2%", "2%"],
-      name: "Horário de saída",
+      boundaryGap: dayStart ? false : ["2%", "2%"],
+      interval: dayStart ? 3_600_000 : undefined,
+      max: dayEndMs === undefined ? undefined : dayEndMs - 1,
+      min: dayStart?.getTime(),
+      minInterval: 60_000,
+      name: dayStart ? "Horário de saída · 00h–23h59" : "Horário de saída",
       nameTextStyle: { color: palette.axisText, fontSize: 10 },
       splitLine: { lineStyle: { color: palette.gridLine, type: "dashed" } },
-      type: "time",
+      type: dayStart ? "value" : "time",
     },
     yAxis: {
       axisLabel: {
@@ -393,6 +431,49 @@ export function buildOccupancyLoiteringSessionsChartOption(
       type: "value",
     },
   };
+}
+
+function buildOccupancyLoiteringSessionTrend(
+  points: readonly {
+    entry: OccupancyLoiteringSessionEntry;
+    timestamp: number;
+  }[],
+  durationScale: DurationScale,
+): Array<[number, number]> | null {
+  if (points.length < 2) return null;
+  const firstTimestamp = points[0].timestamp;
+  const lastTimestamp = points[points.length - 1].timestamp;
+  if (firstTimestamp === lastTimestamp) return null;
+
+  // Centralized online covariance avoids squaring epoch timestamps and keeps
+  // every individual session in the fit, including equal exit instants.
+  let count = 0;
+  let meanMinute = 0;
+  let meanDuration = 0;
+  let minuteVariance = 0;
+  let covariance = 0;
+  points.forEach(({ entry, timestamp }) => {
+    const minute = (timestamp - firstTimestamp) / 60_000;
+    const duration = durationScale.toAxis(entry.durationSeconds);
+    count += 1;
+    const deltaMinute = minute - meanMinute;
+    meanMinute += deltaMinute / count;
+    const deltaDuration = duration - meanDuration;
+    meanDuration += deltaDuration / count;
+    minuteVariance += deltaMinute * (minute - meanMinute);
+    covariance += deltaMinute * (duration - meanDuration);
+  });
+  if (minuteVariance <= 0 || !Number.isFinite(covariance)) return null;
+
+  const slope = covariance / minuteVariance;
+  const lastMinute = (lastTimestamp - firstTimestamp) / 60_000;
+  const firstValue = meanDuration - slope * meanMinute;
+  const lastValue = meanDuration + slope * (lastMinute - meanMinute);
+  if (!Number.isFinite(firstValue) || !Number.isFinite(lastValue)) return null;
+  return [
+    [firstTimestamp, firstValue],
+    [lastTimestamp, lastValue],
+  ];
 }
 
 export function OccupancyLoiteringAverageByScenarioCard({
@@ -606,33 +687,152 @@ export function OccupancyLoiteringSummaryCard({
 }) {
   const { effectiveTheme } = useTheme();
   const widgetColor = useWidgetColor("#1267C4");
-  const sessionEntries = React.useMemo(
-    () => occupancyLoiteringSessionEntries(model, sessions),
-    [model, sessions],
+  const sourcePeriod = previewPeriod ?? period;
+  const defaultDayStart = startOfCompanyTimeZoneDay(
+    new Date(Math.max(sourcePeriod.from.getTime(), sourcePeriod.to.getTime() - 1)),
+    timeZone,
   );
-  const chartEntries = React.useMemo(
-    () => sessionEntries.slice(0, MAX_LOITERING_SESSION_CHART_POINTS),
-    [sessionEntries],
+  const periodKey = JSON.stringify([
+    companyScopeId,
+    period.from.getTime(),
+    period.to.getTime(),
+    timeZone,
+    model.areas.map((area) => area.key),
+  ]);
+  const [selectedDay, setSelectedDay] = React.useState<{
+    periodKey: string;
+    start: number;
+  } | null>(null);
+  const dayStartTime =
+    selectedDay?.periodKey === periodKey
+      ? selectedDay.start
+      : defaultDayStart.getTime();
+  const dayStart = React.useMemo(() => new Date(dayStartTime), [dayStartTime]);
+  const dayEnd = React.useMemo(
+    () => shiftOccupancyCompanyDay(dayStart, 1, timeZone),
+    [dayStart, timeZone],
+  );
+  const dayFromTime = Math.max(dayStartTime, period.from.getTime());
+  const dayToTime = Math.min(dayEnd.getTime(), period.to.getTime());
+  const dayFrom = React.useMemo(() => new Date(dayFromTime), [dayFromTime]);
+  const dayTo = React.useMemo(() => new Date(dayToTime), [dayToTime]);
+  const sourceCoversDay =
+    previewPeriod !== null &&
+    previewPeriod.from.getTime() <= dayFrom.getTime() &&
+    previewPeriod.to.getTime() >= dayTo.getTime();
+  const expectedAreas = React.useMemo(
+    () => model.areas.map((area) => ({
+      area: area.area,
+      cameraId: area.cameraId,
+      objectClass: area.objectClass,
+    })),
+    [model.areas],
+  );
+  const dayScopeKey = JSON.stringify([
+    companyScopeId,
+    dayFrom.getTime(),
+    dayTo.getTime(),
+    timeZone,
+    model.areas.map((area) => area.key),
+  ]);
+  const [selectedDayDataset, setSelectedDayDataset] = React.useState<{
+    error?: string;
+    loading: boolean;
+    rows: OccupancyLoiteringSessionRow[];
+    scopeKey: string;
+  }>({ loading: false, rows: [], scopeKey: "" });
+  React.useEffect(() => {
+    if (
+      !previewPeriod ||
+      sourceCoversDay ||
+      !expectedAreas.length ||
+      dayFrom >= dayTo
+    ) return;
+    const controller = new AbortController();
+    setSelectedDayDataset({ loading: true, rows: [], scopeKey: dayScopeKey });
+    void fetchOccupancyLoiteringSessions({
+      companyScopeId,
+      expectedAreas,
+      from: dayFrom,
+      signal: controller.signal,
+      timeZone,
+      to: dayTo,
+    })
+      .then((rows) => {
+        if (controller.signal.aborted) return;
+        setSelectedDayDataset({ loading: false, rows, scopeKey: dayScopeKey });
+      })
+      .catch((requestError: unknown) => {
+        if (isAbortError(requestError, controller.signal)) return;
+        setSelectedDayDataset({
+          error: "Não foi possível carregar as permanências deste dia.",
+          loading: false,
+          rows: [],
+          scopeKey: dayScopeKey,
+        });
+      });
+    return () => abortRequest(controller);
+  }, [
+    companyScopeId,
+    dayFrom,
+    dayScopeKey,
+    dayTo,
+    expectedAreas,
+    previewPeriod,
+    sourceCoversDay,
+    timeZone,
+  ]);
+  const selectedDayIsCurrent = selectedDayDataset.scopeKey === dayScopeKey;
+  const dayLoading = sourceCoversDay
+    ? loading
+    : !selectedDayIsCurrent || selectedDayDataset.loading;
+  const dayError = sourceCoversDay
+    ? error
+    : selectedDayIsCurrent
+      ? selectedDayDataset.error
+      : undefined;
+  const sessionEntries = React.useMemo(
+    () => {
+      const daySessions = sourceCoversDay
+        ? sessions
+        : selectedDayIsCurrent
+          ? selectedDayDataset.rows
+          : [];
+      const completedInDay = daySessions.filter((session) => {
+        const endedAt = Date.parse(session.ended_at);
+        return endedAt >= dayFrom.getTime() && endedAt < dayTo.getTime();
+      });
+      return occupancyLoiteringSessionEntries(model, completedInDay);
+    },
+    [
+      dayFrom,
+      dayTo,
+      model,
+      selectedDayDataset.rows,
+      selectedDayIsCurrent,
+      sessions,
+      sourceCoversDay,
+    ],
   );
   const chartOption = React.useMemo(
-    () =>
-      chartEntries.length
-        ? buildOccupancyLoiteringSessionsChartOption(
-            chartEntries,
-            effectiveTheme === "dark" ? "dark" : "light",
-            widgetColor,
-            timeZone,
-          )
-        : null,
-    [chartEntries, effectiveTheme, timeZone, widgetColor],
+    () => buildOccupancyLoiteringSessionsChartOption(
+      sessionEntries,
+      effectiveTheme === "dark" ? "dark" : "light",
+      widgetColor,
+      timeZone,
+      dayStart,
+    ),
+    [dayStart, effectiveTheme, sessionEntries, timeZone, widgetColor],
   );
   const [sessionsOpen, setSessionsOpen] = React.useState(false);
   const [sessionsPeriod, setSessionsPeriod] = React.useState(period);
   const hasConfiguredAreas = model.areas.length > 0;
-  const previewContext =
-    sessionsSlicedByDay && previewPeriod
-      ? formatCivilDay(previewPeriod.from, timeZone)
-      : period.contextLabel;
+  const previewContext = formatCivilDay(dayStart, timeZone);
+  const previousDay = shiftOccupancyCompanyDay(dayStart, -1, timeZone);
+  const firstDayStart = startOfCompanyTimeZoneDay(period.from, timeZone);
+  const canGoPreviousDay =
+    previousDay.getTime() >= firstDayStart.getTime();
+  const canGoNextDay = dayEnd.getTime() < period.to.getTime();
 
   return (
     <>
@@ -656,7 +856,7 @@ export function OccupancyLoiteringSummaryCard({
                 className="mt-0.5 line-clamp-2 text-xs leading-4"
                 title={`Registros de permanência concluídos em ${previewContext}.`}
               >
-                Duração e horário de saída · {previewContext}
+                Duração, saída e tendência linear · {previewContext}
               </CardDescription>
             </div>
             {!monitorMode ? (
@@ -680,42 +880,102 @@ export function OccupancyLoiteringSummaryCard({
           </div>
         </CardHeader>
         <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 p-3 pt-1">
-          {error ? (
+          {!monitorMode && (canGoPreviousDay || canGoNextDay) ? (
+            <div className="flex shrink-0 items-center justify-end gap-1 text-xs">
+              <Button
+                aria-label="Dia anterior do gráfico de permanências"
+                disabled={!canGoPreviousDay}
+                onClick={() => setSelectedDay({
+                  periodKey,
+                  start: previousDay.getTime(),
+                })}
+                size="icon"
+                title="Dia anterior"
+                type="button"
+                variant="ghost"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <input
+                aria-label="Selecionar dia do gráfico de permanências"
+                className="h-8 w-32 min-w-0 rounded-md border bg-background px-2 text-center font-medium tabular-nums dark:[color-scheme:dark]"
+                max={companyDateKey(new Date(period.to.getTime() - 1), timeZone)}
+                min={companyDateKey(period.from, timeZone)}
+                onChange={(event) => {
+                  const [year, month, day] = event.currentTarget.value
+                    .split("-")
+                    .map(Number);
+                  if (!year || !month || !day) return;
+                  const requestedDay = startOfCompanyTimeZoneCivilDay(
+                    { year, month, day },
+                    timeZone,
+                  );
+                  if (
+                    requestedDay < firstDayStart ||
+                    requestedDay >= period.to
+                  ) return;
+                  setSelectedDay({
+                    periodKey,
+                    start: requestedDay.getTime(),
+                  });
+                }}
+                title={`Dia exibido: ${previewContext}`}
+                type="date"
+                value={companyDateKey(dayStart, timeZone)}
+              />
+              <Button
+                aria-label="Próximo dia do gráfico de permanências"
+                disabled={!canGoNextDay}
+                onClick={() => setSelectedDay({
+                  periodKey,
+                  start: dayEnd.getTime(),
+                })}
+                size="icon"
+                title="Próximo dia"
+                type="button"
+                variant="ghost"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          ) : null}
+          {dayError ? (
             <div
               className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/15 px-3 text-center text-xs text-muted-foreground"
               role="status"
             >
-              {error}
+              {dayError}
             </div>
-          ) : loading && !chartEntries.length ? (
+          ) : dayLoading && !sessionEntries.length ? (
             <Skeleton className="min-h-40 w-full flex-1" />
           ) : !hasConfiguredAreas ? (
             <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/15 px-3 text-center text-xs text-muted-foreground">
               Este cenário não possui áreas de permanência vinculadas.
             </div>
-          ) : !chartOption ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/15 px-3 text-center text-xs text-muted-foreground">
-              Nenhum registro de permanência foi concluído {sessionsSlicedByDay ? "neste dia" : "neste período"}.
-            </div>
           ) : (
             <div
-              aria-busy={loading}
+              aria-busy={dayLoading}
               className="min-h-40 min-w-0 flex-1"
               data-echart-layout="natural"
             >
               <EChart
-                ariaDescription="Cada ponto representa um registro concluído, posicionado pelo horário de saída e pela duração da permanência."
+                ariaDescription="Cada ponto representa uma permanência concluída no horário exato da saída. Quando há horários distintos, a linha tracejada mostra a tendência linear das durações do dia."
                 ariaLabel="Permanências registradas ao longo do tempo"
                 className="h-full min-h-0 w-full"
                 option={chartOption}
                 themeMode="explicit"
-                valueLabels={chartEntries.length <= 16 ? "auto" : "none"}
+                valueLabels="none"
               />
             </div>
           )}
-          {sessionEntries.length ? (
+          {!dayLoading && !dayError && hasConfiguredAreas && !sessionEntries.length ? (
+            <div className="shrink-0 text-center text-[11px] text-muted-foreground">
+              Sem permanências concluídas neste dia
+            </div>
+          ) : null}
+          {sessionsSlicedByDay && sessionEntries.length ? (
             <div className="shrink-0 text-[11px] text-muted-foreground">
-              Registros mais recentes{sessionsSlicedByDay ? " · prévia diária" : ""}
+              Prévia diária do período selecionado
             </div>
           ) : null}
         </CardContent>
@@ -1461,9 +1721,9 @@ export function buildOccupancyLoiteringReport(
 ): ReportChart | null {
   const entries = occupancyLoiteringSessionEntries(model, sessions);
   if (!entries.length) return null;
-  const chartEntries = entries.slice(0, MAX_LOITERING_SESSION_CHART_POINTS);
+  const chartEntries = entries.slice(0, MAX_LOITERING_REPORT_SESSION_CHART_POINTS);
   const description = [
-    `Registros individuais de permanência concluídos em ${contextLabel}. Cada ponto apresenta quando o registro terminou e sua duração.`,
+    `Registros individuais de permanência concluídos em ${contextLabel}. Cada ponto apresenta quando o registro terminou e sua duração; havendo horários distintos, a linha tracejada indica a tendência linear dos pontos exibidos.`,
     entries.length > chartEntries.length
       ? "O gráfico prioriza os registros mais recentes; a tabela preserva todo o período carregado."
       : "",
@@ -1528,7 +1788,14 @@ export function buildOccupancyLoiteringSummaryMetricReport(
   const configuration = loiteringMetricConfiguration(metric);
   const description = `${configuration.reportDescription} em ${contextLabel}. Cada área física aparece uma única vez, ainda que seja compartilhada por mais de um cenário.`;
   const table: ReportTable = {
-    columns: [
+    columns: metric === "accumulated" ? [
+      { key: "scenario", label: "Cenário", width: 22 },
+      { key: "area", label: "Área", width: 20 },
+      { key: "accumulated", label: "Duração acumulada" },
+      { key: "accumulatedSeconds", label: "Duração acumulada (s)", numeric: true },
+      { key: "averageSeconds", label: "Média (s)", numeric: true },
+      { key: "sessions", label: "Permanências concluídas", numeric: true },
+    ] : [
       { key: "scenario", label: "Cenário", width: 22 },
       { key: "area", label: "Área", width: 20 },
       { key: "average", label: "Média" },
@@ -1539,7 +1806,14 @@ export function buildOccupancyLoiteringSummaryMetricReport(
       { key: "maximumSeconds", label: "Maior (s)", numeric: true },
     ],
     description,
-    rows: entries.map((entry) => ({
+    rows: entries.map((entry) => metric === "accumulated" ? ({
+      area: loiteringEntryAreaLabel(entry),
+      accumulated: formatHumanDuration(loiteringMetricValue(entry, metric), true),
+      accumulatedSeconds: loiteringMetricValue(entry, metric),
+      averageSeconds: entry.average,
+      scenario: loiteringEntryScenarioLabel(entry),
+      sessions: entry.sessions,
+    }) : ({
       area: loiteringEntryAreaLabel(entry),
       average: formatHumanDuration(entry.average, true),
       averageSeconds: entry.average,
@@ -1648,6 +1922,20 @@ function loiteringMetricConfiguration(
   metric: OccupancyLoiteringSummaryMetric,
 ) {
   switch (metric) {
+    case "accumulated":
+      return {
+        ariaDescription:
+          "Soma aproximada das durações individuais concluídas em cada área física, calculada pela média vezes a quantidade de permanências.",
+        axisName: "Duração acumulada",
+        color: "#7C3AED",
+        description:
+          "Duração individual acumulada por área no período; média × permanências concluídas",
+        reportDescription:
+          "Duração individual acumulada estimada a partir do resumo de permanências por cenário e área; não representa tempo ocupado da área",
+        seriesName: "Duração acumulada",
+        title: "Duração acumulada das permanências",
+        valueLabel: "Duração acumulada",
+      } as const;
     case "average":
       return {
         ariaDescription:
@@ -1720,6 +2008,8 @@ function loiteringMetricValue(
   metric: OccupancyLoiteringSummaryMetric,
 ) {
   switch (metric) {
+    case "accumulated":
+      return entry.average * entry.sessions;
     case "average":
       return entry.average;
     case "maximum":

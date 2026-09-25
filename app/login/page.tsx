@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -35,11 +36,15 @@ import type { CurrentUser } from "@/lib/types";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import {
   DEFAULT_LOGIN_BRANDING,
+  fetchDefaultLoginBranding,
+  fetchPublishedLoginBranding,
+  hasExplicitLoginBrandSelection,
   type LoginBranding,
   loginBrandColorWithAlpha,
   loginBrandInitials,
   readableLoginBrandColor,
   resolveLoginBranding,
+  resolveLoginCompanyId,
 } from "@/lib/login-branding";
 
 const LOGIN_CAPABILITIES = [
@@ -74,7 +79,29 @@ export default function LoginPage() {
   const isDefaultBrand = branding.key === DEFAULT_LOGIN_BRANDING.key;
 
   React.useEffect(() => {
-    setBranding(resolveLoginBranding(window.location));
+    const location = window.location;
+    setBranding(resolveLoginBranding(location));
+    const companyId = resolveLoginCompanyId(location);
+    const publishedBranding = hasExplicitLoginBrandSelection(location)
+      ? companyId
+        ? fetchPublishedLoginBranding(companyId)
+        : null
+      : fetchDefaultLoginBranding()
+          .catch(() => null)
+          .then((defaultBranding) =>
+            defaultBranding ?? (companyId ? fetchPublishedLoginBranding(companyId) : null),
+          );
+    if (!publishedBranding) return;
+
+    let active = true;
+    void publishedBranding
+      .then((publishedBranding) => {
+        if (active && publishedBranding) setBranding(publishedBranding);
+      })
+      .catch(() => {
+        // Branding is optional; an unavailable image must never block login.
+      });
+    return () => { active = false; };
   }, []);
 
   React.useEffect(() => {
@@ -411,7 +438,11 @@ function BrandMark({
   compact?: boolean;
   hero?: boolean;
 }) {
-  const sizeClass = branding.logoUrl
+  const [failedLogoUrl, setFailedLogoUrl] = React.useState("");
+  const logoUrl = branding.logoUrl && branding.logoUrl !== failedLogoUrl
+    ? branding.logoUrl
+    : "";
+  const sizeClass = logoUrl
     ? hero
       ? "h-20 w-52 sm:h-24 sm:w-64"
       : compact
@@ -424,21 +455,21 @@ function BrandMark({
         : "h-12 w-12";
   const initialsClass = hero ? "text-3xl sm:text-4xl" : "text-xs";
 
-  if (branding.logoUrl) {
+  if (logoUrl) {
     return (
       <div
         aria-label={`Logo ${branding.companyName}`}
-        className={`${sizeClass} flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white p-2 shadow-lg ring-1 ring-black/5`}
+        className={`${sizeClass} relative flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white shadow-lg ring-1 ring-black/5`}
         role="img"
       >
-        <div
-          className="h-full w-full"
-          style={{
-            backgroundImage: `url("${branding.logoUrl}")`,
-            backgroundPosition: "center",
-            backgroundRepeat: "no-repeat",
-            backgroundSize: "contain",
-          }}
+        <Image
+          src={logoUrl}
+          alt=""
+          fill
+          unoptimized
+          sizes={hero ? "256px" : "144px"}
+          className="object-contain p-2"
+          onError={() => setFailedLogoUrl(logoUrl)}
         />
       </div>
     );

@@ -22,6 +22,7 @@ import {
   type OccupancyLoiteringSummaryMetric,
 } from "@/components/app/occupancy-loitering-widgets";
 import {
+  OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID,
   OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID,
   OCCUPANCY_LOITERING_PERCENTILES_BY_AREA_CARD_ID,
   OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS,
@@ -83,9 +84,17 @@ const LOITERING_SUMMARY_METRIC_CARDS = [
     label: "Maior permanência por área",
     metric: "maximum",
   },
+  {
+    color: "#7C3AED",
+    id: OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID,
+    label: "Duração acumulada das permanências",
+    metric: "accumulated",
+  },
 ] as const satisfies readonly {
   color: string;
-  id: (typeof OCCUPANCY_LOITERING_SUMMARY_CARD_IDS)[number];
+  id:
+    | (typeof OCCUPANCY_LOITERING_SUMMARY_CARD_IDS)[number]
+    | typeof OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID;
   label: string;
   metric: OccupancyLoiteringSummaryMetric;
 }[];
@@ -325,8 +334,9 @@ export function useOccupancyLoitering({
         timeZone,
         refreshMode,
         refreshMode === "manual" ? manualPeriodKey : "live",
+        expectedAreasKey,
       ]),
-    [companyScopeId, manualPeriodKey, refreshMode, timeZone, userId],
+    [companyScopeId, expectedAreasKey, manualPeriodKey, refreshMode, timeZone, userId],
   );
   const [dataset, setDataset] = React.useState<OccupancyLoiteringDataset>({
     loading: false,

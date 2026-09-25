@@ -140,7 +140,7 @@ test("CardLayout recebe tempo ocupado em Análises e permanência individual tam
   const cardsExpression = dashboardVariable("occupancyReportLayoutCards").getText(dashboardAst);
   const cards = insightIds.map((id) => ({ id }));
   const comparisonCards = [{ id: "occupancy_scenario_half_donut" }];
-  const durationCards = [{ id: "occupancy_duration_confirmed" }];
+  const durationCards = [{ id: "occupancy_duration_coverage" }];
   const loiteringCards = [{ id: "occupancy_loitering_summary" }];
   const bindings = {
     analysis: true,
@@ -198,7 +198,7 @@ test("exportação ordena assets paginados junto aos cards visíveis e mantém t
     { cardId: "occupancy_scenario_half_donut", chart: { title: "Comparativo", table: { rows: ["comparison"] } } },
   ];
   const durationReportAssets = [
-    { cardId: "occupancy_duration_confirmed", chart: { title: "Duração", table: { rows: ["duration"] } } },
+    { cardId: "occupancy_duration_timeline", chart: { title: "Duração", table: { rows: ["duration"] } } },
   ];
   const result = evaluateDashboard(`${supplementalStatements}\nreturn (${charts.initializer.getText(dashboardAst)});`, {
     comparisonReportSnapshot: { reportAssets: comparisonReportAssets },
@@ -208,7 +208,7 @@ test("exportação ordena assets paginados junto aos cards visíveis e mantém t
     orderedVisibleReportCardIds: [
       "occupancy_report_day",
       "occupancy_scenario_half_donut",
-      "occupancy_duration_confirmed",
+      "occupancy_duration_timeline",
       insightIds[1],
       insightIds[0],
     ],

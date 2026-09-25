@@ -10,11 +10,12 @@ export const DEFAULT_LOGIN_BRANDING: LoginBranding = {
   accentColor: "#0B4EA2",
   companyName: "IPXData",
   key: "default",
-  logoUrl: "/jk.png",
   subtitle: "IPExtreme Analytics",
 };
 
-const LOGIN_BRAND_STORAGE_KEY = "ipxdata-login-brand-key";
+const COMPANY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const pendingPublishedBranding = new Map<string, Promise<LoginBranding | null>>();
+let pendingDefaultBranding: Promise<LoginBranding | null> | null = null;
 const RESERVED_HOST_KEYS = new Set([
   "app",
   "dashboard",
@@ -28,19 +29,87 @@ export function resolveLoginBranding(location: Location) {
   const brands = configuredBrands();
   const requestedKey =
     searchBrandKey(location.search) ||
-    hostBrandKey(location.hostname) ||
-    readStoredBrandKey();
+    hostBrandKey(location.hostname);
   const brand = requestedKey ? brands.get(normalizeKey(requestedKey)) : null;
 
-  if (brand) {
-    writeStoredBrandKey(brand.key);
-    return brand;
-  }
+  return brand ?? DEFAULT_LOGIN_BRANDING;
+}
 
-  return DEFAULT_LOGIN_BRANDING;
+export function resolveLoginCompanyId(location: Location) {
+  const requestedKey =
+    searchBrandKey(location.search) || hostBrandKey(location.hostname);
+  // A shared browser must never inherit the last tenant's branding. The
+  // deployment default is used only when the URL does not select a tenant.
+  const candidate = requestedKey ||
+    process.env.NEXT_PUBLIC_IPXDATA_DEFAULT_LOGIN_COMPANY_ID?.trim() || "";
+  return COMPANY_ID_PATTERN.test(candidate) ? candidate.toLowerCase() : "";
+}
+
+export function hasExplicitLoginBrandSelection(location: Location) {
+  return Boolean(searchBrandKey(location.search) || hostBrandKey(location.hostname));
+}
+
+export function publishedLoginBranding(
+  value: unknown,
+  expectedCompanyId: string,
+): LoginBranding | null {
+  if (!COMPANY_ID_PATTERN.test(expectedCompanyId) || !value ||
+      typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const companyId = stringValue(record.companyId).toLowerCase();
+  const companyName = stringValue(record.companyName).slice(0, 120);
+  const logoUrl = stringValue(record.logoUrl);
+  const logoPath = `/api/login-branding/${encodeURIComponent(companyId)}/logo`;
+  if (companyId !== expectedCompanyId.toLowerCase() || !companyName ||
+      !logoUrl.startsWith(`${logoPath}?v=`) ||
+      !/^[a-f0-9]{64}$/i.test(logoUrl.slice(logoPath.length + 3))) return null;
+  return {
+    accentColor: DEFAULT_LOGIN_BRANDING.accentColor,
+    companyName,
+    key: companyId,
+    logoUrl,
+    subtitle: "IPXData",
+  };
+}
+
+export function fetchPublishedLoginBranding(companyId: string): Promise<LoginBranding | null> {
+  if (!COMPANY_ID_PATTERN.test(companyId)) return Promise.resolve(null);
+  const id = companyId.toLowerCase();
+  const pending = pendingPublishedBranding.get(id);
+  if (pending) return pending;
+  const request = fetch(`/api/login-branding/${encodeURIComponent(id)}`, {
+    cache: "no-store",
+  }).then(async (response) => response.ok
+    ? publishedLoginBranding(await response.json(), id)
+    : null,
+  ).finally(() => {
+    if (pendingPublishedBranding.get(id) === request) {
+      pendingPublishedBranding.delete(id);
+    }
+  });
+  pendingPublishedBranding.set(id, request);
+  return request;
+}
+
+export function fetchDefaultLoginBranding(): Promise<LoginBranding | null> {
+  if (pendingDefaultBranding) return pendingDefaultBranding;
+  const request = fetch("/api/login-branding/default", {
+    cache: "no-store",
+  }).then(async (response) => {
+    if (!response.ok) return null;
+    const value = await response.json() as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const companyId = stringValue((value as Record<string, unknown>).companyId);
+    return publishedLoginBranding(value, companyId);
+  }).finally(() => {
+    if (pendingDefaultBranding === request) pendingDefaultBranding = null;
+  });
+  pendingDefaultBranding = request;
+  return request;
 }
 
 export function loginBrandInitials(name: string) {
+  if (name.trim().toLowerCase() === "ipxdata") return "IPX";
   const parts = name
     .trim()
     .split(/\s+/)
@@ -138,24 +207,6 @@ function hostBrandKey(hostname: string) {
   const [subdomain] = host.split(".");
   const key = normalizeKey(subdomain);
   return key && !RESERVED_HOST_KEYS.has(key) ? key : "";
-}
-
-function readStoredBrandKey() {
-  if (typeof window === "undefined") return "";
-  try {
-    return window.localStorage.getItem(LOGIN_BRAND_STORAGE_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function writeStoredBrandKey(key: string) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(LOGIN_BRAND_STORAGE_KEY, key);
-  } catch {
-    // Branding is presentation-only and must never block authentication.
-  }
 }
 
 function normalizeKey(value: string) {

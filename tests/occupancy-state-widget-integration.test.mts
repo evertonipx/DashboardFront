@@ -41,15 +41,37 @@ const dashboardSource = readFileSync(
   resolve(root, "components/app/occupancy-scenario-dashboard.tsx"),
   "utf8",
 );
+const reportsSource = readFileSync(
+  resolve(root, "components/app/occupancy-reports-dashboard.tsx"),
+  "utf8",
+);
+const insightsSource = readFileSync(
+  resolve(root, "components/app/occupancy-duration-insights-widgets.tsx"),
+  "utf8",
+);
 
 const stateMetricCards = [
-  "occupancy_duration_free",
   "occupancy_duration_average",
-  "occupancy_duration_rate",
   "occupancy_duration_transitions",
 ] as const;
 const averageByScenarioCardId =
   "occupancy_duration_average_by_scenario" as const;
+
+test("widgets de Ocupação não presumem que os objetos monitorados sejam pessoas", () => {
+  const occupancyPreferences = preferenceSource.slice(
+    preferenceSource.indexOf('key: "occupancy"'),
+    preferenceSource.indexOf("\n];", preferenceSource.indexOf('key: "occupancy"')),
+  );
+  for (const [name, source] of [
+    ["Ao Vivo", dashboardSource],
+    ["Análises e Relatórios", reportsSource],
+    ["duração", widgetSource],
+    ["insights de duração", insightsSource],
+    ["catálogo", occupancyPreferences],
+  ]) {
+    assert.doesNotMatch(source, /\bpessoas?\b/i, `${name} deve usar linguagem neutra`);
+  }
+});
 
 test("duração ao vivo consulta horas completas e deixa somente as bordas em minutos", () => {
   const from = Date.parse("2026-09-17T00:30:00.000Z");
@@ -148,7 +170,7 @@ test("widget de duração usa agregado de cenário e nunca confunde eventos anal
   assert.doesNotMatch(widgetSource, /\/analytics\/aggregate/);
 });
 
-test("indicadores de estado entram no catálogo configurável e no relatório do Ao Vivo", () => {
+test("indicadores de estado mantidos entram no catálogo configurável e no relatório do Ao Vivo", () => {
   for (const cardId of stateMetricCards) {
     assert.match(
       widgetSource,
@@ -327,8 +349,8 @@ test("resumo médio deixa médias e maiores períodos visíveis sem criar outra 
     widgetSource.indexOf("function OccupancyDurationTimelineCard"),
   );
   for (const label of [
-    "Média de pessoas",
-    "Pessoa · permanência média",
+    "Ocupação média",
+    "Permanência individual · média",
     "Área ocupada · média",
     "Área livre · média",
     "Área ocupada · máximo",
@@ -472,6 +494,43 @@ test("Tempo por cenário publica médias e índices por linha sem inferir identi
   assert.match(widgetSource, /Tempo ocupado \(%\)/);
   assert.match(widgetSource, /Mudanças mín\./);
   assert.match(widgetSource, /não representa permanência individual/);
+});
+
+test("Tempo por cenário apresenta só ocupado e desocupado como estados", () => {
+  const { buildDurationSummaryReportTable, durationUnclassifiedSeconds } =
+    loadDurationSummaryPresentationBuilders();
+  const scenario = durationSeries("mixed", "Entrada", [
+    "occupied", "transition", "free", "unknown",
+  ]);
+  assert.equal(durationUnclassifiedSeconds(scenario.summary), 120);
+
+  const report = buildDurationSummaryReportTable(
+    [scenario],
+    "Tempo por cenário",
+    "Intervalo de teste.",
+  );
+  assert.equal(report.rows[0].occupied, 1);
+  assert.equal(report.rows[0].free, 1);
+  assert.equal(report.rows[0].unclassified, 2);
+  assert.deepEqual(
+    report.columns.filter((column: RuntimeFixture) =>
+      ["occupied", "free", "unclassified"].includes(column.key),
+    ).map((column: RuntimeFixture) => column.label),
+    ["Ocupado (min)", "Desocupado (min)", "Sem tempo confirmado (min)"],
+  );
+  assert.equal(
+    report.columns.some((column: RuntimeFixture) =>
+      column.key === "transition" || column.key === "unknown"),
+    false,
+  );
+
+  const chartSource = widgetSource.slice(
+    widgetSource.indexOf("function buildOccupancyDurationByScenarioOption"),
+    widgetSource.indexOf("function buildDurationReportMetrics"),
+  );
+  assert.match(chartSource, /unclassified: durationUnclassifiedSeconds/);
+  assert.match(chartSource, /"Ocupado" : "Desocupado"/);
+  assert.doesNotMatch(chartSource, /label: "Transição"/);
 });
 
 test("Timeline e Tempo por cenário mostram médias e maiores períodos dos snapshots", () => {
@@ -1149,6 +1208,39 @@ function loadAverageByScenarioBuilders() {
   };
   return new Function(...Object.keys(bindings), output)(
     ...Object.values(bindings),
+  );
+}
+
+function loadDurationSummaryPresentationBuilders() {
+  const ast = ts.createSourceFile(
+    widgetPath,
+    widgetSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const targetNames = new Set([
+    "buildDurationSummaryReportTable",
+    "durationUnclassifiedSeconds",
+  ]);
+  const declarations = ast.statements.filter(
+    (node) =>
+      ts.isFunctionDeclaration(node) && targetNames.has(node.name?.text ?? ""),
+  );
+  assert.equal(declarations.length, targetNames.size);
+  const output = ts.transpileModule(
+    `${declarations.map((node) => node.getText(ast)).join("\n")}\nreturn { buildDurationSummaryReportTable, durationUnclassifiedSeconds };`,
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+      fileName: widgetPath,
+    },
+  ).outputText;
+  return new Function("deriveOccupancyStateMetrics", "HOUR_SECONDS", output)(
+    occupancyDuration.deriveOccupancyStateMetrics,
+    3_600,
   );
 }
 

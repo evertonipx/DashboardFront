@@ -81,13 +81,17 @@ function seriesFrom(option: unknown) {
   return Array.isArray(series) ? series : series ? [series] : [];
 }
 
-test("catálogo temporal mantém quatro widgets de duração e aposenta os contadores de sessões", () => {
+test("catálogo temporal deixa o acumulado ao summary e mantém três séries de sessões", () => {
   assert.deepEqual(OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS, [
     OCCUPANCY_LOITERING_AVERAGE_OVER_TIME_CARD_ID,
-    OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID,
     OCCUPANCY_LOITERING_PERCENTILES_BY_AREA_CARD_ID,
     OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID,
   ]);
+  assert.ok(
+    !(OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS as readonly string[]).includes(
+      OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID,
+    ),
+  );
   assert.ok(
     !(OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS as readonly string[]).includes(
       OCCUPANCY_LOITERING_SESSIONS_OVER_TIME_CARD_ID,

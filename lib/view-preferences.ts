@@ -259,21 +259,17 @@ export const cardViewMenus: CardMenuDefinition[] = [
       card("occupancy_scenario_max_hour", "Máximo por hora por cenário", "Pico de cada cenário nas horas de hoje."),
       card("occupancy_scenario_max_month", "Máximo por mês por cenário", "Pico mensal dos últimos 12 meses."),
       card("occupancy_scenario_max_year", "Máximo por ano por cenário", "Pico observado em cada um dos últimos 5 anos."),
-      card("occupancy_duration_confirmed", "Tempo ocupado confirmado", "Soma dos minutos integralmente ocupados hoje nos cenários escolhidos."),
-      card("occupancy_duration_free", "Tempo desocupado confirmado", "Soma dos minutos integralmente desocupados hoje nos cenários escolhidos."),
-      card("occupancy_duration_average", "Ocupação e permanência", "Média de pessoas detectadas, tempos da área ocupada e livre, cobertura e permanência média individual concluída por cenário e no consolidado."),
+      card("occupancy_duration_average", "Ocupação e permanência", "Ocupação média, tempos da área ocupada e livre, cobertura e permanência média individual concluída por cenário e no consolidado."),
       card("occupancy_loitering_summary", "Permanências registradas", "Registros concluídos com cenário, área, duração e horário de saída."),
       card("occupancy_duration_average_by_scenario", "Tempo médio ocupado/livre por cenário", "Tempos médios e maiores intervalos contínuos ocupado e livre, calculados pelos snapshots de cada cenário."),
       card("occupancy_loitering_minimum_by_area", "Menor permanência por área", "Menor duração concluída em cada área no período."),
       card("occupancy_loitering_maximum_by_area", "Maior permanência por área", "Maior duração concluída em cada área no período."),
       card("occupancy_loitering_range_by_area", "Faixa de permanência por área", "Menor, média e maior duração das permanências concluídas em cada área."),
       card("occupancy_loitering_average_over_time", "Permanência média no tempo", "Evolução da duração média das permanências concluídas."),
-      card("occupancy_loitering_accumulated_session_time", "Duração acumulada das permanências", "Soma das durações individuais concluídas, sem representar tempo cronológico de ocupação da área."),
+      card("occupancy_loitering_accumulated_session_time", "Duração acumulada das permanências", "Estimativa por área calculada do resumo completo: média × permanências concluídas. Não representa tempo cronológico de ocupação da área."),
       card("occupancy_loitering_percentiles_by_area", "Mediana e P90 por área", "Duração típica e percentil 90 das permanências concluídas em cada área."),
       card("occupancy_loitering_area_period_heatmap", "Permanência por área e período", "Mapa de calor da duração média das permanências concluídas por área e período."),
-      card("occupancy_duration_rate", "Taxa de tempo ocupado", "Participação ocupada no tempo com estado confirmado, excluindo minutos mistos ou sem dados."),
       card("occupancy_duration_transitions", "Estado atual confirmado", "Estado ocupado, livre, misto ou sem leitura no snapshot atual dos cenários escolhidos."),
-      card("occupancy_duration_longest", "Maior período ocupado", "Maior sequência contínua confirmada no dia atual."),
       card("occupancy_duration_load", "Carga de ocupação", "Integral da ocupação média de hoje em unidades-hora, sem inferir permanência individual."),
       card("occupancy_duration_coverage", "Cobertura da duração", "Percentual dos minutos fechados de hoje com dados disponíveis."),
       card("occupancy_duration_timeline", "Linha do tempo de ocupação", "Intervalos ocupados, livres, mistos e sem dados ao longo de hoje."),
@@ -310,6 +306,15 @@ const OCCUPANCY_DEFAULT_HIDDEN_CARD_IDS = new Set([
   "occupancy_loitering_area_period_heatmap",
 ]);
 
+// Old saved views can still pass these IDs as an explicit card list. Keep
+// them retired during normalization as well as out of the current catalogue.
+const OCCUPANCY_RETIRED_CARD_IDS = new Set([
+  "occupancy_duration_confirmed",
+  "occupancy_duration_free",
+  "occupancy_duration_rate",
+  "occupancy_duration_longest",
+]);
+
 // Widgets com novas fontes de rede incluídos depois que as primeiras visões de
 // Ocupação já estavam persistidas. Eles não devem alterar silenciosamente o
 // layout nem iniciar consultas numa visão antiga, mas continuam visíveis por
@@ -327,8 +332,6 @@ const OCCUPANCY_ADDITIVE_NETWORK_MIGRATION_CARD_IDS = new Set([
   "occupancy_hex_layout",
   "occupancy_day_hour_heatmap",
   "occupancy_scenario_hour_heatmap",
-  "occupancy_duration_confirmed",
-  "occupancy_duration_free",
   "occupancy_duration_average",
   "occupancy_loitering_summary",
   "occupancy_duration_average_by_scenario",
@@ -339,9 +342,7 @@ const OCCUPANCY_ADDITIVE_NETWORK_MIGRATION_CARD_IDS = new Set([
   "occupancy_loitering_accumulated_session_time",
   "occupancy_loitering_percentiles_by_area",
   "occupancy_loitering_area_period_heatmap",
-  "occupancy_duration_rate",
   "occupancy_duration_transitions",
-  "occupancy_duration_longest",
   "occupancy_duration_load",
   "occupancy_duration_coverage",
   "occupancy_duration_timeline",
@@ -374,10 +375,13 @@ export function normalizeCardPreferences(
     menuKey === "occupancy" &&
     Array.isArray(preferences) &&
     preferences.some(isStoredCardPreference);
+  const requestedCardIds = cardIds?.length
+    ? cardIds
+    : getCardMenuDefinition(menuKey).cards.map((card) => card.id);
   const definitionIds = new Set(
-    cardIds?.length
-      ? cardIds
-      : getCardMenuDefinition(menuKey).cards.map((card) => card.id),
+    requestedCardIds.filter(
+      (id) => menuKey !== "occupancy" || !OCCUPANCY_RETIRED_CARD_IDS.has(id),
+    ),
   );
   const byId = new Map<string, StoredCardPreference>();
   const storedOrder: string[] = [];

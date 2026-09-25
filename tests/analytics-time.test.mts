@@ -1183,7 +1183,7 @@ test("classes de objeto de ocupação usam rótulos de negócio", () => {
     occupancyObjectClass.occupancyObjectClassLabel("internal_detector_code"),
     "Objetos monitorados",
   );
-  assert.equal(occupancyObjectClass.occupancyObjectClassLabel(), "Pessoas");
+  assert.equal(occupancyObjectClass.occupancyObjectClassLabel(), "Objetos monitorados");
 });
 
 test("simulador hexagonal distingue zero certificado de célula sem vínculo", () => {
@@ -4238,6 +4238,10 @@ test("widgets de duração preservam composição, acessibilidade e resumo numé
     durationPath,
     "describeDurationScenarioComposition",
   );
+  const durationUnclassifiedSeconds = loadStandaloneFunction(
+    durationPath,
+    "durationUnclassifiedSeconds",
+  );
   const buildSummaryTable = loadStandaloneFunction(
     durationPath,
     "buildDurationSummaryReportTable",
@@ -4245,6 +4249,7 @@ test("widgets de duração preservam composição, acessibilidade e resumo numé
       HOUR_SECONDS: 3_600,
       deriveOccupancyStateMetrics:
         occupancyDuration.deriveOccupancyStateMetrics,
+      durationUnclassifiedSeconds,
     },
   );
   const compactOption = loadStandaloneFunction(
@@ -9448,7 +9453,7 @@ test("snapshots de ocupação separam leitura atual das estatísticas do interva
         scope,
       ),
     /current_value.*inválido/,
-    "a leitura atual representa pessoas e deve ser um inteiro seguro",
+    "a leitura atual representa objetos e deve ser um inteiro seguro",
   );
   assert.throws(
     () =>
@@ -9754,6 +9759,18 @@ test("snapshot histórico aceita total documentado e audita áreas quando presen
       total: 3,
     },
     "a resposta documentada pode trazer somente o total do cenário",
+  );
+  assert.equal(
+    occupancyValidation.requireOccupancyHistoryResponse(
+      {
+        ...valid,
+        areas: [{ ...valid.areas[0], area_id: "area-antiga" }],
+      },
+      "occupancy-a",
+      { requestedAt: validationScope.requestedAt },
+    ).areas?.[0].area_id,
+    "area-antiga",
+    "o histórico conserva a composição da data consultada, não a configuração atual",
   );
   const sanitizedHistory =
     occupancyValidation.requireOccupancyHistoryResponse(

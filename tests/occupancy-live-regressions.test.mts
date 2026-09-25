@@ -14,6 +14,7 @@ const ts: typeof import("typescript") = require("typescript");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cache = new Map();
 const retry = load("lib/occupancy-live-retry.ts");
+const dashboardQuery = load("lib/occupancy-dashboard-query.ts");
 const source = readFileSync(
   resolve(root, "components/app/occupancy-scenario-dashboard.tsx"),
   "utf8",
@@ -80,6 +81,72 @@ const output = ts.transpileModule(
 const live = new Function(...Object.keys(bindings), output)(
   ...Object.values(bindings),
 );
+
+test("Última leitura preserva somente o último valor certificado após falha de atualização", () => {
+  const history = {
+    as_of: "2026-09-24T14:30:00Z",
+    scenario_id: "occupancy-a",
+    total: 0,
+  };
+  assert.deepEqual(
+    dashboardQuery.resolveOccupancyLastReading(null, "Falha temporária"),
+    { asOf: null, updateUnavailable: false, value: null },
+    "sem leitura certificada anterior, falha não pode inventar zero",
+  );
+  assert.deepEqual(
+    dashboardQuery.resolveOccupancyLastReading(history, ""),
+    { asOf: history.as_of, updateUnavailable: false, value: 0 },
+    "zero certificado é um valor exibível",
+  );
+  assert.deepEqual(
+    dashboardQuery.resolveOccupancyLastReading(history, "Falha temporária"),
+    { asOf: history.as_of, updateUnavailable: true, value: 0 },
+    "a última leitura continua disponível com aviso de atualização falha",
+  );
+  assert.deepEqual(
+    dashboardQuery.resolveOccupancyLastReading(
+      { scenario_id: "occupancy-a", total: 7 },
+      "Falha temporária",
+    ),
+    { asOf: null, updateUnavailable: false, value: null },
+    "um total sem origem temporal não é última leitura certificada",
+  );
+  assert.match(source, /const certifiedHistory = hasLoadedSelectedScenario \? history : null/);
+  assert.match(source, /const currentTotal = certifiedHistoryError\s*\? null/);
+  assert.match(source, /value=\{lastReading\.value\}/);
+  assert.match(source, /lastReading\.updateUnavailable\s*\? "Última leitura certificada em"/);
+  assert.match(source, /value: reportOccupancyValue\(lastReading\.value\)/);
+});
+
+test("Última leitura usa total agregado sem certificar ocupação atual ou cruzar o cenário", () => {
+  const aggregate = { asOf: "2026-09-24T14:35:00Z", total: 7 };
+  assert.deepEqual(
+    dashboardQuery.resolveOccupancyLastReading(null, "Detalhes ausentes", aggregate),
+    {
+      aggregateOnly: true,
+      asOf: aggregate.asOf,
+      updateUnavailable: true,
+      value: 7,
+    },
+  );
+  assert.deepEqual(
+    dashboardQuery.resolveOccupancyLastReading(
+      { as_of: "2026-09-24T14:36:00Z", scenario_id: "occupancy-a", total: 5 },
+      "",
+      aggregate,
+    ),
+    { asOf: "2026-09-24T14:36:00Z", updateUnavailable: false, value: 5 },
+    "uma leitura certificada mais recente prevalece",
+  );
+  assert.equal(
+    dashboardQuery.resolveOccupancyLastReading(null, "", { ...aggregate, total: -1 }).value,
+    null,
+  );
+  assert.match(source, /aggregateLastReading\?\.scopeKey === activeDataScopeKey/);
+  assert.match(source, /const currentTotal = certifiedHistoryError\s*\? null/);
+  assert.match(source, /requireAreaSnapshots: true/);
+  assert.match(source, /lastReading\.aggregateOnly/);
+});
 
 test("falhas usam espera progressiva limitada, sem novas tentativas a cada 5 segundos", () => {
   let state: RuntimeFixture;

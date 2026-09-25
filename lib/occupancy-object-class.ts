@@ -12,6 +12,6 @@ const OCCUPANCY_OBJECT_CLASS_LABELS: Readonly<Record<string, string>> = {
 
 export function occupancyObjectClassLabel(value?: string | null) {
   const normalized = value?.trim().toLowerCase();
-  if (!normalized) return "Pessoas";
+  if (!normalized) return "Objetos monitorados";
   return OCCUPANCY_OBJECT_CLASS_LABELS[normalized] ?? "Objetos monitorados";
 }

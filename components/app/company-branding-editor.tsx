@@ -2,7 +2,8 @@
 
 import Image from "next/image";
 import * as React from "react";
-import { ImageIcon, Loader2, Upload, X } from "lucide-react";
+import { Copy, ImageIcon, Loader2, Upload, X } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -37,8 +38,8 @@ export function CompanyBrandingEditor({
       <div className="min-w-0">
         <h3 className="text-sm font-semibold text-foreground">Identidade visual</h3>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          Personalize a marca exibida para esta empresa. PNG, JPEG, GIF ou WebP,
-          com até 5 MB por imagem.
+          O logo substitui a imagem padrão na tela de login desta empresa.
+          PNG, JPEG, GIF ou WebP, com até 5 MB por imagem.
         </p>
       </div>
 
@@ -84,7 +85,20 @@ function BrandingAssetField({
   const [previewUrl, setPreviewUrl] = React.useState("");
   const [previewError, setPreviewError] = React.useState(false);
   const [loadingPreview, setLoadingPreview] = React.useState(false);
-  const label = kind === "logo" ? "Logo" : "Banner";
+  const label = kind === "logo" ? "Logo da tela de login" : "Banner";
+  const actionLabel = kind === "logo" ? "logo" : "banner";
+
+  async function copyCompanyLoginLink() {
+    if (!companyId) return;
+    const url = new URL("/login", window.location.origin);
+    url.searchParams.set("empresa", companyId);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      toast.success("Link de login da empresa copiado.");
+    } catch {
+      toast.error("Não foi possível copiar o link de login.");
+    }
+  }
 
   React.useEffect(() => {
     let active = true;
@@ -217,8 +231,20 @@ function BrandingAssetField({
         disabled={disabled}
       >
         <Upload className="h-3.5 w-3.5" />
-        {file || hasExisting ? `Trocar ${label.toLocaleLowerCase("pt-BR")}` : `Escolher ${label.toLocaleLowerCase("pt-BR")}`}
+        {file || hasExisting ? `Trocar ${actionLabel}` : `Escolher ${actionLabel}`}
       </Button>
+      {kind === "logo" && companyId ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="w-full"
+          onClick={() => void copyCompanyLoginLink()}
+        >
+          <Copy className="h-3.5 w-3.5" />
+          Copiar link de login da empresa
+        </Button>
+      ) : null}
     </div>
   );
 }

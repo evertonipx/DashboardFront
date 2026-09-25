@@ -1327,7 +1327,8 @@ export function OccupancyReportsDashboard({
                           response,
                           snapshotScenario.id,
                           {
-                            expectedAreas: snapshotScenario.areas,
+                            // A composição do cenário é histórica: as áreas
+                            // configuradas hoje podem não ser as mesmas desse dia.
                             requestedAt: currentRange.reference,
                           },
                         );
@@ -1411,13 +1412,6 @@ export function OccupancyReportsDashboard({
           setChartLoadError("");
           setClock(now);
           if (hasSuccessfulSource) setLastUpdated(new Date());
-          if (currentSnapshotResult.error && !silent) {
-            toast.error(
-              analysis && !usesLiveDay
-                ? "A leitura final do intervalo não pôde ser carregada."
-                : "A leitura atual não pôde ser carregada.",
-            );
-          }
           completedChartRequestKeyRef.current = requestScopeKey;
         } catch (error) {
           if (
@@ -2389,10 +2383,10 @@ export function OccupancyReportsDashboard({
       selectedScope?.scenario &&
       visibleCurrentSnapshot
     ) {
-      const areaValueByIdentity = new Map(
-        visibleCurrentSnapshot.areas.map((area) => [
-          JSON.stringify([area.cameraId, area.areaId]),
-          area.value,
+      const areaNameByIdentity = new Map(
+        selectedScope.scenario.areas.map((area) => [
+          JSON.stringify([area.camera_id, area.area_id]),
+          area.label,
         ]),
       );
       supplementalTables.push({
@@ -2402,21 +2396,20 @@ export function OccupancyReportsDashboard({
           { key: "status", label: "Estado", width: 20 },
         ],
         description: `Leitura final certificada em ${formatDateTime(visibleCurrentSnapshot.asOf, companyTimeZone)}.`,
-        rows: selectedScope.scenario.areas.map((area, index) => {
-          const value = areaValueByIdentity.get(
-            JSON.stringify([area.camera_id, area.area_id]),
-          );
-          return {
-            area: area.label || `Área ${index + 1}`,
-            occupancy: value ?? null,
-            status:
-              value === undefined
-                ? "Sem leitura"
-                : value > 0
-                  ? "Ocupada"
-                  : "Desocupada",
-          };
-        }),
+        rows: visibleCurrentSnapshot.areas.length
+          ? visibleCurrentSnapshot.areas.map((area, index) => ({
+              area:
+                areaNameByIdentity.get(
+                  JSON.stringify([area.cameraId, area.areaId]),
+                ) || `Área histórica ${index + 1}`,
+              occupancy: area.value,
+              status: area.value > 0 ? "Ocupada" : "Desocupada",
+            }))
+          : [{
+              area: "Total do cenário",
+              occupancy: visibleCurrentSnapshot.total,
+              status: "Detalhes por área não informados",
+            }],
         title: `Dados - ${resolveReportCardTitle("occupancy_scenario_detail", "Cenário de ocupação")}`,
       });
     }
@@ -3421,10 +3414,10 @@ function OccupancyHistoricalScenarioDetailCard({
   snapshot: CertifiedCurrentSnapshot | null;
   timeZone: string;
 }) {
-  const valueByArea = new Map(
-    (snapshot?.areas ?? []).map((area) => [
-      JSON.stringify([area.cameraId, area.areaId]),
-      area.value,
+  const nameByArea = new Map(
+    scenario.areas.map((area) => [
+      JSON.stringify([area.camera_id, area.area_id]),
+      area.label,
     ]),
   );
 
@@ -3436,7 +3429,7 @@ function OccupancyHistoricalScenarioDetailCard({
         </CardTitle>
         <CardDescription className="line-clamp-2 [overflow-wrap:anywhere]">
           {snapshot
-            ? `Fechamento em ${formatDateTime(snapshot.asOf, timeZone)} · ${occupancyObjectClassLabel(scenario.object_class)}`
+            ? `Fechamento em ${formatDateTime(snapshot.asOf, timeZone)} · objetos monitorados`
             : "Composição e leitura final das áreas no período selecionado."}
         </CardDescription>
       </CardHeader>
@@ -3447,29 +3440,33 @@ function OccupancyHistoricalScenarioDetailCard({
           <div className="flex min-h-24 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/20 px-3 text-center text-xs text-muted-foreground">
             Leitura de fechamento indisponível para este período.
           </div>
+        ) : !snapshot.areas.length ? (
+          <div className="flex min-h-24 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/20 px-3 text-center text-xs text-muted-foreground">
+            Total do cenário: {formatOccupancyValue(snapshot.total)}. A composição por área não foi informada neste período.
+          </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto rounded-md border border-border/70">
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 border-b border-border/70 bg-muted/25 px-3 py-2 text-xs font-semibold">
               <span>Área</span>
               <span className="text-right">Ocupação</span>
             </div>
-            {scenario.areas.map((area, index) => {
-              const value = valueByArea.get(
-                JSON.stringify([area.camera_id, area.area_id]),
-              );
+            {snapshot.areas.map((area, index) => {
+              const name = nameByArea.get(
+                JSON.stringify([area.cameraId, area.areaId]),
+              ) || `Área histórica ${index + 1}`;
               return (
                 <div
                   className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 border-b border-border/50 px-3 py-2 text-xs last:border-b-0"
-                  key={`${area.camera_id}:${area.area_id}`}
+                  key={`${area.cameraId}:${area.areaId}`}
                 >
                   <span
                     className="truncate"
-                    title={area.label || `Área ${index + 1}`}
+                    title={name}
                   >
-                    {area.label || `Área ${index + 1}`}
+                    {name}
                   </span>
                   <span className="font-semibold tabular-nums">
-                    {value === undefined ? "—" : formatOccupancyValue(value)}
+                    {formatOccupancyValue(area.value)}
                   </span>
                 </div>
               );
@@ -4615,7 +4612,7 @@ function buildOccupancyReportChartOption(
       valueFormatter: (value) =>
         value === null || value === undefined
           ? "-"
-          : `${formatOccupancyValue(Number(value))} pessoas`,
+          : formatOccupancyValue(Number(value)),
     },
     xAxis: {
       axisLabel: {
@@ -4774,7 +4771,7 @@ function buildOccupancyReportChartOption(
           valueFormatter: (value: number | null | undefined) =>
             value === null || value === undefined
               ? "-"
-              : `${formatOccupancyValue(Number(value))} pessoas`,
+              : formatOccupancyValue(Number(value)),
         },
         type: "line",
         z: 3,
@@ -4801,7 +4798,7 @@ function buildOccupancyReportChartOption(
           valueFormatter: (value: number | null | undefined) =>
             value === null || value === undefined
               ? "-"
-              : `${formatOccupancyValue(Number(value))} pessoas`,
+              : formatOccupancyValue(Number(value)),
         },
         type: series.effect ? "effectScatter" : "scatter",
         z: series.z,

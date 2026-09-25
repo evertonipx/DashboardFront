@@ -20,6 +20,7 @@ function loadLoginBrandingModule() {
   const compiledModule = { exports: {} };
   vm.runInNewContext(compiled, {
     URLSearchParams,
+    fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),
     exports: compiledModule.exports,
     module: compiledModule,
     process,
@@ -169,15 +170,107 @@ test("erros apresentados ao usuário ocultam rotas e identificadores internos", 
   );
 });
 
-test("branding opcional nunca bloqueia o login quando storage está indisponível", () => {
-  assert.match(
-    brandingSource,
-    /function readStoredBrandKey\(\)[\s\S]*?try \{[\s\S]*?localStorage\.getItem[\s\S]*?catch \{[\s\S]*?return ""/,
-  );
-  assert.match(
-    brandingSource,
-    /function writeStoredBrandKey\(key: string\)[\s\S]*?try \{[\s\S]*?localStorage\.setItem[\s\S]*?catch \{/,
-  );
+test("logo do login vem da empresa explícita, nunca do último tenant salvo no navegador", () => {
+  const branding = loadLoginBrandingModule();
+  const companyId = "977696b6-5bf7-4cb8-afe8-381cb8377b82";
+  const previousDefault = process.env.NEXT_PUBLIC_IPXDATA_DEFAULT_LOGIN_COMPANY_ID;
+  process.env.NEXT_PUBLIC_IPXDATA_DEFAULT_LOGIN_COMPANY_ID = companyId;
+  try {
+    assert.equal(branding.DEFAULT_LOGIN_BRANDING.logoUrl, undefined);
+    assert.equal(branding.loginBrandInitials(branding.DEFAULT_LOGIN_BRANDING.companyName), "IPX");
+    assert.equal(branding.resolveLoginCompanyId({
+      hostname: "localhost", search: `?empresa=${companyId}`,
+    } as Location), companyId);
+    assert.equal(branding.resolveLoginCompanyId({
+      hostname: "localhost", search: "",
+    } as Location), companyId);
+    assert.equal(branding.resolveLoginCompanyId({
+      hostname: "localhost", search: "?empresa=outro-cliente",
+    } as Location), "", "uma marca explícita não pode herdar o default de outra empresa");
+    assert.equal(branding.resolveLoginBranding({
+      hostname: "localhost", search: "",
+    } as Location).key, "default");
+  } finally {
+    if (previousDefault === undefined) delete process.env.NEXT_PUBLIC_IPXDATA_DEFAULT_LOGIN_COMPANY_ID;
+    else process.env.NEXT_PUBLIC_IPXDATA_DEFAULT_LOGIN_COMPANY_ID = previousDefault;
+  }
+  assert.doesNotMatch(brandingSource, /localStorage|\/jk\.png/);
+  assert.match(loginSource, /fetchPublishedLoginBranding\(companyId\)/);
+  assert.match(loginSource, /onError=\{\(\) => setFailedLogoUrl\(logoUrl\)\}/);
+});
+
+test("identidade visual pública certifica empresa e URL da imagem antes de renderizar", async () => {
+  const branding = loadLoginBrandingModule();
+  const companyId = "977696b6-5bf7-4cb8-afe8-381cb8377b82";
+  const logoUrl = `/api/login-branding/${companyId}/logo?v=${"a".repeat(64)}`;
+  const record = { companyId, companyName: "Shopping JK", logoUrl };
+  assert.deepEqual({ ...branding.publishedLoginBranding(record, companyId) }, {
+    accentColor: "#0B4EA2", companyName: "Shopping JK", key: companyId,
+    logoUrl, subtitle: "IPXData",
+  });
+  assert.equal(branding.publishedLoginBranding({ ...record, companyId: "20a13438-9963-4e9e-8945-40d95385608c" }, companyId), null);
+  assert.equal(branding.publishedLoginBranding({ ...record, logoUrl: "https://externo.example/logo.png" }, companyId), null);
+  assert.equal(branding.publishedLoginBranding({ ...record, logoUrl: `${logoUrl}&script=1` }, companyId), null);
+
+  const originalFetch = globalThis.fetch;
+  try {
+    let calls = 0;
+    let completeFetch: ((response: Response) => void) | undefined;
+    globalThis.fetch = (input, init) => {
+      calls += 1;
+      assert.equal(input, `/api/login-branding/${companyId}`);
+      assert.equal(init?.cache, "no-store");
+      return new Promise<Response>((resolve) => { completeFetch = resolve; });
+    };
+    const first = branding.fetchPublishedLoginBranding(companyId);
+    const second = branding.fetchPublishedLoginBranding(companyId);
+    assert.strictEqual(first, second, "montagens concorrentes devem compartilhar a leitura da marca");
+    assert.equal(calls, 1);
+    completeFetch?.(Response.json(record));
+    assert.equal((await first)?.logoUrl, logoUrl);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("login sem empresa consulta o logo padrão publicado, sem herdar outra empresa na URL", async () => {
+  const branding = loadLoginBrandingModule();
+  const companyId = "dcd467c6-4c4e-4517-914b-d119ee393e6c";
+  const logoUrl = `/api/login-branding/${companyId}/logo?v=${"b".repeat(64)}`;
+  const location = (search: string, hostname = "localhost") => ({
+    hostname, search,
+  }) as Location;
+  assert.equal(branding.hasExplicitLoginBrandSelection(location("")), false);
+  assert.equal(branding.hasExplicitLoginBrandSelection(location(`?empresa=${companyId}`)), true);
+  assert.equal(branding.hasExplicitLoginBrandSelection(location("?empresa=cliente-a")), true);
+  assert.equal(branding.hasExplicitLoginBrandSelection(location("", "cliente-a.example.com")), true);
+  assert.match(loginSource, /hasExplicitLoginBrandSelection\(location\)\s*\?\s*companyId\s*\?\s*fetchPublishedLoginBranding\(companyId\)/);
+  assert.match(loginSource, /fetchDefaultLoginBranding\(\)/);
+
+  const originalFetch = globalThis.fetch;
+  try {
+    let calls = 0;
+    let completeFetch: ((response: Response) => void) | undefined;
+    globalThis.fetch = (input, init) => {
+      calls += 1;
+      assert.equal(input, "/api/login-branding/default");
+      assert.equal(init?.cache, "no-store");
+      return new Promise<Response>((resolve) => { completeFetch = resolve; });
+    };
+    const first = branding.fetchDefaultLoginBranding();
+    const second = branding.fetchDefaultLoginBranding();
+    assert.strictEqual(first, second);
+    assert.equal(calls, 1);
+    completeFetch?.(Response.json({ companyId, companyName: "Cliente", logoUrl }));
+    assert.equal((await first)?.logoUrl, logoUrl);
+
+    globalThis.fetch = async () => Response.json({
+      companyId, companyName: "Cliente", logoUrl: "https://externo.example/logo.png",
+    });
+    assert.equal(await branding.fetchDefaultLoginBranding(), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("branding extremo preserva contraste e limita nomes sem separadores", () => {

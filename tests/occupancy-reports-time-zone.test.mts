@@ -348,6 +348,43 @@ test("leitura aberta prefere o lote raw e completa áreas quietas pelo históric
   );
 });
 
+test("Análises não rejeita composição histórica nem emite alerta global por leitura final opcional", () => {
+  const source = readFileSync(
+    resolve(root, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const closedBranchStart = source.indexOf(
+    ": scheduleQuery(",
+    source.indexOf("const [entries, currentSnapshotResult]"),
+  );
+  const closedBranchEnd = source.indexOf(
+    ": Promise.resolve({ data: null, error: \"\" })",
+    closedBranchStart,
+  );
+  assert.ok(closedBranchStart >= 0 && closedBranchEnd > closedBranchStart);
+  const closedBranch = source.slice(closedBranchStart, closedBranchEnd);
+  assert.match(closedBranch, /requireOccupancyHistoryResponse\(/);
+  assert.doesNotMatch(closedBranch, /expectedAreas\s*:/);
+  assert.doesNotMatch(source, /A leitura final do intervalo não pôde ser carregada\./);
+
+  const comparisonSource = readFileSync(
+    resolve(root, "components/app/occupancy-comparison-widgets.tsx"),
+    "utf8",
+  );
+  const historicalStart = comparisonSource.indexOf(
+    "if (referenceAt) {",
+    comparisonSource.indexOf("async function loadOccupancyComparisonReportSnapshots"),
+  );
+  const historicalEnd = comparisonSource.indexOf(
+    "const query = occupancyLiveSnapshotQuery",
+    historicalStart,
+  );
+  assert.ok(historicalStart >= 0 && historicalEnd > historicalStart);
+  const historicalBranch = comparisonSource.slice(historicalStart, historicalEnd);
+  assert.match(historicalBranch, /requireOccupancyHistoryResponse\(/);
+  assert.doesNotMatch(historicalBranch, /expectedAreas\s*:/);
+});
+
 function inTimeZones(zones: RuntimeFixture, run: (...args: RuntimeFixture[]) => RuntimeFixture) {
   const previous = process.env.TZ;
   try { for (const timeZone of zones) { process.env.TZ = timeZone; run(); } }

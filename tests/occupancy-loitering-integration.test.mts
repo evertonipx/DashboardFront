@@ -36,7 +36,6 @@ const summaryCardIds = [
 ] as const;
 const temporalCardIds = [
   averageOverTimeCardId,
-  accumulatedSessionTimeCardId,
   percentilesByAreaCardId,
   areaPeriodHeatmapCardId,
 ] as const;
@@ -45,10 +44,18 @@ const retiredSessionCountCardIds = [
   sessionsOverTimeCardId,
   durationDistributionCardId,
 ] as const;
-const baseLoiteringCardIds = [cardId, ...summaryCardIds] as const;
+const baseLoiteringCardIds = [
+  cardId,
+  ...summaryCardIds,
+  accumulatedSessionTimeCardId,
+] as const;
 const sessionCardIds = [cardId, ...temporalCardIds] as const;
 const loiteringCardIds = [
-  ...baseLoiteringCardIds,
+  cardId,
+  minimumCardId,
+  maximumCardId,
+  accumulatedSessionTimeCardId,
+  rangeCardId,
   ...temporalCardIds,
 ] as const;
 const loiteringPreferenceIds = [
@@ -291,7 +298,7 @@ test("widget temporal ativo isolado consulta sessions uma vez sem abrir summary"
   }
 });
 
-test("Permanência individual e os quatro temporais ativos compartilham uma sessions e um timer", async () => {
+test("Permanência individual e os três temporais ativos compartilham uma sessions e um timer", async () => {
   const fixture = createLoiteringHookFixture({
     preferences: sessionCardIds.map((id) => ({
       id,
@@ -994,6 +1001,69 @@ test("três widgets agregados reutilizam uma única consulta summary", async () 
   }
 });
 
+test("duração acumulada usa summary do período inteiro sem carregar sessions", async () => {
+  const period = {
+    contextLabel: "últimos 12 meses",
+    from: new Date("2025-09-17T03:00:00.000Z"),
+    to: new Date("2026-09-17T03:00:00.000Z"),
+  };
+  const fixture = createLoiteringHookFixture({
+    period,
+    preferences: loiteringPreferencesWithVisible(accumulatedSessionTimeCardId),
+    refreshMode: "manual",
+    requestedCardIds: new Set([accumulatedSessionTimeCardId]),
+  });
+  fixture.setSummaryResponseRows([{
+    area: "area-a",
+    avg_duration_seconds: 24.5,
+    camera_id: "camera-a",
+    max_duration_seconds: 44,
+    min_duration_seconds: 5,
+    object_class: "person",
+    session_count: 14,
+  }]);
+  try {
+    await fixture.flush();
+    assert.deepEqual(fixture.requests.map((request) => request.resource), ["summary"]);
+    assert.equal(fixture.requests[0].from.toISOString(), period.from.toISOString());
+    assert.equal(fixture.requests[0].to.toISOString(), period.to.toISOString());
+    const card = fixture.result.cards.find(
+      (candidate: RuntimeFixture) => candidate.id === accumulatedSessionTimeCardId,
+    );
+    assert.equal(card?.node({ scenarioSelection: { mode: "all", scenarioIds: [] } }).props.metric, "accumulated");
+
+    const assets = await fixture.result.loadReportAssets();
+    assert.deepEqual(fixture.requests.map((request) => request.resource), ["summary", "summary"]);
+    const chart = assets.find((asset: RuntimeFixture) => asset.cardId === accumulatedSessionTimeCardId)?.chart;
+    assert.equal(chart?.metric, "accumulated");
+    const widgets = loadLoiteringWidgets();
+    const actualChart = widgets.buildOccupancyLoiteringSummaryMetricReport({
+      areas: [],
+      scenarios: [{
+        areas: [],
+        label: "Entrada",
+        scenarioId: "scenario-a",
+        totals: {
+          avgDurationSeconds: 24.5,
+          maxDurationSeconds: 44,
+          minDurationSeconds: 5,
+          sessionCount: 14,
+        },
+      }],
+      totals: {
+        avgDurationSeconds: 24.5,
+        maxDurationSeconds: 44,
+        minDurationSeconds: 5,
+        sessionCount: 14,
+      },
+    }, period.contextLabel, "accumulated") as RuntimeFixture;
+    assert.equal(actualChart.option.series[0].data[0].rawValue, 343);
+    assert.equal(actualChart.table.rows[0].accumulatedSeconds, 343);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("áreas da mesma câmera reutilizam o único summary tenant-wide", async () => {
   const fixture = createLoiteringHookFixture({
     preferences: [
@@ -1651,8 +1721,8 @@ test("card individual usa sessions e o diálogo mantém seu detalhamento sob dem
   );
   assert.equal(
     widgetSource.match(/fetchOccupancyLoiteringSessions\(\{/g)?.length,
-    1,
-    "o diálogo deve manter uma única consulta adicional, somente ao ser aberto",
+    2,
+    "a navegação do gráfico e o diálogo consultam outro dia somente sob demanda",
   );
 });
 
@@ -1688,11 +1758,17 @@ test("gráfico individual preserva uma sessão por ponto no horário e duração
     "America/Sao_Paulo",
   ) as RuntimeFixture;
   const series = option.series as RuntimeFixture[];
-  const points = series.flatMap((candidate) => candidate.data);
+  const scatterSeries = series.filter((candidate) => candidate.type === "scatter");
+  const points = scatterSeries.flatMap((candidate) => candidate.data);
 
   assert.equal(option.xAxis.type, "time");
   assert.equal(option.yAxis.type, "value");
-  assert.deepEqual(series.map((candidate) => candidate.type), ["scatter", "scatter"]);
+  assert.equal(scatterSeries.length, 2, "cada área conserva sua série de pontos");
+  assert.deepEqual(
+    series.filter((candidate) => candidate.type === "line").map((candidate) => candidate.name),
+    ["Tendência linear"],
+    "as áreas compartilham uma única regressão linear",
+  );
   assert.equal(points.length, 3, "sessões simultâneas não podem ser deduplicadas");
   assert.deepEqual(
     points
@@ -1700,11 +1776,299 @@ test("gráfico individual preserva uma sessão por ponto no horário e duração
       .map((point) => point.value[1]),
     [21, 7],
   );
+  assert.deepEqual(
+    points.map((point) => point.value[0]),
+    [Date.parse(endedAt), Date.parse(endedAt), Date.parse("2026-09-16T17:15:40.000Z")],
+    "os pontos mantêm seus horários reais, inclusive os segundos",
+  );
   const tooltip = option.tooltip.formatter({ data: points[0] });
   assert.match(tooltip, /&lt;Entrada&gt;/);
   assert.match(tooltip, /Parado &amp; espera/);
   assert.match(tooltip, /21 s/);
   assert.ok(!tooltip.includes("camera_id"));
+});
+
+test("tendência linear considera globalmente as sessões de todas as áreas", () => {
+  const widgets = loadLoiteringWidgets();
+  const timestamps = [
+    "2026-09-16T13:01:00.000Z",
+    "2026-09-16T14:01:00.000Z",
+    "2026-09-16T15:01:00.000Z",
+  ];
+  const entries = [10, 30, 20].map((durationSeconds, index) => ({
+    areaLabel: index === 1 ? "Fila" : "Espera",
+    durationSeconds,
+    endedAt: timestamps[index],
+    key: `session-${index}`,
+    scenarioLabel: "Entrada",
+  }));
+  const option = widgets.buildOccupancyLoiteringSessionsChartOption(
+    entries,
+    "light",
+    "#1267C4",
+    "America/Sao_Paulo",
+  ) as RuntimeFixture;
+  const scatterSeries = option.series.filter(
+    (series: RuntimeFixture) => series.type === "scatter",
+  );
+  const trendSeries = option.series.filter(
+    (series: RuntimeFixture) => series.type === "line",
+  );
+  assert.equal(scatterSeries.length, 2);
+  assert.equal(scatterSeries.flatMap((series: RuntimeFixture) => series.data).length, 3);
+  assert.equal(trendSeries.length, 1);
+  assert.equal(trendSeries[0].name, "Tendência linear");
+  const trendEndpoints = trendSeries[0].data.map((datum: RuntimeFixture) =>
+    Array.isArray(datum) ? datum : datum.value,
+  );
+  assert.equal(trendEndpoints.length, 2);
+  assert.deepEqual(
+    trendEndpoints.map((point: number[]) => point[0]),
+    [Date.parse(timestamps[0]), Date.parse(timestamps[2])],
+  );
+  assert.ok(Math.abs(trendEndpoints[0][1] - 15) < 1e-9);
+  assert.ok(Math.abs(trendEndpoints[1][1] - 25) < 1e-9);
+  assert.ok(
+    Math.abs((trendEndpoints[1][1] - trendEndpoints[0][1]) / 2 - 5) < 1e-9,
+    "a inclinação dos três pontos conhecidos deve ser 5 segundos por hora",
+  );
+  assert.equal(option.tooltip.formatter({ data: trendSeries[0].data[0] }), "");
+  const chart = echarts.init(null, null, {
+    height: 260,
+    renderer: "svg",
+    ssr: true,
+    width: 600,
+  });
+  try {
+    chart.setOption(option, { lazyUpdate: false, notMerge: true });
+    assert.match(chart.renderToSVGString(), /<svg/);
+  } finally {
+    chart.dispose();
+  }
+});
+
+test("tendência na escala adaptativa usa posições log sem perder segundos auditáveis", () => {
+  const widgets = loadLoiteringWidgets();
+  const durations = [10, 789_852_493, 30];
+  const entries = durations.map((durationSeconds, index) => ({
+    areaLabel: "Espera",
+    durationSeconds,
+    endedAt: new Date(Date.parse("2026-09-16T13:01:00.000Z") + index * 3_600_000)
+      .toISOString(),
+    key: `session-${index}`,
+    scenarioLabel: "Entrada",
+  }));
+  const option = widgets.buildOccupancyLoiteringSessionsChartOption(
+    entries,
+    "light",
+    "#1267C4",
+    "America/Sao_Paulo",
+  ) as RuntimeFixture;
+  const scatterPoints = option.series
+    .filter((series: RuntimeFixture) => series.type === "scatter")
+    .flatMap((series: RuntimeFixture) => series.data);
+  const trendSeries = option.series.filter(
+    (series: RuntimeFixture) => series.type === "line",
+  );
+  assert.equal(trendSeries.length, 1);
+  assert.match(trendSeries[0].name, /Tendência linear.*escala adaptativa/);
+  assert.match(option.yAxis.name, /escala log adaptativa/);
+  assert.deepEqual(
+    scatterPoints.map((point: RuntimeFixture) => point.durationSeconds),
+    durations,
+  );
+  const extremePoint = scatterPoints[1];
+  assert.equal(extremePoint.value[1], Math.log1p(789_852_493));
+  assert.match(option.tooltip.formatter({ data: extremePoint }), /789\.852\.493 s/);
+
+  const endpoints = trendSeries[0].data as [number, number][];
+  assert.deepEqual(
+    endpoints.map(([timestamp]) => timestamp),
+    [Date.parse(entries[0].endedAt), Date.parse(entries[2].endedAt)],
+  );
+  assert.ok(endpoints.every(([, value]) => Number.isFinite(value)));
+  const transformed = durations.map((seconds) => Math.log1p(seconds));
+  const transformedMean = transformed.reduce((sum, value) => sum + value, 0) / 3;
+  const expectedSlopePerHour = (transformed[2] - transformed[0]) / 2;
+  assert.ok(
+    Math.abs(endpoints[0][1] - (transformedMean - expectedSlopePerHour)) < 1e-9,
+  );
+  assert.ok(
+    Math.abs(endpoints[1][1] - (transformedMean + expectedSlopePerHour)) < 1e-9,
+  );
+});
+
+test("um ponto ou horários coincidentes não produzem regressão linear", () => {
+  const widgets = loadLoiteringWidgets();
+  const entry = {
+    areaLabel: "Espera",
+    durationSeconds: 12,
+    endedAt: "2026-09-16T17:14:40.000Z",
+    key: "first",
+    scenarioLabel: "Entrada",
+  };
+  for (const entries of [
+    [entry],
+    [entry, { ...entry, areaLabel: "Fila", durationSeconds: 30, key: "second" }],
+  ]) {
+    const option = widgets.buildOccupancyLoiteringSessionsChartOption(
+      entries,
+      "light",
+      "#1267C4",
+      "America/Sao_Paulo",
+    ) as RuntimeFixture;
+    assert.equal(
+      option.series.filter((series: RuntimeFixture) => series.type === "line").length,
+      0,
+    );
+    assert.equal(
+      option.series
+        .filter((series: RuntimeFixture) => series.type === "scatter")
+        .flatMap((series: RuntimeFixture) => series.data).length,
+      entries.length,
+    );
+  }
+});
+
+test("permanências exibem o dia civil inteiro com precisão de minuto e sem cortar registros", () => {
+  const widgets = loadLoiteringWidgets();
+  const dayStart = new Date("2026-09-24T03:00:00.000Z");
+  const entries = Array.from({ length: 300 }, (_, index) => ({
+    areaLabel: "Espera",
+    durationSeconds: index + 1,
+    endedAt: new Date(dayStart.getTime() + index * 60_000).toISOString(),
+    key: `session-${index}`,
+    scenarioLabel: "Entrada",
+  }));
+  entries.push({
+    areaLabel: "Espera",
+    durationSeconds: 12,
+    endedAt: "2026-09-25T02:59:00.000Z",
+    key: "last-minute",
+    scenarioLabel: "Entrada",
+  });
+
+  const option = widgets.buildOccupancyLoiteringSessionsChartOption(
+    entries,
+    "light",
+    "#1267C4",
+    "America/Sao_Paulo",
+    dayStart,
+  ) as RuntimeFixture;
+  assert.equal(option.dataZoom, undefined, "não deve existir zoom inferior nem zoom interno");
+  assert.equal(option.xAxis.type, "value", "o eixo diário deve graduar cada hora local");
+  assert.equal(option.xAxis.min, dayStart.getTime());
+  assert.equal(option.xAxis.max, Date.parse("2026-09-25T03:00:00.000Z") - 1);
+  assert.equal(option.xAxis.minInterval, 60_000);
+  assert.equal(option.xAxis.interval, 3_600_000);
+  assert.match(option.xAxis.axisLabel.formatter(dayStart.getTime()), /00:00/);
+  assert.equal(option.xAxis.axisLabel.formatter(dayStart.getTime() + 60_000), "");
+  assert.match(
+    option.xAxis.axisPointer.label.formatter({ value: dayStart.getTime() + 60_000 }),
+    /00:01/,
+  );
+  assert.match(
+    option.xAxis.axisLabel.formatter(dayStart.getTime() + 3_600_000),
+    /01:00/,
+  );
+  assert.equal(
+    option.xAxis.axisLabel.formatter(Date.parse("2026-09-25T02:59:00.000Z")),
+    "",
+  );
+  assert.match(
+    option.xAxis.axisPointer.label.formatter({
+      value: Date.parse("2026-09-25T02:59:00.000Z"),
+    }),
+    /23:59/,
+  );
+  const scatterPoints = option.series
+    .filter((series: RuntimeFixture) => series.type === "scatter")
+    .flatMap((series: RuntimeFixture) => series.data);
+  assert.equal(
+    scatterPoints.length,
+    301,
+    "o gráfico diário deve preservar também os registros anteriores aos 240 mais recentes",
+  );
+  assert.ok(
+    scatterPoints.some((point: RuntimeFixture) =>
+      point.value[0] === Date.parse("2026-09-25T02:59:00.000Z")),
+    "a última sessão do dia deve permanecer no minuto exato",
+  );
+
+  const dstStart = new Date("2026-03-08T05:00:00.000Z");
+  const dstOption = widgets.buildOccupancyLoiteringSessionsChartOption(
+    [],
+    "light",
+    "#1267C4",
+    "America/New_York",
+    dstStart,
+  ) as RuntimeFixture;
+  assert.equal(dstOption.dataZoom, undefined);
+  assert.equal(dstOption.xAxis.type, "value");
+  assert.equal(dstOption.xAxis.min, dstStart.getTime());
+  assert.equal(
+    dstOption.xAxis.max,
+    Date.parse("2026-03-09T04:00:00.000Z") - 1,
+    "a janela deve seguir o dia IANA mesmo quando ele não tem 24 horas absolutas",
+  );
+  assert.equal(dstOption.xAxis.interval, 3_600_000);
+  assert.match(
+    dstOption.xAxis.axisLabel.formatter(Date.parse("2026-03-08T06:00:00.000Z")),
+    /01:00/,
+  );
+  assert.match(
+    dstOption.xAxis.axisLabel.formatter(Date.parse("2026-03-08T07:00:00.000Z")),
+    /03:00/,
+  );
+  const emptyChart = echarts.init(null, null, {
+    height: 260,
+    renderer: "svg",
+    ssr: true,
+    width: 500,
+  });
+  try {
+    emptyChart.setOption(dstOption, { lazyUpdate: false, notMerge: true });
+    assert.match(emptyChart.renderToSVGString(), /<svg/);
+  } finally {
+    emptyChart.dispose();
+  }
+});
+
+test("eixo diário de Kathmandu mantém marcas horárias apesar do deslocamento fracionário", () => {
+  const widgets = loadLoiteringWidgets();
+  const dayStart = new Date("2026-09-23T18:15:00.000Z");
+  const option = widgets.buildOccupancyLoiteringSessionsChartOption(
+    [],
+    "light",
+    "#1267C4",
+    "Asia/Kathmandu",
+    dayStart,
+  ) as RuntimeFixture;
+  assert.equal(option.xAxis.type, "value");
+  assert.equal(option.xAxis.min, dayStart.getTime());
+  assert.equal(option.xAxis.max, Date.parse("2026-09-24T18:15:00.000Z") - 1);
+  assert.equal(option.xAxis.interval, 3_600_000);
+  assert.match(option.xAxis.axisLabel.formatter(dayStart.getTime()), /00:00/);
+  assert.match(
+    option.xAxis.axisLabel.formatter(dayStart.getTime() + 3_600_000),
+    /01:00/,
+  );
+  const chart = echarts.init(null, null, {
+    height: 260,
+    renderer: "svg",
+    ssr: true,
+    width: 600,
+  });
+  try {
+    chart.setOption(option, { lazyUpdate: false, notMerge: true });
+    const ticks = (chart as RuntimeFixture).getModel().getComponent("xAxis")?.axis.scale.getTicks()
+      .map((tick: { value: number }) => tick.value) ?? [];
+    assert.ok(ticks.includes(dayStart.getTime()));
+    assert.ok(ticks.includes(dayStart.getTime() + 3_600_000));
+    assert.ok(ticks.includes(dayStart.getTime() + 23 * 3_600_000));
+  } finally {
+    chart.dispose();
+  }
 });
 
 test("gráfico de faixa representa mínimo, máximo e média sem promover quantidade de sessões", () => {
@@ -1878,12 +2242,20 @@ test("payload individual preserva zero, empate e valor extremo em uma série Cen
     "#1267C4",
     "America/Sao_Paulo",
   ) as RuntimeFixture;
-  const points = option.series.flatMap(
-    (series: RuntimeFixture) => series.data,
-  );
+  const points = option.series
+    .filter((series: RuntimeFixture) => series.type === "scatter")
+    .flatMap((series: RuntimeFixture) => series.data);
 
-  assert.equal(option.series.length, 1);
-  assert.equal(option.series[0].name, "Operação · Parado");
+  assert.deepEqual(
+    option.series
+      .filter((series: RuntimeFixture) => series.type === "scatter")
+      .map((series: RuntimeFixture) => series.name),
+    ["Operação · Parado"],
+  );
+  assert.equal(
+    option.series.filter((series: RuntimeFixture) => series.type === "line").length,
+    1,
+  );
   assert.equal(points.length, 24);
   assert.equal(points.filter((point: RuntimeFixture) => point.durationSeconds === 0).length, 2);
   assert.equal(
@@ -1944,6 +2316,12 @@ test("gráficos de sessions e summary renderizam no primeiro frame em light e da
         summaryEntries,
         theme,
         "#0F766E",
+      ),
+      widgets.buildOccupancyLoiteringSummaryMetricChartOption(
+        summaryEntries,
+        theme,
+        "accumulated",
+        "#7C3AED",
       ),
     ];
     for (const option of options) {
@@ -2029,7 +2407,9 @@ test("exportação individual preserva uma linha e um ponto por sessão real", (
   const option = chart.option as RuntimeFixture;
   assert.equal(chart.title, "Permanências registradas");
   assert.equal(
-    option.series.flatMap((series: RuntimeFixture) => series.data).length,
+    option.series
+      .filter((series: RuntimeFixture) => series.type === "scatter")
+      .flatMap((series: RuntimeFixture) => series.data).length,
     3,
     "a exportação não pode consolidar nem deduplicar sessões simultâneas",
   );
@@ -2141,7 +2521,7 @@ test("exportação média preserva a área e os segundos brutos sem expor quanti
 });
 
 test("textos focam duração e horário sem contadores nem IDs técnicos", () => {
-  assert.match(widgetSource, /Duração e horário de saída/);
+  assert.match(widgetSource, /Permanências registradas/);
   assert.doesNotMatch(
     widgetSource,
     /Exibindo[\s\S]*?\bde\b[\s\S]*?sessionEntries\.length/i,
@@ -2347,6 +2727,7 @@ function createLoiteringHookFixture(
     OCCUPANCY_LOITERING_SUMMARY_CONSUMER_CARD_IDS: [
       averageCardId,
       ...summaryCardIds,
+      accumulatedSessionTimeCardId,
     ],
     OccupancyLoiteringAverageByScenarioCard:
       "OccupancyLoiteringAverageByScenarioCard",
@@ -2357,7 +2738,7 @@ function createLoiteringHookFixture(
     buildOccupancyLoiteringReport: (model: RuntimeFixture) => ({ model }),
     buildOccupancyLoiteringRangeReport: (model: RuntimeFixture) => ({ model }),
     buildOccupancyLoiteringSummaryMetricReport:
-      (model: RuntimeFixture) => ({ model }),
+      (model: RuntimeFixture, contextLabel: string, metric: string) => ({ contextLabel, metric, model }),
   };
   const temporalLabels = Object.fromEntries(
     temporalCardIds.map((id) => [id, id]),
@@ -2655,6 +3036,12 @@ function createLoiteringHookFixture(
 }
 
 function loadLoiteringWidgets() {
+  const companyTimeZone = productionLoader<
+    typeof import("../lib/company-time-zone.ts")
+  >("lib/company-time-zone.ts");
+  const occupancyCalendar = productionLoader<
+    typeof import("../lib/occupancy-calendar.ts")
+  >("lib/occupancy-calendar.ts");
   const palette = {
     axisLine: "#CBD5E1",
     axisText: "#334155",
@@ -2680,8 +3067,8 @@ function loadLoiteringWidgets() {
       "@/components/ui/select": {},
       "@/components/ui/skeleton": {},
       "@/components/ui/table": {},
-      "@/lib/company-time-zone": {},
-      "@/lib/occupancy-calendar": {},
+      "@/lib/company-time-zone": companyTimeZone,
+      "@/lib/occupancy-calendar": occupancyCalendar,
       "@/lib/occupancy-loitering-query": {},
       "@/lib/request-cancellation": {},
       "@/lib/utils": { formatDateTime: (value: string) => value },

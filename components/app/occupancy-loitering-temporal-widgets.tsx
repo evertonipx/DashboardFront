@@ -52,9 +52,10 @@ export const OCCUPANCY_LOITERING_DURATION_DISTRIBUTION_CARD_ID =
 export const OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID =
   "occupancy_loitering_area_period_heatmap" as const;
 
+// O acumulado foi movido para /loitering/summary para cobrir o período inteiro;
+// /sessions continua reservado às séries que exigem horários individuais.
 export const OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS = [
   OCCUPANCY_LOITERING_AVERAGE_OVER_TIME_CARD_ID,
-  OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID,
   OCCUPANCY_LOITERING_PERCENTILES_BY_AREA_CARD_ID,
   OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID,
 ] as const;

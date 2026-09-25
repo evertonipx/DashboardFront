@@ -1,4 +1,5 @@
 import type { OccupancyMetricVisibility } from "@/lib/occupancy-dashboard-settings";
+import type { OccupancyScenarioHistoryResponse } from "@/lib/types";
 import type { CardPreference } from "@/lib/view-preferences";
 
 const OCCUPANCY_LIVE_SNAPSHOT_WINDOW_MS = 10 * 60_000;
@@ -7,6 +8,48 @@ const OCCUPANCY_LIVE_SNAPSHOT_CLOCK_SKEW_MS = 2 * 60_000;
 export const OCCUPANCY_LIVE_SNAPSHOT_QUERY_ID =
   "__occupancy_current_snapshot__";
 export const OCCUPANCY_LIVE_SNAPSHOT_CACHE_TTL_MS = 5_000;
+
+export type OccupancyLastReading = {
+  aggregateOnly?: boolean;
+  asOf: string | null;
+  updateUnavailable: boolean;
+  value: number | null;
+};
+
+/**
+ * Keep the last certified reading visible when a later live refresh fails.
+ * This is not a current snapshot: consumers of current state must continue
+ * to fail closed until the next successful refresh.
+ */
+export function resolveOccupancyLastReading(
+  certifiedHistory: OccupancyScenarioHistoryResponse | null,
+  refreshError: string,
+  aggregateReading?: { asOf: string; total: number } | null,
+): OccupancyLastReading {
+  const asOf = certifiedHistory?.as_of || null;
+  const aggregateAt = aggregateReading?.asOf
+    ? Date.parse(aggregateReading.asOf)
+    : NaN;
+  if (
+    aggregateReading &&
+    Number.isFinite(aggregateAt) &&
+    Number.isFinite(aggregateReading.total) &&
+    aggregateReading.total >= 0 &&
+    (!asOf || aggregateAt > Date.parse(asOf))
+  ) {
+    return {
+      aggregateOnly: true,
+      asOf: aggregateReading.asOf,
+      updateUnavailable: Boolean(refreshError),
+      value: aggregateReading.total,
+    };
+  }
+  return {
+    asOf,
+    updateUnavailable: Boolean(asOf && refreshError),
+    value: asOf ? (certifiedHistory?.total ?? null) : null,
+  };
+}
 
 /**
  * Every consumer of the tenant-wide current snapshot uses the same five-second

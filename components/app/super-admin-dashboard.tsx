@@ -60,7 +60,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ApiError, apiFetch } from "@/lib/api";
+import { ApiError, apiFetch, getStoredSession } from "@/lib/api";
 import {
   discoverCompanyUserResource,
   mutateCompanyUserResource,
@@ -2318,6 +2318,18 @@ export function SuperAdminDashboard() {
         brandingKindInProgress = null;
       }
 
+      let loginLogoSyncFailed = false;
+      try {
+        // CompanyResponse.logo_url is optional in the API. The authenticated
+        // logo endpoint, not this metadata field, determines whether an
+        // existing image should be published (or a removed image cleared).
+        await syncCompanyLoginBranding(savedCompany.id, "POST");
+      } catch {
+        // The company and any uploaded logo are already saved by the backend.
+        // This public login mirror can be retried by saving the company again.
+        loginLogoSyncFailed = true;
+      }
+
       toast.success(
         wasEditing
           ? hasPendingBranding
@@ -2327,6 +2339,11 @@ export function SuperAdminDashboard() {
             ? "Empresa criada com identidade visual."
             : "Empresa criada.",
       );
+      if (loginLogoSyncFailed) {
+        toast.warning(
+          "Empresa salva, mas o logo do login não foi atualizado. Salve novamente para tentar.",
+        );
+      }
       handleCompanyDialogOpenChange(false);
       await loadCompanies();
     } catch (error) {
@@ -2368,6 +2385,13 @@ export function SuperAdminDashboard() {
         method: "DELETE",
       });
       toast.success("Empresa excluída.");
+      try {
+        await syncCompanyLoginBranding(company.id, "DELETE");
+      } catch {
+        toast.warning(
+          "A empresa foi excluída, mas não foi possível limpar o logo público do login.",
+        );
+      }
 
       const storedScope = getStoredMasterCompanyScope();
       if (storedScope?.id === company.id) {
@@ -4908,6 +4932,42 @@ function companyBrandingSaveErrorMessage(
     `Não foi possível enviar o ${label}.`,
   );
   return `Os dados da empresa foram salvos. ${detail}`;
+}
+
+async function syncCompanyLoginBranding(
+  companyId: string,
+  method: "POST" | "DELETE",
+) {
+  let token = "";
+  // apiFetch owns proactive refresh, one retry after 401, and session-change
+  // protection. Capture the token it actually sent instead of reading a
+  // possibly expired token from localStorage before the refresh completes.
+  await apiFetch<unknown>("/auth/me", {
+    bypassReadCache: true,
+    captureAccessToken(accessToken) {
+      token = accessToken;
+    },
+    dedupe: false,
+  });
+  if (!token) throw new Error("Sessão indisponível para sincronizar o logo do login.");
+  if (getStoredSession()?.access_token !== token) {
+    throw new Error("A sessão foi alterada antes de sincronizar o logo do login.");
+  }
+
+  const response = await fetch(
+    `/api/login-branding/${encodeURIComponent(companyId)}/sync`,
+    {
+      cache: "no-store",
+      headers: { Authorization: `Bearer ${token}` },
+      method,
+    },
+  );
+  if (getStoredSession()?.access_token !== token) {
+    throw new Error("A sessão foi alterada durante a sincronização do logo do login.");
+  }
+  if (!response.ok) {
+    throw new Error("Não foi possível sincronizar o logo do login.");
+  }
 }
 
 function ExecutiveStat({

@@ -5,9 +5,7 @@ import {
   Activity,
   AlertTriangle,
   CircleOff,
-  Clock3,
   Gauge,
-  Percent,
   ShieldCheck,
   Timer,
 } from "lucide-react";
@@ -99,13 +97,9 @@ import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import { cn } from "@/lib/utils";
 
 export const OCCUPANCY_DURATION_CARD_IDS = [
-  "occupancy_duration_confirmed",
-  "occupancy_duration_free",
   "occupancy_duration_average",
   "occupancy_duration_average_by_scenario",
-  "occupancy_duration_rate",
   "occupancy_duration_transitions",
-  "occupancy_duration_longest",
   "occupancy_duration_load",
   "occupancy_duration_coverage",
   "occupancy_duration_timeline",
@@ -262,11 +256,13 @@ const EMPTY_OCCUPANCY_LOITERING_SUMMARY_ROWS:
 const EMPTY_OCCUPANCY_DURATION_SNAPSHOTS:
   readonly OccupancyScenarioSnapshot[] = [];
 
-const DURATION_STATE_ORDER: readonly OccupancyDurationState[] = [
+// Only occupied/free are operational states. A minute that changed state and
+// a minute with no reading cannot be assigned a full minute to either side.
+type OccupancyDurationDisplayState = "occupied" | "free" | "unclassified";
+const DURATION_STATE_ORDER: readonly OccupancyDurationDisplayState[] = [
   "occupied",
-  "transition",
   "free",
-  "unknown",
+  "unclassified",
 ];
 
 type OccupancyDurationTimelineState = Exclude<
@@ -289,14 +285,10 @@ const sharedDurationScenarioCaches = new Map<
 >();
 
 const CARD_LABELS: Record<OccupancyDurationCardId, string> = {
-  occupancy_duration_confirmed: "Tempo ocupado confirmado",
-  occupancy_duration_free: "Tempo desocupado confirmado",
   occupancy_duration_average: "Ocupação e permanência",
   occupancy_duration_average_by_scenario:
     "Tempo médio ocupado/livre por cenário",
-  occupancy_duration_rate: "Taxa de tempo ocupado",
   occupancy_duration_transitions: "Estado atual confirmado",
-  occupancy_duration_longest: "Maior período ocupado",
   occupancy_duration_load: "Carga de ocupação",
   occupancy_duration_coverage: "Cobertura da duração",
   occupancy_duration_timeline: "Linha do tempo de ocupação",
@@ -1235,29 +1227,6 @@ export function useOccupancyDurationCards({
     return [
     {
       ...commonCardProps,
-      ...COMPACT_METRIC_LAYOUT_DEFAULTS,
-      colorEditable: true,
-      id: "occupancy_duration_confirmed",
-      label: CARD_LABELS.occupancy_duration_confirmed,
-      node: renderMetric(
-        "confirmed",
-        CARD_LABELS.occupancy_duration_confirmed,
-      ),
-      previewKind: "metric",
-      scenarioSelectionPolicy: "aggregate",
-    },
-    {
-      ...commonCardProps,
-      ...COMPACT_METRIC_LAYOUT_DEFAULTS,
-      colorEditable: true,
-      id: "occupancy_duration_free",
-      label: CARD_LABELS.occupancy_duration_free,
-      node: renderMetric("free", CARD_LABELS.occupancy_duration_free),
-      previewKind: "metric",
-      scenarioSelectionPolicy: "aggregate",
-    },
-    {
-      ...commonCardProps,
       colorEditable: true,
       defaultHeight: "tall",
       defaultHeightLevel: 4,
@@ -1323,16 +1292,6 @@ export function useOccupancyDurationCards({
       ...commonCardProps,
       ...COMPACT_METRIC_LAYOUT_DEFAULTS,
       colorEditable: true,
-      id: "occupancy_duration_rate",
-      label: CARD_LABELS.occupancy_duration_rate,
-      node: renderMetric("rate", CARD_LABELS.occupancy_duration_rate),
-      previewKind: "metric",
-      scenarioSelectionPolicy: "aggregate",
-    },
-    {
-      ...commonCardProps,
-      ...COMPACT_METRIC_LAYOUT_DEFAULTS,
-      colorEditable: true,
       id: "occupancy_duration_transitions",
       label: durationCardLabel(
         "occupancy_duration_transitions",
@@ -1345,16 +1304,6 @@ export function useOccupancyDurationCards({
           Boolean(historicalPeriodLabel),
         ),
       ),
-      previewKind: "metric",
-      scenarioSelectionPolicy: "aggregate",
-    },
-    {
-      ...commonCardProps,
-      ...COMPACT_METRIC_LAYOUT_DEFAULTS,
-      colorEditable: true,
-      id: "occupancy_duration_longest",
-      label: CARD_LABELS.occupancy_duration_longest,
-      node: renderMetric("longest", CARD_LABELS.occupancy_duration_longest),
       previewKind: "metric",
       scenarioSelectionPolicy: "aggregate",
     },
@@ -1837,12 +1786,8 @@ export function useOccupancyDurationCards({
 }
 
 type DurationMetricKind =
-  | "confirmed"
-  | "free"
   | "average"
-  | "rate"
   | "current"
-  | "longest"
   | "load"
   | "coverage";
 
@@ -1972,9 +1917,9 @@ function OccupancyDurationAverageSummaryCard({
   const metrics = [
     {
       key: "averageOccupancy",
-      label: "Média de pessoas",
+      label: "Ocupação média",
       title:
-        "Média de pessoas detectadas por cenário nos minutos observados.",
+        "Média de objetos presentes por cenário nos minutos observados.",
       value: (summary: DurationAverageSummary) =>
         summary.averageOccupancy === null
           ? "—"
@@ -1982,7 +1927,7 @@ function OccupancyDurationAverageSummaryCard({
     },
     {
       key: "averageIndividualDwellSeconds",
-      label: "Pessoa · permanência média",
+      label: "Permanência individual · média",
       title:
         "Média ponderada das permanências concluídas; a quantidade de registros é usada somente como denominador interno.",
       value: (summary: DurationAverageSummary) =>
@@ -2204,8 +2149,8 @@ function OccupancyDurationTimelineCard({
   );
   const composition = describeDurationScenarioComposition(selectedScenarios);
   const description = historicalPeriodLabel
-    ? `No ${historicalPeriodLabel}, cada faixa representa um minuto fechado como ocupado ou desocupado; somente a apresentação incorpora transições ao estado ocupado, sem alterar os cálculos. Intervalos sem cobertura continuam identificados. Composição: ${composition.shortLabel}.`
-    : `Hoje, cada faixa representa um minuto fechado como ocupado ou desocupado; somente a apresentação incorpora transições ao estado ocupado, sem alterar os cálculos. Intervalos sem cobertura continuam identificados e horários futuros permanecem vazios. Composição: ${composition.shortLabel}.`;
+    ? `No ${historicalPeriodLabel}, cada minuto com presença detectada aparece como ocupado e os demais minutos confirmados como desocupados. A duração confirmada só inclui minutos inteiramente classificados. Intervalos sem cobertura continuam identificados. Composição: ${composition.shortLabel}.`
+    : `Hoje, cada minuto com presença detectada aparece como ocupado e os demais minutos confirmados como desocupados. A duração confirmada só inclui minutos inteiramente classificados. Intervalos sem cobertura continuam identificados e horários futuros permanecem vazios. Composição: ${composition.shortLabel}.`;
   return (
     <DurationChartCard
       chartKind="timeline"
@@ -2267,7 +2212,7 @@ function OccupancyDurationByScenarioCard({
   const composition = describeDurationScenarioComposition(selectedScenarios);
   const description = `${
     historicalPeriodLabel ? `No ${historicalPeriodLabel}` : "Hoje"
-  } por cenário: tempo ocupado, desocupado, misto e sem dados; cada linha também informa as médias contínuas ocupada e livre derivadas dos snapshots. Composição: ${composition.shortLabel}.`;
+  } por cenário: tempo ocupado e desocupado confirmados; minutos sem classificação ficam neutros. Cada linha também informa as médias contínuas dos dois estados derivadas dos snapshots. Composição: ${composition.shortLabel}.`;
   return (
     <DurationChartCard
       chartKind="comparison"
@@ -2580,8 +2525,9 @@ function DurationScenarioTextAlternative({
         state.occupiedShareOfConfirmed === null
           ? "—"
           : `${formatDecimal(state.occupiedShareOfConfirmed * 100, 1)}%`,
-      transition: formatOccupancyDuration(scenario.summary.transitionSeconds),
-      unknown: formatOccupancyDuration(scenario.summary.unknownSeconds),
+      unclassified: formatOccupancyDuration(
+        durationUnclassifiedSeconds(scenario.summary),
+      ),
     };
   });
 
@@ -2593,15 +2539,14 @@ function DurationScenarioTextAlternative({
           <tr>
             <th scope="col">Cenário</th>
             <th scope="col">Ocupado confirmado</th>
-            <th scope="col">Transição</th>
-            <th scope="col">Livre confirmado</th>
+            <th scope="col">Desocupado confirmado</th>
             <th scope="col">Média do período ocupado</th>
             <th scope="col">Média do período desocupado</th>
             <th scope="col">Maior período ocupado</th>
             <th scope="col">Maior período desocupado</th>
             <th scope="col">Taxa de tempo ocupado</th>
             <th scope="col">Mudanças mínimas de estado</th>
-            <th scope="col">Sem dados</th>
+            <th scope="col">Sem tempo confirmado</th>
             <th scope="col">Cobertura</th>
             <th scope="col">Carga de ocupação, não permanência individual</th>
           </tr>
@@ -2611,7 +2556,6 @@ function DurationScenarioTextAlternative({
             <tr key={`${series[index].scenarioId}-accessible`}>
               <th scope="row">{row.name}</th>
               <td>{row.occupied}</td>
-              <td>{row.transition}</td>
               <td>{row.free}</td>
               <td>{row.averageOccupied}</td>
               <td>{row.averageFree}</td>
@@ -2619,7 +2563,7 @@ function DurationScenarioTextAlternative({
               <td>{row.longestFree}</td>
               <td>{row.occupiedRate}</td>
               <td>{row.minimumTransitions}</td>
-              <td>{row.unknown}</td>
+              <td>{row.unclassified}</td>
               <td>{row.coverage}</td>
               <td>{row.load}</td>
             </tr>
@@ -2638,11 +2582,10 @@ function DurationScenarioTextAlternative({
                 key={`${series[index].scenarioId}-visible-summary`}
               >
                 <strong className="text-foreground">{row.name}:</strong>{" "}
-                ocupado {row.occupied}; transição {row.transition}; livre{" "}
-                {row.free}; média ocupada {row.averageOccupied}; média livre{" "}
+                ocupado {row.occupied}; desocupado {row.free}; média ocupada {row.averageOccupied}; média desocupada{" "}
                 {row.averageFree}; maior período ocupado {row.longestOccupied};{" "}
                 maior período livre {row.longestFree}; taxa ocupada {row.occupiedRate}; mudanças mínimas{" "}
-                {row.minimumTransitions}; sem dados {row.unknown}; cobertura{" "}
+                {row.minimumTransitions}; sem tempo confirmado {row.unclassified}; cobertura{" "}
                 {row.coverage}; carga{" "}
                 {row.load}.
               </p>
@@ -2892,7 +2835,7 @@ function buildOccupancyDurationTimelineOption({
       show: true,
       label: {
         description:
-          "Linha do tempo minuto a minuto por cenário. A apresentação exibe ocupado ou desocupado e incorpora transições ao estado ocupado sem alterar as métricas conservadoras. Intervalos sem cobertura permanecem identificados.",
+          "Linha do tempo minuto a minuto por cenário. Um minuto com presença detectada aparece como ocupado; as durações confirmadas só incluem minutos inteiramente classificados. Intervalos sem cobertura permanecem identificados.",
       },
     },
     dataZoom: showVerticalZoom
@@ -3409,6 +3352,10 @@ function buildOccupancyDurationAverageByScenarioOption({
   };
 }
 
+function durationUnclassifiedSeconds(summary: OccupancyDurationSummary) {
+  return summary.transitionSeconds + summary.unknownSeconds;
+}
+
 function buildOccupancyDurationByScenarioOption({
   interactive = true,
   monitorMode,
@@ -3425,13 +3372,21 @@ function buildOccupancyDurationByScenarioOption({
   const palette = getOccupancyChartPalette(theme);
   const showVerticalZoom = interactive && series.length > 8;
   const secondsByState: Record<
-    OccupancyDurationState,
+    OccupancyDurationDisplayState,
     (summary: OccupancyDurationSummary) => number
   > = {
     free: (summary) => summary.confirmedFreeSeconds,
     occupied: (summary) => summary.confirmedOccupiedSeconds,
-    transition: (summary) => summary.transitionSeconds,
-    unknown: (summary) => summary.unknownSeconds,
+    unclassified: durationUnclassifiedSeconds,
+  };
+  const displayVisual = (state: OccupancyDurationDisplayState) => {
+    if (state === "unclassified") {
+      return { ...visuals.unknown, label: "Sem tempo confirmado" };
+    }
+    return {
+      ...visuals[state],
+      label: state === "occupied" ? "Ocupado" : "Desocupado",
+    };
   };
 
   return {
@@ -3440,7 +3395,7 @@ function buildOccupancyDurationByScenarioOption({
       show: true,
       label: {
         description:
-          "Barras empilhadas por cenário com tempo ocupado confirmado, transição, livre e sem dados; as médias contínuas ocupada e livre aparecem em cada linha.",
+          "Barras empilhadas por cenário com tempo ocupado, desocupado e tempo sem classificação confirmada. Minutos mistos ou sem leitura não são atribuídos a nenhum dos dois estados.",
       },
     },
     dataZoom: showVerticalZoom
@@ -3471,7 +3426,7 @@ function buildOccupancyDurationByScenarioOption({
       top: 52,
     },
     legend: {
-      data: DURATION_STATE_ORDER.map((state) => visuals[state].label),
+      data: DURATION_STATE_ORDER.map((state) => displayVisual(state).label),
       itemHeight: 8,
       itemWidth: 14,
       left: 8,
@@ -3486,13 +3441,13 @@ function buildOccupancyDurationByScenarioOption({
       ),
       emphasis: { focus: "series" },
       itemStyle: {
-        borderColor: visuals[state].border,
-        borderWidth: state === "unknown" ? 1 : 0,
-        color: visuals[state].color,
+        borderColor: displayVisual(state).border,
+        borderWidth: state === "unclassified" ? 1 : 0,
+        color: displayVisual(state).color,
         decal:
-          state === "unknown"
+          state === "unclassified"
             ? {
-                color: visuals[state].border,
+                color: displayVisual(state).border,
                 dashArrayX: [1, 0],
                 dashArrayY: [3, 3],
                 rotation: Math.PI / 4,
@@ -3501,7 +3456,7 @@ function buildOccupancyDurationByScenarioOption({
             : undefined,
       },
       label: {
-        color: visuals[state].text,
+        color: displayVisual(state).text,
         formatter: (params: unknown) => {
           const record = isRecord(params) ? params : {};
           const hours = numericValue(record.value) ?? 0;
@@ -3515,7 +3470,7 @@ function buildOccupancyDurationByScenarioOption({
         show: true,
       },
       labelLayout: { hideOverlap: true },
-      name: visuals[state].label,
+      name: displayVisual(state).label,
       stack: "duration",
       type: "bar",
     })),
@@ -3674,12 +3629,8 @@ function buildDurationReportMetrics({
     cardId: OccupancyDurationCardId;
     kind: DurationMetricKind;
   }> = [
-    { cardId: "occupancy_duration_confirmed", kind: "confirmed" },
-    { cardId: "occupancy_duration_free", kind: "free" },
     { cardId: "occupancy_duration_average", kind: "average" },
-    { cardId: "occupancy_duration_rate", kind: "rate" },
     { cardId: "occupancy_duration_transitions", kind: "current" },
-    { cardId: "occupancy_duration_longest", kind: "longest" },
     { cardId: "occupancy_duration_load", kind: "load" },
     { cardId: "occupancy_duration_coverage", kind: "coverage" },
   ];
@@ -3892,7 +3843,7 @@ function buildDurationReportAssets({
         chart: {
           description:
             joinMessages(
-              "Visualização minuto a minuto em ocupado ou desocupado; somente no gráfico as transições aparecem como ocupado, enquanto os cálculos conservadores permanecem inalterados. O futuro permanece vazio e intervalos sem cobertura continuam identificados.",
+              "Visualização minuto a minuto em ocupado ou desocupado. Um minuto com presença detectada aparece como ocupado, mas as durações confirmadas só incluem minutos inteiramente classificados. O futuro permanece vazio e intervalos sem cobertura continuam identificados.",
               `Composição: ${timelineComposition.fullLabel}.`,
               chunks.length > 1
                 ? `Cenários ${index * MAX_REPORT_SCENARIOS_PER_CHART + 1}–${
@@ -3901,7 +3852,7 @@ function buildDurationReportAssets({
                 : undefined,
               timeZoneWarning,
             ) ??
-            "Visualização minuto a minuto em ocupado ou desocupado; somente no gráfico as transições aparecem como ocupado, enquanto os cálculos conservadores permanecem inalterados. O futuro permanece vazio e intervalos sem cobertura continuam identificados.",
+            "Visualização minuto a minuto em ocupado ou desocupado. Um minuto com presença detectada aparece como ocupado, mas as durações confirmadas só incluem minutos inteiramente classificados. O futuro permanece vazio e intervalos sem cobertura continuam identificados.",
           option: buildOccupancyDurationTimelineOption({
             interactive: false,
             monitorMode,
@@ -4085,9 +4036,8 @@ function buildDurationSummaryReportTable(
       { key: "averageFree", label: "Média desocupado (min)", numeric: true, width: 17 },
       { key: "occupiedRate", label: "Tempo ocupado (%)", numeric: true, width: 15 },
       { key: "stateChanges", label: "Mudanças mín.", numeric: true, width: 13 },
-      { key: "transition", label: "Transição (min)", numeric: true, width: 14 },
-      { key: "free", label: "Livre (min)", numeric: true, width: 13 },
-      { key: "unknown", label: "Sem dados (min)", numeric: true, width: 14 },
+      { key: "free", label: "Desocupado (min)", numeric: true, width: 15 },
+      { key: "unclassified", label: "Sem tempo confirmado (min)", numeric: true, width: 22 },
       { key: "observed", label: "Observados (min)", numeric: true, width: 14 },
       { key: "expected", label: "Esperados (min)", numeric: true, width: 14 },
       { key: "coverage", label: "Cobertura (%)", numeric: true, width: 13 },
@@ -4097,7 +4047,7 @@ function buildDurationSummaryReportTable(
       "pt-BR",
     )} intervalo(s) foram resumidos em ${series.length.toLocaleString(
       "pt-BR",
-    )} linha(s), sem truncar os totais. Médias e maiores períodos representam sequências contínuas dos estados ocupados/desocupados confirmados nos snapshots.`,
+    )} linha(s), sem truncar os totais. Minutos mistos ou sem leitura aparecem como tempo sem confirmação, sem serem somados ao ocupado ou desocupado. Médias e maiores períodos representam sequências contínuas dos estados confirmados nos snapshots.`,
     rows: series.map((scenario) => {
       const state = deriveOccupancyStateMetrics(scenario.summary);
       return {
@@ -4146,8 +4096,7 @@ function buildDurationSummaryReportTable(
             : Number((state.occupiedShareOfConfirmed * 100).toFixed(4)),
         scenario: scenario.name,
         stateChanges: state.minimumDetectedTransitions,
-        transition: scenario.summary.transitionSeconds / 60,
-        unknown: scenario.summary.unknownSeconds / 60,
+        unclassified: durationUnclassifiedSeconds(scenario.summary) / 60,
       };
     }),
     title,
@@ -4400,26 +4349,6 @@ function durationMetricDefinition(
 ) {
   const hasObservedData = stats.observedSeconds > 0;
   const periodPrefix = historicalPeriodLabel ? "No período aplicado" : "Hoje";
-  if (kind === "confirmed") {
-    return {
-      color: "#1267C4",
-      description: `${periodPrefix}: tempo mínimo confirmado; transições e ausência de dados não entram na soma.`,
-      icon: Clock3,
-      value: hasObservedData
-        ? formatOccupancyDuration(stats.confirmedOccupiedSeconds)
-        : "—",
-    };
-  }
-  if (kind === "free") {
-    return {
-      color: "#16A34A",
-      description: `${periodPrefix}: tempo mínimo confirmado sem ocupação; transições e ausência de dados não entram na soma.`,
-      icon: CircleOff,
-      value: hasObservedData
-        ? formatOccupancyDuration(stats.confirmedFreeSeconds)
-        : "—",
-    };
-  }
   if (kind === "average") {
     const averageOccupied = stats.confirmedOccupiedSequenceCount > 0
       ? stats.confirmedOccupiedSeconds /
@@ -4443,22 +4372,6 @@ function durationMetricDefinition(
         averageOccupied === null
           ? "—"
           : formatOccupancyDuration(averageOccupied),
-    };
-  }
-  if (kind === "rate") {
-    const confirmedSeconds =
-      stats.confirmedOccupiedSeconds + stats.confirmedFreeSeconds;
-    return {
-      color: "#2563EB",
-      description: `${periodPrefix}: participação ocupada somente no tempo com estado confirmado; minutos mistos e sem dados ficam fora da base.`,
-      icon: Percent,
-      value:
-        confirmedSeconds > 0
-          ? `${formatDecimal(
-              (stats.confirmedOccupiedSeconds / confirmedSeconds) * 100,
-              1,
-            )}%`
-          : "—",
     };
   }
   if (kind === "current") {
@@ -4501,23 +4414,6 @@ function durationMetricDefinition(
       },
     } as const;
     return definitions[state];
-  }
-  if (kind === "longest") {
-    return {
-      color: "#0F766E",
-      description: joinMessages(
-        `${periodPrefix}: maior sequência ocupada confirmada em um cenário; simultâneos não são unidos.`,
-        stats.confirmedFreeSequenceCount > 0
-          ? `Maior período livre: ${formatOccupancyDuration(
-              stats.longestConfirmedFreeSeconds,
-            )}.`
-          : "Nenhum período livre foi confirmado.",
-      ) ?? "Maior sequência ocupada confirmada.",
-      icon: Activity,
-      value: stats.confirmedOccupiedSequenceCount > 0
-        ? formatOccupancyDuration(stats.longestConfirmedOccupiedSeconds)
-        : "—",
-    };
   }
   if (kind === "load") {
     return {
@@ -4572,7 +4468,7 @@ function durationStateVisuals(
       transition: {
         border: "#FCD34D",
         color: "#B45309",
-        label: "Transição",
+        label: "Sem tempo confirmado",
         text: "#FFFBEB",
       },
       unknown: {
@@ -4599,7 +4495,7 @@ function durationStateVisuals(
     transition: {
       border: "#B45309",
       color: "#F59E0B",
-      label: "Transição",
+      label: "Sem tempo confirmado",
       text: "#451A03",
     },
     unknown: {
