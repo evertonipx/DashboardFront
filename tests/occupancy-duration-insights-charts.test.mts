@@ -315,6 +315,30 @@ test("exportação usa tema claro, unidades legíveis e ausência nunca vira 0% 
   assert.ok(report.table.rows.every((row: RuntimeFixture) => !row.period.startsWith("03/09/2026")));
 });
 
+test("exportação preserva o gráfico visível sem seleção como asset explicitamente vazio", () => {
+  for (const kind of charts.OCCUPANCY_DURATION_INSIGHT_CARD_IDS) {
+    const report = charts.buildOccupancyDurationInsightReport({
+      kind,
+      month,
+      series: [],
+    });
+    assert.equal(report.title, charts.OCCUPANCY_DURATION_INSIGHT_LABELS[kind]);
+    assert.equal(report.table.rows.length, 0);
+    const chart = echarts.init(null, null, {
+      height: 360,
+      renderer: "svg",
+      ssr: true,
+      width: 720,
+    });
+    try {
+      chart.setOption(report.option, { lazyUpdate: false, notMerge: true });
+      assert.doesNotMatch(chart.renderToSVGString(), /\bNaN\b|\bInfinity\b/);
+    } finally {
+      chart.dispose();
+    }
+  }
+});
+
 function build(kind: RuntimeFixture, theme: RuntimeFixture) {
   return charts.buildOccupancyDurationInsightOption({ kind, model, month, scenarioNames: series.map((item) => item.name), theme, widgetColor: "#1267C4" });
 }

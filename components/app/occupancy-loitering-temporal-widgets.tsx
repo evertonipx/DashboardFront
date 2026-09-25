@@ -53,16 +53,19 @@ export const OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID =
   "occupancy_loitering_area_period_heatmap" as const;
 
 export const OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS = [
-  OCCUPANCY_LOITERING_SESSIONS_OVER_TIME_CARD_ID,
   OCCUPANCY_LOITERING_AVERAGE_OVER_TIME_CARD_ID,
   OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID,
   OCCUPANCY_LOITERING_PERCENTILES_BY_AREA_CARD_ID,
-  OCCUPANCY_LOITERING_DURATION_DISTRIBUTION_CARD_ID,
   OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID,
 ] as const;
 
 export type OccupancyLoiteringTemporalCardId =
-  (typeof OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS)[number];
+  | typeof OCCUPANCY_LOITERING_SESSIONS_OVER_TIME_CARD_ID
+  | typeof OCCUPANCY_LOITERING_AVERAGE_OVER_TIME_CARD_ID
+  | typeof OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID
+  | typeof OCCUPANCY_LOITERING_PERCENTILES_BY_AREA_CARD_ID
+  | typeof OCCUPANCY_LOITERING_DURATION_DISTRIBUTION_CARD_ID
+  | typeof OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID;
 
 export const OCCUPANCY_LOITERING_TEMPORAL_LABELS: Record<
   OccupancyLoiteringTemporalCardId,
@@ -73,7 +76,7 @@ export const OCCUPANCY_LOITERING_TEMPORAL_LABELS: Record<
   occupancy_loitering_average_over_time:
     "Permanência média ao longo do tempo",
   occupancy_loitering_accumulated_session_time:
-    "Duração acumulada das sessões",
+    "Duração acumulada das permanências",
   occupancy_loitering_percentiles_by_area: "Mediana e P90 por área",
   occupancy_loitering_duration_distribution:
     "Distribuição das permanências",
@@ -299,7 +302,7 @@ export function OccupancyLoiteringTemporalCard({
           <Skeleton className="min-h-28 w-full flex-1" />
         ) : !option ? (
           <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/15 px-3 text-center text-xs text-muted-foreground">
-            Nenhuma sessão de permanência foi concluída no intervalo carregado.
+            Nenhuma permanência foi concluída no intervalo carregado.
           </div>
         ) : (
           <div
@@ -710,7 +713,6 @@ export function buildOccupancyLoiteringPercentilesByAreaOption(
           `<strong>${escapeHtml(labels[areaIndex])}</strong>`,
           `Mediana: <strong>${escapeHtml(formatAuditableDuration(area.stats.medianDurationSeconds))}</strong>`,
           `P90: <strong>${escapeHtml(formatAuditableDuration(area.stats.p90DurationSeconds))}</strong>`,
-          `Sessões concluídas: ${formatInteger(area.stats.count)}`,
         ].join("<br/>");
       },
       textStyle: { color: palette.tooltipText, fontSize: 12 },
@@ -988,7 +990,7 @@ export function buildOccupancyLoiteringAreaPeriodHeatmapOption(
           color: stateColors.noData,
         },
         label: { show: false },
-        name: "Sem sessão concluída",
+        name: "Sem permanência concluída",
       },
       {
         ...baseSeries,
@@ -1039,35 +1041,43 @@ export function buildOccupancyLoiteringAreaPeriodHeatmapOption(
         if (!area || !bucket) return "";
         const heading = `${labels[datum.areaIndex]} · ${bucket.label}`;
         return datum.rawValue === null
-          ? `<strong>${escapeHtml(heading)}</strong><br/>Nenhuma sessão concluída`
+          ? `<strong>${escapeHtml(heading)}</strong><br/>Sem permanência concluída`
           : [
               `<strong>${escapeHtml(heading)}</strong>`,
               `Permanência média: <strong>${escapeHtml(formatAuditableDuration(datum.rawValue))}</strong>`,
-              `Sessões concluídas: ${formatInteger(datum.count)}`,
             ].join("<br/>");
       },
       textStyle: { color: palette.tooltipText, fontSize: 12 },
       trigger: "item",
     },
-    visualMap: {
-      bottom: showHorizontalZoom ? 45 : 30,
-      calculable: false,
-      dimension: 2,
-      formatter: (value: number) => formatDurationAxis(scale.fromAxis(value)),
-      inRange: { color: colors },
-      itemHeight: 120,
-      itemWidth: 8,
-      left: "center",
-      max: maximum,
-      min: 0,
-      orient: "horizontal",
-      precision: 2,
-      seriesIndex: 1,
-      text: ["Maior", "Menor"],
-      textGap: 6,
-      textStyle: { color: palette.axisText, fontSize: 10 },
-      type: "continuous",
-    },
+    visualMap: [
+      {
+        dimension: 2,
+        pieces: [{ color: stateColors.noData, value: -1 }],
+        seriesIndex: 0,
+        show: false,
+        type: "piecewise",
+      },
+      {
+        bottom: showHorizontalZoom ? 45 : 30,
+        calculable: false,
+        dimension: 2,
+        formatter: (value: number) => formatDurationAxis(scale.fromAxis(value)),
+        inRange: { color: colors },
+        itemHeight: 120,
+        itemWidth: 8,
+        left: "center",
+        max: maximum,
+        min: 0,
+        orient: "horizontal",
+        precision: 2,
+        seriesIndex: 1,
+        text: ["Maior", "Menor"],
+        textGap: 6,
+        textStyle: { color: palette.axisText, fontSize: 10 },
+        type: "continuous",
+      },
+    ],
     xAxis: {
       axisLabel: {
         color: palette.axisText,
@@ -1122,7 +1132,7 @@ export function buildOccupancyLoiteringTemporalReportChart({
     ? ` Esta visualização usa somente a prévia efetivamente carregada (${effectiveDataContext}), e não todo o período selecionado (${contextLabel}).`
     : ` Intervalo analisado: ${effectiveDataContext}.`;
   const semanticNote =
-    " As quantidades representam sessões concluídas, não pessoas únicas. Cada sessão é agrupada pelo horário de encerramento, e sua duração integral pertence ao bucket de saída. A soma de durações representa pessoa-tempo das sessões e não o tempo cronológico de ocupação da área.";
+    " Cada permanência é agrupada pelo horário de encerramento, e sua duração integral pertence ao período de saída. A duração acumulada representa a soma das permanências e não o tempo cronológico em que a área esteve ocupada.";
   const description = `${configuration.reportDescription}.${previewNote}${semanticNote}`;
   return {
     description,
@@ -1185,7 +1195,6 @@ function buildTemporalReportTable(
       columns: [
         { key: "scenario", label: "Cenário", width: 24 },
         { key: "area", label: "Área", width: 22 },
-        { key: "sessions", label: "Sessões", numeric: true },
         { key: "median", label: "Mediana" },
         { key: "medianSeconds", label: "Mediana (s)", numeric: true },
         { key: "p90", label: "P90" },
@@ -1199,7 +1208,6 @@ function buildTemporalReportTable(
         p90: formatDuration(area.stats.p90DurationSeconds),
         p90Seconds: area.stats.p90DurationSeconds,
         scenario: scenarioLabel(area, labels[index]),
-        sessions: area.stats.count,
       })),
       title: `Dados - ${OCCUPANCY_LOITERING_TEMPORAL_LABELS[kind]}`,
     };
@@ -1241,11 +1249,10 @@ function buildTemporalReportTable(
       { key: "scenario", label: "Cenário", width: 22 },
       { key: "area", label: "Área", width: 20 },
       { key: "period", label: "Período", width: 30 },
-      { key: "sessions", label: "Sessões", numeric: true },
       { key: "average", label: "Permanência média" },
       { key: "averageSeconds", label: "Média (s)", numeric: true },
-      { key: "personTime", label: "Duração no período" },
-      { key: "personTimeSeconds", label: "Duração no período (s)", numeric: true },
+      { key: "personTime", label: "Duração concluída" },
+      { key: "personTimeSeconds", label: "Duração concluída (s)", numeric: true },
       ...(cumulative
         ? [
             { key: "accumulatedPersonTime", label: "Duração acumulada" },
@@ -1273,7 +1280,6 @@ function buildTemporalReportTable(
           personTime: formatDuration(bucket.sumDurationSeconds),
           personTimeSeconds: bucket.sumDurationSeconds,
           scenario: scenarioLabel(area, labels[areaIndex]),
-          sessions: bucket.count,
           ...(cumulative
             ? {
                 accumulatedPersonTime: formatDuration(
@@ -1304,25 +1310,25 @@ function temporalCardConfiguration(kind: OccupancyLoiteringTemporalCardId) {
     case OCCUPANCY_LOITERING_AVERAGE_OVER_TIME_CARD_ID:
       return {
         ariaDescription:
-          "Duração média das sessões concluídas em cada área ao longo do tempo.",
+          "Duração média das permanências concluídas em cada área ao longo do tempo.",
         icon: Clock3,
         reportDescription:
-          "Permanência média das sessões concluídas por área e período",
+          "Permanência média concluída por área e período",
         title,
       } as const;
     case OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID:
       return {
         ariaDescription:
-          "Soma acumulada das durações individuais das sessões concluídas, sem representar o tempo ocupado da área.",
+          "Soma acumulada das durações individuais concluídas, sem representar o tempo ocupado da área.",
         icon: Sigma,
         reportDescription:
-          "Duração acumulada das sessões concluídas por área",
+          "Duração acumulada das permanências concluídas por área",
         title,
       } as const;
     case OCCUPANCY_LOITERING_PERCENTILES_BY_AREA_CARD_ID:
       return {
         ariaDescription:
-          "Mediana e percentil noventa da duração das sessões concluídas em cada área.",
+          "Mediana e percentil noventa da duração das permanências concluídas em cada área.",
         icon: ChartNoAxesCombined,
         reportDescription:
           "Mediana e percentil noventa das permanências concluídas por área",
@@ -1340,10 +1346,10 @@ function temporalCardConfiguration(kind: OccupancyLoiteringTemporalCardId) {
     case OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID:
       return {
         ariaDescription:
-          "Mapa de calor da permanência média por área e período.",
+          "Mapa de calor da permanência média concluída por área e período.",
         icon: Grid3X3,
         reportDescription:
-          "Mapa de calor da permanência média das sessões concluídas por área e período",
+          "Mapa de calor da permanência média concluída por área e período",
         title,
       } as const;
   }
@@ -1360,11 +1366,11 @@ function temporalDescription(
       : kind === OCCUPANCY_LOITERING_DURATION_DISTRIBUTION_CARD_ID
         ? "Sessões concluídas agrupadas por faixa de duração"
         : kind === OCCUPANCY_LOITERING_PERCENTILES_BY_AREA_CARD_ID
-          ? "Duração típica e limite abaixo do qual estão 90% das sessões"
+          ? "Duração típica e limite abaixo do qual estão 90% das permanências"
           : kind === OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID
-            ? "Intensidade da permanência média em cada área e período"
+            ? "Intensidade da permanência média concluída em cada área e período"
             : kind === OCCUPANCY_LOITERING_AVERAGE_OVER_TIME_CARD_ID
-              ? "Média das sessões concluídas em cada período"
+              ? "Média das permanências concluídas em cada período"
               : "Quantidade de sessões encerradas em cada período";
   return sessionsSlicedByDay
     ? `${base} · agrupado pela saída · prévia carregada: ${effectiveDataLabel}`
@@ -1461,7 +1467,7 @@ function temporalLineTooltip(
         : `${escapeHtml(label)}: <strong>${escapeHtml(formatAuditableDuration(datum.rawValue))}</strong>`,
     );
   });
-  if (lines.length === 1) lines.push("Nenhuma sessão concluída");
+  if (lines.length === 1) lines.push("Nenhuma permanência concluída");
   if (metric === "accumulated") {
     lines.push("Soma das durações concluídas; não é tempo ocupado da área.");
   }

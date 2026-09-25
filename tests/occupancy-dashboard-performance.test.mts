@@ -32,7 +32,15 @@ const query: typeof import("../lib/occupancy-dashboard-query.ts") = loadModule("
 const scenarioSnapshots: typeof import("../lib/occupancy-scenario-snapshots.ts") = loadModule("lib/occupancy-scenario-snapshots.ts");
 const definitionIds = ["occupancy_report_hour", "occupancy_report_day", "occupancy_report_month"];
 const metricVisibility = { average: true, minimum: true, peak: true };
-const cardIds = [...definitionIds, "occupancy_report_current", "occupancy_report_average", "occupancy_report_peak", "occupancy_report_minimum"];
+const cardIds = [
+  ...definitionIds,
+  "occupancy_report_current",
+  "occupancy_active_areas",
+  "occupancy_scenario_detail",
+  "occupancy_report_average",
+  "occupancy_report_peak",
+  "occupancy_report_minimum",
+];
 const preferencesFor = (...visibleIds: string[]) => cardIds.map((id) => ({ id, visible: visibleIds.includes(id) }));
 
 test("plano de demanda não consulta widget visível antes de sua materialização", () => {
@@ -70,6 +78,7 @@ test("snapshot atual existe somente enquanto um widget demandado o consome", () 
     "occupancy_current_total",
     "occupancy_active_areas",
     "occupancy_scenario_detail",
+    "occupancy_duration_transitions",
   ]) {
     assert.equal(
       query.occupancyLiveHistoryRequired(new Set([cardId]), []),
@@ -139,6 +148,7 @@ test("snapshot consolidado compõe vários cenários com a leitura mais antiga",
       current_value: 3,
       min: 1,
       object_class: "person",
+      occupied: true,
       peak: 4,
     },
     {
@@ -149,6 +159,7 @@ test("snapshot consolidado compõe vários cenários com a leitura mais antiga",
       current_value: 5,
       min: 2,
       object_class: "person",
+      occupied: true,
       peak: 6,
     },
   ];
@@ -157,6 +168,7 @@ test("snapshot consolidado compõe vários cenários com a leitura mais antiga",
     {
       asOf: "2026-09-15T12:00:00Z",
       name: "Praça",
+      occupied: true,
       scenarioId: "scenario-a",
       total: 8,
     },
@@ -168,17 +180,20 @@ test("snapshot consolidado compõe vários cenários com a leitura mais antiga",
         {
           area_id: "area-a",
           camera_id: "camera-a",
+          occupied: true,
           snapshot_at: "2026-09-15T12:00:00Z",
           value: 3,
         },
         {
           area_id: "area-b",
           camera_id: "camera-b",
+          occupied: true,
           snapshot_at: "2026-09-15T12:00:01Z",
           value: 5,
         },
       ],
       as_of: "2026-09-15T12:00:00Z",
+      occupied: true,
       scenario_id: "scenario-a",
       total: 8,
     },
@@ -189,8 +204,103 @@ test("snapshot consolidado compõe vários cenários com a leitura mais antiga",
       scenarioSnapshots.buildOccupancyScenarioSnapshotValue(
         scenario,
         rows.slice(0, 1),
-      ),
+    ),
     /area-b.*não está disponível/,
+  );
+  const baseline = {
+    areas: [
+      {
+        area_id: "area-a",
+        camera_id: "camera-a",
+        occupied: true,
+        snapshot_at: "2026-09-15T11:59:00Z",
+        value: 2,
+      },
+      {
+        area_id: "area-b",
+        camera_id: "camera-b",
+        occupied: true,
+        snapshot_at: "2026-09-15T11:58:00Z",
+        value: 5,
+      },
+    ],
+    as_of: "2026-09-15T11:58:00Z",
+    occupied: true,
+    scenario_id: "scenario-a",
+    total: 7,
+  };
+  assert.deepEqual(
+    scenarioSnapshots.mergeOccupancyScenarioCurrentHistory(
+      scenario,
+      baseline,
+      [
+        {
+          ...rows[0],
+          avg: 0,
+          current_at: "2026-09-15T12:00:00Z",
+          current_value: 0,
+          min: 0,
+          occupied: false,
+          peak: 0,
+        },
+      ],
+    ),
+    {
+      areas: [
+        {
+          area_id: "area-a",
+          camera_id: "camera-a",
+          occupied: false,
+          snapshot_at: "2026-09-15T12:00:00Z",
+          value: 0,
+        },
+        baseline.areas[1],
+      ],
+      as_of: "2026-09-15T11:58:00Z",
+      occupied: true,
+      scenario_id: "scenario-a",
+      total: 5,
+    },
+    "uma resposta raw parcial deve atualizar somente a área recebida e preservar o baseline certificado",
+  );
+  assert.equal(
+    scenarioSnapshots.mergeOccupancyScenarioCurrentHistory(
+      scenario,
+      null,
+      rows.slice(0, 1),
+    ),
+    null,
+    "sem baseline completo o caller deve fazer um único bootstrap em /history",
+  );
+  assert.equal(
+    scenarioSnapshots.buildOccupancyScenarioSnapshotValue(scenario, [
+      {
+        ...rows[0],
+        avg: 0,
+        current_value: 0,
+        min: 0,
+        occupied: false,
+        peak: 0,
+      },
+      rows[1],
+    ]).occupied,
+    true,
+    "uma área ocupada torna ocupado o cenário multiárea",
+  );
+  assert.equal(
+    scenarioSnapshots.buildOccupancyScenarioSnapshotValue(
+      scenario,
+      rows.map((row) => ({
+        ...row,
+        avg: 0,
+        current_value: 0,
+        min: 0,
+        occupied: false,
+        peak: 0,
+      })),
+    ).occupied,
+    false,
+    "o cenário só fica livre quando todas as áreas certificadas estão livres",
   );
   assert.match(
     comparisonSource,
@@ -199,18 +309,23 @@ test("snapshot consolidado compõe vários cenários com a leitura mais antiga",
   );
   assert.match(
     comparisonSource,
-    /rows = requireOccupancyCurrentSnapshotRows\(response,[\s\S]*?!occupancyScenarioSnapshotHasCompleteCoverage\(scenario, rows\)[\s\S]*?total: null[\s\S]*?return;[\s\S]*?snapshot = buildOccupancyScenarioSnapshotValue\(scenario, rows\)/,
-    "cada cenário completo deve usar o lote raw e a cobertura ausente deve permanecer indisponível",
+    /type SnapshotCacheEntry = \{[\s\S]*?history\?: OccupancyScenarioHistoryResponse[\s\S]*?snapshot: OccupancyScenarioSnapshot/,
+    "o cache comparativo deve preservar o baseline por área junto da fotografia projetada",
   );
-  assert.doesNotMatch(
+  assert.match(
     comparisonSource,
-    /occupancyHistoryPath|loadScenarioHistorySnapshot/,
-    "o lote comparativo não pode multiplicar history por cenário a cada pulso",
+    /const merged = mergeOccupancyScenarioCurrentHistory\([\s\S]*?cached\?\.history,[\s\S]*?rows,[\s\S]*?if \(merged\) \{[\s\S]*?commitSnapshot\([\s\S]*?merged,[\s\S]*?\);[\s\S]*?return;[\s\S]*?const historyPath = occupancyComparisonHistoryPath\(/,
+    "respostas raw parciais devem reutilizar o baseline antes de considerar um bootstrap",
+  );
+  assert.match(
+    comparisonSource,
+    /const historyPath = occupancyComparisonHistoryPath\([\s\S]*?requireOccupancyHistoryResponse\([\s\S]*?expectedAreas: scenario\.areas,[\s\S]*?requireAreaSnapshots: true,[\s\S]*?commitSnapshot\([\s\S]*?history[\s\S]*?history[\s\S]*?function commitSnapshot\([\s\S]*?history: history \?\? cached\?\.history/,
+    "a ausência de baseline deve fazer um bootstrap certificado e persistente, não um fan-out recorrente",
   );
   assert.match(
     liveDashboardSource,
-    /loadFocusedLiveSnapshot\([\s\S]*?path: snapshotQuery\.path[\s\S]*?requireOccupancyCurrentSnapshotRows[\s\S]*?!occupancyScenarioSnapshotHasCompleteCoverage\(scenario, rows\)[\s\S]*?return loadHistoryFallback\(\)[\s\S]*?buildOccupancyScenarioCurrentHistory/,
-    "a leitura focal deve preferir o raw e usar history somente quando sua cobertura estiver ausente",
+    /loadFocusedLiveSnapshot\(\{[\s\S]*?previousHistory:[\s\S]*?historyRef\.current\.value[\s\S]*?async function loadFocusedLiveSnapshot\(\{[\s\S]*?previousHistory[\s\S]*?const merged = mergeOccupancyScenarioCurrentHistory\([\s\S]*?previousHistory,[\s\S]*?rows,[\s\S]*?return merged \?\? loadHistoryFallback\(\)/,
+    "a leitura focal deve mesclar o pulso parcial e consultar history somente para inicializar o baseline",
   );
   assert.match(
     liveDashboardSource,
@@ -222,6 +337,53 @@ test("snapshot consolidado compõe vários cenários com a leitura mais antiga",
     /occupancyLiveRetryReady\([\s\S]*?freshness\.retries\?\.history[\s\S]*?requireAreaSnapshots: true/,
     "o único fallback focal deve exigir prova por área e recuar depois de falhar",
   );
+});
+
+test("detalhe do cenário apresenta estado explícito e horário certificado por área", () => {
+  const detailStart = liveDashboardSource.indexOf(
+    "function OccupancyScenarioDetailCard",
+  );
+  const detailEnd = liveDashboardSource.indexOf(
+    "function occupancyAreaStatePresentation",
+    detailStart,
+  );
+  const stateEnd = liveDashboardSource.indexOf(
+    "function OccupancyAlertsCard",
+    detailEnd,
+  );
+  const detailSource = liveDashboardSource.slice(detailStart, detailEnd);
+  const stateSource = liveDashboardSource.slice(detailEnd, stateEnd);
+  const exportStart = liveDashboardSource.indexOf(
+    'if (scenario && visible.has("occupancy_scenario_detail"))',
+  );
+  const exportEnd = liveDashboardSource.indexOf(
+    'if (visible.has("occupancy_alert_list")',
+    exportStart,
+  );
+  const exportSource = liveDashboardSource.slice(exportStart, exportEnd);
+
+  assert.ok(detailStart >= 0 && detailEnd > detailStart && stateEnd > detailEnd);
+  assert.match(detailSource, /occupancyAreaStatePresentation\(currentArea\)/);
+  assert.match(detailSource, /currentArea\?\.snapshot_at/);
+  assert.match(
+    detailSource,
+    /formatDateTime\(currentArea\.snapshot_at, timeZone\)/,
+  );
+  assert.match(stateSource, /area\.occupied === true/);
+  assert.match(stateSource, /area\.occupied === false/);
+  assert.match(stateSource, /label: "Sem leitura"/);
+  assert.match(stateSource, /label: "Estado não certificado"/);
+  assert.doesNotMatch(
+    stateSource,
+    /\.value|current_value/,
+    "o estado não pode ser inferido pelo valor numérico",
+  );
+
+  assert.ok(exportStart >= 0 && exportEnd > exportStart);
+  assert.match(exportSource, /key: "state", label: "Estado"/);
+  assert.match(exportSource, /key: "snapshotAt", label: "Leitura em"/);
+  assert.match(exportSource, /occupancyAreaStatePresentation\(snapshot\)\.label/);
+  assert.match(exportSource, /formatDateTime\(snapshot\.snapshot_at, timeZone\)/);
 });
 
 test("todos os loaders secundários respeitam a mesma demanda do layout", () => {
@@ -374,6 +536,26 @@ test("somente leitura atual do cenário não consulta agregados diários nem com
     preferences: preferencesFor("occupancy_report_current"),
   });
   assert.deepEqual(plan, { definitionIds: "", comparisonDefinitionIds: "", currentSnapshot: true });
+});
+
+test("áreas e detalhe histórico compartilham exclusivamente o snapshot de fechamento", () => {
+  for (const cardId of ["occupancy_active_areas", "occupancy_scenario_detail"]) {
+    const plan = query.buildOccupancyReportResourcePlan({
+      definitionIds,
+      metricVisibility,
+      hasScenario: true,
+      preferences: preferencesFor(cardId),
+    });
+    assert.deepEqual(
+      plan,
+      {
+        definitionIds: "",
+        comparisonDefinitionIds: "",
+        currentSnapshot: true,
+      },
+      cardId,
+    );
+  }
 });
 
 test("média, pico e mínimo reutilizam uma fonte diária; ocultos não pedem rede", () => {

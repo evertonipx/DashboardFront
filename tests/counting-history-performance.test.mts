@@ -306,7 +306,10 @@ test("query dependencies stay semantic and historical defaults remain unchanged"
   assert.match(loader, /requiredCustomGranularitiesKey/);
   assert.match(analysis, /shiftOccupancyAnalysisDateInput\(\s*companyTodayInput,\s*-1/);
   assert.match(analysis, /setAnalysisRequested\(true\)/);
-  assert.match(reports, /defaultCountingReportPeriod\(\)/);
+  assert.match(
+    reports,
+    /defaultCountingReportPeriod\(new Date\(\), companyTimeZone\)/,
+  );
   assert.doesNotMatch(analysis + reports, /setInterval\(/);
   assert.match(analysis, /reconcileCountingHistoryItems\(current, next\)/);
   assert.match(reports, /reconcileCountingHistoryItems\(current, next\)/);

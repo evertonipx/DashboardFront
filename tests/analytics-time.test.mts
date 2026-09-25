@@ -298,21 +298,41 @@ test("exportação não transforma corte temporal ausente no relógio do navegad
   );
   assert.match(
     occupancyReportsSource,
-    /dataCompleteUntil: reportDataCompleteUntil,/,
+    /const payloadDataCompleteUntil = mergeOccupancyDataCompleteUntil\([\s\S]*?comparisonReportSnapshot\.dataCompleteUntil,[\s\S]*?durationReportSnapshot\.dataCompleteUntil,[\s\S]*?occupancyDurationInsights\.dataCompleteUntil,[\s\S]*?dataCompleteUntil: payloadDataCompleteUntil,/,
+  );
+  assert.match(
+    occupancyReportsSource,
+    /if \(primary === undefined\) return supplemental \?\? null;\s*if \(supplemental === undefined\) return primary;/,
   );
   assert.doesNotMatch(occupancyReportsSource, /dataCompleteUntil:\s*reportDataCompleteUntil\s*\?\?/);
 });
 
-test("comparação de ocupação distingue zero certificado de ausência", () => {
+test("comparação de ocupação usa o estado explícito sem rederivá-lo do total", () => {
   const snapshots = [
-    { name: "Fila A", scenarioId: "a", total: 0 },
-    { name: "Fila B", scenarioId: "b", total: 3 },
-    { name: "Fila C", scenarioId: "c", total: null },
+    { name: "Fila A", occupied: false, scenarioId: "a", total: 9 },
+    { name: "Fila B", occupied: true, scenarioId: "b", total: 0 },
+    { name: "Fila C", occupied: null, scenarioId: "c", total: null },
   ];
 
-  assert.equal(occupancyComparison.classifyOccupancyTotal(0), "unoccupied");
-  assert.equal(occupancyComparison.classifyOccupancyTotal(3), "occupied");
-  assert.equal(occupancyComparison.classifyOccupancyTotal(null), "unknown");
+  assert.equal(
+    occupancyComparison.classifyOccupancySnapshot(snapshots[0]),
+    "unoccupied",
+  );
+  assert.equal(
+    occupancyComparison.classifyOccupancySnapshot(snapshots[1]),
+    "occupied",
+  );
+  assert.equal(
+    occupancyComparison.classifyOccupancySnapshot(snapshots[2]),
+    "unknown",
+  );
+  assert.throws(
+    () =>
+      occupancyComparison.classifyOccupancySnapshot({
+        occupied: "sim",
+      } as DynamicFixture),
+    /estado.*inválido/i,
+  );
   assert.deepEqual(
     occupancyComparison
       .filterOccupancySnapshots(snapshots, "unoccupied")
@@ -329,9 +349,9 @@ test("comparação de ocupação distingue zero certificado de ausência", () =>
 
 test("meia rosca alterna estado e ocupação real sem apagar cenário zero", () => {
   const snapshots = [
-    { name: "Posto livre", scenarioId: "free", total: 0 },
-    { name: "Fila ocupada", scenarioId: "busy", total: 7 },
-    { name: "Sem dados", scenarioId: "missing", total: null },
+    { name: "Posto livre", occupied: false, scenarioId: "free", total: 0 },
+    { name: "Fila ocupada", occupied: true, scenarioId: "busy", total: 7 },
+    { name: "Sem dados", occupied: null, scenarioId: "missing", total: null },
   ];
   const status = occupancyComparison.buildOccupancyHalfDonutEntries(
     snapshots,
@@ -360,8 +380,8 @@ test("meia rosca alterna estado e ocupação real sem apagar cenário zero", () 
 
   const afterValueChange = occupancyComparison.buildOccupancyHalfDonutEntries(
     [
-      { name: "Posto livre", scenarioId: "free", total: 12 },
-      { name: "Fila ocupada", scenarioId: "busy", total: 1 },
+      { name: "Posto livre", occupied: true, scenarioId: "free", total: 12 },
+      { name: "Fila ocupada", occupied: true, scenarioId: "busy", total: 1 },
     ],
     "actual",
   );
@@ -374,9 +394,9 @@ test("meia rosca alterna estado e ocupação real sem apagar cenário zero", () 
 
 test("barras atuais preservam ordem, zero e ausência nos dois modos", () => {
   const snapshots = [
-    { name: "Livre", scenarioId: "free", total: 0 },
-    { name: "Sem dados", scenarioId: "missing", total: null },
-    { name: "Ocupado", scenarioId: "busy", total: 9 },
+    { name: "Livre", occupied: false, scenarioId: "free", total: 0 },
+    { name: "Sem dados", occupied: null, scenarioId: "missing", total: null },
+    { name: "Ocupado", occupied: true, scenarioId: "busy", total: 9 },
   ];
   const actual = occupancyComparison.buildOccupancyComparisonBarEntries(
     snapshots,
@@ -1184,8 +1204,8 @@ test("simulador hexagonal distingue zero certificado de célula sem vínculo", (
     preset: "custom",
     scenarios: [{ id: "free", max_total: 10, name: "Posto" }],
     snapshots: [
-      { name: "Posto", scenarioId: "free", total: 0 },
-      { name: "Cenário antigo", scenarioId: "gone", total: 99 },
+      { name: "Posto", occupied: false, scenarioId: "free", total: 0 },
+      { name: "Cenário antigo", occupied: true, scenarioId: "gone", total: 99 },
     ],
   });
 
@@ -1201,8 +1221,12 @@ test("simulador hexagonal distingue zero certificado de célula sem vínculo", (
     columns: 1,
     preset: "queue",
     scenarios: [{ id: "busy", max_total: null, name: "Fila" }],
-    snapshots: [{ name: "Fila", scenarioId: "busy", total: 7 }],
+    snapshots: [
+      { name: "Fila", occupied: false, scenarioId: "busy", total: 7 },
+    ],
   });
+  assert.equal(withoutCapacity[0].state, "unoccupied");
+  assert.equal(withoutCapacity[0].total, 7);
   assert.equal(withoutCapacity[0].capacity, null);
   assert.equal(withoutCapacity[0].utilization, null);
 });
@@ -1288,7 +1312,25 @@ test("escala hexbin é determinística para vazio, zero, ordem e teto 1/2/5", ()
   );
 });
 
-test("escala hexbin rejeita estados e números inconsistentes", () => {
+test("escala hexbin preserva estado explícito e valida apenas seus próprios números", () => {
+  const explicitStates = occupancyHexVisual.buildOccupancyHexVisualScale([
+    { capacity: 10, cellId: "free-positive", state: "unoccupied", total: 1 },
+    { capacity: 10, cellId: "busy-zero", state: "occupied", total: 0 },
+    { capacity: 10, cellId: "unknown-count", state: "unknown", total: 2 },
+  ]);
+  assert.deepEqual(
+    explicitStates.entries.map((entry: DynamicFixture) => [
+      entry.cellId,
+      entry.state,
+      entry.total,
+    ]),
+    [
+      ["free-positive", "unoccupied", 1],
+      ["busy-zero", "occupied", 0],
+      ["unknown-count", "unknown", 2],
+    ],
+    "a escala não deve rederivar estado a partir do total",
+  );
   assert.throws(
     () =>
       occupancyHexVisual.buildOccupancyHexVisualScale([
@@ -1296,13 +1338,6 @@ test("escala hexbin rejeita estados e números inconsistentes", () => {
         { capacity: 10, cellId: "duplicate", state: "occupied", total: 2 },
       ]),
     /duplicado/,
-  );
-  assert.throws(
-    () =>
-      occupancyHexVisual.buildOccupancyHexVisualScale([
-        { capacity: 10, cellId: "false-zero", state: "unoccupied", total: 1 },
-      ]),
-    /deve ter total zero/,
   );
   assert.throws(
     () =>
@@ -2189,7 +2224,11 @@ test("comparativos de Ocupação desligam fontes ocultas e atualizam a borda sem
     "needsCurrentHourMaximum",
     "needsMaximumTrend",
   ]) {
-    assert.match(source, new RegExp(`if \\(!${guard}\\) return;`));
+    assert.match(
+      source,
+      new RegExp(`if \\([^;]*!${guard}[^;]*\\) return;`),
+      `${guard} deve impedir a fonte quando nenhum widget visível a exige`,
+    );
   }
   assert.match(source, /const DEFAULT_MAXIMUM_TREND_REFRESH_MS = 60 \* 60_000/);
   assert.match(
@@ -2270,7 +2309,7 @@ test("retorno à Ocupação respeita o TTL independente de cada fonte", () => {
   );
   assert.match(
     source,
-    /return \{ cards, getReportAssets, refresh, settings, updateSettings \}/,
+    /return \{[\s\S]*?cards,[\s\S]*?getReportAssets,[\s\S]*?refresh,[\s\S]*?settings,[\s\S]*?snapshots: certifiedSnapshots,[\s\S]*?updateSettings,[\s\S]*?\};/,
     "o botão Atualizar precisa continuar forçando as fontes visíveis",
   );
 });
@@ -3878,7 +3917,7 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
   assert.match(dashboardSource, /aria-label="Cenário de ocupação em foco"/);
   assert.match(
     comparisonSource,
-    /return \{ cards, getReportAssets, refresh, settings, updateSettings \}/,
+    /return \{[\s\S]*?cards,[\s\S]*?getReportAssets,[\s\S]*?refresh,[\s\S]*?settings,[\s\S]*?snapshots: certifiedSnapshots,[\s\S]*?updateSettings,[\s\S]*?\};/,
     "o painel superior precisa atualizar a mesma preferência persistida dos widgets",
   );
   assert.equal(
@@ -4125,7 +4164,7 @@ test("exportação da Ocupação Ao Vivo inclui comparativos e duração configu
   );
   assert.match(
     durationSource,
-    /chunkDurationSeries\([\s\S]*?interactive:\s*false/,
+    /chunkDurationReportSeries\([\s\S]*?interactive:\s*false/,
     "a exportação deve dividir muitos cenários e remover o zoom interativo do arquivo estático",
   );
   assert.match(
@@ -4150,13 +4189,13 @@ test("exportação da Ocupação Ao Vivo inclui comparativos e duração configu
   );
   assert.match(
     dashboardSource,
-    /occupancyComparisonReportAssets:\s*getOccupancyComparisonReportAssets\(\)[\s\S]*?occupancyComparisonReportAssets\.forEach\(\(\{ cardId, chart \}\) =>/,
+    /occupancyComparisonReportAssets,[\s\S]*?occupancyComparisonReportAssets\.forEach\(\(\{ cardId, chart \}\) =>/,
     "o relatório deve incorporar os assets usando as preferências de ordem, visibilidade e título",
   );
   assert.match(
     dashboardSource,
-    /occupancyDurationReportAssets:\s*getOccupancyDurationReportAssets\(\)[\s\S]*?occupancyDurationInsightReportAssets:\s*occupancyDurationInsights\.getReportAssets\(\)[\s\S]*?occupancyLoiteringReportAssets:\s*occupancyLoitering\.getReportAssets\(\)[\s\S]*?\[\s*\.\.\.occupancyDurationReportAssets,\s*\.\.\.occupancyDurationInsightReportAssets,\s*\.\.\.occupancyLoiteringReportAssets,?\s*\]\.forEach\([\s\S]*?titleSuffix/,
-    "o relatório deve incorporar a linha do tempo, os comparativos e a permanência individual",
+    /await Promise\.all\(\[[\s\S]*?loadOccupancyComparisonReportAssets\(signal\),[\s\S]*?occupancyLoitering\.loadReportAssets\(signal\),[\s\S]*?loadOccupancyDurationReportSnapshot\(signal\),[\s\S]*?\]\)[\s\S]*?occupancyComparisonReportAssets,[\s\S]*?occupancyDurationReportAssets:\s*occupancyDurationReportSnapshot\.reportAssets[\s\S]*?occupancyDurationReportMetrics:\s*occupancyDurationReportSnapshot\.reportMetrics[\s\S]*?occupancyLoiteringReportAssets,[\s\S]*?\[\s*\.\.\.occupancyDurationReportAssets,\s*\.\.\.occupancyDurationInsightReportAssets,\s*\.\.\.occupancyLoiteringReportAssets,?\s*\]\.forEach\([\s\S]*?titleSuffix/,
+    "o relatório deve aguardar o snapshot completo e incorporar duração, comparativos e permanência individual",
   );
   assert.match(
     dashboardSource,
@@ -4287,7 +4326,7 @@ test("widgets de duração preservam composição, acessibilidade e resumo numé
   );
   assert.match(
     durationSource,
-    /enabled = true[\s\S]*?if \(!enabled\) return "";[\s\S]*?React\.useEffect\(\(\) => \{\s*if \(\s*!enabled\s*\|\|[\s\S]*?scopeKey: ""[\s\S]*?return;/,
+    /enabled = true[\s\S]*?const queryEnabled =[\s\S]*?if \(!queryEnabled\) return "";[\s\S]*?React\.useEffect\(\(\) => \{\s*if \(!queryEnabled \|\| !companyScopeId\.trim\(\)\) \{[\s\S]*?scopeKey: ""[\s\S]*?return;/,
     "a duração deve zerar a fonte e sair antes de criar consulta ou timer enquanto a visão hidrata",
   );
   assert.match(
@@ -8958,6 +8997,7 @@ test("descoberta de ocupação mantém snapshot como fallback do catálogo novo"
             current_value: 4,
             min: 4,
             object_class: "person",
+            occupied: true,
             peak: 4,
           },
         ],
@@ -9017,6 +9057,7 @@ test("fallback de ocupação não perde snapshots quando linhas aninhadas retorn
             current_value: 4,
             min: 4,
             object_class: "person",
+            occupied: true,
             peak: 4,
           },
         ],
@@ -9215,6 +9256,7 @@ test("snapshots de ocupação válidos preservam zero explícito", () => {
           current_at: "2026-07-22T10:30:00Z",
           current_value: 0,
           min: 0,
+          occupied: false,
           peak: 0,
         },
       ],
@@ -9227,9 +9269,10 @@ test("snapshots de ocupação válidos preservam zero explícito", () => {
       average: rows[0].avg,
       current: rows[0].current_value,
       minimum: rows[0].min,
+      occupied: rows[0].occupied,
       peak: rows[0].peak,
     },
-    { average: 0, current: 0, minimum: 0, peak: 0 },
+    { average: 0, current: 0, minimum: 0, occupied: false, peak: 0 },
   );
 });
 
@@ -9266,6 +9309,7 @@ test("descoberta de áreas preserva snapshots quando metadados legados não exis
             current_value: 5,
             min: 2,
             object_class: "person",
+            occupied: true,
             peak: 8,
           },
         ],
@@ -9357,8 +9401,18 @@ test("snapshots de ocupação separam leitura atual das estatísticas do interva
     current_at: "2026-07-22T10:30:00Z",
     current_value: 5,
     min: 2,
+    occupied: true,
     peak: 8,
   };
+
+  assert.equal(
+    occupancyValidation.requireOccupancySnapshotRows(
+      [{ ...valid, avg: 4.5 }],
+      scope,
+    )[0].avg,
+    4.5,
+    "avg continua aceitando a média fracionária documentada",
+  );
 
   assert.throws(
     () =>
@@ -9386,6 +9440,15 @@ test("snapshots de ocupação separam leitura atual das estatísticas do interva
         scope,
       ),
     /current_value.*inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancySnapshotRows(
+        [{ ...valid, current_value: 1.5 }],
+        scope,
+      ),
+    /current_value.*inválido/,
+    "a leitura atual representa pessoas e deve ser um inteiro seguro",
   );
   assert.throws(
     () =>
@@ -9422,7 +9485,14 @@ test("snapshots de ocupação separam leitura atual das estatísticas do interva
   );
   assert.equal(
     occupancyValidation.requireOccupancySnapshotRows(
-      [{ ...valid, current_at: "2026-07-22T09:30:00Z", current_value: 0 }],
+      [
+        {
+          ...valid,
+          current_at: "2026-07-22T09:30:00Z",
+          current_value: 0,
+          occupied: false,
+        },
+      ],
       scope,
     )[0].current_value,
     0,
@@ -9504,6 +9574,7 @@ test("seleção de snapshots por câmeras aceita superset e devolve somente as e
     current_value: 99,
     min: 2,
     object_class: "person",
+    occupied: true,
     peak: 8,
   };
 
@@ -9534,6 +9605,102 @@ test("seleção de snapshots por câmeras aceita superset e devolve somente as e
         scope,
       ),
     /cobertura de câmeras.*ausentes: camera-a/i,
+  );
+});
+
+test("snapshots de ocupação exigem occupied explícito e consistente", () => {
+  const scope = {
+    expectedCameraIds: ["camera-a", "camera-b"],
+    from: new Date("2026-07-22T10:00:00Z"),
+    to: new Date("2026-07-22T11:00:00Z"),
+  };
+  const row = (cameraId: string, currentValue: number) => ({
+    avg: currentValue,
+    camera_id: cameraId,
+    current_at: "2026-07-22T10:30:00Z",
+    current_value: currentValue,
+    min: currentValue,
+    peak: currentValue,
+  });
+
+  assert.deepEqual(
+    occupancyValidation
+      .requireOccupancySnapshotRows(
+        {
+          data: [
+            { ...row("camera-a", 0), occupied: false },
+            { ...row("camera-b", 4), occupied: true },
+          ],
+        },
+        scope,
+      )
+      .map((candidate: { occupied: boolean }) => candidate.occupied),
+    [false, true],
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancySnapshotRows(
+        {
+          data: [
+            { ...row("camera-a", 0), occupied: false },
+            row("camera-b", 4),
+          ],
+        },
+        scope,
+      ),
+    /occupied.*inválido/,
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancySnapshotRows(
+        {
+          data: [row("camera-a", 0), row("camera-b", 4)],
+        },
+        scope,
+      ),
+    /occupied.*inválido/,
+    "um lote inteiro sem occupied também viola o contrato Swagger",
+  );
+  for (const occupied of [null, "true", 1]) {
+    assert.throws(
+      () =>
+        occupancyValidation.requireOccupancySnapshotRows(
+          {
+            data: [
+              { ...row("camera-a", 0), occupied },
+              { ...row("camera-b", 4), occupied: true },
+            ],
+          },
+          scope,
+        ),
+      /occupied.*inválido/,
+    );
+  }
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancySnapshotRows(
+        {
+          data: [
+            { ...row("camera-a", 0), occupied: true },
+            { ...row("camera-b", 4), occupied: true },
+          ],
+        },
+        scope,
+      ),
+    /occupied divergente de current_value/,
+  );
+  assert.throws(
+    () =>
+      occupancyValidation.requireOccupancySnapshotRows(
+        {
+          data: [
+            { ...row("camera-a", 0), occupied: false, is_occupied: false },
+            { ...row("camera-b", 4), occupied: true },
+          ],
+        },
+        scope,
+      ),
+    /aliases não certificados/,
   );
 });
 
@@ -9582,10 +9749,31 @@ test("snapshot histórico aceita total documentado e audita áreas quando presen
     {
       areas: undefined,
       as_of: "2026-07-22T10:00:00Z",
+      occupied: undefined,
       scenario_id: "occupancy-a",
       total: 3,
     },
     "a resposta documentada pode trazer somente o total do cenário",
+  );
+  const sanitizedHistory =
+    occupancyValidation.requireOccupancyHistoryResponse(
+      {
+        ...valid,
+        areas: [{ ...valid.areas[0], occupied: true }],
+        occupied: true,
+      },
+      "occupancy-a",
+      validationScope,
+    );
+  assert.equal(
+    sanitizedHistory.occupied,
+    undefined,
+    "o endpoint histórico não documenta estado atual no cenário",
+  );
+  assert.equal(
+    sanitizedHistory.areas?.[0].occupied,
+    undefined,
+    "o endpoint histórico não documenta estado atual por área",
   );
   assert.equal(
     occupancyValidation.requireOccupancyHistoryResponse(
@@ -16812,7 +17000,10 @@ test("exportação executiva separa gráficos e dados sem reduzir tabelas extens
   assert.match(source, /options\.signal\?\.throwIfAborted\(\)/);
   assert.match(source, /signal: options\.signal/);
   assert.match(actionsSource, /signal: controller\.signal/);
-  assert.match(actionsSource, /if \(isExportAbort\(error, controller\.signal\)\) return;/);
+  assert.match(
+    actionsSource,
+    /const requestWasAborted = abortPendingRequestsAfterFailure\([\s\S]*?if \(requestWasAborted\) return;/,
+  );
   assert.match(source, /safeSheetName\(`Dados \$\{index \+ 1\}/);
   assert.match(source, /fitToHeight: 1/);
   assert.match(source, /pageSetup\.printTitlesRow/);

@@ -55,7 +55,12 @@ import {
   aggregateQueryIso,
   endOfAggregateBucket,
 } from "@/lib/aggregate-time";
-import { companyTimeZoneHour, requireCompanyTimeZone } from "@/lib/company-time-zone";
+import {
+  companyCalendarDate,
+  companyTimeZoneHour,
+  endOfCompanyTimeZoneHour,
+  requireCompanyTimeZone,
+} from "@/lib/company-time-zone";
 import {
   fetchOccupancyCivilAggregate,
   type OccupancyCivilAggregateUnitCache,
@@ -72,7 +77,10 @@ import {
   fetchSharedOccupancyQuery,
   sharedOccupancyCivilCapabilities,
 } from "@/lib/occupancy-shared-query";
-import { occupancyCalendarBoundaryInstant } from "@/lib/occupancy-calendar";
+import {
+  occupancyCalendarBoundaryInstant,
+  shiftOccupancyCalendarDate,
+} from "@/lib/occupancy-calendar";
 import { getOccupancyColorPalette } from "@/lib/occupancy-color-palettes";
 import {
   formatOccupancyCount,
@@ -139,6 +147,7 @@ import {
   type OccupancyComparisonMetricKey,
   type OccupancyHeatmapCell,
   type OccupancyHexPosition,
+  type OccupancyMaximumTrendRange,
   type OccupancyMaximumTrendRanges,
   type OccupancyScenarioHourlySeries,
   type OccupancyScenarioSnapshot,
@@ -148,7 +157,9 @@ import {
   occupancyScenarioColor,
 } from "@/lib/occupancy-scenario-color";
 import {
+  buildOccupancyScenarioCurrentHistory,
   buildOccupancyScenarioSnapshotValue,
+  mergeOccupancyScenarioCurrentHistory,
   occupancyScenarioSnapshotHasCompleteCoverage,
 } from "@/lib/occupancy-scenario-snapshots";
 import {
@@ -174,9 +185,12 @@ import {
 } from "@/lib/occupancy-widget-settings";
 import {
   requireOccupancyCurrentSnapshotRows,
+  requireOccupancyHistoryResponse,
 } from "@/lib/occupancy-validation";
 import {
+  OCCUPANCY_COMPARISON_REPORT_CARD_IDS,
   buildOccupancyComparisonSelectionPlan,
+  buildOccupancyComparisonReportSelectionPlan,
   filterOccupancyComparisonRows,
   occupancyComparisonSnapshotRefreshIntervalMs,
   resolveOccupancyComparisonInheritedScenarioIds,
@@ -184,11 +198,15 @@ import {
   selectOccupancyComparisonSharedSource,
 } from "@/lib/occupancy-comparison-selection";
 import type {
+  AggregateGranularity,
   OccupancyScenario,
   OccupancyScenarioAggregateResponse,
+  OccupancyScenarioHistoryResponse,
 } from "@/lib/types";
 import type { ReportChart } from "@/lib/report-export";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
+import { abortRequest, isAbortError } from "@/lib/request-cancellation";
+import { USER_GRID_HYDRATED_EVENT } from "@/lib/user-grid";
 import { cn, formatDateTime, formatNumber } from "@/lib/utils";
 import type { CardPreference } from "@/lib/view-preferences";
 
@@ -219,22 +237,14 @@ const CURRENT_HOUR_MAXIMUM_RETRY_DELAYS_MS = [
 const MAX_PARALLEL_REQUESTS = 4;
 
 export const OCCUPANCY_COMPARISON_CARD_IDS = [
-  "occupancy_scenario_half_donut",
-  "occupancy_scenario_bar_race",
-  "occupancy_scenario_max_hour",
-  "occupancy_scenario_max_month",
-  "occupancy_scenario_max_year",
-  "occupancy_hex_layout",
-  "occupancy_day_hour_heatmap",
-  "occupancy_scenario_hour_heatmap",
+  ...OCCUPANCY_COMPARISON_REPORT_CARD_IDS,
 ] as const;
 
-const OCCUPANCY_SNAPSHOT_CARD_IDS = new Set([
+const OCCUPANCY_HISTORICAL_SNAPSHOT_CARD_IDS = new Set([
   "occupancy_scenario_half_donut",
   "occupancy_scenario_bar_race",
-  "occupancy_scenario_max_hour",
-  "occupancy_scenario_max_year",
   "occupancy_hex_layout",
+  "occupancy_duration_transitions",
 ]);
 const OCCUPANCY_HOURLY_AGGREGATE_CARD_IDS = new Set([
   "occupancy_scenario_max_hour",
@@ -256,6 +266,24 @@ export type OccupancyComparisonReportAsset = {
   chart: ReportChart;
 };
 
+export type OccupancyComparisonReportSnapshot = {
+  /** Fechamento certificado pela mesma leitura que produziu os assets. */
+  dataCompleteUntil: Date | null | undefined;
+  reportAssets: OccupancyComparisonReportAsset[];
+};
+
+export type OccupancyComparisonHistoricalPeriod = {
+  /** Primeiro instante incluído na consulta. */
+  from: Date;
+  /** Primeiro instante excluído da consulta. */
+  to: Date;
+  /** Instante do fechamento exibido pelos widgets de estado. */
+  referenceAt: Date;
+  contextLabel: string;
+};
+
+export type OccupancyComparisonRefreshMode = "manual" | "poll";
+
 type SnapshotDataset = {
   loading: boolean;
   requestedAt: Date | null;
@@ -265,6 +293,7 @@ type SnapshotDataset = {
 
 type SnapshotCacheEntry = {
   completedAt: number;
+  history?: OccupancyScenarioHistoryResponse;
   refreshVersion: number;
   snapshot: OccupancyScenarioSnapshot;
 };
@@ -379,8 +408,36 @@ type SettingsState = {
 type OccupancyScenarioRow = { scenarioId: string };
 type ComparisonRetryState = { failures: number; retryAt: number };
 
+type OccupancyHistoricalComparisonRanges = {
+  hourly: OccupancyMaximumTrendRange | null;
+  maximumTrend: OccupancyMaximumTrendRanges | null;
+  scenarioHeatmap: OccupancyMaximumTrendRange | null;
+};
+
+type OccupancyHistoricalComparisonDataset = {
+  hourlyRange: OccupancyMaximumTrendRange | null;
+  hourlySeries: OccupancyScenarioHourlySeries[];
+  maximumTrendRanges: OccupancyMaximumTrendRanges | null;
+  maximumTrendSeries: OccupancyScenarioHourlySeries[];
+  scenarioHeatmapRange: OccupancyMaximumTrendRange | null;
+  scenarioHeatmapSeries: OccupancyScenarioHourlySeries[];
+  snapshots: OccupancyScenarioSnapshot[];
+};
+
+type OccupancyHistoricalComparisonLoadPlan = {
+  hourlyScenarioIds: readonly string[];
+  maximumTrendScenarioIds: readonly string[];
+  needsHourlyAggregate: boolean;
+  needsMaximumTrend: boolean;
+  needsScenarioHeatmap: boolean;
+  needsSnapshots: boolean;
+  scenarioHeatmapScenarioIds: readonly string[];
+  snapshotScenarioIds: readonly string[];
+};
+
 const EMPTY_OCCUPANCY_SNAPSHOTS: OccupancyScenarioSnapshot[] = [];
 const EMPTY_OCCUPANCY_BUCKETS: Date[] = [];
+const EMPTY_OCCUPANCY_SCENARIO_IDS: readonly string[] = [];
 const EMPTY_OCCUPANCY_HOURLY_SERIES: OccupancyScenarioHourlySeries[] = [];
 const EMPTY_OCCUPANCY_OPEN_MAXIMUM_SERIES: OccupancyScenarioOpenMaximumSeries[] = [];
 const SHARED_OCCUPANCY_SNAPSHOT_CACHE = new Map<string, SnapshotCacheEntry>();
@@ -407,17 +464,368 @@ const SHARED_OCCUPANCY_MAXIMUM_TREND_RETRIES = new Map<
 >();
 const MAX_SHARED_COMPARISON_CACHE_ENTRIES = 320;
 
+export function occupancyComparisonHistoricalPeriodKey(
+  period: OccupancyComparisonHistoricalPeriod | null | undefined,
+) {
+  if (!period) return "";
+  const normalized = requireOccupancyComparisonHistoricalPeriod(period);
+  return JSON.stringify([
+    normalized.from.getTime(),
+    normalized.to.getTime(),
+    normalized.referenceAt.getTime(),
+    normalized.contextLabel,
+  ]);
+}
+
+export function occupancyComparisonHistoricalPeriodFromKey(
+  key: string,
+): OccupancyComparisonHistoricalPeriod | null {
+  if (!key) return null;
+  const parsed = JSON.parse(key) as unknown;
+  if (!Array.isArray(parsed) || parsed.length !== 4) {
+    throw new TypeError("O período histórico de comparação é inválido.");
+  }
+  const [from, to, referenceAt, contextLabel] = parsed;
+  return requireOccupancyComparisonHistoricalPeriod({
+    contextLabel: typeof contextLabel === "string" ? contextLabel : "",
+    from: new Date(requireFiniteTimestamp(from, "início")),
+    referenceAt: new Date(
+      requireFiniteTimestamp(referenceAt, "instante de fechamento"),
+    ),
+    to: new Date(requireFiniteTimestamp(to, "fim")),
+  });
+}
+
+export function buildOccupancyHistoricalComparisonRanges({
+  dayCount,
+  needsAnnualMaximum = false,
+  needsHourlyAggregate,
+  needsHourlyHeatmap,
+  needsMaximumTrend,
+  needsScenarioHeatmap,
+  period,
+  scenarioHeatmapGranularity,
+  timeZone,
+}: {
+  dayCount: 7 | 14 | 30;
+  needsAnnualMaximum?: boolean;
+  needsHourlyAggregate: boolean;
+  needsHourlyHeatmap: boolean;
+  needsMaximumTrend: boolean;
+  needsScenarioHeatmap: boolean;
+  period: OccupancyComparisonHistoricalPeriod;
+  scenarioHeatmapGranularity: OccupancyScenarioHeatmapGranularity;
+  timeZone: string;
+}): OccupancyHistoricalComparisonRanges {
+  const stablePeriod = requireOccupancyComparisonHistoricalPeriod(period);
+  requireCompanyTimeZone(timeZone);
+  const hourlyCandidate = needsHourlyAggregate
+    ? buildOccupancyHourlyRange(
+        stablePeriod.referenceAt,
+        needsHourlyHeatmap ? dayCount : 1,
+        timeZone,
+      )
+    : null;
+  const maximumCandidate = needsMaximumTrend
+    ? buildOccupancyHistoricalMaximumTrendRanges({
+        includeAnnualSource: needsAnnualMaximum,
+        period: stablePeriod,
+        timeZone,
+      })
+    : null;
+  const scenarioCandidate =
+    needsScenarioHeatmap && scenarioHeatmapGranularity !== "hour"
+      ? buildOccupancyScenarioHeatmapRange(
+          stablePeriod.referenceAt,
+          scenarioHeatmapGranularity,
+          scenarioHeatmapGranularity === "day" ? dayCount : 7,
+          timeZone,
+        )
+      : null;
+
+  return {
+    hourly: hourlyCandidate
+      ? clipOccupancyHistoricalRange(
+          hourlyCandidate,
+          stablePeriod,
+          "hour",
+          timeZone,
+        )
+      : null,
+    maximumTrend: maximumCandidate,
+    scenarioHeatmap:
+      scenarioHeatmapGranularity === "hour"
+        ? hourlyCandidate
+          ? clipOccupancyHistoricalRange(
+              hourlyCandidate,
+              stablePeriod,
+              "hour",
+              timeZone,
+            )
+          : null
+        : scenarioCandidate
+          ? clipOccupancyHistoricalRange(
+              scenarioCandidate,
+              stablePeriod,
+              scenarioHeatmapGranularity,
+              timeZone,
+            )
+          : null,
+  };
+}
+
+function buildOccupancyHistoricalMaximumTrendRanges({
+  includeAnnualSource,
+  period,
+  timeZone,
+}: {
+  includeAnnualSource: boolean;
+  period: OccupancyComparisonHistoricalPeriod;
+  timeZone: string;
+}): OccupancyMaximumTrendRanges {
+  const currentMonth = companyCalendarDate(
+    period.referenceAt,
+    timeZone,
+    "month",
+  );
+  const lastClosedMonth =
+    occupancyCalendarBoundaryInstant(
+      shiftOccupancyCalendarDate(currentMonth, 0, 1),
+      timeZone,
+    ) <= period.to
+      ? currentMonth
+      : shiftOccupancyCalendarDate(currentMonth, 0, -1);
+  const monthlyFrom = shiftOccupancyCalendarDate(
+    lastClosedMonth,
+    0,
+    -11,
+  );
+  const monthlyTo = shiftOccupancyCalendarDate(lastClosedMonth, 0, 1);
+
+  const currentYear = companyCalendarDate(
+    period.referenceAt,
+    timeZone,
+    "year",
+  );
+  const lastClosedYear =
+    occupancyCalendarBoundaryInstant(
+      shiftOccupancyCalendarDate(currentYear, 0, 0, 1),
+      timeZone,
+    ) <= period.to
+      ? currentYear
+      : shiftOccupancyCalendarDate(currentYear, 0, 0, -1);
+  const annualFrom = shiftOccupancyCalendarDate(lastClosedYear, 0, 0, -3);
+  const annualTo = shiftOccupancyCalendarDate(lastClosedYear, 0, 0, 1);
+  const hourlyCandidate = buildOccupancyMaximumTrendRanges(
+    period.referenceAt,
+    timeZone,
+  ).hourly;
+
+  return {
+    annual: {
+      buckets: listOccupancyHistoricalCivilBuckets(
+        annualFrom,
+        annualTo,
+        "year",
+      ),
+      from: annualFrom,
+      to: annualTo,
+    },
+    hourly:
+      clipOccupancyHistoricalRange(
+        hourlyCandidate,
+        period,
+        "hour",
+        timeZone,
+      ) ?? emptyOccupancyHistoricalRange(period.referenceAt),
+    monthly: {
+      buckets: listOccupancyHistoricalCivilBuckets(
+        monthlyFrom,
+        monthlyTo,
+        "month",
+      ),
+      from: monthlyFrom,
+      to: monthlyTo,
+    },
+    monthlySource: {
+      buckets: listOccupancyHistoricalCivilBuckets(
+        includeAnnualSource ? annualFrom : monthlyFrom,
+        monthlyTo,
+        "month",
+      ),
+      from: includeAnnualSource ? annualFrom : monthlyFrom,
+      to: monthlyTo,
+    },
+  };
+}
+
+function listOccupancyHistoricalCivilBuckets(
+  from: Date,
+  to: Date,
+  granularity: "month" | "year",
+) {
+  const buckets: Date[] = [];
+  let cursor = new Date(from);
+  while (cursor < to) {
+    buckets.push(new Date(cursor));
+    cursor = shiftOccupancyCalendarDate(
+      cursor,
+      0,
+      granularity === "month" ? 1 : 0,
+      granularity === "year" ? 1 : 0,
+    );
+    if (buckets.length > 60) {
+      throw new RangeError("A janela histórica de máximos excedeu o limite.");
+    }
+  }
+  return buckets;
+}
+
+function requireOccupancyComparisonHistoricalPeriod(
+  period: OccupancyComparisonHistoricalPeriod,
+): OccupancyComparisonHistoricalPeriod {
+  const from = requireHistoricalDate(period.from, "início");
+  const to = requireHistoricalDate(period.to, "fim");
+  const referenceAt = requireHistoricalDate(
+    period.referenceAt,
+    "instante de fechamento",
+  );
+  if (from >= to) {
+    throw new RangeError("O período histórico de comparação deve ser crescente.");
+  }
+  if (referenceAt < from || referenceAt >= to) {
+    throw new RangeError(
+      "O instante de fechamento deve pertencer ao período histórico de comparação.",
+    );
+  }
+  return {
+    contextLabel: period.contextLabel.trim() || "período selecionado",
+    from,
+    referenceAt,
+    to,
+  };
+}
+
+function requireHistoricalDate(value: Date, label: string) {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw new TypeError(`O ${label} do período histórico é inválido.`);
+  }
+  return new Date(value);
+}
+
+function requireFiniteTimestamp(value: unknown, label: string) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`O ${label} do período histórico é inválido.`);
+  }
+  return value;
+}
+
+function clipOccupancyHistoricalRange(
+  range: OccupancyMaximumTrendRange,
+  period: OccupancyComparisonHistoricalPeriod,
+  granularity: AggregateGranularity,
+  timeZone: string,
+): OccupancyMaximumTrendRange | null {
+  const buckets = range.buckets.filter((bucket) => {
+    const bounds = occupancyHistoricalBucketBounds(
+      bucket,
+      granularity,
+      timeZone,
+    );
+    return bounds.from >= period.from && bounds.to <= period.to;
+  });
+  if (!buckets.length) return null;
+  const from = new Date(buckets[0]);
+  const to = occupancyHistoricalBucketQueryEnd(
+    buckets.at(-1)!,
+    granularity,
+    timeZone,
+  );
+  return from < to ? { buckets, from, to } : null;
+}
+
+function occupancyHistoricalBucketBounds(
+  bucket: Date,
+  granularity: AggregateGranularity,
+  timeZone: string,
+) {
+  if (granularity === "minute") {
+    return {
+      from: new Date(bucket),
+      to: new Date(bucket.getTime() + 60_000),
+    };
+  }
+  if (granularity === "hour") {
+    return {
+      from: new Date(bucket),
+      to: endOfCompanyTimeZoneHour(bucket, timeZone),
+    };
+  }
+  const end = occupancyHistoricalCivilBucketEnd(bucket, granularity);
+  return {
+    from: occupancyCalendarBoundaryInstant(bucket, timeZone),
+    to: occupancyCalendarBoundaryInstant(end, timeZone),
+  };
+}
+
+function occupancyHistoricalBucketQueryEnd(
+  bucket: Date,
+  granularity: AggregateGranularity,
+  timeZone: string,
+) {
+  if (granularity === "minute") {
+    return new Date(bucket.getTime() + 60_000);
+  }
+  if (granularity === "hour") {
+    return endOfCompanyTimeZoneHour(bucket, timeZone);
+  }
+  return occupancyHistoricalCivilBucketEnd(bucket, granularity);
+}
+
+function occupancyHistoricalCivilBucketEnd(
+  bucket: Date,
+  granularity: Exclude<AggregateGranularity, "minute" | "hour">,
+) {
+  if (granularity === "day") {
+    return shiftOccupancyCalendarDate(bucket, 1);
+  }
+  if (granularity === "week") {
+    return shiftOccupancyCalendarDate(bucket, 7);
+  }
+  if (granularity === "month") {
+    return shiftOccupancyCalendarDate(bucket, 0, 1);
+  }
+  if (granularity === "semester") {
+    return shiftOccupancyCalendarDate(bucket, 0, 6);
+  }
+  return shiftOccupancyCalendarDate(bucket, 0, 0, 1);
+}
+
+function emptyOccupancyHistoricalRange(
+  referenceAt: Date,
+): OccupancyMaximumTrendRange {
+  return {
+    buckets: [],
+    from: new Date(referenceAt),
+    to: new Date(referenceAt),
+  };
+}
+
 export function useOccupancyComparisonCards({
   aggregateRefreshMs = DEFAULT_AGGREGATE_REFRESH_MS,
   companyScopeId,
+  enabled = true,
   focusScenarioId,
   focusHourlyAggregate,
   focusSnapshot,
   focusSnapshotPending = false,
   maximumTrendRefreshMs = DEFAULT_MAXIMUM_TREND_REFRESH_MS,
   monitorMode,
+  period,
   preferenceScopeId,
   preferences,
+  refreshMode = "poll",
+  reportPreferences = preferences,
   requestedCardIds,
   snapshotRefreshMs = DEFAULT_SNAPSHOT_REFRESH_MS,
   scenarios,
@@ -427,14 +835,18 @@ export function useOccupancyComparisonCards({
 }: {
   aggregateRefreshMs?: number;
   companyScopeId: string;
+  enabled?: boolean;
   focusScenarioId: string;
   focusHourlyAggregate?: OccupancySharedHourlyAggregate | null;
   focusSnapshot?: (OccupancyScenarioSnapshot & { requestedAt: Date }) | null;
   focusSnapshotPending?: boolean;
   maximumTrendRefreshMs?: number;
   monitorMode: boolean;
+  period?: OccupancyComparisonHistoricalPeriod | null;
   preferenceScopeId?: string | null;
   preferences: ReadonlyArray<CardPreference>;
+  refreshMode?: OccupancyComparisonRefreshMode;
+  reportPreferences?: ReadonlyArray<CardPreference>;
   requestedCardIds?: ReadonlySet<string>;
   snapshotRefreshMs?: number;
   scenarios: OccupancyScenario[];
@@ -442,6 +854,20 @@ export function useOccupancyComparisonCards({
   timeZoneWarning?: string;
   userId?: string | null;
 }) {
+  const manualPeriodKey = React.useMemo(
+    () =>
+      refreshMode === "manual"
+        ? occupancyComparisonHistoricalPeriodKey(period)
+        : "",
+    [period, refreshMode],
+  );
+  const stableManualPeriod = React.useMemo(
+    () => occupancyComparisonHistoricalPeriodFromKey(manualPeriodKey),
+    [manualPeriodKey],
+  );
+  const queryEnabled =
+    enabled && (refreshMode === "poll" || stableManualPeriod !== null);
+  const historicalMode = refreshMode === "manual";
   const settingsScopeKey = `${companyScopeId}|${userId ?? ""}|${preferenceScopeId ?? ""}`;
   const [settingsState, setSettingsState] = React.useState<SettingsState>({
     scopeKey: "",
@@ -474,10 +900,6 @@ export function useOccupancyComparisonCards({
     () => new Set(visibleCardIdsKey.split(",").filter(Boolean)),
     [visibleCardIdsKey],
   );
-  const needsSnapshots = setIntersects(
-    visibleCardIds,
-    OCCUPANCY_SNAPSHOT_CARD_IDS,
-  );
   const scenarioHeatmapVisible = visibleCardIds.has(
     "occupancy_scenario_hour_heatmap",
   );
@@ -491,6 +913,9 @@ export function useOccupancyComparisonCards({
   const needsMaximumTrend = setIntersects(
     visibleCardIds,
     OCCUPANCY_MAXIMUM_TREND_CARD_IDS,
+  );
+  const needsAnnualMaximum = visibleCardIds.has(
+    "occupancy_scenario_max_year",
   );
   const scopedScenarios = React.useMemo(
     () =>
@@ -544,6 +969,26 @@ export function useOccupancyComparisonCards({
     hexScenarioIds,
     scenarioHeatmapGranularity: settings.scenarioHeatmapGranularity,
   }), [hexScenarioIds, inheritedHeatmapScenarioId, requestedPreferences, scopedScenarios, selectedScenarioIds, settings.scenarioHeatmapGranularity]);
+  const snapshotScenarioIds = React.useMemo(
+    () =>
+      historicalMode
+        ? occupancyHistoricalSnapshotScenarioIds({
+            byCard: selectionPlan.byCard,
+            hexScenarioIds,
+            scenarios: scopedScenarios,
+            visibleCardIds,
+          })
+        : selectionPlan.snapshots,
+    [
+      hexScenarioIds,
+      historicalMode,
+      scopedScenarios,
+      selectionPlan.byCard,
+      selectionPlan.snapshots,
+      visibleCardIds,
+    ],
+  );
+  const needsSnapshots = snapshotScenarioIds.length > 0;
   const comparisonSelectionKey = selectionPlan.hourly.join(",");
   const scenarioHeatmapSelectionKey = (
     selectionPlan.byCard.get("occupancy_scenario_hour_heatmap") ?? []
@@ -557,8 +1002,8 @@ export function useOccupancyComparisonCards({
       settings.scenarioHeatmapGranularity === "hour" &&
       scenarioHeatmapSelectionKey.length > 0);
   const hourlyAggregateDayCount = needsHourlyHeatmap ? settings.dayCount : 1;
-  const snapshotSelectionKey = selectionPlan.snapshots.join(",");
-  const snapshotRequestGroupCount = selectionPlan.snapshots.length ? 1 : 0;
+  const snapshotSelectionKey = snapshotScenarioIds.join(",");
+  const snapshotRequestGroupCount = snapshotScenarioIds.length ? 1 : 0;
   const effectiveSnapshotRefreshMs =
     occupancyComparisonSnapshotRefreshIntervalMs({
       baseRefreshMs: snapshotRefreshMs,
@@ -567,16 +1012,19 @@ export function useOccupancyComparisonCards({
       // scenario count below is therefore either one batch or none.
       scenarioCount: snapshotRequestGroupCount,
     });
-  const snapshotScopeKey = `${companyScopeId}|${timeZone}|${snapshotSelectionKey}`;
-  const aggregateScopeKey = `${companyScopeId}|${timeZone}|${comparisonSelectionKey}|${hourlyAggregateDayCount}`;
+  const comparisonWindowKey = historicalMode
+    ? `historical:${manualPeriodKey}`
+    : "live";
+  const snapshotScopeKey = `${companyScopeId}|${timeZone}|${comparisonWindowKey}|${snapshotSelectionKey}`;
+  const aggregateScopeKey = `${companyScopeId}|${timeZone}|${comparisonWindowKey}|${comparisonSelectionKey}|${hourlyAggregateDayCount}`;
   const scenarioHeatmapRangeDayCount =
     settings.scenarioHeatmapGranularity === "hour" ||
     settings.scenarioHeatmapGranularity === "day"
       ? settings.dayCount
       : 7;
-  const scenarioHeatmapScopeKey = `${companyScopeId}|${timeZone}|${settings.scenarioHeatmapGranularity}|${scenarioHeatmapRangeDayCount}|${scenarioHeatmapSelectionKey}`;
-  const maximumTrendScopeKey = `${companyScopeId}|${timeZone}|${maximumTrendSelectionKey}`;
-  const currentHourScopeKey = `${companyScopeId}|${timeZone}|${currentHourSelectionKey}`;
+  const scenarioHeatmapScopeKey = `${companyScopeId}|${timeZone}|${comparisonWindowKey}|${settings.scenarioHeatmapGranularity}|${scenarioHeatmapRangeDayCount}|${scenarioHeatmapSelectionKey}`;
+  const maximumTrendScopeKey = `${companyScopeId}|${timeZone}|${comparisonWindowKey}|${maximumTrendSelectionKey}`;
+  const currentHourScopeKey = `${companyScopeId}|${timeZone}|${comparisonWindowKey}|${currentHourSelectionKey}`;
   const [snapshotDataset, setSnapshotDataset] =
     React.useState<SnapshotDataset>({
       loading: false,
@@ -751,17 +1199,27 @@ export function useOccupancyComparisonCards({
       OCCUPANCY_WIDGET_SETTINGS_UPDATED_EVENT,
       synchronizeSettings,
     );
+    window.addEventListener(USER_GRID_HYDRATED_EVENT, synchronizeSettings);
     return () => {
       window.removeEventListener("storage", synchronizeSettings);
       window.removeEventListener(
         OCCUPANCY_WIDGET_SETTINGS_UPDATED_EVENT,
         synchronizeSettings,
       );
+      window.removeEventListener(
+        USER_GRID_HYDRATED_EVENT,
+        synchronizeSettings,
+      );
     };
-  }, [companyScopeId, preferenceScopeId, settingsScopeKey, userId]);
+  }, [
+    companyScopeId,
+    preferenceScopeId,
+    settingsScopeKey,
+    userId,
+  ]);
 
   React.useEffect(() => {
-    if (!needsSnapshots) return;
+    if (!queryEnabled || historicalMode || !needsSnapshots) return;
 
     let disposed = false;
     let timeout: number | undefined;
@@ -856,12 +1314,22 @@ export function useOccupancyComparisonCards({
           ? candidateFocusSnapshot
           : null;
       const cachePrefix = `${userId ?? ""}|${companyScopeId}|${timeZone}|`;
+      const snapshotCacheKey = (scenario: OccupancyScenario) =>
+        `${cachePrefix}${JSON.stringify([
+          scenario.id,
+          scenario.object_class,
+          scenario.areas
+            .map((area) => [area.camera_id, area.area_id])
+            .sort(([leftCamera, leftArea], [rightCamera, rightArea]) =>
+              leftCamera.localeCompare(rightCamera) || leftArea.localeCompare(rightArea),
+            ),
+        ])}`;
       const oldestFreshSnapshot = requestedAt.getTime() - effectiveSnapshotRefreshMs;
       const snapshotsById = new Map<string, OccupancyScenarioSnapshot>();
       const scenariosToRequest: OccupancyScenario[] = [];
 
       for (const scenario of requestedScenarios) {
-        const cacheKey = `${cachePrefix}${scenario.id}`;
+        const cacheKey = snapshotCacheKey(scenario);
         const cached = snapshotCacheRef.current.get(cacheKey);
         if (cached) {
           snapshotsById.set(scenario.id, {
@@ -887,15 +1355,19 @@ export function useOccupancyComparisonCards({
             asOf: sharedFocusSnapshot.asOf,
             error: sharedFocusSnapshot.error,
             name: focusScenario.name,
+            occupied: sharedFocusSnapshot.occupied,
             scenarioId: focusScenario.id,
             total: sharedFocusSnapshot.total,
           };
           snapshotsById.set(focusScenario.id, snapshot);
           setBoundedComparisonCacheEntry(
             snapshotCacheRef.current,
-            `${cachePrefix}${focusScenario.id}`,
+            snapshotCacheKey(focusScenario),
             {
               completedAt: requestedAt.getTime(),
+              history: snapshotCacheRef.current.get(
+                snapshotCacheKey(focusScenario),
+              )?.history,
               refreshVersion: manualRefreshVersion,
               snapshot,
             },
@@ -963,13 +1435,21 @@ export function useOccupancyComparisonCards({
         const expectedAreas = Array.from(
           new Map(
             scenariosToRequest.flatMap((scenario) =>
-              scenario.areas.map((area) => [
-                JSON.stringify([area.camera_id, area.area_id]),
-                {
-                  area_id: area.area_id,
-                  camera_id: area.camera_id,
-                },
-              ] as const),
+              scenario.areas.map(
+                (area) =>
+                  [
+                    JSON.stringify([
+                      area.camera_id,
+                      area.area_id,
+                      scenario.object_class,
+                    ]),
+                    {
+                      area_id: area.area_id,
+                      camera_id: area.camera_id,
+                      object_class: scenario.object_class,
+                    },
+                  ] as const,
+              ),
             ),
           ).values(),
         );
@@ -998,12 +1478,23 @@ export function useOccupancyComparisonCards({
         } catch (error) {
           if (requestController.signal.aborted) throw error;
           scenariosToRequest.forEach((scenario) => {
+            const cached = snapshotCacheRef.current.get(
+              snapshotCacheKey(scenario),
+            );
+            if (cached) {
+              commitSnapshot(scenario, {
+                ...cached.snapshot,
+                name: scenario.name,
+              }, cached.history);
+              return;
+            }
             commitSnapshot(scenario, {
               error: occupancyRequestError(
                 error,
                 "A leitura atual não está disponível.",
               ),
               name: scenario.name,
+              occupied: null,
               scenarioId: scenario.id,
               total: null,
             });
@@ -1011,53 +1502,131 @@ export function useOccupancyComparisonCards({
           rows = null;
         }
 
-        // `/occupancy` is the only tenant-wide current source. A valid but
-        // incomplete batch must stay unavailable instead of fanning out one
-        // `/history` request per scenario every five seconds. The focused
-        // dashboard owns the single-scenario compatibility probe.
+        // `/occupancy` omits areas without an event in the requested window.
+        // Seed each demanded scenario once from history and then merge the
+        // five-second tenant-wide pulse into that complete per-area baseline.
+        // Quiet scenarios reuse their certified baseline without recurring
+        // per-scenario requests.
         if (rows !== null) {
-          scenariosToRequest.forEach((scenario) => {
-            if (
-              !occupancyScenarioSnapshotHasCompleteCoverage(scenario, rows)
-            ) {
-              commitSnapshot(scenario, {
-                error:
-                  "A leitura atual não cobriu todas as áreas do cenário.",
-                name: scenario.name,
-                scenarioId: scenario.id,
-                total: null,
-              });
-              return;
-            }
-
-            let snapshot: OccupancyScenarioSnapshot;
+          await Promise.all(scenariosToRequest.map(async (scenario) => {
             try {
-              snapshot = buildOccupancyScenarioSnapshotValue(scenario, rows);
+              if (occupancyScenarioSnapshotHasCompleteCoverage(scenario, rows)) {
+                const history = buildOccupancyScenarioCurrentHistory(
+                  scenario,
+                  rows,
+                );
+                commitSnapshot(
+                  scenario,
+                  {
+                    asOf: history.as_of,
+                    name: scenario.name,
+                    occupied: history.total > 0,
+                    scenarioId: scenario.id,
+                    total: history.total,
+                  },
+                  history,
+                );
+                return;
+              }
+
+              const cached = snapshotCacheRef.current.get(
+                snapshotCacheKey(scenario),
+              );
+              const merged = mergeOccupancyScenarioCurrentHistory(
+                scenario,
+                cached?.history,
+                rows,
+              );
+              if (merged) {
+                commitSnapshot(
+                  scenario,
+                  {
+                    asOf: merged.as_of,
+                    name: scenario.name,
+                    occupied: merged.total > 0,
+                    scenarioId: scenario.id,
+                    total: merged.total,
+                  },
+                  merged,
+                );
+                return;
+              }
+
+              const historyPath = occupancyComparisonHistoryPath(
+                scenario.id,
+                requestedAt,
+              );
+              const historyResponse = await scheduleQuery(historyPath, () =>
+                fetchSharedOccupancyQuery<unknown>({
+                  cacheTtlMs: OCCUPANCY_LIVE_SNAPSHOT_CACHE_TTL_MS,
+                  companyScopeId,
+                  path: historyPath,
+                  priority: "background",
+                  scenarioId: scenario.id,
+                  signal: requestController.signal,
+                  timeZone,
+                }),
+              );
+              const history = requireOccupancyHistoryResponse(
+                historyResponse,
+                scenario.id,
+                {
+                  expectedAreas: scenario.areas,
+                  requireAreaSnapshots: true,
+                  requestedAt,
+                },
+              );
+              commitSnapshot(
+                scenario,
+                {
+                  asOf: history.as_of,
+                  name: scenario.name,
+                  occupied: history.total > 0,
+                  scenarioId: scenario.id,
+                  total: history.total,
+                },
+                history,
+              );
             } catch (error) {
-              snapshot = {
+              const cached = snapshotCacheRef.current.get(
+                snapshotCacheKey(scenario),
+              );
+              if (cached) {
+                commitSnapshot(
+                  scenario,
+                  { ...cached.snapshot, name: scenario.name },
+                  cached.history,
+                );
+                return;
+              }
+              commitSnapshot(scenario, {
                 error: occupancyRequestError(
                   error,
                   "A leitura atual não está disponível.",
                 ),
                 name: scenario.name,
+                occupied: null,
                 scenarioId: scenario.id,
                 total: null,
-              };
+              });
             }
-            commitSnapshot(scenario, snapshot);
-          });
+          }));
         }
 
         function commitSnapshot(
           scenario: OccupancyScenario,
           snapshot: OccupancyScenarioSnapshot,
+          history?: OccupancyScenarioHistoryResponse,
         ) {
+          const cacheKey = snapshotCacheKey(scenario);
+          const cached = snapshotCacheRef.current.get(cacheKey);
           snapshotsById.set(scenario.id, snapshot);
           setBoundedComparisonCacheEntry(
             snapshotCacheRef.current,
-            `${cachePrefix}${scenario.id}`,
+            cacheKey,
             {
               completedAt: requestedAt.getTime(),
+              history: history ?? cached?.history,
               refreshVersion: manualRefreshVersion,
               snapshot,
             },
@@ -1118,12 +1687,14 @@ export function useOccupancyComparisonCards({
     snapshotScopeKey,
     snapshotSelectionKey,
     effectiveSnapshotRefreshMs,
+    historicalMode,
+    queryEnabled,
     timeZone,
     userId,
   ]);
 
   React.useEffect(() => {
-    if (!needsHourlyAggregate) return;
+    if (!queryEnabled || historicalMode || !needsHourlyAggregate) return;
 
     let disposed = false;
     let timeout: number | undefined;
@@ -1521,8 +2092,10 @@ export function useOccupancyComparisonCards({
     comparisonSelectionKey,
     focusHourlyAggregateKey,
     focusScenarioId,
+    historicalMode,
     hourlyAggregateDayCount,
     needsHourlyAggregate,
+    queryEnabled,
     scopedScenarios,
     settingsReady,
     timeZone,
@@ -1532,6 +2105,7 @@ export function useOccupancyComparisonCards({
 
   React.useEffect(() => {
     const granularity = settings.scenarioHeatmapGranularity;
+    if (!queryEnabled || historicalMode) return;
     if (!scenarioHeatmapVisible || granularity === "hour") return;
     const civilGranularity =
       granularity === "minute" ? null : granularity;
@@ -1939,7 +2513,9 @@ export function useOccupancyComparisonCards({
     aggregateRefreshMs,
     civilAggregateCapabilities,
     companyScopeId,
+    historicalMode,
     manualRefreshVersion,
+    queryEnabled,
     scenarioHeatmapScopeKey,
     scenarioHeatmapRangeDayCount,
     scenarioHeatmapSelectionKey,
@@ -1953,6 +2529,7 @@ export function useOccupancyComparisonCards({
   ]);
 
   React.useEffect(() => {
+    if (!queryEnabled || historicalMode) return;
     if (!needsCurrentHourMaximum) return;
 
     let disposed = false;
@@ -2479,7 +3056,9 @@ export function useOccupancyComparisonCards({
     comparisonSelectionKey,
     currentHourSelectionKey,
     currentHourScopeKey,
+    historicalMode,
     needsCurrentHourMaximum,
+    queryEnabled,
     needsHourlyAggregate,
     scopedScenarios,
     settingsReady,
@@ -2489,7 +3068,7 @@ export function useOccupancyComparisonCards({
   ]);
 
   React.useEffect(() => {
-    if (!needsMaximumTrend) return;
+    if (!queryEnabled || historicalMode || !needsMaximumTrend) return;
 
     let disposed = false;
     let timeout: number | undefined;
@@ -2926,15 +3505,276 @@ export function useOccupancyComparisonCards({
     civilAggregateCapabilities,
     companyScopeId,
     currentHourScopeKey,
+    historicalMode,
     maximumTrendSelectionKey,
     maximumTrendRefreshMs,
     maximumTrendScopeKey,
     needsMaximumTrend,
+    queryEnabled,
     scopedScenarios,
     settingsReady,
     timeZone,
     timeZoneWarning,
     userId,
+  ]);
+
+  const historicalRanges = React.useMemo(
+    () =>
+      historicalMode && stableManualPeriod
+        ? buildOccupancyHistoricalComparisonRanges({
+            dayCount: settings.dayCount,
+            needsAnnualMaximum,
+            needsHourlyAggregate,
+            needsHourlyHeatmap,
+            needsMaximumTrend,
+            needsScenarioHeatmap: scenarioHeatmapVisible,
+            period: stableManualPeriod,
+            scenarioHeatmapGranularity:
+              settings.scenarioHeatmapGranularity,
+            timeZone,
+          })
+        : null,
+    [
+      historicalMode,
+      needsAnnualMaximum,
+      needsHourlyAggregate,
+      needsHourlyHeatmap,
+      needsMaximumTrend,
+      scenarioHeatmapVisible,
+      settings.dayCount,
+      settings.scenarioHeatmapGranularity,
+      stableManualPeriod,
+      timeZone,
+    ],
+  );
+
+  React.useEffect(() => {
+    if (!historicalMode) return;
+    if (
+      !queryEnabled ||
+      !settingsReady ||
+      !stableManualPeriod ||
+      !historicalRanges ||
+      !companyScopeId.trim()
+    ) {
+      setSnapshotDataset({
+        loading: false,
+        requestedAt: null,
+        scopeKey: "",
+        snapshots: [],
+      });
+      setAggregateDataset({
+        buckets: [],
+        from: null,
+        loading: false,
+        scopeKey: "",
+        series: [],
+        to: null,
+      });
+      setScenarioHeatmapDataset({
+        buckets: [],
+        from: null,
+        granularity: settings.scenarioHeatmapGranularity,
+        loading: false,
+        scopeKey: "",
+        series: [],
+        to: null,
+      });
+      setMaximumTrendDataset({
+        loading: false,
+        ranges: null,
+        scopeKey: "",
+        series: [],
+      });
+      setCurrentHourMaximumDataset({
+        bucket: null,
+        loading: false,
+        scopeKey: "",
+        series: [],
+      });
+      return;
+    }
+
+    let disposed = false;
+    const controller = new AbortController();
+    const plan: OccupancyHistoricalComparisonLoadPlan = {
+      hourlyScenarioIds: selectionPlan.hourly,
+      maximumTrendScenarioIds: selectionPlan.trends,
+      needsHourlyAggregate,
+      needsMaximumTrend,
+      needsScenarioHeatmap: scenarioHeatmapVisible,
+      needsSnapshots,
+      scenarioHeatmapScenarioIds:
+        selectionPlan.byCard.get("occupancy_scenario_hour_heatmap") ?? [],
+      snapshotScenarioIds,
+    };
+
+    setSnapshotDataset({
+      loading: needsSnapshots,
+      requestedAt: stableManualPeriod.referenceAt,
+      scopeKey: snapshotScopeKey,
+      snapshots: [],
+    });
+    setAggregateDataset({
+      buckets: historicalRanges.hourly?.buckets ?? [],
+      from: historicalRanges.hourly?.from ?? null,
+      loading: needsHourlyAggregate,
+      scopeKey: aggregateScopeKey,
+      series: [],
+      to: historicalRanges.hourly?.to ?? null,
+    });
+    setScenarioHeatmapDataset({
+      buckets: historicalRanges.scenarioHeatmap?.buckets ?? [],
+      from: historicalRanges.scenarioHeatmap?.from ?? null,
+      granularity: settings.scenarioHeatmapGranularity,
+      loading:
+        scenarioHeatmapVisible &&
+        settings.scenarioHeatmapGranularity !== "hour",
+      scopeKey: scenarioHeatmapScopeKey,
+      series: [],
+      to: historicalRanges.scenarioHeatmap?.to ?? null,
+    });
+    setMaximumTrendDataset({
+      loading: needsMaximumTrend,
+      ranges: historicalRanges.maximumTrend,
+      scopeKey: maximumTrendScopeKey,
+      series: [],
+    });
+    setCurrentHourMaximumDataset({
+      bucket: null,
+      loading: false,
+      scopeKey: currentHourScopeKey,
+      series: [],
+    });
+
+    void loadOccupancyHistoricalComparisonDataset({
+      bypassCache: manualRefreshVersion > 0,
+      companyScopeId,
+      period: stableManualPeriod,
+      plan,
+      ranges: historicalRanges,
+      scenarioHeatmapGranularity: settings.scenarioHeatmapGranularity,
+      scenarios: scopedScenarios,
+      signal: controller.signal,
+      timeZone,
+      timeZoneWarning,
+    }).then(
+      (dataset) => {
+        if (disposed || controller.signal.aborted) return;
+        setSnapshotDataset({
+          loading: false,
+          requestedAt: stableManualPeriod.referenceAt,
+          scopeKey: snapshotScopeKey,
+          snapshots: dataset.snapshots,
+        });
+        setAggregateDataset({
+          buckets: dataset.hourlyRange?.buckets ?? [],
+          from: dataset.hourlyRange?.from ?? null,
+          loading: false,
+          scopeKey: aggregateScopeKey,
+          series: dataset.hourlySeries,
+          to: dataset.hourlyRange?.to ?? null,
+        });
+        setScenarioHeatmapDataset({
+          buckets: dataset.scenarioHeatmapRange?.buckets ?? [],
+          from: dataset.scenarioHeatmapRange?.from ?? null,
+          granularity: settings.scenarioHeatmapGranularity,
+          loading: false,
+          scopeKey: scenarioHeatmapScopeKey,
+          series: dataset.scenarioHeatmapSeries,
+          to: dataset.scenarioHeatmapRange?.to ?? null,
+        });
+        setMaximumTrendDataset({
+          loading: false,
+          ranges: dataset.maximumTrendRanges,
+          scopeKey: maximumTrendScopeKey,
+          series: dataset.maximumTrendSeries,
+        });
+      },
+      (error: unknown) => {
+        if (disposed || isAbortError(error, controller.signal)) return;
+        const message = occupancyRequestError(
+          error,
+          "A comparação histórica não está disponível.",
+        );
+        const failedSeries = historicalComparisonFailureSeries(
+          Array.from(
+            new Set([
+              ...plan.hourlyScenarioIds,
+              ...plan.maximumTrendScenarioIds,
+              ...plan.scenarioHeatmapScenarioIds,
+            ]),
+          ),
+          scopedScenarios,
+          message,
+        );
+        setSnapshotDataset({
+          loading: false,
+          requestedAt: stableManualPeriod.referenceAt,
+          scopeKey: snapshotScopeKey,
+          snapshots: historicalSnapshotFailures(
+            plan.snapshotScenarioIds,
+            scopedScenarios,
+            message,
+          ),
+        });
+        setAggregateDataset((current) => ({
+          ...current,
+          loading: false,
+          series: filterOccupancyComparisonRows(
+            failedSeries,
+            plan.hourlyScenarioIds,
+          ),
+        }));
+        setScenarioHeatmapDataset((current) => ({
+          ...current,
+          loading: false,
+          series: filterOccupancyComparisonRows(
+            failedSeries,
+            plan.scenarioHeatmapScenarioIds,
+          ),
+        }));
+        setMaximumTrendDataset((current) => ({
+          ...current,
+          loading: false,
+          series: filterOccupancyComparisonRows(
+            failedSeries,
+            plan.maximumTrendScenarioIds,
+          ),
+        }));
+      },
+    );
+
+    return () => {
+      disposed = true;
+      abortRequest(
+        controller,
+        "A consulta histórica de comparação foi substituída.",
+      );
+    };
+  }, [
+    aggregateScopeKey,
+    companyScopeId,
+    currentHourScopeKey,
+    historicalMode,
+    historicalRanges,
+    manualRefreshVersion,
+    maximumTrendScopeKey,
+    needsHourlyAggregate,
+    needsMaximumTrend,
+    needsSnapshots,
+    queryEnabled,
+    scenarioHeatmapScopeKey,
+    scenarioHeatmapVisible,
+    scopedScenarios,
+    selectionPlan,
+    settings.scenarioHeatmapGranularity,
+    settingsReady,
+    snapshotScenarioIds,
+    snapshotScopeKey,
+    stableManualPeriod,
+    timeZone,
+    timeZoneWarning,
   ]);
 
   const certifiedSnapshots =
@@ -3014,33 +3854,139 @@ export function useOccupancyComparisonCards({
     ],
   );
   const snapshotLoading =
+    queryEnabled &&
     needsSnapshots &&
     (snapshotDataset.scopeKey !== snapshotScopeKey || snapshotDataset.loading);
   const aggregateLoading =
+    queryEnabled &&
     needsHourlyAggregate &&
     (aggregateDataset.scopeKey !== aggregateScopeKey ||
       aggregateDataset.loading);
   const scenarioHeatmapLoading =
-    settings.scenarioHeatmapGranularity === "hour"
+    !queryEnabled
+      ? false
+      : settings.scenarioHeatmapGranularity === "hour"
       ? aggregateLoading
       : scenarioHeatmapVisible &&
         (scenarioHeatmapDataset.scopeKey !== scenarioHeatmapScopeKey ||
           scenarioHeatmapDataset.loading);
   const maximumTrendLoading =
+    queryEnabled &&
     needsMaximumTrend &&
     (maximumTrendDataset.scopeKey !== maximumTrendScopeKey ||
       maximumTrendDataset.loading);
   const currentHourMaximumLoading =
+    queryEnabled &&
     needsCurrentHourMaximum &&
     (currentHourMaximumDataset.scopeKey !== currentHourScopeKey ||
       currentHourMaximumDataset.loading);
+  const loading =
+    snapshotLoading ||
+    aggregateLoading ||
+    scenarioHeatmapLoading ||
+    maximumTrendLoading ||
+    currentHourMaximumLoading;
+  const historicalSnapshotDemand = needsSnapshots;
+  const historicalHourlyDemand =
+    needsHourlyAggregate && selectionPlan.hourly.length > 0;
+  const historicalMaximumTrendDemand =
+    needsMaximumTrend && selectionPlan.trends.length > 0;
+  const historicalScenarioHeatmapIds =
+    selectionPlan.byCard.get("occupancy_scenario_hour_heatmap") ??
+    EMPTY_OCCUPANCY_SCENARIO_IDS;
+  const historicalScenarioHeatmapDemand =
+    scenarioHeatmapVisible &&
+    settings.scenarioHeatmapGranularity !== "hour" &&
+    historicalScenarioHeatmapIds.length > 0;
+  const historicalDataDemand =
+    historicalSnapshotDemand ||
+    historicalHourlyDemand ||
+    historicalMaximumTrendDemand ||
+    historicalScenarioHeatmapDemand;
+  const dataCompleteUntil = React.useMemo<Date | null | undefined>(() => {
+    if (
+      !historicalMode ||
+      !queryEnabled ||
+      !historicalDataDemand ||
+      !stableManualPeriod ||
+      !historicalRanges
+    ) {
+      return undefined;
+    }
+    if (loading) return null;
+    if (
+      historicalSnapshotDemand &&
+      !occupancyHistoricalSnapshotsAreComplete(
+        certifiedSnapshots,
+        snapshotScenarioIds,
+      )
+    ) {
+      return null;
+    }
+    if (
+      historicalHourlyDemand &&
+      !occupancyHistoricalAggregateIsComplete({
+        granularity: "hour",
+        range: historicalRanges.hourly,
+        scenarioIds: selectionPlan.hourly,
+        series: certifiedAggregate.series,
+      })
+    ) {
+      return null;
+    }
+    if (
+      historicalMaximumTrendDemand &&
+      !occupancyHistoricalAggregateIsComplete({
+        coverageScenarios: scopedScenarios,
+        granularity: "month",
+        range: historicalRanges.maximumTrend?.monthlySource ?? null,
+        scenarioIds: selectionPlan.trends,
+        series: certifiedMaximumTrend.series,
+        timeZone,
+      })
+    ) {
+      return null;
+    }
+    if (
+      historicalScenarioHeatmapDemand &&
+      !occupancyHistoricalAggregateIsComplete({
+        granularity: settings.scenarioHeatmapGranularity,
+        range: historicalRanges.scenarioHeatmap,
+        scenarioIds: historicalScenarioHeatmapIds,
+        series: certifiedScenarioHeatmap.series,
+      })
+    ) {
+      return null;
+    }
+    return new Date(stableManualPeriod.referenceAt);
+  }, [
+    certifiedAggregate.series,
+    certifiedMaximumTrend.series,
+    certifiedScenarioHeatmap.series,
+    certifiedSnapshots,
+    historicalDataDemand,
+    historicalHourlyDemand,
+    historicalMaximumTrendDemand,
+    historicalMode,
+    historicalRanges,
+    historicalScenarioHeatmapDemand,
+    historicalScenarioHeatmapIds,
+    historicalSnapshotDemand,
+    loading,
+    queryEnabled,
+    scopedScenarios,
+    selectionPlan.hourly,
+    selectionPlan.trends,
+    snapshotScenarioIds,
+    settings.scenarioHeatmapGranularity,
+    stableManualPeriod,
+    timeZone,
+  ]);
   const hourlyMaximumBuckets = React.useMemo(() => {
-    const anchorBucket =
-      certifiedCurrentHourMaximum.bucket ?? certifiedAggregate.buckets.at(-1);
-    if (!anchorBucket) return [];
-    const latestDayKey = localDateKey(anchorBucket, timeZone);
-    return certifiedAggregate.buckets.filter(
-      (bucket) => localDateKey(bucket, timeZone) === latestDayKey,
+    return occupancyLatestCompanyDayBuckets(
+      certifiedAggregate.buckets,
+      certifiedCurrentHourMaximum.bucket,
+      timeZone,
     );
   }, [certifiedAggregate.buckets, certifiedCurrentHourMaximum.bucket, timeZone]);
   const hourlyMaximumSeries = React.useMemo(
@@ -3194,6 +4140,9 @@ export function useOccupancyComparisonCards({
     }),
     [selectedScenarioIds],
   );
+  const historicalContextLabel = historicalMode
+    ? stableManualPeriod?.contextLabel
+    : undefined;
   const snapshotDependentCards = React.useMemo<ComparisonLayoutCard[]>(() => [
     {
       colorEditable: false,
@@ -3211,7 +4160,9 @@ export function useOccupancyComparisonCards({
         snapshots={certifiedSnapshots}
         defaultScenarioIds={selectedScenarioIds}
       /> : undefined,
-      label: "Comparação atual por cenário",
+      label: historicalMode
+        ? "Comparação no fechamento por cenário"
+        : "Comparação atual por cenário",
       previewChartType: "bar",
       previewColors: selectedColorPalette.colors,
       previewKind:
@@ -3231,9 +4182,9 @@ export function useOccupancyComparisonCards({
           timeZone={timeZone}
           chartType={settings.comparisonChartType}
           colorPalette={selectedColorPalette.colors}
+          historicalContextLabel={historicalContextLabel}
           loading={snapshotLoading}
           mode={settings.comparisonMode}
-          requestedAt={snapshotDataset.requestedAt}
           snapshots={snapshots}
           statusColors={DEFAULT_OCCUPANCY_STATUS_COLORS}
         />
@@ -3249,7 +4200,9 @@ export function useOccupancyComparisonCards({
       defaultSize: "wide",
       ...scenarioCardDefaults,
       id: "occupancy_scenario_bar_race",
-      label: "Ranking ao vivo por cenário",
+      label: historicalMode
+        ? "Ranking no fechamento por cenário"
+        : "Ranking ao vivo por cenário",
       previewColors: selectedColorPalette.colors,
       previewKind: "ranking",
       scenarioOrderingDisabled: true,
@@ -3264,8 +4217,15 @@ export function useOccupancyComparisonCards({
           timeZone={timeZone}
           loading={snapshotLoading}
           colorPalette={selectedColorPalette.colors}
-          requestedAt={snapshotDataset.requestedAt}
-          refreshSeconds={Math.max(1, Math.round(effectiveSnapshotRefreshMs / 1_000))}
+          historicalContextLabel={historicalContextLabel}
+          refreshSeconds={
+            historicalMode
+              ? undefined
+              : Math.max(
+                  1,
+                  Math.round(effectiveSnapshotRefreshMs / 1_000),
+                )
+          }
           snapshots={snapshots}
         />
         );
@@ -3280,7 +4240,9 @@ export function useOccupancyComparisonCards({
       defaultSize: "wide",
       ...scenarioCardDefaults,
       id: "occupancy_scenario_max_hour",
-      label: "Máximo por hora por cenário",
+      label: historicalMode
+        ? "Máximo por hora no período"
+        : "Máximo por hora por cenário",
       previewChartType: "line",
       previewColors: selectedColorPalette.colors,
       previewKind: "chart",
@@ -3308,8 +4270,13 @@ export function useOccupancyComparisonCards({
           currentSnapshots={snapshots}
           currentSeries={currentSeries}
           granularity="hour"
-          loading={aggregateLoading && currentHourMaximumLoading}
-          refreshSeconds={Math.max(1, Math.round(aggregateRefreshMs / 1_000))}
+          historicalContextLabel={historicalContextLabel}
+          loading={aggregateLoading || currentHourMaximumLoading}
+          refreshSeconds={
+            historicalMode
+              ? undefined
+              : Math.max(1, Math.round(aggregateRefreshMs / 1_000))
+          }
           series={series}
         />
         );
@@ -3324,7 +4291,9 @@ export function useOccupancyComparisonCards({
       defaultSize: "wide",
       ...scenarioCardDefaults,
       id: "occupancy_scenario_max_year",
-      label: "Máximo por ano por cenário",
+      label: historicalMode
+        ? "Máximo anual · 4 anos fechados"
+        : "Máximo por ano por cenário",
       previewChartType: "line",
       previewColors: selectedColorPalette.colors,
       previewKind: "chart",
@@ -3355,6 +4324,7 @@ export function useOccupancyComparisonCards({
           currentSnapshots={snapshots}
           currentSeries={currentSeries}
           granularity="year"
+          historicalContextLabel={historicalContextLabel}
           loading={maximumTrendLoading}
           monthlySourceBuckets={
             certifiedMaximumTrend.ranges?.monthlySource.buckets ??
@@ -3382,7 +4352,9 @@ export function useOccupancyComparisonCards({
         snapshots={certifiedSnapshots}
         defaultScenarioIds={selectedScenarioIds}
       /> : undefined,
-      label: "Simulador operacional hexagonal",
+      label: historicalMode
+        ? "Mapa operacional no fechamento"
+        : "Simulador operacional hexagonal",
       previewColors: selectedHexColorPalette.colors,
       previewKind: "hex",
       node: (
@@ -3392,6 +4364,7 @@ export function useOccupancyComparisonCards({
           columns={settings.hexColumns}
           defaultScenarioIds={selectedScenarioIds}
           displayMode={settings.hexDisplayMode}
+          historicalContextLabel={historicalContextLabel}
           layout={settings.hexLayout}
           loading={snapshotLoading}
           preset={settings.hexPreset}
@@ -3423,13 +4396,14 @@ export function useOccupancyComparisonCards({
     selectedHexColorPalette.colors,
     selectedScenarioIds,
     settings,
-    snapshotDataset.requestedAt,
     snapshotLoading,
     aggregateRefreshMs,
     effectiveSnapshotRefreshMs,
     timeZone,
     updateSettings,
     currentHourMaximumLoading,
+    historicalContextLabel,
+    historicalMode,
   ]);
 
   const snapshotIndependentCards = React.useMemo<ComparisonLayoutCard[]>(
@@ -3441,7 +4415,9 @@ export function useOccupancyComparisonCards({
         defaultSize: "wide",
         ...scenarioCardDefaults,
         id: "occupancy_scenario_max_month",
-        label: "Máximo por mês por cenário",
+        label: historicalMode
+          ? "Máximo mensal · 12 meses fechados"
+          : "Máximo por mês por cenário",
         previewChartType: "line",
         previewColors: selectedColorPalette.colors,
         previewKind: "chart",
@@ -3464,6 +4440,7 @@ export function useOccupancyComparisonCards({
               }
               colorPalette={selectedColorPalette.colors}
               granularity="month"
+              historicalContextLabel={historicalContextLabel}
               loading={maximumTrendLoading}
               series={series}
             />
@@ -3516,6 +4493,7 @@ export function useOccupancyComparisonCards({
               buckets={certifiedAggregate.buckets}
               colorPalette={selectedColorPalette.colors}
               dayCount={settings.dayCount}
+              historicalContextLabel={historicalContextLabel}
               loading={aggregateLoading}
               maximum={heatmapMaximum(series, settings.metric)}
               metric={settings.metric}
@@ -3566,6 +4544,7 @@ export function useOccupancyComparisonCards({
               colorPalette={selectedColorPalette.colors}
               dayCount={settings.dayCount}
               granularity={settings.scenarioHeatmapGranularity}
+              historicalContextLabel={historicalContextLabel}
               loading={scenarioHeatmapLoading}
               metric={settings.metric}
               dateKey={scenarioHourHeatmapDateKey}
@@ -3587,6 +4566,8 @@ export function useOccupancyComparisonCards({
       heatmapMaximum,
       inheritedHeatmapScenarioId,
       maximumTrendLoading,
+      historicalContextLabel,
+      historicalMode,
       monitorMode,
       resolveCardScenarioIds,
       scenarioCardDefaults,
@@ -3624,6 +4605,7 @@ export function useOccupancyComparisonCards({
         currentHourSeries: certifiedCurrentHourMaximum.series,
         heatmapScenarioId,
         hexSnapshots: certifiedSnapshots,
+        historicalContextLabel,
         hourlyMaximumBuckets,
         hourlyMaximumSeries,
         maximumTrendRanges: certifiedMaximumTrend.ranges,
@@ -3648,6 +4630,7 @@ export function useOccupancyComparisonCards({
       certifiedScenarioHeatmap.series,
       certifiedSnapshots,
       heatmapScenarioId,
+      historicalContextLabel,
       hourlyMaximumBuckets,
       hourlyMaximumSeries,
       scenarioHourHeatmapDateKey,
@@ -3659,7 +4642,440 @@ export function useOccupancyComparisonCards({
     ],
   );
 
-  return { cards, getReportAssets, refresh, settings, updateSettings };
+  const loadReportSnapshot = React.useCallback(
+    async (
+      signal?: AbortSignal,
+    ): Promise<OccupancyComparisonReportSnapshot> => {
+      signal?.throwIfAborted();
+      const requestSignal = signal ?? new AbortController().signal;
+      if (!companyScopeId.trim() || !scopedScenarios.length) {
+        return { dataCompleteUntil: undefined, reportAssets: [] };
+      }
+
+      // Export is an explicit, one-shot operation. It intentionally derives
+      // demand from every saved visible comparison card instead of the
+      // viewport subset used by live polling, so an offscreen card cannot be
+      // exported with an empty or stale data set.
+      const reportSettings = settingsReady
+        ? settings
+        : loadOccupancyWidgetSettings(
+            companyScopeId,
+            userId,
+            preferenceScopeId,
+          );
+      const reportSelectedScenarioIds =
+        resolveOccupancyComparisonInheritedScenarioIds({
+          configuredScenarioIds: reportSettings.scenarioIds,
+          focusScenarioId,
+          scenarios: scopedScenarios,
+        });
+      const reportHexScenarioIds = reportSettings.hexLayout
+        ? Array.from(
+            new Set(
+              reportSettings.hexLayout.cells.flatMap((cell) =>
+                cell.scenarioId ? [cell.scenarioId] : [],
+              ),
+            ),
+          )
+        : reportSelectedScenarioIds;
+      const reportInheritedHeatmapScenarioId = resolveHeatmapScenarioId(
+        reportSettings.heatmapScenarioId,
+        focusScenarioId,
+        reportSelectedScenarioIds,
+      );
+      const reportSelectionPlan = buildOccupancyComparisonReportSelectionPlan({
+        scenarios: scopedScenarios,
+        preferences: reportPreferences,
+        inheritedScenarioIds: reportSelectedScenarioIds,
+        inheritedHeatmapScenarioId: reportInheritedHeatmapScenarioId,
+        hexScenarioIds: reportHexScenarioIds,
+        scenarioHeatmapGranularity:
+          reportSettings.scenarioHeatmapGranularity,
+      });
+      const visibleReportCardIds = new Set(
+        reportSelectionPlan.visibleCardIds,
+      );
+      if (!visibleReportCardIds.size) {
+        return { dataCompleteUntil: undefined, reportAssets: [] };
+      }
+      const requestedAt = new Date();
+      requireCompanyTimeZone(timeZone);
+
+      const needsHourlyHeatmap =
+        visibleReportCardIds.has("occupancy_day_hour_heatmap") ||
+        (visibleReportCardIds.has("occupancy_scenario_hour_heatmap") &&
+          reportSettings.scenarioHeatmapGranularity === "hour");
+      const needsHourlyAggregate =
+        visibleReportCardIds.has("occupancy_scenario_max_hour") ||
+        needsHourlyHeatmap;
+      if (historicalMode && stableManualPeriod) {
+        const needsHistoricalMaximumTrend =
+          visibleReportCardIds.has("occupancy_scenario_max_month") ||
+          visibleReportCardIds.has("occupancy_scenario_max_year");
+        const needsHistoricalScenarioHeatmap = visibleReportCardIds.has(
+          "occupancy_scenario_hour_heatmap",
+        );
+        const reportHistoricalSnapshotScenarioIds =
+          occupancyHistoricalSnapshotScenarioIds({
+            byCard: reportSelectionPlan.byCard,
+            hexScenarioIds: reportHexScenarioIds,
+            scenarios: scopedScenarios,
+            visibleCardIds: visibleReportCardIds,
+          });
+        const needsHistoricalSnapshots =
+          reportHistoricalSnapshotScenarioIds.length > 0;
+        const reportRanges = buildOccupancyHistoricalComparisonRanges({
+          dayCount: reportSettings.dayCount,
+          needsAnnualMaximum: visibleReportCardIds.has(
+            "occupancy_scenario_max_year",
+          ),
+          needsHourlyAggregate,
+          needsHourlyHeatmap,
+          needsMaximumTrend: needsHistoricalMaximumTrend,
+          needsScenarioHeatmap: needsHistoricalScenarioHeatmap,
+          period: stableManualPeriod,
+          scenarioHeatmapGranularity:
+            reportSettings.scenarioHeatmapGranularity,
+          timeZone,
+        });
+        const reportPlan: OccupancyHistoricalComparisonLoadPlan = {
+          hourlyScenarioIds: reportSelectionPlan.hourly,
+          maximumTrendScenarioIds: reportSelectionPlan.trends,
+          needsHourlyAggregate,
+          needsMaximumTrend: needsHistoricalMaximumTrend,
+          needsScenarioHeatmap: needsHistoricalScenarioHeatmap,
+          needsSnapshots: needsHistoricalSnapshots,
+          scenarioHeatmapScenarioIds:
+            reportSelectionPlan.byCard.get(
+              "occupancy_scenario_hour_heatmap",
+            ) ?? [],
+          snapshotScenarioIds: reportHistoricalSnapshotScenarioIds,
+        };
+        const dataset = await loadOccupancyHistoricalComparisonDataset({
+          bypassCache: true,
+          companyScopeId,
+          period: stableManualPeriod,
+          plan: reportPlan,
+          ranges: reportRanges,
+          scenarioHeatmapGranularity:
+            reportSettings.scenarioHeatmapGranularity,
+          scenarios: scopedScenarios,
+          signal: requestSignal,
+          timeZone,
+          timeZoneWarning,
+        });
+        requestSignal.throwIfAborted();
+        const reportDataCompleteUntil =
+          occupancyHistoricalComparisonDataCompleteUntil({
+            dataset,
+            period: stableManualPeriod,
+            plan: reportPlan,
+            ranges: reportRanges,
+            scenarioHeatmapGranularity:
+              reportSettings.scenarioHeatmapGranularity,
+            scenarios: scopedScenarios,
+            timeZone,
+          });
+        if (reportDataCompleteUntil === null) {
+          throw new Error(
+            "Não foi possível certificar todos os dados comparativos visíveis para a exportação.",
+          );
+        }
+        const scenarioDateKeys =
+          reportSettings.scenarioHeatmapGranularity === "hour"
+            ? Array.from(
+                new Set(
+                  dataset.scenarioHeatmapRange?.buckets.map((bucket) =>
+                    localDateKey(bucket, timeZone),
+                  ) ?? [],
+                ),
+              )
+            : [];
+        const scenarioDateKey = scenarioDateKeys.includes(
+          reportSettings.scenarioHourHeatmapDateKey,
+        )
+          ? reportSettings.scenarioHourHeatmapDateKey
+          : (scenarioDateKeys.at(-1) ?? "");
+        const hourlyMaximumBuckets =
+          dataset.hourlyRange?.buckets.filter(
+            (bucket) =>
+              localDateKey(bucket, timeZone) ===
+              localDateKey(stableManualPeriod.referenceAt, timeZone),
+          ) ?? [];
+
+        return {
+          dataCompleteUntil: reportDataCompleteUntil,
+          reportAssets: buildOccupancyComparisonReportAssets({
+            aggregateBuckets: dataset.hourlyRange?.buckets ?? [],
+            aggregateSeries: dataset.hourlySeries,
+            currentHourBucket: null,
+            currentHourSeries: [],
+            heatmapScenarioId:
+              reportSelectionPlan.byCard.get(
+                "occupancy_day_hour_heatmap",
+              )?.[0] ?? "",
+            hexSnapshots: dataset.snapshots,
+            historicalContextLabel: stableManualPeriod.contextLabel,
+            hourlyMaximumBuckets,
+            hourlyMaximumSeries: dataset.hourlySeries,
+            maximumTrendRanges: dataset.maximumTrendRanges,
+            maximumTrendSeries: dataset.maximumTrendSeries,
+            scenarioHeatmapBuckets:
+              dataset.scenarioHeatmapRange?.buckets ?? [],
+            scenarioHeatmapSeries: dataset.scenarioHeatmapSeries,
+            scenarioHourHeatmapDateKey: scenarioDateKey,
+            scenarios: scopedScenarios,
+            selectionsByCard: reportSelectionPlan.byCard,
+            selectedScenarioIds: reportSelectedScenarioIds,
+            settings: reportSettings,
+            snapshots: dataset.snapshots,
+            timeZone,
+          }).filter((asset) => visibleReportCardIds.has(asset.cardId)),
+        };
+      }
+      const hourlyRange = needsHourlyAggregate
+        ? buildOccupancyHourlyRange(
+            requestedAt,
+            needsHourlyHeatmap ? reportSettings.dayCount : 1,
+            timeZone,
+          )
+        : null;
+      const scenarioHeatmapRange =
+        visibleReportCardIds.has("occupancy_scenario_hour_heatmap") &&
+        reportSettings.scenarioHeatmapGranularity !== "hour"
+          ? buildOccupancyScenarioHeatmapRange(
+              requestedAt,
+              reportSettings.scenarioHeatmapGranularity,
+              reportSettings.scenarioHeatmapGranularity === "day"
+                ? reportSettings.dayCount
+                : 7,
+              timeZone,
+            )
+          : null;
+      const maximumTrendRanges =
+        visibleReportCardIds.has("occupancy_scenario_max_month") ||
+        visibleReportCardIds.has("occupancy_scenario_max_year")
+          ? buildOccupancyMaximumTrendRanges(requestedAt, timeZone)
+          : null;
+      const currentHourRange = reportSelectionPlan.currentHour.length
+        ? buildOccupancyCurrentHourRange(requestedAt, timeZone)
+        : null;
+      const hourlyScenarioIds = new Set(reportSelectionPlan.hourly);
+      const currentHourOnlyIds = reportSelectionPlan.currentHour.filter(
+        (scenarioId) => !hourlyScenarioIds.has(scenarioId),
+      );
+
+      const [
+        reportSnapshots,
+        hourlySeries,
+        currentHourOnlySeries,
+        nonHourlyHeatmapSeries,
+        maximumTrendSeries,
+      ] = await Promise.all([
+        loadOccupancyComparisonReportSnapshots({
+          companyScopeId,
+          scenarioIds: reportSelectionPlan.snapshots,
+          scenarios: scopedScenarios,
+          signal: requestSignal,
+          timeZone,
+        }),
+        hourlyRange
+          ? loadOccupancyComparisonReportAggregate({
+              companyScopeId,
+              granularity: "hour",
+              range: hourlyRange,
+              scenarioIds: reportSelectionPlan.hourly,
+              scenarios: scopedScenarios,
+              signal: requestSignal,
+              timeZone,
+              timeZoneWarning,
+            })
+          : Promise.resolve([]),
+        currentHourRange && currentHourOnlyIds.length
+          ? loadOccupancyComparisonReportAggregate({
+              companyScopeId,
+              granularity: "hour",
+              range: currentHourRange,
+              scenarioIds: currentHourOnlyIds,
+              scenarios: scopedScenarios,
+              signal: requestSignal,
+              timeZone,
+              timeZoneWarning,
+            })
+          : Promise.resolve([]),
+        scenarioHeatmapRange
+          ? loadOccupancyComparisonReportAggregate({
+              companyScopeId,
+              granularity: reportSettings.scenarioHeatmapGranularity,
+              range: scenarioHeatmapRange,
+              scenarioIds:
+                reportSelectionPlan.byCard.get(
+                  "occupancy_scenario_hour_heatmap",
+                ) ?? [],
+              scenarios: scopedScenarios,
+              signal: requestSignal,
+              timeZone,
+              timeZoneWarning,
+            })
+          : Promise.resolve([]),
+        maximumTrendRanges
+          ? loadOccupancyComparisonReportAggregate({
+              companyScopeId,
+              granularity: "month",
+              range: maximumTrendRanges.monthlySource,
+              scenarioIds: reportSelectionPlan.trends,
+              scenarios: scopedScenarios,
+              signal: requestSignal,
+              timeZone,
+              timeZoneWarning,
+            })
+          : Promise.resolve([]),
+      ]);
+      requestSignal.throwIfAborted();
+
+      const hourlySeriesById = new Map(
+        [...hourlySeries, ...currentHourOnlySeries].map((series) => [
+          series.scenarioId,
+          series,
+        ]),
+      );
+      const currentHourSeries: OccupancyScenarioOpenMaximumSeries[] =
+        currentHourRange
+          ? reportSelectionPlan.currentHour.flatMap((scenarioId) => {
+              const series = hourlySeriesById.get(scenarioId);
+              if (!series) return [];
+              const metric = series.metrics.get(
+                occupancyAggregateBucketKey(currentHourRange.from, "hour"),
+              );
+              return [
+                {
+                  error: series.error,
+                  name: series.name,
+                  peaks: metric
+                    ? new Map([
+                        [
+                          occupancyAggregateBucketKey(
+                            currentHourRange.from,
+                            "hour",
+                          ),
+                          metric.peak,
+                        ],
+                      ])
+                    : new Map(),
+                  scenarioId,
+                  source: "hour" as const,
+                  warning: series.warning,
+                },
+              ];
+            })
+          : [];
+      const reportScenarioHeatmapSeries =
+        reportSettings.scenarioHeatmapGranularity === "hour"
+          ? hourlySeries
+          : nonHourlyHeatmapSeries;
+      const reportScenarioHeatmapBuckets =
+        reportSettings.scenarioHeatmapGranularity === "hour"
+          ? (hourlyRange?.buckets ?? EMPTY_OCCUPANCY_BUCKETS)
+          : (scenarioHeatmapRange?.buckets ?? EMPTY_OCCUPANCY_BUCKETS);
+      const reportScenarioHourDateKeys =
+        reportSettings.scenarioHeatmapGranularity === "hour"
+          ? Array.from(
+              new Set(
+                reportScenarioHeatmapBuckets.map((bucket) =>
+                  localDateKey(bucket, timeZone),
+                ),
+              ),
+            )
+          : [];
+      const reportScenarioHourDateKey = reportScenarioHourDateKeys.includes(
+        reportSettings.scenarioHourHeatmapDateKey,
+      )
+        ? reportSettings.scenarioHourHeatmapDateKey
+        : (reportScenarioHourDateKeys.at(-1) ?? "");
+      const reportHourlyMaximumBuckets = currentHourRange
+        ? (hourlyRange?.buckets ?? currentHourRange.buckets).filter(
+            (bucket) =>
+              localDateKey(bucket, timeZone) ===
+              localDateKey(currentHourRange.from, timeZone),
+          )
+        : [];
+
+      return {
+        dataCompleteUntil: undefined,
+        reportAssets: buildOccupancyComparisonReportAssets({
+          timeZone,
+          aggregateBuckets: hourlyRange?.buckets ?? EMPTY_OCCUPANCY_BUCKETS,
+          aggregateSeries: hourlySeries,
+          currentHourBucket: currentHourRange?.from ?? null,
+          currentHourSeries,
+          heatmapScenarioId:
+            reportSelectionPlan.byCard.get(
+              "occupancy_day_hour_heatmap",
+            )?.[0] ?? "",
+          hexSnapshots: reportSnapshots,
+          hourlyMaximumBuckets: reportHourlyMaximumBuckets,
+          hourlyMaximumSeries: hourlySeries.length
+            ? hourlySeries
+            : currentHourOnlySeries,
+          maximumTrendRanges,
+          maximumTrendSeries,
+          scenarioHeatmapBuckets: reportScenarioHeatmapBuckets,
+          scenarioHeatmapSeries: reportScenarioHeatmapSeries,
+          scenarioHourHeatmapDateKey: reportScenarioHourDateKey,
+          scenarios: scopedScenarios,
+          selectionsByCard: reportSelectionPlan.byCard,
+          selectedScenarioIds: reportSelectedScenarioIds,
+          settings: reportSettings,
+          snapshots: reportSnapshots,
+        }).filter((asset) => visibleReportCardIds.has(asset.cardId)),
+      };
+    },
+    [
+      companyScopeId,
+      focusScenarioId,
+      historicalMode,
+      preferenceScopeId,
+      reportPreferences,
+      scopedScenarios,
+      settings,
+      settingsReady,
+      stableManualPeriod,
+      timeZone,
+      timeZoneWarning,
+      userId,
+    ],
+  );
+
+  // Compatibilidade com o painel Ao Vivo, cujo exportador já certifica o
+  // restante das fontes em um snapshot próprio.
+  const loadReportAssets = React.useCallback(
+    async (signal?: AbortSignal) =>
+      (await loadReportSnapshot(signal)).reportAssets,
+    [loadReportSnapshot],
+  );
+
+  const reportAssets = React.useMemo(
+    () =>
+      historicalMode && queryEnabled && !loading
+        ? getReportAssets().filter((asset) => visibleCardIds.has(asset.cardId))
+        : [],
+    [getReportAssets, historicalMode, loading, queryEnabled, visibleCardIds],
+  );
+
+  return {
+    cards,
+    dataCompleteUntil,
+    getReportAssets,
+    loadReportAssets,
+    loadReportSnapshot,
+    loading,
+    refresh,
+    reportAssets,
+    settings,
+    snapshots: certifiedSnapshots,
+    snapshotsLoading: snapshotLoading,
+    updateSettings,
+  };
 }
 
 function buildOccupancyComparisonReportAssets({
@@ -3670,6 +5086,7 @@ function buildOccupancyComparisonReportAssets({
   currentHourSeries,
   heatmapScenarioId,
   hexSnapshots,
+  historicalContextLabel,
   hourlyMaximumBuckets,
   hourlyMaximumSeries,
   maximumTrendRanges,
@@ -3689,6 +5106,7 @@ function buildOccupancyComparisonReportAssets({
   currentHourSeries: OccupancyScenarioOpenMaximumSeries[];
   heatmapScenarioId: string;
   hexSnapshots: OccupancyScenarioSnapshot[];
+  historicalContextLabel?: string;
   hourlyMaximumBuckets: Date[];
   hourlyMaximumSeries: OccupancyScenarioHourlySeries[];
   maximumTrendRanges: OccupancyMaximumTrendRanges | null;
@@ -3770,11 +5188,15 @@ function buildOccupancyComparisonReportAssets({
       entry.total === null ? total : total + entry.total,
     0,
   );
-  const comparisonTitle = "Comparação atual por cenário";
+  const comparisonTitle = historicalContextLabel
+    ? "Comparação no fechamento por cenário"
+    : "Comparação atual por cenário";
   const comparisonDescription =
-    settings.comparisonMode === "status"
-      ? "Estado atual por cenário na ordem configurada; zero representa desocupado e ausência permanece sem dados."
-      : "Ocupação atual por cenário na ordem configurada, com participação calculada apenas sobre valores disponíveis.";
+    historicalContextLabel
+      ? `${historicalContextLabel}. Estado e ocupação certificados no fechamento do intervalo; ausência permanece sem dados.`
+      : settings.comparisonMode === "status"
+        ? "Estado atual informado pela leitura mais recente de cada cenário; ausência permanece sem dados."
+        : "Ocupação atual por cenário na ordem configurada, com participação calculada apenas sobre valores disponíveis.";
 
   const raceEntries = buildOccupancyLiveRaceEntries(raceSnapshots);
   const raceRows = raceEntries
@@ -3806,6 +5228,7 @@ function buildOccupancyComparisonReportAssets({
     currentSnapshots: [],
     currentSeries: [],
     granularity: "month",
+    markLastBucketPartial: !historicalContextLabel,
     monthlySourceBuckets: [],
     scenarios,
     series: filterForCard("occupancy_scenario_max_month", maximumTrendSeries),
@@ -3818,6 +5241,7 @@ function buildOccupancyComparisonReportAssets({
     currentSnapshots: filterForCard("occupancy_scenario_max_year", snapshots),
     currentSeries: filterForCard("occupancy_scenario_max_year", currentHourSeries),
     granularity: "year",
+    markLastBucketPartial: !historicalContextLabel,
     monthlySourceBuckets: maximumTrendRanges?.monthlySource.buckets ?? [],
     scenarios,
     series: filterForCard("occupancy_scenario_max_year", maximumTrendSeries),
@@ -3901,11 +5325,14 @@ function buildOccupancyComparisonReportAssets({
     scenarioHeatmapGranularity,
   );
   const scenarioPeriodTitle = `Ocupação por cenários x ${scenarioPeriodLabel}`;
-  const scenarioPeriodDescription = `Período: ${occupancyScenarioHeatmapPeriodDescription(
-    scenarioHeatmapGranularity,
-    settings.dayCount,
-    scenarioHourHeatmapDateKey,
-  )}. Os cenários não são somados e as lacunas permanecem sem valor.`;
+  const scenarioPeriodDescription = `Período: ${
+    historicalContextLabel ??
+    occupancyScenarioHeatmapPeriodDescription(
+      scenarioHeatmapGranularity,
+      settings.dayCount,
+      scenarioHourHeatmapDateKey,
+    )
+  }. Os cenários não são somados e as lacunas permanecem sem valor.`;
   const scenarioPeriodNotice = occupancyAggregatePresentationWarning(
     joinMessages(
       ...scenarioPeriodSeries.flatMap((scenario) => [
@@ -3929,9 +5356,18 @@ function buildOccupancyComparisonReportAssets({
             { key: "order", label: "Ordem", numeric: true },
             { key: "scenario", label: "Cenário" },
             { key: "state", label: "Estado" },
-            { key: "occupancy", label: "Ocupação atual", numeric: true },
+            {
+              key: "occupancy",
+              label: historicalContextLabel
+                ? "Ocupação no fechamento"
+                : "Ocupação atual",
+              numeric: true,
+            },
             { key: "share", label: "Participação (%)", numeric: true },
-            { key: "asOf", label: "Atualizado em" },
+            {
+              key: "asOf",
+              label: historicalContextLabel ? "Fechamento em" : "Atualizado em",
+            },
           ],
           description:
             "Ordem fixa configurada; valores ausentes permanecem nulos e não participam do percentual.",
@@ -3959,8 +5395,9 @@ function buildOccupancyComparisonReportAssets({
     {
       cardId: "occupancy_scenario_bar_race",
       chart: {
-        description:
-          "Ranking ao vivo da ocupação atual; empates preservam a ordem configurada e leituras ausentes ficam sem valor.",
+        description: historicalContextLabel
+          ? `Ranking da ocupação no fechamento de ${historicalContextLabel}; empates preservam a ordem configurada e leituras ausentes ficam sem valor.`
+          : "Ranking ao vivo da ocupação atual; empates preservam a ordem configurada e leituras ausentes ficam sem valor.",
         option: buildLiveBarRaceOption(
           raceEntries,
           widgetColor,
@@ -3972,8 +5409,17 @@ function buildOccupancyComparisonReportAssets({
           columns: [
             { key: "rank", label: "Posição", numeric: true },
             { key: "scenario", label: "Cenário" },
-            { key: "occupancy", label: "Ocupação atual", numeric: true },
-            { key: "asOf", label: "Atualizado em" },
+            {
+              key: "occupancy",
+              label: historicalContextLabel
+                ? "Ocupação no fechamento"
+                : "Ocupação atual",
+              numeric: true,
+            },
+            {
+              key: "asOf",
+              label: historicalContextLabel ? "Fechamento em" : "Atualizado em",
+            },
           ],
           description:
             "Ranking visual dos cenários no horário da última atualização.",
@@ -3985,9 +5431,13 @@ function buildOccupancyComparisonReportAssets({
             rank: entry.value === null ? null : index + 1,
             scenario: entry.name,
           })),
-          title: "Dados - Ranking ao vivo por cenário",
+          title: historicalContextLabel
+            ? "Dados - Ranking no fechamento por cenário"
+            : "Dados - Ranking ao vivo por cenário",
         },
-        title: "Ranking ao vivo por cenário",
+        title: historicalContextLabel
+          ? "Ranking no fechamento por cenário"
+          : "Ranking ao vivo por cenário",
       },
     },
     buildMaximumReportAsset({
@@ -3997,6 +5447,7 @@ function buildOccupancyComparisonReportAssets({
       labels: OCCUPANCY_FIXED_HOUR_LABELS,
       series: hourlyMaximum,
       widgetColor,
+      historicalContextLabel,
     }),
     buildMaximumReportAsset({
       cardId: "occupancy_scenario_max_month",
@@ -4005,6 +5456,7 @@ function buildOccupancyComparisonReportAssets({
       labels: occupancyMaximumTrendBucketLabels(monthlyBuckets, "month"),
       series: monthlyMaximum,
       widgetColor,
+      historicalContextLabel,
     }),
     buildMaximumReportAsset({
       cardId: "occupancy_scenario_max_year",
@@ -4013,12 +5465,14 @@ function buildOccupancyComparisonReportAssets({
       labels: occupancyMaximumTrendBucketLabels(annualBuckets, "year"),
       series: annualMaximum,
       widgetColor,
+      historicalContextLabel,
     }),
     {
       cardId: "occupancy_hex_layout",
       chart: {
-        description:
-          settings.hexDisplayMode === "actual"
+        description: historicalContextLabel
+          ? `${historicalContextLabel}. Layout operacional certificado no fechamento do intervalo.`
+          : settings.hexDisplayMode === "actual"
             ? "Layout operacional em escala gradual de ocupação real."
             : "Layout operacional por estado ocupado ou desocupado.",
         option: buildHexLayoutOption(
@@ -4061,15 +5515,21 @@ function buildOccupancyComparisonReportAssets({
                 ? null
                 : position.utilization * 100,
           })),
-          title: "Dados - Simulador operacional hexagonal",
+          title: historicalContextLabel
+            ? "Dados - Mapa operacional no fechamento"
+            : "Dados - Simulador operacional hexagonal",
         },
-        title: "Simulador operacional hexagonal",
+        title: historicalContextLabel
+          ? "Mapa operacional no fechamento"
+          : "Simulador operacional hexagonal",
       },
     },
     {
       cardId: "occupancy_day_hour_heatmap",
       chart: {
-        description: `Últimos ${settings.dayCount} dias do cenário escolhido; o valor zero permanece visível e a ausência fica sem valor.`,
+        description: historicalContextLabel
+          ? `${historicalContextLabel}. Horários disponíveis dentro do período aplicado; zero permanece visível e ausência fica sem valor.`
+          : `Últimos ${settings.dayCount} dias do cenário escolhido; o valor zero permanece visível e a ausência fica sem valor.`,
         option: buildHeatmapOption({
           cells: dayHourMatrix.cells,
           interactive: false,
@@ -4164,10 +5624,637 @@ function buildOccupancyComparisonReportAssets({
   ];
 }
 
+type OccupancyComparisonReportRange = {
+  buckets: Date[];
+  from: Date;
+  to: Date;
+};
+
+async function loadOccupancyHistoricalComparisonDataset({
+  bypassCache,
+  companyScopeId,
+  period,
+  plan,
+  ranges,
+  scenarioHeatmapGranularity,
+  scenarios,
+  signal,
+  timeZone,
+  timeZoneWarning,
+}: {
+  bypassCache: boolean;
+  companyScopeId: string;
+  period: OccupancyComparisonHistoricalPeriod;
+  plan: OccupancyHistoricalComparisonLoadPlan;
+  ranges: OccupancyHistoricalComparisonRanges;
+  scenarioHeatmapGranularity: OccupancyScenarioHeatmapGranularity;
+  scenarios: readonly OccupancyScenario[];
+  signal: AbortSignal;
+  timeZone: string;
+  timeZoneWarning?: string;
+}): Promise<OccupancyHistoricalComparisonDataset> {
+  signal.throwIfAborted();
+  const snapshotsPromise = plan.needsSnapshots
+    ? loadOccupancyComparisonReportSnapshots({
+        bypassCache,
+        companyScopeId,
+        referenceAt: period.referenceAt,
+        scenarioIds: plan.snapshotScenarioIds,
+        scenarios,
+        signal,
+        timeZone,
+      })
+    : Promise.resolve([]);
+  const hourlyPromise =
+    plan.needsHourlyAggregate && ranges.hourly?.buckets.length
+      ? loadOccupancyComparisonReportAggregate({
+          bypassCache,
+          companyScopeId,
+          granularity: "hour",
+          range: ranges.hourly,
+          requestedAt: period.referenceAt,
+          scenarioIds: plan.hourlyScenarioIds,
+          scenarios,
+          signal,
+          timeZone,
+          timeZoneWarning,
+        })
+      : Promise.resolve(
+          emptyHistoricalComparisonSeries(plan.hourlyScenarioIds, scenarios),
+        );
+  const maximumTrendPromise =
+    plan.needsMaximumTrend &&
+    ranges.maximumTrend?.monthlySource.buckets.length
+      ? loadOccupancyComparisonReportAggregate({
+          bypassCache,
+          companyScopeId,
+          granularity: "month",
+          range: ranges.maximumTrend.monthlySource,
+          requestedAt: period.referenceAt,
+          scenarioIds: plan.maximumTrendScenarioIds,
+          scenarios,
+          signal,
+          timeZone,
+          timeZoneWarning,
+        })
+      : Promise.resolve(
+          emptyHistoricalComparisonSeries(
+            plan.maximumTrendScenarioIds,
+            scenarios,
+          ),
+        );
+  const nonHourlyScenarioHeatmapPromise =
+    plan.needsScenarioHeatmap &&
+    scenarioHeatmapGranularity !== "hour" &&
+    ranges.scenarioHeatmap?.buckets.length
+      ? loadOccupancyComparisonReportAggregate({
+          bypassCache,
+          companyScopeId,
+          granularity: scenarioHeatmapGranularity,
+          range: ranges.scenarioHeatmap,
+          requestedAt: period.referenceAt,
+          scenarioIds: plan.scenarioHeatmapScenarioIds,
+          scenarios,
+          signal,
+          timeZone,
+          timeZoneWarning,
+        })
+      : Promise.resolve([]);
+
+  const [snapshots, hourlySeries, maximumTrendSeries, nonHourlyHeatmapSeries] =
+    await Promise.all([
+      snapshotsPromise,
+      hourlyPromise,
+      maximumTrendPromise,
+      nonHourlyScenarioHeatmapPromise,
+    ]);
+  signal.throwIfAborted();
+
+  return {
+    hourlyRange: ranges.hourly,
+    hourlySeries,
+    maximumTrendRanges: ranges.maximumTrend,
+    maximumTrendSeries,
+    scenarioHeatmapRange: ranges.scenarioHeatmap,
+    scenarioHeatmapSeries:
+      scenarioHeatmapGranularity === "hour"
+        ? filterOccupancyComparisonRows(
+            hourlySeries,
+            plan.scenarioHeatmapScenarioIds,
+          )
+        : nonHourlyHeatmapSeries.length
+          ? nonHourlyHeatmapSeries
+          : emptyHistoricalComparisonSeries(
+              plan.scenarioHeatmapScenarioIds,
+              scenarios,
+            ),
+    snapshots,
+  };
+}
+
+function emptyHistoricalComparisonSeries(
+  scenarioIds: readonly string[],
+  scenarios: readonly OccupancyScenario[],
+): OccupancyScenarioHourlySeries[] {
+  const requestedIds = new Set(scenarioIds);
+  return scenarios.flatMap((scenario) =>
+    requestedIds.has(scenario.id)
+      ? [
+          {
+            metrics: new Map<number, OccupancyAggregateMetric>(),
+            name: scenario.name,
+            scenarioId: scenario.id,
+          },
+        ]
+      : [],
+  );
+}
+
+function historicalComparisonFailureSeries(
+  scenarioIds: readonly string[],
+  scenarios: readonly OccupancyScenario[],
+  error: string,
+) {
+  return emptyHistoricalComparisonSeries(scenarioIds, scenarios).map(
+    (series) => ({ ...series, error }),
+  );
+}
+
+function historicalSnapshotFailures(
+  scenarioIds: readonly string[],
+  scenarios: readonly OccupancyScenario[],
+  error: string,
+): OccupancyScenarioSnapshot[] {
+  const requestedIds = new Set(scenarioIds);
+  return scenarios.flatMap((scenario) =>
+    requestedIds.has(scenario.id)
+      ? [
+          {
+            error,
+            name: scenario.name,
+            occupied: null,
+            scenarioId: scenario.id,
+            total: null,
+          },
+        ]
+      : [],
+  );
+}
+
+function occupancyHistoricalSnapshotsAreComplete(
+  snapshots: readonly OccupancyScenarioSnapshot[],
+  scenarioIds: readonly string[],
+) {
+  const snapshotsById = new Map(
+    snapshots.map((snapshot) => [snapshot.scenarioId, snapshot]),
+  );
+  return Array.from(new Set(scenarioIds)).every((scenarioId) => {
+    const snapshot = snapshotsById.get(scenarioId);
+    return Boolean(
+      snapshot &&
+        !snapshot.error &&
+        snapshot.total !== null &&
+        Number.isFinite(snapshot.total),
+    );
+  });
+}
+
+function occupancyHistoricalAggregateIsComplete({
+  coverageScenarios,
+  granularity,
+  range,
+  scenarioIds,
+  series,
+  timeZone,
+}: {
+  coverageScenarios?: readonly Pick<OccupancyScenario, "created_at" | "id">[];
+  granularity: AggregateGranularity;
+  range: OccupancyMaximumTrendRange | null;
+  scenarioIds: readonly string[];
+  series: readonly OccupancyScenarioHourlySeries[];
+  timeZone?: string;
+}) {
+  const uniqueScenarioIds = Array.from(new Set(scenarioIds));
+  if (!uniqueScenarioIds.length) return true;
+  if (!range?.buckets.length) return true;
+  const seriesById = new Map(
+    series.map((scenarioSeries) => [
+      scenarioSeries.scenarioId,
+      scenarioSeries,
+    ]),
+  );
+  const coverageStartById = new Map(
+    coverageScenarios?.map((scenario) => [
+      scenario.id,
+      occupancyScenarioCoverageStart(scenario.created_at),
+    ]) ?? [],
+  );
+  return uniqueScenarioIds.every((scenarioId) => {
+    const coverageStart = coverageStartById.get(scenarioId);
+    const coverageMonth =
+      granularity === "month" && coverageStart && timeZone
+        ? companyCalendarDate(coverageStart, timeZone, "month")
+        : null;
+    const requiredBuckets = coverageMonth
+      ? range.buckets.filter(
+          (bucket) =>
+            bucket.getFullYear() * 12 + bucket.getMonth() >=
+            coverageMonth.getFullYear() * 12 + coverageMonth.getMonth(),
+        )
+      : range.buckets;
+    if (!requiredBuckets.length) return true;
+    const scenarioSeries = seriesById.get(scenarioId);
+    return Boolean(
+      scenarioSeries &&
+        !scenarioSeries.error &&
+        requiredBuckets.every((bucket) =>
+          scenarioSeries.metrics.has(
+            occupancyAggregateBucketKey(bucket, granularity),
+          ),
+        ),
+    );
+  });
+}
+
+function occupancyHistoricalComparisonDataCompleteUntil({
+  dataset,
+  period,
+  plan,
+  ranges,
+  scenarioHeatmapGranularity,
+  scenarios,
+  timeZone,
+}: {
+  dataset: OccupancyHistoricalComparisonDataset;
+  period: OccupancyComparisonHistoricalPeriod;
+  plan: OccupancyHistoricalComparisonLoadPlan;
+  ranges: OccupancyHistoricalComparisonRanges;
+  scenarioHeatmapGranularity: AggregateGranularity;
+  scenarios: readonly OccupancyScenario[];
+  timeZone: string;
+}): Date | null | undefined {
+  const snapshotDemand =
+    plan.needsSnapshots && plan.snapshotScenarioIds.length > 0;
+  const hourlyDemand =
+    plan.needsHourlyAggregate && plan.hourlyScenarioIds.length > 0;
+  const maximumTrendDemand =
+    plan.needsMaximumTrend && plan.maximumTrendScenarioIds.length > 0;
+  const scenarioHeatmapDemand =
+    plan.needsScenarioHeatmap &&
+    scenarioHeatmapGranularity !== "hour" &&
+    plan.scenarioHeatmapScenarioIds.length > 0;
+
+  if (
+    !snapshotDemand &&
+    !hourlyDemand &&
+    !maximumTrendDemand &&
+    !scenarioHeatmapDemand
+  ) {
+    return undefined;
+  }
+  if (
+    snapshotDemand &&
+    !occupancyHistoricalSnapshotsAreComplete(
+      dataset.snapshots,
+      plan.snapshotScenarioIds,
+    )
+  ) {
+    return null;
+  }
+  if (
+    hourlyDemand &&
+    !occupancyHistoricalAggregateIsComplete({
+      granularity: "hour",
+      range: ranges.hourly,
+      scenarioIds: plan.hourlyScenarioIds,
+      series: dataset.hourlySeries,
+    })
+  ) {
+    return null;
+  }
+  if (
+    maximumTrendDemand &&
+    !occupancyHistoricalAggregateIsComplete({
+      coverageScenarios: scenarios,
+      granularity: "month",
+      range: ranges.maximumTrend?.monthlySource ?? null,
+      scenarioIds: plan.maximumTrendScenarioIds,
+      series: dataset.maximumTrendSeries,
+      timeZone,
+    })
+  ) {
+    return null;
+  }
+  if (
+    scenarioHeatmapDemand &&
+    !occupancyHistoricalAggregateIsComplete({
+      granularity: scenarioHeatmapGranularity,
+      range: ranges.scenarioHeatmap,
+      scenarioIds: plan.scenarioHeatmapScenarioIds,
+      series: dataset.scenarioHeatmapSeries,
+    })
+  ) {
+    return null;
+  }
+  return new Date(period.referenceAt);
+}
+
+function occupancyComparisonHistoryPath(scenarioId: string, at: Date) {
+  const params = new URLSearchParams({ at: at.toISOString() });
+  return `/occupancy/scenarios/${encodeURIComponent(scenarioId)}/history?${params.toString()}`;
+}
+
+async function loadOccupancyComparisonReportSnapshots({
+  bypassCache = false,
+  companyScopeId,
+  referenceAt,
+  scenarioIds,
+  scenarios,
+  signal,
+  timeZone,
+}: {
+  bypassCache?: boolean;
+  companyScopeId: string;
+  referenceAt?: Date;
+  scenarioIds: readonly string[];
+  scenarios: readonly OccupancyScenario[];
+  signal: AbortSignal;
+  timeZone: string;
+}): Promise<OccupancyScenarioSnapshot[]> {
+  const requestedIds = new Set(scenarioIds);
+  const requestedScenarios = scenarios.filter((scenario) =>
+    requestedIds.has(scenario.id),
+  );
+  if (!requestedScenarios.length) return [];
+  signal.throwIfAborted();
+
+  if (referenceAt) {
+    return mapWithConcurrency(
+      requestedScenarios,
+      MAX_PARALLEL_REQUESTS,
+      async (scenario): Promise<OccupancyScenarioSnapshot> => {
+        try {
+          const response = await fetchSharedOccupancyQuery<unknown>({
+            bypassCache,
+            cacheTtlMs: DEFAULT_AGGREGATE_REFRESH_MS,
+            companyScopeId,
+            path: occupancyComparisonHistoryPath(scenario.id, referenceAt),
+            priority: "normal",
+            scenarioId: scenario.id,
+            signal,
+            timeZone,
+          });
+          signal.throwIfAborted();
+          const history = requireOccupancyHistoryResponse(
+            response,
+            scenario.id,
+            {
+              expectedAreas: scenario.areas,
+              requestedAt: referenceAt,
+            },
+          );
+          return {
+            asOf: history.as_of,
+            name: scenario.name,
+            occupied: history.total > 0,
+            scenarioId: scenario.id,
+            total: history.total,
+          };
+        } catch (error) {
+          if (isAbortError(error, signal)) throw error;
+          return {
+            error: occupancyRequestError(
+              error,
+              "A leitura de fechamento não está disponível.",
+            ),
+            name: scenario.name,
+            occupied: null,
+            scenarioId: scenario.id,
+            total: null,
+          };
+        }
+      },
+    );
+  }
+
+  const query = occupancyLiveSnapshotQuery({ now: new Date() });
+  const expectedAreas = Array.from(
+    new Map(
+      requestedScenarios.flatMap((scenario) =>
+        scenario.areas.map((area) => [
+          JSON.stringify([
+            area.camera_id,
+            area.area_id,
+            scenario.object_class,
+          ]),
+          {
+            area_id: area.area_id,
+            camera_id: area.camera_id,
+            object_class: scenario.object_class,
+          },
+        ] as const),
+      ),
+    ).values(),
+  );
+
+  try {
+    const response = await fetchSharedOccupancyQuery<unknown>({
+      bypassCache,
+      cacheTtlMs: OCCUPANCY_LIVE_SNAPSHOT_CACHE_TTL_MS,
+      companyScopeId,
+      path: query.path,
+      priority: "normal",
+      scenarioId: OCCUPANCY_LIVE_SNAPSHOT_QUERY_ID,
+      signal,
+      timeZone,
+    });
+    signal.throwIfAborted();
+    const rows = requireOccupancyCurrentSnapshotRows(response, {
+      expectedAreas,
+    });
+    return requestedScenarios.map((scenario) => {
+      if (!occupancyScenarioSnapshotHasCompleteCoverage(scenario, rows)) {
+        return {
+          error: "A leitura atual não cobriu todas as áreas do cenário.",
+          name: scenario.name,
+          occupied: null,
+          scenarioId: scenario.id,
+          total: null,
+        };
+      }
+      try {
+        return buildOccupancyScenarioSnapshotValue(scenario, rows);
+      } catch (error) {
+        return {
+          error: occupancyRequestError(
+            error,
+            "A leitura atual não está disponível.",
+          ),
+          name: scenario.name,
+          occupied: null,
+          scenarioId: scenario.id,
+          total: null,
+        };
+      }
+    });
+  } catch (error) {
+    signal.throwIfAborted();
+    const message = occupancyRequestError(
+      error,
+      "A leitura atual não está disponível.",
+    );
+    return requestedScenarios.map((scenario) => ({
+      error: message,
+      name: scenario.name,
+      occupied: null,
+      scenarioId: scenario.id,
+      total: null,
+    }));
+  }
+}
+
+async function loadOccupancyComparisonReportAggregate({
+  bypassCache = false,
+  companyScopeId,
+  granularity,
+  range,
+  requestedAt = new Date(),
+  scenarioIds,
+  scenarios,
+  signal,
+  timeZone,
+  timeZoneWarning,
+}: {
+  bypassCache?: boolean;
+  companyScopeId: string;
+  granularity: OccupancyScenarioHeatmapGranularity;
+  range: OccupancyComparisonReportRange;
+  requestedAt?: Date;
+  scenarioIds: readonly string[];
+  scenarios: readonly OccupancyScenario[];
+  signal: AbortSignal;
+  timeZone: string;
+  timeZoneWarning?: string;
+}): Promise<OccupancyScenarioHourlySeries[]> {
+  const requestedIds = new Set(scenarioIds);
+  const requestedScenarios = scenarios.filter((scenario) =>
+    requestedIds.has(scenario.id),
+  );
+  if (!requestedScenarios.length) return [];
+  signal.throwIfAborted();
+  const openBucket = range.buckets.at(-1);
+  const capabilities = sharedOccupancyCivilCapabilities(
+    companyScopeId,
+    timeZone,
+  );
+
+  return mapWithConcurrency(
+    requestedScenarios,
+    MAX_PARALLEL_REQUESTS,
+    async (scenario): Promise<OccupancyScenarioHourlySeries> => {
+      try {
+        signal.throwIfAborted();
+        const fetchResponse = (path: string) =>
+          fetchSharedOccupancyQuery<OccupancyScenarioAggregateResponse>({
+            bypassCache,
+            cacheTtlMs: DEFAULT_AGGREGATE_REFRESH_MS,
+            companyScopeId,
+            path,
+            priority: "normal",
+            scenarioId: scenario.id,
+            signal,
+            timeZone,
+          });
+        const response =
+          granularity === "day" ||
+          granularity === "week" ||
+          granularity === "month"
+            ? await fetchOccupancyCivilAggregate({
+                capabilities,
+                companyScopeId,
+                fetchResponse,
+                from: range.from,
+                granularity,
+                maximumFallbackRequests:
+                  occupancyLiveCivilFallbackRequestLimit(granularity),
+                openBucket,
+                requestedAt,
+                scenarioId: scenario.id,
+                signal,
+                timeZone,
+                to: range.to,
+              })
+            : await fetchResponse(
+                occupancyAggregatePath(
+                  scenario.id,
+                  range.from,
+                  range.to,
+                  granularity,
+                ),
+              );
+        signal.throwIfAborted();
+        const rows = requireOccupancyAggregateRows(
+          response,
+          granularity,
+          scenario.id,
+          timeZone,
+          {
+            allowDocumentedAggregateResponse: true,
+            allowVerifiedCivilAggregateResponse:
+              granularity !== "minute" && granularity !== "hour",
+            expectedTimezone: timeZone,
+            openBucket,
+            requestedAt,
+            requireCertification: true,
+          },
+        );
+        const coverage = aggregateOccupancyRowsForRequestedBuckets(
+          rows,
+          granularity,
+          range.buckets,
+          {
+            allowDocumentedAggregateResponse: true,
+            allowVerifiedCivilAggregateResponse:
+              granularity !== "minute" && granularity !== "hour",
+            expectedTimezone: timeZone,
+            openBucket,
+            requireCertification: true,
+          },
+        );
+        return {
+          metrics: new Map(coverage.totals),
+          name: scenario.name,
+          scenarioId: scenario.id,
+          warning: joinMessages(
+            timeZoneWarning,
+            occupancyAggregateMetadataWarning(response, granularity),
+            occupancyAggregateCoverageWarning(
+              coverage.missingBuckets.length,
+              range.buckets.length,
+            ),
+          ),
+        };
+      } catch (error) {
+        signal.throwIfAborted();
+        return {
+          error: occupancyRequestError(
+            error,
+            `A série por ${occupancyScenarioHeatmapGranularityLabel(granularity)} não está disponível.`,
+          ),
+          metrics: new Map(),
+          name: scenario.name,
+          scenarioId: scenario.id,
+        };
+      }
+    },
+  );
+}
+
 function buildMaximumReportAsset({
   cardId,
   colorPalette,
   granularity,
+  historicalContextLabel,
   labels,
   series,
   widgetColor,
@@ -4175,15 +6262,25 @@ function buildMaximumReportAsset({
   cardId: string;
   colorPalette: readonly string[];
   granularity: OccupancyMaximumLineGranularity;
+  historicalContextLabel?: string;
   labels: string[];
   series: OccupancyMaximumLineSeries[];
   widgetColor: string;
 }): OccupancyComparisonReportAsset {
-  const title = maximumLineTitle(granularity);
+  const title = historicalContextLabel
+    ? granularity === "hour"
+      ? "Máximo por hora no período"
+      : granularity === "month"
+        ? "Máximo mensal · 12 meses fechados"
+        : "Máximo anual · 4 anos fechados"
+    : maximumLineTitle(granularity);
+  const description = historicalContextLabel
+    ? `${historicalContextLabel}. ${maximumLineDescription(granularity, true)}`
+    : maximumLineDescription(granularity);
   return {
     cardId,
     chart: {
-      description: maximumLineDescription(granularity),
+      description,
       option: buildScenarioMaximumLineOption({
         colorPalette,
         granularity,
@@ -4227,8 +6324,8 @@ function buildMaximumReportAsset({
 function comparisonStateLabel(
   state: OccupancyComparisonBarEntry["state"],
 ) {
-  if (state === "occupied") return "Ocupado (> 0)";
-  if (state === "unoccupied") return "Desocupado (= 0)";
+  if (state === "occupied") return "Ocupado";
+  if (state === "unoccupied") return "Desocupado";
   return "Sem dados";
 }
 
@@ -4373,21 +6470,24 @@ function OccupancyHalfDonutCard({
   timeZone,
   chartType,
   colorPalette,
+  historicalContextLabel,
   loading,
   mode,
-  requestedAt,
   snapshots,
   statusColors,
 }: {
   chartType: OccupancyWidgetSettings["comparisonChartType"];
   timeZone: string;
   colorPalette: readonly string[];
+  historicalContextLabel?: string;
   loading: boolean;
   mode: OccupancyHalfDonutMode;
-  requestedAt: Date | null;
   snapshots: OccupancyScenarioSnapshot[];
   statusColors: OccupancyStatusColors;
 }) {
+  const title = historicalContextLabel
+    ? "Comparação no fechamento por cenário"
+    : "Comparação atual por cenário";
   const widgetColor = useWidgetColor(colorPalette[0]);
   const { effectiveTheme } = useTheme();
   const chartContainerRef = React.useRef<HTMLDivElement>(null);
@@ -4411,8 +6511,8 @@ function OccupancyHalfDonutCard({
     [mode, snapshots],
   );
   const effectiveAt = React.useMemo(
-    () => occupancySnapshotEffectiveAt(snapshots, requestedAt),
-    [requestedAt, snapshots],
+    () => occupancySnapshotEffectiveAt(snapshots),
+    [snapshots],
   );
   const barEntries = React.useMemo(
     () => buildOccupancyComparisonBarEntries(snapshots, mode),
@@ -4500,11 +6600,11 @@ function OccupancyHalfDonutCard({
       widgetColor,
     ],
   );
-  const allCertifiedAreZero =
+  const allCertifiedAreUnoccupied =
     chartType === "half_donut" &&
     mode === "actual" &&
     entries.length > 0 &&
-    entries.every((entry) => entry.total === 0);
+    entries.every((entry) => entry.state === "unoccupied");
   const hasChartEntries =
     chartType === "half_donut" ? entries.length > 0 : barEntries.length > 0;
   const showCompactDonutFallback =
@@ -4550,9 +6650,10 @@ function OccupancyHalfDonutCard({
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2 @2xl:grid-cols-[minmax(0,1fr)_auto]">
           <div className="min-w-0">
             <CardTitle className="[overflow-wrap:anywhere]">
-              <WidgetTitleText fallback="Comparação atual por cenário" />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1 [overflow-wrap:anywhere]">
+              {historicalContextLabel ? `${historicalContextLabel}. ` : ""}
               {chartType === "vertical_bars"
                 ? mode === "status"
                   ? "Uma coluna por cenário, da esquerda para a direita na ordem configurada, distinguindo ocupado, desocupado e ausência de dados."
@@ -4562,7 +6663,7 @@ function OccupancyHalfDonutCard({
                   ? "Uma barra por cenário, na ordem configurada, distinguindo ocupado, desocupado e ausência de dados."
                   : "Uma barra por cenário, na ordem configurada, com valor real e participação percentual."
                 : mode === "status"
-                  ? "Todos os cenários com dados têm o mesmo peso visual; zero permanece desocupado e visível."
+                  ? "Todos os cenários com leitura têm o mesmo peso visual; o estado informado permanece visível."
                   : "A área de cada fatia representa a ocupação real; o callout identifica cenário e participação percentual."}
             </CardDescription>
           </div>
@@ -4576,11 +6677,11 @@ function OccupancyHalfDonutCard({
           <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
             <OccupancyStatusLegendBadge
               color={displayStatusColors.occupied}
-              label="Ocupado > 0"
+              label="Ocupado"
             />
             <OccupancyStatusLegendBadge
               color={displayStatusColors.unoccupied}
-              label="Desocupado = 0"
+              label="Desocupado"
               patterned
             />
             <span>
@@ -4597,17 +6698,17 @@ function OccupancyHalfDonutCard({
           >
             <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
               <EChart
-                ariaLabel="Comparação atual por cenário"
+                ariaLabel={title}
                 option={option}
                 themeMode="explicit"
                 className="h-full min-h-0 w-full"
               />
-              {allCertifiedAreZero ? (
+              {allCertifiedAreUnoccupied ? (
                 <div
                   className="pointer-events-none absolute inset-x-0 bottom-8 text-center text-xs font-semibold"
                   style={{ color: displayStatusColors.unoccupied }}
                 >
-                  Todos desocupados · 0
+                  Todos desocupados
                 </div>
               ) : null}
             </div>
@@ -4624,11 +6725,17 @@ function OccupancyHalfDonutCard({
             ) : null}
           </div>
         ) : (
-          <EmptyComparisonState text="Nenhum cenário possui leitura disponível neste momento." />
+          <EmptyComparisonState
+            text={
+              historicalContextLabel
+                ? "Nenhum cenário possui leitura de fechamento disponível no período."
+                : "Nenhum cenário possui leitura disponível neste momento."
+            }
+          />
         )}
         {effectiveAt ? (
           <div className="mt-1 text-[11px] text-muted-foreground">
-            Leitura efetiva: {formatDateTime(effectiveAt, timeZone)}.
+            {historicalContextLabel ? "Fechamento efetivo" : "Leitura efetiva"}: {formatDateTime(effectiveAt, timeZone)}.
           </div>
         ) : null}
       </CardContent>
@@ -4911,13 +7018,13 @@ export function OccupancyStatusColorsDialog({
               <OccupancyStatusColorField
                 color={draft.occupied}
                 id={occupiedInputId}
-                label="Ocupado > 0"
+                label="Ocupado"
                 onChange={(color) => changeColor("occupied", color)}
               />
               <OccupancyStatusColorField
                 color={draft.unoccupied}
                 id={unoccupiedInputId}
-                label="Desocupado = 0"
+                label="Desocupado"
                 onChange={(color) => changeColor("unoccupied", color)}
               />
             </div>
@@ -4939,7 +7046,7 @@ export function OccupancyStatusColorsDialog({
                   color: readableTextColor(draft.occupied),
                 }}
               >
-                Ocupado &gt; 0
+                Ocupado
               </div>
               <div
                 className="px-3 py-3"
@@ -4948,7 +7055,7 @@ export function OccupancyStatusColorsDialog({
                   color: readableTextColor(draft.unoccupied),
                 }}
               >
-                Desocupado = 0
+                Desocupado
               </div>
             </div>
           </div>
@@ -5101,18 +7208,21 @@ function colorContrastRatio(first: number, second: number) {
 function OccupancyBarRaceCard({
   timeZone,
   colorPalette,
+  historicalContextLabel,
   loading,
-  requestedAt,
   refreshSeconds,
   snapshots,
 }: {
   colorPalette: readonly string[];
+  historicalContextLabel?: string;
   loading: boolean;
-  requestedAt: Date | null;
-  refreshSeconds: number;
+  refreshSeconds?: number;
   timeZone: string;
   snapshots: OccupancyScenarioSnapshot[];
 }) {
+  const title = historicalContextLabel
+    ? "Ranking no fechamento por cenário"
+    : "Ranking ao vivo por cenário";
   const widgetColor = useWidgetColor(colorPalette[0]);
   const { effectiveTheme } = useTheme();
   const entries = React.useMemo(
@@ -5120,8 +7230,8 @@ function OccupancyBarRaceCard({
     [snapshots],
   );
   const effectiveAt = React.useMemo(
-    () => occupancySnapshotEffectiveAt(snapshots, requestedAt),
-    [requestedAt, snapshots],
+    () => occupancySnapshotEffectiveAt(snapshots),
+    [snapshots],
   );
   const option = React.useMemo(
     () =>
@@ -5142,11 +7252,12 @@ function OccupancyBarRaceCard({
           <div className="min-w-0">
             <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
               <Trophy className="h-4 w-4 shrink-0 text-primary" />
-              <WidgetTitleText fallback="Ranking ao vivo por cenário" />
+              <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1 [overflow-wrap:anywhere]">
-              Ranking da ocupação total neste instante, verificado no Ao Vivo a
-              cada {refreshSeconds} segundos.
+              {historicalContextLabel
+                ? `Ranking da ocupação no fechamento de ${historicalContextLabel}.`
+                : `Ranking da ocupação total neste instante, verificado no Ao Vivo a cada ${refreshSeconds} segundos.`}
             </CardDescription>
           </div>
         </div>
@@ -5157,8 +7268,12 @@ function OccupancyBarRaceCard({
         ) : entries.length ? (
           <>
             <EChart
-              ariaDescription={`Ranking da ocupação total neste instante, verificado a cada ${refreshSeconds} segundos.`}
-              ariaLabel="Ranking ao vivo por cenário"
+              ariaDescription={
+                historicalContextLabel
+                  ? `Ranking da ocupação no fechamento de ${historicalContextLabel}.`
+                  : `Ranking da ocupação total neste instante, verificado a cada ${refreshSeconds} segundos.`
+              }
+              ariaLabel={title}
               option={option}
               mergeUpdates
               themeMode="explicit"
@@ -5166,12 +7281,18 @@ function OccupancyBarRaceCard({
             />
             {effectiveAt ? (
               <div className="text-[11px] text-muted-foreground">
-                Leitura efetiva: {formatDateTime(effectiveAt, timeZone)}.
+                {historicalContextLabel ? "Fechamento efetivo" : "Leitura efetiva"}: {formatDateTime(effectiveAt, timeZone)}.
               </div>
             ) : null}
           </>
         ) : (
-          <EmptyComparisonState text="Nenhum cenário foi selecionado para o ranking ao vivo." />
+          <EmptyComparisonState
+            text={
+              historicalContextLabel
+                ? "Nenhum cenário possui fechamento disponível para o ranking."
+                : "Nenhum cenário foi selecionado para o ranking ao vivo."
+            }
+          />
         )}
       </CardContent>
     </Card>
@@ -5187,6 +7308,7 @@ function OccupancyScenarioMaximumLineCard({
   currentSnapshots = [],
   currentSeries = [],
   granularity,
+  historicalContextLabel,
   loading,
   monthlySourceBuckets = [],
   refreshSeconds,
@@ -5200,6 +7322,7 @@ function OccupancyScenarioMaximumLineCard({
   currentSnapshots?: OccupancyScenarioSnapshot[];
   currentSeries?: OccupancyScenarioOpenMaximumSeries[];
   granularity: OccupancyMaximumLineGranularity;
+  historicalContextLabel?: string;
   loading: boolean;
   monthlySourceBuckets?: Date[];
   refreshSeconds?: number;
@@ -5223,6 +7346,7 @@ function OccupancyScenarioMaximumLineCard({
         currentSnapshots,
         currentSeries,
         granularity,
+        markLastBucketPartial: !historicalContextLabel,
         monthlySourceBuckets,
         scenarios: allScenarios,
         series,
@@ -5234,6 +7358,7 @@ function OccupancyScenarioMaximumLineCard({
       currentSnapshots,
       currentSeries,
       granularity,
+      historicalContextLabel,
       monthlySourceBuckets,
       series,
       timeZone,
@@ -5251,7 +7376,16 @@ function OccupancyScenarioMaximumLineCard({
       }),
     [colorPalette, effectiveTheme, granularity, labels, lineSeries, widgetColor],
   );
-  const title = maximumLineTitle(granularity);
+  const title = historicalContextLabel
+    ? granularity === "hour"
+      ? "Máximo por hora no período"
+      : granularity === "month"
+        ? "Máximo mensal · 12 meses fechados"
+        : "Máximo anual · 4 anos fechados"
+    : maximumLineTitle(granularity);
+  const description = historicalContextLabel
+    ? `${historicalContextLabel}. ${maximumLineDescription(granularity, true)}`
+    : maximumLineDescription(granularity);
 
   return (
     <Card className="@container flex h-full min-w-0 flex-col overflow-hidden">
@@ -5269,7 +7403,7 @@ function OccupancyScenarioMaximumLineCard({
               <WidgetTitleText fallback={title} />
             </CardTitle>
             <CardDescription className="mt-1 [overflow-wrap:anywhere]">
-              {maximumLineDescription(granularity)}
+              {description}
             </CardDescription>
           </div>
           <div className="col-span-full flex min-w-0 flex-wrap items-center gap-2">
@@ -5286,7 +7420,7 @@ function OccupancyScenarioMaximumLineCard({
         ) : lineSeries.length ? (
           <>
             <EChart
-              ariaDescription={maximumLineDescription(granularity)}
+              ariaDescription={description}
               ariaLabel={title}
               option={option}
               themeMode="explicit"
@@ -5322,6 +7456,7 @@ function OccupancyHexLayoutCard({
   columns,
   defaultScenarioIds,
   displayMode,
+  historicalContextLabel,
   layout,
   loading,
   preset,
@@ -5334,6 +7469,7 @@ function OccupancyHexLayoutCard({
   columns: number;
   defaultScenarioIds: string[];
   displayMode: OccupancyWidgetSettings["hexDisplayMode"];
+  historicalContextLabel?: string;
   layout: OccupancyWidgetSettings["hexLayout"];
   loading: boolean;
   preset: OccupancyWidgetSettings["hexPreset"];
@@ -5436,21 +7572,29 @@ function OccupancyHexLayoutCard({
           <div className="min-w-0">
             <CardTitle className="flex min-w-0 items-start gap-2 [overflow-wrap:anywhere]">
               <Hexagon className="h-4 w-4 shrink-0 text-primary" />
-              <WidgetTitleText fallback="Simulador operacional hexagonal" />
+              <WidgetTitleText
+                fallback={
+                  historicalContextLabel
+                    ? "Mapa operacional no fechamento"
+                    : "Simulador operacional hexagonal"
+                }
+              />
             </CardTitle>
             <CardDescription className="mt-1 [overflow-wrap:anywhere]">
-              {displayMode === "actual"
-                ? "Valor real: o hexágono interno cresce com a ocupação e percorre uma escala contínua de cor."
-                : "Estado operacional: cada posição mostra ocupado (> 0) ou desocupado (= 0) com o mesmo peso visual."}
+              {historicalContextLabel
+                ? `${historicalContextLabel}. Estado certificado no fechamento do intervalo.`
+                : displayMode === "actual"
+                  ? "Valor real: o hexágono interno cresce com a ocupação e percorre uma escala contínua de cor."
+                  : "Estado operacional informado pela leitura atual, com o mesmo peso visual para cada posição."}
             </CardDescription>
           </div>
           <div className="col-span-full min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-2 @xl:justify-end">
               <Badge variant="outline">
-                {stateCounts.occupied} ocupados (&gt; 0)
+                {stateCounts.occupied} ocupados
               </Badge>
               <Badge variant="outline">
-                {stateCounts.unoccupied} desocupados (= 0)
+                {stateCounts.unoccupied} desocupados
               </Badge>
               <Badge variant="secondary">
                 {positions.length} posições · {occupancyHexDensityLabel(viewport.density)}
@@ -5534,6 +7678,7 @@ function OccupancyDayHourHeatmapCard({
   buckets,
   colorPalette,
   dayCount,
+  historicalContextLabel,
   loading,
   maximum,
   metric,
@@ -5543,6 +7688,7 @@ function OccupancyDayHourHeatmapCard({
   buckets: Date[];
   colorPalette: readonly string[];
   dayCount: 7 | 14 | 30;
+  historicalContextLabel?: string;
   timeZone: string;
   loading: boolean;
   maximum: number;
@@ -5585,7 +7731,11 @@ function OccupancyDayHourHeatmapCard({
 
   return (
     <OccupancyHeatmapCardShell
-      description={`Últimos ${dayCount} dias do cenário escolhido; o valor zero permanece visível e a ausência fica cinza.`}
+      description={
+        historicalContextLabel
+          ? `${historicalContextLabel}. Horários disponíveis dentro do período aplicado; zero permanece visível e ausência fica cinza.`
+          : `Últimos ${dayCount} dias do cenário escolhido; o valor zero permanece visível e a ausência fica cinza.`
+      }
       fallbackColor={colorPalette[0]}
       icon={<Grid3X3 className="h-4 w-4 shrink-0 text-primary" />}
       loading={loading}
@@ -5616,6 +7766,7 @@ function OccupancyScenarioHourHeatmapCard({
   dateKey,
   dayCount,
   granularity,
+  historicalContextLabel,
   loading,
   metric,
   series,
@@ -5625,6 +7776,7 @@ function OccupancyScenarioHourHeatmapCard({
   dateKey: string;
   dayCount: 7 | 14 | 30;
   granularity: OccupancyScenarioHeatmapGranularity;
+  historicalContextLabel?: string;
   loading: boolean;
   timeZone: string;
   metric: OccupancyComparisonMetricKey;
@@ -5682,7 +7834,9 @@ function OccupancyScenarioHourHeatmapCard({
 
   return (
     <OccupancyHeatmapCardShell
-      description={`Período: ${periodDescription}. Os cenários não são somados e as lacunas não são preenchidas com zero.`}
+      description={`Período: ${
+        historicalContextLabel ?? periodDescription
+      }. Os cenários não são somados e as lacunas não são preenchidas com zero.`}
       fallbackColor={colorPalette[0]}
       granularity={granularity}
       icon={<Grid3X3 className="h-4 w-4 shrink-0 text-primary" />}
@@ -5880,15 +8034,15 @@ function HexVisualScaleLegend({
     return (
       <div className="mt-2 grid gap-2 rounded-md border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground @sm:grid-cols-2">
         <div className="flex min-w-0 items-start gap-2">
-          <LegendDot color={palette.occupied} label="Ocupado > 0" />
+          <LegendDot color={palette.occupied} label="Ocupado" />
           <span className="break-words [overflow-wrap:anywhere]">
             hexágono preenchido com peso visual uniforme
           </span>
         </div>
         <div className="flex min-w-0 items-start gap-2">
-          <LegendDot color={palette.zero} label="Desocupado = 0" />
+          <LegendDot color={palette.zero} label="Desocupado" />
           <span className="break-words [overflow-wrap:anywhere]">
-            o valor zero continua visível e distinto
+            estado livre visível e distinto
           </span>
         </div>
       </div>
@@ -6200,15 +8354,13 @@ function buildHalfDonutOption(
             ? `Estado: ${data?.state === "occupied" ? "Ocupado" : "Desocupado"}`
             : "Visualização proporcional ao valor real",
           mode === "status"
-            ? data?.state === "occupied"
-              ? "Critério: ocupação maior que zero"
-              : "Critério: ocupação igual a zero"
+            ? "Estado fornecido pela leitura atual"
             : `Ocupação atual: ${formatOccupancyCount(data?.occupancy ?? 0)}`,
           mode === "actual"
             ? `Participação: ${formatChartNumber(data?.percentage ?? 0)}%`
             : null,
           mode === "status"
-            ? "Fatia com peso unitário; o zero não foi convertido em ocupação"
+            ? "Fatia com peso unitário para comparação do estado operacional"
             : "Cenários com valor zero permanecem visíveis e não geram área visual",
         ].filter(Boolean).join("<br />");
       },
@@ -6376,10 +8528,10 @@ function buildCurrentComparisonBarOption(
               return data.state === "occupied"
                 ? compactLayout
                   ? "Ocupado"
-                  : "Ocupado > 0"
+                  : "Ocupado"
                 : compactLayout
                   ? "Desocupado"
-                  : "Desocupado = 0";
+                  : "Desocupado";
             }
             return `${formatOccupancyCount(data.total)} · ${formatChartNumber(
               data.percentage ?? 0,
@@ -6450,7 +8602,7 @@ function buildCurrentComparisonBarOption(
           data.state === "unknown"
             ? null
             : `Estado: ${
-                data.state === "occupied" ? "Ocupado > 0" : "Desocupado = 0"
+                data.state === "occupied" ? "Ocupado" : "Desocupado"
               }`,
           mode === "actual" && typeof data.total === "number"
             ? `Participação: ${formatChartNumber(data.percentage ?? 0)}%`
@@ -6786,7 +8938,7 @@ function buildCurrentComparisonVerticalBarOption(
           data.state === "unknown"
             ? null
             : `Estado: ${
-                data.state === "occupied" ? "Ocupado > 0" : "Desocupado = 0"
+                data.state === "occupied" ? "Ocupado" : "Desocupado"
               }`,
           mode === "actual" && typeof data.total === "number"
             ? `Participação: ${formatChartNumber(data.percentage ?? 0)}%`
@@ -6986,6 +9138,7 @@ function buildMaximumLineSeries({
   currentSnapshots,
   currentSeries,
   granularity,
+  markLastBucketPartial = true,
   monthlySourceBuckets,
   scenarios,
   series,
@@ -6995,6 +9148,7 @@ function buildMaximumLineSeries({
   currentSnapshots: OccupancyScenarioSnapshot[];
   currentSeries: OccupancyScenarioOpenMaximumSeries[];
   granularity: OccupancyMaximumLineGranularity;
+  markLastBucketPartial?: boolean;
   monthlySourceBuckets: Date[];
   scenarios: OccupancyScenario[];
   series: OccupancyScenarioHourlySeries[];
@@ -7033,7 +9187,7 @@ function buildMaximumLineSeries({
           ? undefined
           : null
         : undefined;
-    const annualPoints =
+    const annualPointsWithSourceState =
       granularity === "year"
         ? buildOccupancyAnnualMaximumPoints({
             timeZone,
@@ -7047,6 +9201,13 @@ function buildMaximumLineSeries({
             monthlyBuckets: monthlySourceBuckets,
           })
         : null;
+    const annualPoints =
+      annualPointsWithSourceState && !markLastBucketPartial
+        ? annualPointsWithSourceState.map((point) => ({
+            ...point,
+            partial: false,
+          }))
+        : annualPointsWithSourceState;
 
     return {
       error: joinMessages(
@@ -7065,7 +9226,9 @@ function buildMaximumLineSeries({
               currentPeak !== undefined &&
               currentPeak !== null
             ? [timeZone ? companyTimeZoneHour(currentBucket, timeZone) : currentBucket.getHours()]
-            : granularity === "month" && buckets.length
+            : granularity === "month" &&
+                markLastBucketPartial &&
+                buckets.length
               ? [buckets.length - 1]
               : [],
       scenarioId: scenario.scenarioId,
@@ -7249,12 +9412,21 @@ function maximumLineTitle(granularity: OccupancyMaximumLineGranularity) {
 
 function maximumLineDescription(
   granularity: OccupancyMaximumLineGranularity,
+  historical = false,
 ) {
   if (granularity === "hour") {
+    if (historical) {
+      return "Maior ocupação registrada em cada hora do último dia do período, em eixo fixo de 00h a 24h; horários sem leitura permanecem vazios.";
+    }
     return "Maior ocupação de cada hora de hoje em eixo fixo de 00h a 24h; a hora em andamento combina minutos encerrados e a leitura do Ao Vivo.";
   }
   if (granularity === "month") {
-    return "Maior ocupação disponível de cada mês nos últimos 12 meses.";
+    return historical
+      ? "Maior ocupação disponível em cada um dos 12 meses fechados até o fechamento selecionado."
+      : "Maior ocupação disponível de cada mês nos últimos 12 meses.";
+  }
+  if (historical) {
+    return "Maior pico observado em cada um dos 4 anos civis fechados até o fechamento selecionado; lacunas permanecem sem valor.";
   }
   return "Maior pico observado em cada um dos últimos 4 anos; anos fechados exigem cobertura completa e o ano atual aparece como parcial.";
 }
@@ -7424,7 +9596,7 @@ function buildHexLayoutOption(
         description:
           preferences.displayMode === "actual"
             ? `Mapa operacional com ${positions.length} posições em escala gradual de valor real.`
-            : `Mapa operacional com ${positions.length} posições. Cores no contexto ${preferences.semanticLabel}. Ocupado significa valor maior que zero; desocupado significa valor zero.`,
+            : `Mapa operacional com ${positions.length} posições. Cores no contexto ${preferences.semanticLabel}; o estado vem da leitura atual certificada.`,
       },
     },
     grid: { bottom: 12, left: 12, right: 12, top: 12 },
@@ -7842,14 +10014,13 @@ function buildThemedScenarioColorMap(
 
 function occupancySnapshotEffectiveAt(
   snapshots: readonly OccupancyScenarioSnapshot[],
-  requestedAt: Date | null,
 ) {
   const instants = snapshots.flatMap((snapshot) => {
     if (!snapshot.asOf) return [];
     const instant = Date.parse(snapshot.asOf);
     return Number.isFinite(instant) ? [instant] : [];
   });
-  return instants.length ? new Date(Math.min(...instants)) : requestedAt;
+  return instants.length ? new Date(Math.min(...instants)) : null;
 }
 
 function occupancyAggregatePath(
@@ -8085,6 +10256,44 @@ function setIntersects(left: ReadonlySet<string>, right: ReadonlySet<string>) {
   return false;
 }
 
+function occupancyHistoricalSnapshotScenarioIds({
+  byCard,
+  hexScenarioIds,
+  scenarios,
+  visibleCardIds,
+}: {
+  byCard: ReadonlyMap<string, readonly string[]>;
+  hexScenarioIds: readonly string[];
+  scenarios: readonly OccupancyScenario[];
+  visibleCardIds: ReadonlySet<string>;
+}) {
+  const requested = new Set<string>();
+  for (const cardId of OCCUPANCY_HISTORICAL_SNAPSHOT_CARD_IDS) {
+    if (!visibleCardIds.has(cardId)) continue;
+    const scenarioIds =
+      cardId === "occupancy_hex_layout"
+        ? hexScenarioIds
+        : (byCard.get(cardId) ?? EMPTY_OCCUPANCY_SCENARIO_IDS);
+    scenarioIds.forEach((scenarioId) => requested.add(scenarioId));
+  }
+  return scenarios.flatMap((scenario) =>
+    requested.has(scenario.id) ? [scenario.id] : [],
+  );
+}
+
+function occupancyLatestCompanyDayBuckets(
+  buckets: readonly Date[],
+  currentBucket: Date | null,
+  timeZone: string,
+) {
+  const anchorBucket = currentBucket ?? buckets.at(-1);
+  if (!anchorBucket) return [];
+  const latestDayKey = localDateKey(anchorBucket, timeZone);
+  return buckets.filter(
+    (bucket) => localDateKey(bucket, timeZone) === latestDayKey,
+  );
+}
+
 function setBoundedComparisonCacheEntry<T>(
   cache: Map<string, T>,
   key: string,
@@ -8190,8 +10399,8 @@ function scenarioHeatmapCertificationLabel(
 function occupancyStateLabel(state: OccupancyHexPosition["state"]) {
   if (state === "unlinked") return "sem cenário vinculado";
   if (state === "unavailable") return "cenário indisponível";
-  if (state === "occupied") return "ocupado (> 0)";
-  if (state === "unoccupied") return "desocupado (= 0)";
+  if (state === "occupied") return "ocupado";
+  if (state === "unoccupied") return "desocupado";
   return "sem dados";
 }
 

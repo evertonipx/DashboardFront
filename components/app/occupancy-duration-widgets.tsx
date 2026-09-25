@@ -8,7 +8,6 @@ import {
   Clock3,
   Gauge,
   Percent,
-  RefreshCw,
   ShieldCheck,
   Timer,
 } from "lucide-react";
@@ -34,6 +33,15 @@ import { resolveAccessTokenContext } from "@/lib/access-token-claims";
 import { aggregateQueryIso } from "@/lib/aggregate-time";
 import { getStoredSession } from "@/lib/api";
 import {
+  classifyOccupancySnapshot,
+  type OccupancyScenarioSnapshot,
+} from "@/lib/occupancy-comparison";
+import {
+  OCCUPANCY_LIVE_SNAPSHOT_CACHE_TTL_MS,
+  OCCUPANCY_LIVE_SNAPSHOT_QUERY_ID,
+  occupancyLiveSnapshotQuery,
+} from "@/lib/occupancy-dashboard-query";
+import {
   aggregateOccupancyRowsForRequestedBuckets,
   occupancyAggregateCoverageWarning,
   occupancyAggregateMetadataWarning,
@@ -44,6 +52,7 @@ import {
 import {
   buildOccupancyClosedDayMinuteRange,
   buildOccupancyDurationSummary,
+  buildOccupancyHistoricalMinuteRange,
   deriveOccupancyStateMetrics,
   formatOccupancyDuration,
   reconcileOccupancyDurationMetrics,
@@ -51,20 +60,28 @@ import {
   type OccupancyDurationState,
   type OccupancyDurationSummary,
 } from "@/lib/occupancy-duration";
+import type { OccupancyDurationInsightAnalysisPeriod } from "@/lib/occupancy-duration-insights";
 import {
   groupContiguousOccupancyDurationBuckets,
   planOccupancyDurationCoarseQuery,
   resolveOccupancyDurationHourlyPlan,
 } from "@/lib/occupancy-duration-query-plan";
 import {
+  buildOccupancyLoiteringSummaryModel,
+  formatOccupancyLoiteringDuration,
+  type OccupancyLoiteringSummaryModel,
+  type OccupancyLoiteringSummaryRow,
+} from "@/lib/occupancy-loitering";
+import {
+  buildOccupancyScenarioSnapshotValue,
+  occupancyScenarioSnapshotHasCompleteCoverage,
+} from "@/lib/occupancy-scenario-snapshots";
+import {
   occupancyDurationMinuteTransportTtl,
   occupancyDurationNextMinuteRefreshDelay,
   occupancyDurationReconciliationFrom,
+  planOccupancyDurationCacheRefresh,
 } from "@/lib/occupancy-duration-refresh";
-import {
-  formatOccupancyLoiteringDuration,
-  type OccupancyLoiteringTotals,
-} from "@/lib/occupancy-loitering";
 import { fetchSharedOccupancyQuery } from "@/lib/occupancy-shared-query";
 import { abortRequest, isAbortError } from "@/lib/request-cancellation";
 import type { ReportChart, ReportMetric } from "@/lib/report-export";
@@ -72,6 +89,7 @@ import type {
   OccupancyScenario,
   OccupancyScenarioAggregateResponse,
 } from "@/lib/types";
+import { requireOccupancyCurrentSnapshotRows } from "@/lib/occupancy-validation";
 import type {
   CardPreference,
   CardScenarioSelection,
@@ -97,9 +115,11 @@ export const OCCUPANCY_DURATION_CARD_IDS = [
 export type OccupancyDurationCardId =
   (typeof OCCUPANCY_DURATION_CARD_IDS)[number];
 
+export type OccupancyDurationRefreshMode = "manual" | "poll";
+
 const OCCUPANCY_AGGREGATE_DURATION_CARD_IDS =
   OCCUPANCY_DURATION_CARD_IDS.filter(
-    (cardId) => cardId !== "occupancy_duration_average_by_scenario",
+    (cardId) => cardId !== "occupancy_duration_transitions",
   );
 
 export type OccupancyDurationReportAsset = {
@@ -113,40 +133,33 @@ export type OccupancyDurationReportMetric = {
   metric: ReportMetric;
 };
 
+export type OccupancyDurationReportSnapshot = {
+  dataCompleteUntil: Date | null | undefined;
+  reportAssets: OccupancyDurationReportAsset[];
+  reportContext: string[];
+  reportMetrics: OccupancyDurationReportMetric[];
+  reportWarnings: string[];
+};
+
 type DurationScenario = Pick<OccupancyScenario, "id" | "name">;
 
 type OccupancyDurationScenarioSeries = {
   asOf?: Date;
   error?: string;
-  individualDwell?: {
-    error?: string;
-    loading: boolean;
-    totals?: OccupancyLoiteringTotals;
-  };
   name: string;
   scenarioId: string;
   summary: OccupancyDurationSummary;
   warning?: string;
 };
 
-type OccupancyIndividualDwellScenarioSeries = Pick<
-  OccupancyDurationScenarioSeries,
-  "name" | "scenarioId"
-> & {
-  individualDwell: NonNullable<
-    OccupancyDurationScenarioSeries["individualDwell"]
-  >;
-};
-
 type OccupancyDurationAverageByScenarioEntry = {
-  averageDurationSeconds: number | null;
+  averageFreeSeconds: number | null;
+  averageOccupiedSeconds: number | null;
   error?: string;
-  loading: boolean;
-  maximumDurationSeconds: number | null;
-  minimumDurationSeconds: number | null;
+  longestFreeSeconds: number | null;
+  longestOccupiedSeconds: number | null;
   name: string;
   scenarioId: string;
-  sessionCount: number | null;
 };
 
 type OccupancyDurationDataset = {
@@ -186,6 +199,7 @@ type DurationSelectionStats = {
   errorCount: number;
   expectedSeconds: number;
   loadUnitSeconds: number;
+  longestConfirmedFreeSeconds: number;
   longestConfirmedOccupiedSeconds: number;
   minimumDetectedTransitions: number;
   observedSeconds: number;
@@ -198,9 +212,12 @@ type DurationSelectionStats = {
 
 type DurationAverageSummary = {
   averageFreeSeconds: number | null;
+  averageIndividualDwellSeconds: number | null;
   averageOccupancy: number | null;
   averageOccupiedSeconds: number | null;
   coverage: number | null;
+  longestFreeSeconds: number | null;
+  longestOccupiedSeconds: number | null;
 };
 
 type DurationAverageComparisonRow = {
@@ -240,6 +257,10 @@ const COMPACT_CHART_HEIGHT_PX = 300;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const HOUR_SECONDS = 3_600;
+const EMPTY_OCCUPANCY_LOITERING_SUMMARY_ROWS:
+  readonly OccupancyLoiteringSummaryRow[] = [];
+const EMPTY_OCCUPANCY_DURATION_SNAPSHOTS:
+  readonly OccupancyScenarioSnapshot[] = [];
 
 const DURATION_STATE_ORDER: readonly OccupancyDurationState[] = [
   "occupied",
@@ -270,10 +291,11 @@ const sharedDurationScenarioCaches = new Map<
 const CARD_LABELS: Record<OccupancyDurationCardId, string> = {
   occupancy_duration_confirmed: "Tempo ocupado confirmado",
   occupancy_duration_free: "Tempo desocupado confirmado",
-  occupancy_duration_average: "Resumo médio de ocupação",
-  occupancy_duration_average_by_scenario: "Permanência média por cenário",
+  occupancy_duration_average: "Ocupação e permanência",
+  occupancy_duration_average_by_scenario:
+    "Tempo médio ocupado/livre por cenário",
   occupancy_duration_rate: "Taxa de tempo ocupado",
-  occupancy_duration_transitions: "Mudanças mínimas de estado",
+  occupancy_duration_transitions: "Estado atual confirmado",
   occupancy_duration_longest: "Maior período ocupado",
   occupancy_duration_load: "Carga de ocupação",
   occupancy_duration_coverage: "Cobertura da duração",
@@ -281,16 +303,32 @@ const CARD_LABELS: Record<OccupancyDurationCardId, string> = {
   occupancy_duration_by_scenario: "Tempo por cenário",
 };
 
+function durationCardLabel(
+  cardId: OccupancyDurationCardId,
+  historical: boolean,
+) {
+  return historical && cardId === "occupancy_duration_transitions"
+    ? "Estado no fechamento"
+    : CARD_LABELS[cardId];
+}
+
 export function useOccupancyDurationCards({
   aggregateRefreshMs = DEFAULT_AGGREGATE_REFRESH_MS,
   companyScopeId,
+  currentSnapshots = [],
+  currentSnapshotsLoading = false,
   enabled = true,
+  finalSnapshots = EMPTY_OCCUPANCY_DURATION_SNAPSHOTS,
+  finalSnapshotsLoading = false,
   focusScenarioId,
-  individualDwellError,
-  individualDwellLoading = false,
-  individualDwellTotalsByScenarioId,
+  loadLoiteringSummaryRows,
+  loiteringSummaryError,
+  loiteringSummaryLoading = false,
+  loiteringSummaryRows = EMPTY_OCCUPANCY_LOITERING_SUMMARY_ROWS,
   monitorMode,
+  period,
   preferences,
+  refreshMode = "poll",
   requestedCardIds,
   scenarios,
   timeZone,
@@ -298,16 +336,22 @@ export function useOccupancyDurationCards({
 }: {
   aggregateRefreshMs?: number;
   companyScopeId: string;
+  currentSnapshots?: readonly OccupancyScenarioSnapshot[];
+  currentSnapshotsLoading?: boolean;
   enabled?: boolean;
+  finalSnapshots?: readonly OccupancyScenarioSnapshot[];
+  finalSnapshotsLoading?: boolean;
   focusScenarioId: string;
-  individualDwellError?: string;
-  individualDwellLoading?: boolean;
-  individualDwellTotalsByScenarioId?: ReadonlyMap<
-    string,
-    OccupancyLoiteringTotals
-  >;
+  loadLoiteringSummaryRows?: (
+    signal?: AbortSignal,
+  ) => Promise<OccupancyLoiteringSummaryRow[]>;
+  loiteringSummaryError?: string;
+  loiteringSummaryLoading?: boolean;
+  loiteringSummaryRows?: readonly OccupancyLoiteringSummaryRow[];
   monitorMode: boolean;
+  period?: OccupancyDurationInsightAnalysisPeriod | null;
   preferences: CardPreference[];
+  refreshMode?: OccupancyDurationRefreshMode;
   requestedCardIds?: ReadonlySet<string>;
   scenarios: OccupancyScenario[];
   timeZone: string;
@@ -344,12 +388,80 @@ export function useOccupancyDurationCards({
   );
   const inheritedScenarioLabel =
     inheritedScenarios[0]?.name ?? "Nenhum cenário selecionado na tela";
+  const fullScenarioById = React.useMemo(
+    () =>
+      new Map(
+        scenarios
+          .filter((scenario) => scenario.company_id === companyScopeId)
+          .map((scenario) => [scenario.id, scenario]),
+      ),
+    [companyScopeId, scenarios],
+  );
+  const manualPeriodKey = React.useMemo(
+    () =>
+      refreshMode === "manual" && period
+        ? JSON.stringify([
+            period.from.getTime(),
+            period.to.getTime(),
+            period.monthEnd.getTime(),
+            period.timeZone,
+            period.dateKeys,
+            period.contextLabel,
+            period.clippedToFinalMonth,
+          ])
+        : "",
+    [period, refreshMode],
+  );
+  const stableManualPeriod = React.useMemo(
+    () => occupancyDurationManualPeriodFromKey(manualPeriodKey),
+    [manualPeriodKey],
+  );
+  const queryEnabled =
+    enabled && (refreshMode === "poll" || stableManualPeriod !== null);
+  // Historical state is an explicit closing snapshot supplied by the
+  // analysis controller. Never let the five-second live snapshot leak into a
+  // closed interval when no closing snapshot was provided.
+  const stateSnapshots =
+    refreshMode === "manual" ? finalSnapshots : currentSnapshots;
+  const stateSnapshotsLoading =
+    refreshMode === "manual"
+      ? finalSnapshotsLoading
+      : currentSnapshotsLoading;
+  const emptyLoiteringSummaryModel = React.useMemo(
+    () => buildOccupancyLoiteringSummaryModel([], []),
+    [],
+  );
+  const resolveSelectedLoiteringSummaryModel = React.useCallback(
+    (selection: CardScenarioSelection): OccupancyLoiteringSummaryModel => {
+      const selected = resolveWidgetScenarios(
+        scenarioOptions,
+        selection,
+        inheritedScenarios,
+      ).flatMap((scenario) => {
+        const fullScenario = fullScenarioById.get(scenario.id);
+        return fullScenario ? [fullScenario] : [];
+      });
+      return selected.length
+        ? buildOccupancyLoiteringSummaryModel(
+            selected,
+            loiteringSummaryRows,
+          )
+        : emptyLoiteringSummaryModel;
+    },
+    [
+      emptyLoiteringSummaryModel,
+      fullScenarioById,
+      inheritedScenarios,
+      loiteringSummaryRows,
+      scenarioOptions,
+    ],
+  );
   const preferenceByCardId = React.useMemo(
     () => new Map(preferences.map((preference) => [preference.id, preference])),
     [preferences],
   );
   const requestedScenarioKey = React.useMemo(() => {
-    if (!enabled) return "";
+    if (!queryEnabled) return "";
     const requested = new Map<string, DurationScenario>();
     OCCUPANCY_AGGREGATE_DURATION_CARD_IDS.forEach((cardId) => {
       if (requestedCardIds && !requestedCardIds.has(cardId)) return;
@@ -363,7 +475,7 @@ export function useOccupancyDurationCards({
     });
     return Array.from(requested.keys()).sort().join(",");
   }, [
-    enabled,
+    queryEnabled,
     inheritedScenarios,
     preferenceByCardId,
     requestedCardIds,
@@ -389,6 +501,19 @@ export function useOccupancyDurationCards({
       ...requested.slice(focusIndex + 1),
     ];
   }, [focusScenarioId, requestedScenarioKey, scenarioOptions]);
+  const reportScenarios = React.useMemo(() => {
+    const requested = new Set<string>();
+    OCCUPANCY_AGGREGATE_DURATION_CARD_IDS.forEach((cardId) => {
+      const preference = preferenceByCardId.get(cardId);
+      if (preference?.visible === false) return;
+      resolveWidgetScenarios(
+        scenarioOptions,
+        scenarioSelectionFromPreference(preference),
+        inheritedScenarios,
+      ).forEach((scenario) => requested.add(scenario.id));
+    });
+    return scenarioOptions.filter((scenario) => requested.has(scenario.id));
+  }, [inheritedScenarios, preferenceByCardId, scenarioOptions]);
   const authenticatedUserId = resolveAccessTokenContext(
     getStoredSession()?.access_token ?? "",
   )?.userId ?? "";
@@ -397,7 +522,9 @@ export function useOccupancyDurationCards({
     companyScopeId.trim(),
     timeZone.trim(),
   ]);
-  const scopeKey = `${cacheScopeKey}|${requestedScenarioKey}`;
+  const scopeKey = `${cacheScopeKey}|${
+    refreshMode === "manual" ? manualPeriodKey : "live"
+  }|${requestedScenarioKey}`;
   const scenarioCacheRef = React.useRef<{
     scopeKey: string;
     value: OccupancyDurationScenarioCacheScope;
@@ -411,9 +538,15 @@ export function useOccupancyDurationCards({
     scopeKey: "",
     series: [],
   });
+  const [refreshVersion, setRefreshVersion] = React.useState(0);
+  const handledManualRefreshRef = React.useRef("");
+  const refresh = React.useCallback(
+    () => setRefreshVersion((value) => value + 1),
+    [],
+  );
 
   React.useEffect(() => {
-    if (!enabled || !companyScopeId.trim()) {
+    if (!queryEnabled || !companyScopeId.trim()) {
       setDataset({
         loading: false,
         range: null,
@@ -455,9 +588,21 @@ export function useOccupancyDurationCards({
     const scenarioCache = cacheState.scenarios;
     const failureBackoffs = cacheState.failures;
     const retryBaseMs = normalizeRefreshMilliseconds(aggregateRefreshMs);
+    const manualRefreshIdentity = `${cacheScopeKey}|${manualPeriodKey}|${refreshVersion}`;
+    if (
+      refreshMode === "manual" &&
+      refreshVersion > 0 &&
+      handledManualRefreshRef.current !== manualRefreshIdentity
+    ) {
+      requestedScenarios.forEach((scenario) => {
+        scenarioCache.delete(scenario.id);
+        failureBackoffs.delete(scenario.id);
+      });
+      handledManualRefreshRef.current = manualRefreshIdentity;
+    }
 
     const scheduleNext = () => {
-      if (disposed) return;
+      if (refreshMode !== "poll" || disposed) return;
       timer = window.setTimeout(() => {
         void runLoad();
       }, occupancyDurationNextMinuteRefreshDelay());
@@ -467,8 +612,9 @@ export function useOccupancyDurationCards({
       if (disposed) return;
 
       if (
-        document.visibilityState !== "visible" ||
-        navigator.onLine === false
+        refreshMode === "poll" &&
+        (document.visibilityState !== "visible" ||
+          navigator.onLine === false)
       ) {
         scheduleNext();
         return;
@@ -477,7 +623,13 @@ export function useOccupancyDurationCards({
 
       let range: OccupancyDurationMinuteRange;
       try {
-        range = buildOccupancyClosedDayMinuteRange(new Date(), timeZone);
+        range =
+          refreshMode === "manual"
+            ? buildOccupancyHistoricalMinuteRange(
+                stableManualPeriod!,
+                timeZone,
+              )
+            : buildOccupancyClosedDayMinuteRange(new Date(), timeZone);
       } catch (error) {
         if (disposed) return;
         setDataset({
@@ -816,7 +968,10 @@ export function useOccupancyDurationCards({
             // Network responses commonly settle in small bursts. Publish a
             // burst together so the first scenarios become usable promptly
             // without committing one React render per response.
-            if (progressTimer === undefined) {
+            if (
+              refreshMode === "poll" &&
+              progressTimer === undefined
+            ) {
               progressTimer = window.setTimeout(publishProgress, 32);
             }
           },
@@ -855,7 +1010,13 @@ export function useOccupancyDurationCards({
         if (currentGeneration === generation && controller === requestController) {
           controller = null;
         }
-        if (!disposed && currentGeneration === generation) scheduleNext();
+        if (
+          refreshMode === "poll" &&
+          !disposed &&
+          currentGeneration === generation
+        ) {
+          scheduleNext();
+        }
       }
     };
 
@@ -874,7 +1035,7 @@ export function useOccupancyDurationCards({
           ),
           loading: false,
         }));
-        scheduleNext();
+        if (refreshMode === "poll") scheduleNext();
       }
     };
 
@@ -891,14 +1052,18 @@ export function useOccupancyDurationCards({
     };
 
     void runLoad();
-    document.addEventListener("visibilitychange", resume);
-    window.addEventListener("online", resume);
+    if (refreshMode === "poll") {
+      document.addEventListener("visibilitychange", resume);
+      window.addEventListener("online", resume);
+    }
     return () => {
       disposed = true;
       if (timer !== undefined) window.clearTimeout(timer);
       if (progressTimer !== undefined) window.clearTimeout(progressTimer);
-      document.removeEventListener("visibilitychange", resume);
-      window.removeEventListener("online", resume);
+      if (refreshMode === "poll") {
+        document.removeEventListener("visibilitychange", resume);
+        window.removeEventListener("online", resume);
+      }
       if (controller) {
         abortRequest(
           controller,
@@ -911,15 +1076,19 @@ export function useOccupancyDurationCards({
     authenticatedUserId,
     cacheScopeKey,
     companyScopeId,
-    enabled,
+    manualPeriodKey,
+    queryEnabled,
+    refreshMode,
+    refreshVersion,
     requestedScenarios,
     requestedScenarioKey,
     scopeKey,
+    stableManualPeriod,
     timeZone,
   ]);
 
   const currentDataset =
-    !enabled
+    !queryEnabled
       ? {
           loading: false,
           range: null,
@@ -934,27 +1103,7 @@ export function useOccupancyDurationCards({
           scopeKey,
           series: [],
         };
-  const displaySeries = React.useMemo(() => {
-    const hasIndividualDwellContext = Boolean(
-      individualDwellTotalsByScenarioId ||
-        individualDwellLoading ||
-        individualDwellError,
-    );
-    if (!hasIndividualDwellContext) return currentDataset.series;
-    return currentDataset.series.map((item) => ({
-      ...item,
-      individualDwell: {
-        ...(individualDwellError ? { error: individualDwellError } : {}),
-        loading: individualDwellLoading,
-        totals: individualDwellTotalsByScenarioId?.get(item.scenarioId),
-      },
-    }));
-  }, [
-    currentDataset.series,
-    individualDwellError,
-    individualDwellLoading,
-    individualDwellTotalsByScenarioId,
-  ]);
+  const displaySeries = currentDataset.series;
   const selectedSeriesCache = React.useMemo(() => {
     const seriesById = new Map(
       displaySeries.map((item) => [item.scenarioId, item]),
@@ -1011,33 +1160,29 @@ export function useOccupancyDurationCards({
       scenarioOptions,
       selectedSeriesCache,
     ]);
-  const resolveSelectedIndividualDwellSeries = React.useCallback(
-    (
-      selection: CardScenarioSelection,
-    ): OccupancyIndividualDwellScenarioSeries[] =>
+  const currentSnapshotByScenarioId = React.useMemo(
+    () =>
+      new Map(
+        stateSnapshots.map((snapshot) => [snapshot.scenarioId, snapshot]),
+      ),
+    [stateSnapshots],
+  );
+  const resolveSelectedCurrentSnapshots = React.useCallback(
+    (selection: CardScenarioSelection) =>
       resolveWidgetScenarios(
         scenarioOptions,
         selection,
         inheritedScenarios,
-      ).map((scenario) => ({
-        individualDwell: {
-          ...(individualDwellError ? { error: individualDwellError } : {}),
-          loading: individualDwellLoading,
-          totals: individualDwellLoading
-            ? undefined
-            : individualDwellTotalsByScenarioId?.get(scenario.id),
-        },
-        name: scenario.name,
-        scenarioId: scenario.id,
-      })),
-    [
-      individualDwellError,
-      individualDwellLoading,
-      individualDwellTotalsByScenarioId,
-      inheritedScenarios,
-      scenarioOptions,
-    ],
+      ).flatMap((scenario) => {
+        const snapshot = currentSnapshotByScenarioId.get(scenario.id);
+        return snapshot ? [snapshot] : [];
+      }),
+    [currentSnapshotByScenarioId, inheritedScenarios, scenarioOptions],
   );
+  const historicalPeriodLabel =
+    refreshMode === "manual"
+      ? stableManualPeriod?.contextLabel ?? "período aplicado"
+      : undefined;
   const cards = React.useMemo<LayoutCard[]>(() => {
     const commonCardProps = {
       inheritedScenarioIds,
@@ -1057,14 +1202,32 @@ export function useOccupancyDurationCards({
           scenarioSelection,
           inheritedScenarios,
         );
+        const currentStateCard = kind === "current";
+        const selectedSnapshots = currentStateCard
+          ? resolveSelectedCurrentSnapshots(scenarioSelection)
+          : [];
         return (
           <OccupancyDurationMetricCard
-            datasetError={currentDataset.error}
+            currentSnapshots={selectedSnapshots}
+            datasetError={
+              currentStateCard
+                ? selectedSnapshotErrors(selectedSnapshots)
+                : currentDataset.error
+            }
             fallbackTitle={fallbackTitle}
+            historicalPeriodLabel={historicalPeriodLabel}
             kind={kind}
-            loading={currentDataset.loading}
+            loading={
+              currentStateCard
+                ? stateSnapshotsLoading
+                : currentDataset.loading
+            }
             selectedScenarios={selectedScenarios}
-            selectedSeries={resolveSelectedSeries(scenarioSelection)}
+            selectedSeries={
+              currentStateCard
+                ? []
+                : resolveSelectedSeries(scenarioSelection)
+            }
           />
         );
       };
@@ -1111,6 +1274,11 @@ export function useOccupancyDurationCards({
         return (
           <OccupancyDurationAverageSummaryCard
             datasetError={currentDataset.error}
+            loiteringError={loiteringSummaryError}
+            loiteringLoading={loiteringSummaryLoading}
+            loiteringModel={resolveSelectedLoiteringSummaryModel(
+              scenarioSelection,
+            )}
             loading={currentDataset.loading}
             selectedScenarios={selectedScenarios}
             selectedSeries={resolveSelectedSeries(scenarioSelection)}
@@ -1136,20 +1304,18 @@ export function useOccupancyDurationCards({
         );
         return (
           <OccupancyDurationAverageByScenarioCard
-            datasetError={individualDwellError}
-            loading={individualDwellLoading}
+            datasetError={currentDataset.error}
+            historicalPeriodLabel={historicalPeriodLabel}
+            loading={currentDataset.loading}
             monitorMode={monitorMode}
             selectedScenarios={selectedScenarios}
-            selectedSeries={resolveSelectedIndividualDwellSeries(
-              scenarioSelection,
-            )}
+            selectedSeries={resolveSelectedSeries(scenarioSelection)}
           />
         );
       },
       previewColors: ["#0F766E"],
       previewKind: "ranking",
       previewOrientation: "horizontal",
-      scenarioOrderingDisabled: true,
       scenarioSelectionPolicy: "compare",
       zoomEnabled: true,
     },
@@ -1168,10 +1334,16 @@ export function useOccupancyDurationCards({
       ...COMPACT_METRIC_LAYOUT_DEFAULTS,
       colorEditable: true,
       id: "occupancy_duration_transitions",
-      label: CARD_LABELS.occupancy_duration_transitions,
+      label: durationCardLabel(
+        "occupancy_duration_transitions",
+        Boolean(historicalPeriodLabel),
+      ),
       node: renderMetric(
-        "transitions",
-        CARD_LABELS.occupancy_duration_transitions,
+        "current",
+        durationCardLabel(
+          "occupancy_duration_transitions",
+          Boolean(historicalPeriodLabel),
+        ),
       ),
       previewKind: "metric",
       scenarioSelectionPolicy: "aggregate",
@@ -1223,6 +1395,7 @@ export function useOccupancyDurationCards({
         return (
           <OccupancyDurationTimelineCard
             datasetError={currentDataset.error}
+            historicalPeriodLabel={historicalPeriodLabel}
             loading={currentDataset.loading}
             monitorMode={monitorMode}
             range={currentDataset.range}
@@ -1255,6 +1428,7 @@ export function useOccupancyDurationCards({
         return (
           <OccupancyDurationByScenarioCard
             datasetError={currentDataset.error}
+            historicalPeriodLabel={historicalPeriodLabel}
             loading={currentDataset.loading}
             monitorMode={monitorMode}
             selectedScenarios={selectedScenarios}
@@ -1273,13 +1447,16 @@ export function useOccupancyDurationCards({
     currentDataset.error,
     currentDataset.loading,
     currentDataset.range,
-    individualDwellError,
-    individualDwellLoading,
+    stateSnapshotsLoading,
     inheritedScenarioIds,
     inheritedScenarioLabel,
     inheritedScenarios,
+    historicalPeriodLabel,
+    loiteringSummaryError,
+    loiteringSummaryLoading,
     monitorMode,
-    resolveSelectedIndividualDwellSeries,
+    resolveSelectedLoiteringSummaryModel,
+    resolveSelectedCurrentSnapshots,
     resolveSelectedSeries,
     scenarioOptions,
     timeZone,
@@ -1288,37 +1465,59 @@ export function useOccupancyDurationCards({
   const reportMetrics = React.useMemo(
     () =>
       buildDurationReportMetrics({
+        historicalPeriodLabel,
         inheritedScenarios,
         preferenceByCardId,
+        resolveSelectedCurrentSnapshots,
+        resolveSelectedLoiteringSummaryModel,
         resolveSelectedSeries,
         scenarioOptions,
       }),
     [
       inheritedScenarios,
+      historicalPeriodLabel,
       preferenceByCardId,
+      resolveSelectedCurrentSnapshots,
+      resolveSelectedLoiteringSummaryModel,
       resolveSelectedSeries,
       scenarioOptions,
     ],
   );
+  const resolvePresentationRange = React.useCallback(() => {
+    if (currentDataset.range) return currentDataset.range;
+    if (!queryEnabled || !companyScopeId.trim()) return null;
+    try {
+      return refreshMode === "manual"
+        ? buildOccupancyHistoricalMinuteRange(stableManualPeriod!, timeZone)
+        : buildOccupancyClosedDayMinuteRange(new Date(), timeZone);
+    } catch {
+      return null;
+    }
+  }, [
+    companyScopeId,
+    currentDataset.range,
+    queryEnabled,
+    refreshMode,
+    stableManualPeriod,
+    timeZone,
+  ]);
   const getReportAssets = React.useCallback(
     () =>
       buildDurationReportAssets({
         inheritedScenarios,
         monitorMode,
         preferenceByCardId,
-        range: currentDataset.range,
-        resolveSelectedIndividualDwellSeries,
+        range: resolvePresentationRange(),
         resolveSelectedSeries,
         scenarioOptions,
         timeZone,
         timeZoneWarning,
       }),
     [
-      currentDataset.range,
       inheritedScenarios,
       monitorMode,
       preferenceByCardId,
-      resolveSelectedIndividualDwellSeries,
+      resolvePresentationRange,
       resolveSelectedSeries,
       scenarioOptions,
       timeZone,
@@ -1328,45 +1527,309 @@ export function useOccupancyDurationCards({
   const reportContext = React.useMemo(
     () =>
       buildDurationReportContext({
+        historical: Boolean(historicalPeriodLabel),
         inheritedScenarios,
         preferenceByCardId,
         scenarioOptions,
       }),
-    [inheritedScenarios, preferenceByCardId, scenarioOptions],
+    [historicalPeriodLabel, inheritedScenarios, preferenceByCardId, scenarioOptions],
   );
 
-  const durationDataIncomplete =
-    requestedScenarios.length > 0 &&
-    (Boolean(currentDataset.error) ||
-      currentDataset.series.length !== requestedScenarios.length ||
-      currentDataset.series.some(
-        (item) => Boolean(item.error) || item.summary.unknownSeconds > 0,
-      ));
-  const durationDataCompleteUntil =
-    requestedScenarios.length === 0
-      ? undefined
-      : !durationDataIncomplete &&
-          currentDataset.series.length === requestedScenarios.length &&
-          currentDataset.series.every((item) => item.asOf)
-        ? earliestDate(...currentDataset.series.map((item) => item.asOf))
-        : null;
-  const reportWarnings = Array.from(
-    new Set(
-      [
+  const loadReportSnapshot = React.useCallback(
+    async (signal?: AbortSignal): Promise<OccupancyDurationReportSnapshot> => {
+      signal?.throwIfAborted();
+      const requestSignal = signal ?? new AbortController().signal;
+      // This instant is only consumed by the live branch below. Historical
+      // reports use the explicit period boundaries and never substitute a
+      // present-time snapshot for a missing closing snapshot.
+      const requestedAt = new Date();
+      const currentStatePreference = preferenceByCardId.get(
+        "occupancy_duration_transitions",
+      );
+      const averagePreference = preferenceByCardId.get(
+        "occupancy_duration_average",
+      );
+      const averageSelection = scenarioSelectionFromPreference(
+        averagePreference,
+      );
+      const reportNeedsIndividualDwell =
+        averagePreference?.visible !== false &&
+        resolveWidgetScenarios(
+          scenarioOptions,
+          averageSelection,
+          inheritedScenarios,
+        ).some(
+          (scenario) =>
+            (fullScenarioById.get(scenario.id)?.areas.length ?? 0) > 0,
+        );
+      const currentStateSelection = scenarioSelectionFromPreference(
+        currentStatePreference,
+      );
+      const currentStateScenarioOptions =
+        currentStatePreference?.visible === false
+          ? []
+          : resolveWidgetScenarios(
+              scenarioOptions,
+              currentStateSelection,
+              inheritedScenarios,
+            );
+      const cachedCurrentSnapshots = currentStateScenarioOptions.length
+        ? resolveSelectedCurrentSnapshots(currentStateSelection)
+        : [];
+      const currentStateScenarios = currentStateScenarioOptions.flatMap(
+        (scenario) => {
+          const fullScenario = fullScenarioById.get(scenario.id);
+          return fullScenario ? [fullScenario] : [];
+        },
+      );
+      const range =
+        queryEnabled && companyScopeId.trim()
+          ? refreshMode === "manual"
+            ? buildOccupancyHistoricalMinuteRange(
+                stableManualPeriod!,
+                timeZone,
+              )
+            : buildOccupancyClosedDayMinuteRange(requestedAt, timeZone)
+          : null;
+      let reportSeriesPromise: Promise<OccupancyDurationScenarioSeries[]> =
+        Promise.resolve([]);
+      if (range && reportScenarios.length > 0) {
+        const sharedScenarioCache = acquireOccupancyDurationScenarioCache({
+          companyScopeId,
+          timeZone,
+          userId: authenticatedUserId,
+        });
+        if (!sharedScenarioCache && scenarioCacheRef.current.scopeKey !== cacheScopeKey) {
+          scenarioCacheRef.current = {
+            scopeKey: cacheScopeKey,
+            value: createOccupancyDurationScenarioCacheScope(),
+          };
+        }
+        reportSeriesPromise = loadOccupancyDurationReportSeries({
+          cache:
+            sharedScenarioCache?.scenarios ??
+            scenarioCacheRef.current.value.scenarios,
+          companyScopeId,
+          range,
+          scenarios: reportScenarios,
+          signal: requestSignal,
+          timeZone,
+        });
+      }
+      const reportCurrentSnapshotsPromise =
+        refreshMode === "manual"
+          ? Promise.resolve(cachedCurrentSnapshots)
+          : queryEnabled &&
+        companyScopeId.trim() &&
+        currentStateScenarioOptions.length > 0
+          ? (async () => {
+              try {
+                const loadedSnapshots =
+                  await loadOccupancyDurationCurrentSnapshots({
+                    companyScopeId,
+                    requestedAt,
+                    scenarios: currentStateScenarios,
+                    signal: requestSignal,
+                    timeZone,
+                  });
+                const loadedById = new Map(
+                  loadedSnapshots.map((snapshot) => [
+                    snapshot.scenarioId,
+                    snapshot,
+                  ]),
+                );
+                return currentStateScenarioOptions.map(
+                  (scenario) =>
+                    loadedById.get(scenario.id) ?? {
+                      error:
+                        "A configuração atual do cenário não está disponível para certificar o estado.",
+                      name: scenario.name,
+                      occupied: null,
+                      scenarioId: scenario.id,
+                      total: null,
+                    },
+                );
+              } catch (error) {
+                if (isAbortError(error, requestSignal)) throw error;
+                const message = durationRequestError(
+                  error,
+                  "Não foi possível validar o estado atual para o relatório.",
+                );
+                return currentStateScenarioOptions.map((scenario) => ({
+                  error: message,
+                  name: scenario.name,
+                  occupied: null,
+                  scenarioId: scenario.id,
+                  total: null,
+                }));
+              }
+            })()
+          : Promise.resolve(cachedCurrentSnapshots);
+      const reportLoiteringSummaryPromise =
+        reportNeedsIndividualDwell && loadLoiteringSummaryRows
+          ? loadLoiteringSummaryRows(requestSignal).then(
+              (rows) => ({ error: undefined, rows }),
+              (error: unknown) => {
+                if (isAbortError(error, requestSignal)) throw error;
+                return {
+                  error: durationRequestError(
+                    error,
+                    "Não foi possível validar a permanência média individual para o relatório.",
+                  ),
+                  rows: [] as OccupancyLoiteringSummaryRow[],
+                };
+              },
+            )
+          : Promise.resolve({
+              error: reportNeedsIndividualDwell
+                ? "A permanência média individual não está disponível para este relatório."
+                : undefined,
+              rows: [] as OccupancyLoiteringSummaryRow[],
+            });
+      const [
+        reportSeries,
+        reportCurrentSnapshots,
+        reportLoiteringSummary,
+      ] = await Promise.all([
+        reportSeriesPromise,
+        reportCurrentSnapshotsPromise,
+        reportLoiteringSummaryPromise,
+      ]);
+      requestSignal.throwIfAborted();
+
+      const reportSeriesById = new Map(
+        reportSeries.map((series) => [series.scenarioId, series]),
+      );
+      const resolveReportSeries = (selection: CardScenarioSelection) =>
+        resolveWidgetScenarios(
+          scenarioOptions,
+          selection,
+          inheritedScenarios,
+        ).flatMap((scenario) => {
+          const series = reportSeriesById.get(scenario.id);
+          return series ? [series] : [];
+        });
+      const reportCurrentSnapshotById = new Map(
+        reportCurrentSnapshots.map((snapshot) => [
+          snapshot.scenarioId,
+          snapshot,
+        ]),
+      );
+      const resolveReportCurrentSnapshots = (
+        selection: CardScenarioSelection,
+      ) =>
+        resolveWidgetScenarios(
+          scenarioOptions,
+          selection,
+          inheritedScenarios,
+        ).flatMap((scenario) => {
+          const snapshot = reportCurrentSnapshotById.get(scenario.id);
+          return snapshot ? [snapshot] : [];
+        });
+      const resolveReportLoiteringSummaryModel = (
+        selection: CardScenarioSelection,
+      ) => {
+        const selected = resolveWidgetScenarios(
+          scenarioOptions,
+          selection,
+          inheritedScenarios,
+        ).flatMap((scenario) => {
+          const fullScenario = fullScenarioById.get(scenario.id);
+          return fullScenario ? [fullScenario] : [];
+        });
+        return selected.length
+          ? buildOccupancyLoiteringSummaryModel(
+              selected,
+              reportLoiteringSummary.rows,
+            )
+          : emptyLoiteringSummaryModel;
+      };
+      const reportWarnings = durationReportWarnings(
+        reportSeries,
         timeZoneWarning,
-        currentDataset.error,
-        ...currentDataset.series.flatMap((item) => [item.error, item.warning]),
-      ]
-        .map(occupancyAggregatePresentationWarning)
-        .filter((value): value is string => Boolean(value?.trim())),
-    ),
+        selectedSnapshotErrors(reportCurrentSnapshots),
+        reportLoiteringSummary.error,
+      );
+      const dataCompleteUntil = combineDurationDataCompleteUntil(
+        durationSeriesDataCompleteUntil(
+          reportSeries,
+          reportScenarios.length,
+        ),
+        durationCurrentSnapshotsDataCompleteUntil(
+          reportCurrentSnapshots,
+          currentStateScenarioOptions.map((scenario) => scenario.id),
+        ),
+      );
+
+      return {
+        dataCompleteUntil,
+        reportAssets: buildDurationReportAssets({
+          inheritedScenarios,
+          monitorMode,
+          preferenceByCardId,
+          range,
+          resolveSelectedSeries: resolveReportSeries,
+          scenarioOptions,
+          timeZone,
+          timeZoneWarning,
+        }),
+        reportContext,
+        reportMetrics: buildDurationReportMetrics({
+          historicalPeriodLabel,
+          inheritedScenarios,
+          preferenceByCardId,
+          resolveSelectedCurrentSnapshots: resolveReportCurrentSnapshots,
+          resolveSelectedLoiteringSummaryModel:
+            resolveReportLoiteringSummaryModel,
+          resolveSelectedSeries: resolveReportSeries,
+          scenarioOptions,
+        }),
+        reportWarnings,
+      };
+    },
+    [
+      authenticatedUserId,
+      cacheScopeKey,
+      companyScopeId,
+      emptyLoiteringSummaryModel,
+      fullScenarioById,
+      historicalPeriodLabel,
+      inheritedScenarios,
+      loadLoiteringSummaryRows,
+      monitorMode,
+      preferenceByCardId,
+      queryEnabled,
+      refreshMode,
+      reportContext,
+      reportScenarios,
+      resolveSelectedCurrentSnapshots,
+      scenarioOptions,
+      stableManualPeriod,
+      timeZone,
+      timeZoneWarning,
+    ],
+  );
+
+  const durationDataCompleteUntil = durationSeriesDataCompleteUntil(
+    currentDataset.series,
+    requestedScenarios.length,
+    currentDataset.error,
+  );
+  const reportWarnings = durationReportWarnings(
+    currentDataset.series,
+    timeZoneWarning,
+    currentDataset.error,
   );
 
   return {
     cards,
     dataCompleteUntil: durationDataCompleteUntil,
     getReportAssets,
-    loading: currentDataset.loading,
+    loadReportSnapshot,
+    loading:
+      currentDataset.loading ||
+      (refreshMode === "manual" && stateSnapshotsLoading),
+    refresh,
     reportContext,
     reportMetrics,
     reportWarnings,
@@ -1378,28 +1841,39 @@ type DurationMetricKind =
   | "free"
   | "average"
   | "rate"
-  | "transitions"
+  | "current"
   | "longest"
   | "load"
   | "coverage";
 
 function OccupancyDurationMetricCard({
+  currentSnapshots,
   datasetError,
   fallbackTitle,
+  historicalPeriodLabel,
   kind,
   loading,
   selectedScenarios,
   selectedSeries,
 }: {
+  currentSnapshots: readonly OccupancyScenarioSnapshot[];
   datasetError?: string;
   fallbackTitle: string;
+  historicalPeriodLabel?: string;
   kind: DurationMetricKind;
   loading: boolean;
   selectedScenarios: DurationScenario[];
   selectedSeries: OccupancyDurationScenarioSeries[];
 }) {
   const stats = summarizeSelectedSeries(selectedSeries, selectedScenarios.length);
-  const definition = durationMetricDefinition(kind, stats);
+  const definition = durationMetricDefinition(
+    kind,
+    stats,
+    selectedSeries,
+    selectedScenarios.length,
+    currentSnapshots,
+    historicalPeriodLabel,
+  );
   const composition = describeDurationScenarioComposition(selectedScenarios);
   const contextualMessage = joinMessages(
     datasetError,
@@ -1411,6 +1885,9 @@ function OccupancyDurationMetricCard({
   const completeDescription =
     joinMessages(
       definition.description,
+      historicalPeriodLabel
+        ? `Escopo: ${historicalPeriodLabel}.`
+        : undefined,
       `Composição: ${composition.shortLabel}.`,
       contextualMessage,
     ) ?? definition.description;
@@ -1453,11 +1930,17 @@ function OccupancyDurationMetricCard({
 
 function OccupancyDurationAverageSummaryCard({
   datasetError,
+  loiteringError,
+  loiteringLoading,
+  loiteringModel,
   loading,
   selectedScenarios,
   selectedSeries,
 }: {
   datasetError?: string;
+  loiteringError?: string;
+  loiteringLoading: boolean;
+  loiteringModel: OccupancyLoiteringSummaryModel;
   loading: boolean;
   selectedScenarios: DurationScenario[];
   selectedSeries: OccupancyDurationScenarioSeries[];
@@ -1470,31 +1953,48 @@ function OccupancyDurationAverageSummaryCard({
   const comparisonRows = buildDurationAverageComparisonRows(
     selectedScenarios,
     selectedSeries,
+    loiteringModel,
   );
   const composition = describeDurationScenarioComposition(selectedScenarios);
   const contextualMessage = joinMessages(
     datasetError,
+    loiteringError
+      ? "Não foi possível validar a permanência média individual."
+      : undefined,
     stats.errorCount
       ? `${stats.errorCount} cenário(s) permanecem sem dados válidos.`
       : undefined,
     ...stats.warnings,
   );
-  const hasError = Boolean(datasetError || stats.errorCount);
+  const hasError = Boolean(
+    datasetError || loiteringError || stats.errorCount,
+  );
   const metrics = [
     {
       key: "averageOccupancy",
-      label: "Ocupação média",
+      label: "Média de pessoas",
       title:
-        "Média de unidades ocupadas por cenário e minuto observado.",
+        "Média de pessoas detectadas por cenário nos minutos observados.",
       value: (summary: DurationAverageSummary) =>
         summary.averageOccupancy === null
           ? "—"
           : formatDecimal(summary.averageOccupancy, 2),
     },
     {
+      key: "averageIndividualDwellSeconds",
+      label: "Pessoa · permanência média",
+      title:
+        "Média ponderada das permanências concluídas; a quantidade de registros é usada somente como denominador interno.",
+      value: (summary: DurationAverageSummary) =>
+        formatOccupancyLoiteringDuration(
+          summary.averageIndividualDwellSeconds,
+          true,
+        ),
+    },
+    {
       key: "averageOccupiedSeconds",
-      label: "Tempo médio ocupado",
-      title: "Média das sequências continuamente ocupadas.",
+      label: "Área ocupada · média",
+      title: "Média das sequências em que a área permaneceu ocupada.",
       value: (summary: DurationAverageSummary) =>
         summary.averageOccupiedSeconds === null
           ? "—"
@@ -1502,12 +2002,30 @@ function OccupancyDurationAverageSummaryCard({
     },
     {
       key: "averageFreeSeconds",
-      label: "Tempo médio livre",
-      title: "Média das sequências continuamente desocupadas.",
+      label: "Área livre · média",
+      title: "Média das sequências em que a área permaneceu desocupada.",
       value: (summary: DurationAverageSummary) =>
         summary.averageFreeSeconds === null
           ? "—"
           : formatOccupancyDuration(summary.averageFreeSeconds),
+    },
+    {
+      key: "longestOccupiedSeconds",
+      label: "Área ocupada · máximo",
+      title: "Maior sequência em que uma área permaneceu ocupada.",
+      value: (summary: DurationAverageSummary) =>
+        summary.longestOccupiedSeconds === null
+          ? "—"
+          : formatOccupancyDuration(summary.longestOccupiedSeconds),
+    },
+    {
+      key: "longestFreeSeconds",
+      label: "Área livre · máximo",
+      title: "Maior sequência em que uma área permaneceu desocupada.",
+      value: (summary: DurationAverageSummary) =>
+        summary.longestFreeSeconds === null
+          ? "—"
+          : formatOccupancyDuration(summary.longestFreeSeconds),
     },
     {
       key: "coverage",
@@ -1571,14 +2089,14 @@ function OccupancyDurationAverageSummaryCard({
         </p>
 
         <div
-          aria-label="Comparação das médias globais e individuais da ocupação"
+          aria-label="Comparação entre detecção, estado das áreas e permanências individuais concluídas"
           className="mt-1.5 grid min-h-0 flex-1 content-start gap-1.5 overflow-y-auto overscroll-contain pr-0.5 [scrollbar-color:hsl(var(--border))_transparent] [scrollbar-width:thin]"
         >
           {comparisonRows.map((row) => (
             <section
               aria-label={row.label}
               className={cn(
-                "grid min-w-0 grid-cols-2 overflow-hidden rounded-md border @2xl:grid-cols-[minmax(112px,1.15fr)_repeat(4,minmax(76px,1fr))]",
+                "grid min-w-0 grid-cols-2 overflow-hidden rounded-md border @2xl:grid-cols-[minmax(112px,1.15fr)_repeat(7,minmax(72px,1fr))]",
                 row.kind === "global"
                   ? "border-[color:var(--duration-summary-accent)] bg-muted/45"
                   : "border-border/70 bg-card",
@@ -1608,7 +2126,7 @@ function OccupancyDurationAverageSummaryCard({
                   </p>
                   <p className="truncate text-[9px] leading-3 text-muted-foreground">
                     {row.kind === "global"
-                      ? "Média entre cenários · tempos médios ponderados"
+                      ? "Detecção média · durações calculadas separadamente"
                       : "Cenário individual"}
                   </p>
                 </div>
@@ -1626,7 +2144,9 @@ function OccupancyDurationAverageSummaryCard({
                       {metric.label}
                     </dt>
                     <dd className="mt-0.5 truncate text-xs font-semibold leading-4 tabular-nums text-foreground">
-                      {loading && value === "—" ? (
+                      {(metric.key === "averageIndividualDwellSeconds"
+                        ? loiteringLoading
+                        : loading) && value === "—" ? (
                         <Skeleton className="h-4 w-12" />
                       ) : (
                         value
@@ -1645,6 +2165,7 @@ function OccupancyDurationAverageSummaryCard({
 
 function OccupancyDurationTimelineCard({
   datasetError,
+  historicalPeriodLabel,
   loading,
   monitorMode,
   range,
@@ -1653,6 +2174,7 @@ function OccupancyDurationTimelineCard({
   timeZone,
 }: {
   datasetError?: string;
+  historicalPeriodLabel?: string;
   loading: boolean;
   monitorMode: boolean;
   range: OccupancyDurationMinuteRange | null;
@@ -1681,7 +2203,9 @@ function OccupancyDurationTimelineCard({
     [effectiveTheme, monitorMode, range, selectedSeries, timeZone, visuals],
   );
   const composition = describeDurationScenarioComposition(selectedScenarios);
-  const description = `Hoje, cada faixa representa um minuto fechado como ocupado ou desocupado; somente a apresentação incorpora transições ao estado ocupado, sem alterar os cálculos. Intervalos sem cobertura continuam identificados e horários futuros permanecem vazios. Composição: ${composition.shortLabel}.`;
+  const description = historicalPeriodLabel
+    ? `No ${historicalPeriodLabel}, cada faixa representa um minuto fechado como ocupado ou desocupado; somente a apresentação incorpora transições ao estado ocupado, sem alterar os cálculos. Intervalos sem cobertura continuam identificados. Composição: ${composition.shortLabel}.`
+    : `Hoje, cada faixa representa um minuto fechado como ocupado ou desocupado; somente a apresentação incorpora transições ao estado ocupado, sem alterar os cálculos. Intervalos sem cobertura continuam identificados e horários futuros permanecem vazios. Composição: ${composition.shortLabel}.`;
   return (
     <DurationChartCard
       chartKind="timeline"
@@ -1711,12 +2235,14 @@ function OccupancyDurationTimelineCard({
 
 function OccupancyDurationByScenarioCard({
   datasetError,
+  historicalPeriodLabel,
   loading,
   monitorMode,
   selectedScenarios,
   selectedSeries,
 }: {
   datasetError?: string;
+  historicalPeriodLabel?: string;
   loading: boolean;
   monitorMode: boolean;
   selectedScenarios: DurationScenario[];
@@ -1739,7 +2265,9 @@ function OccupancyDurationByScenarioCard({
     [effectiveTheme, monitorMode, selectedSeries, visuals],
   );
   const composition = describeDurationScenarioComposition(selectedScenarios);
-  const description = `Hoje por cenário: ocupado confirmado, transição, livre, sem dados e permanência média das sessões concluídas em cada linha. Composição: ${composition.shortLabel}.`;
+  const description = `${
+    historicalPeriodLabel ? `No ${historicalPeriodLabel}` : "Hoje"
+  } por cenário: tempo ocupado, desocupado, misto e sem dados; cada linha também informa as médias contínuas ocupada e livre derivadas dos snapshots. Composição: ${composition.shortLabel}.`;
   return (
     <DurationChartCard
       chartKind="comparison"
@@ -1769,16 +2297,18 @@ function OccupancyDurationByScenarioCard({
 
 function OccupancyDurationAverageByScenarioCard({
   datasetError,
+  historicalPeriodLabel,
   loading,
   monitorMode,
   selectedScenarios,
   selectedSeries,
 }: {
   datasetError?: string;
+  historicalPeriodLabel?: string;
   loading: boolean;
   monitorMode: boolean;
   selectedScenarios: DurationScenario[];
-  selectedSeries: OccupancyIndividualDwellScenarioSeries[];
+  selectedSeries: OccupancyDurationScenarioSeries[];
 }) {
   const { effectiveTheme } = useTheme();
   const widgetColor = useWidgetColor("#0F766E");
@@ -1797,30 +2327,33 @@ function OccupancyDurationAverageByScenarioCard({
     [effectiveTheme, entries, monitorMode, widgetColor],
   );
   const composition = describeDurationScenarioComposition(selectedScenarios);
-  const description = `Hoje por cenário: permanência individual real das sessões concluídas, ponderada pela quantidade de sessões. Composição: ${composition.shortLabel}.`;
-  const hasResolvedSummary = entries.some(
-    (entry) => entry.sessionCount !== null,
-  );
-  const hasCompletedSessions = entries.some(
-    (entry) => entry.sessionCount !== null && entry.sessionCount > 0,
+  const description = `${
+    historicalPeriodLabel ? `No ${historicalPeriodLabel}` : "Hoje"
+  } por cenário: duração média e maior sequência continuamente ocupada ou desocupada, derivadas dos snapshots agregados por minuto. Composição: ${composition.shortLabel}.`;
+  const hasResolvedSummary = entries.length > 0;
+  const hasStateDuration = entries.some(
+    (entry) =>
+      entry.averageOccupiedSeconds !== null ||
+      entry.averageFreeSeconds !== null,
   );
 
   return (
     <DurationChartCard
       chartKind="average"
       description={description}
-      emptyText="Selecione ao menos um cenário para comparar a permanência média."
-      error={datasetError}
-      hasData={hasCompletedSessions}
+      emptyText="Selecione ao menos um cenário para comparar os períodos ocupados e livres."
+      error={joinMessages(datasetError, selectedSeriesErrors(selectedSeries))}
+      hasData={hasStateDuration}
       hasSelection={selectedScenarios.length > 0}
       loading={loading && !hasResolvedSummary}
-      noDataText="Nenhuma sessão de permanência foi concluída neste período."
+      noDataText="Ainda não há intervalos ocupados ou desocupados confirmados neste período."
       option={option}
       textAlternative={
         <DurationAverageByScenarioTextAlternative entries={entries} />
       }
       title={CARD_LABELS.occupancy_duration_average_by_scenario}
       updating={loading && hasResolvedSummary}
+      warning={selectedSeriesWarnings(selectedSeries)}
     />
   );
 }
@@ -2009,21 +2542,6 @@ function DurationScenarioTextAlternative({
   if (!series.length) return null;
   const rows = series.map((scenario) => {
     const state = deriveOccupancyStateMetrics(scenario.summary);
-    const dwell = scenario.individualDwell;
-    const dwellTotals = dwell?.totals;
-    const dwellAverage = dwell?.loading &&
-      (!dwellTotals || dwellTotals.sessionCount === 0)
-      ? "Carregando"
-      : dwellTotals
-        ? dwellTotals.sessionCount > 0
-        ? formatOccupancyLoiteringDuration(
-            dwellTotals.avgDurationSeconds,
-            true,
-          )
-        : "—"
-        : dwell?.error
-          ? "Indisponível"
-          : "—";
     return {
       averageFree:
         state.averageConfirmedFreeSequenceSeconds === null
@@ -2043,13 +2561,14 @@ function DurationScenarioTextAlternative({
         scenario.summary.loadUnitSeconds / HOUR_SECONDS,
         2,
       )} unid·h`,
-      individualDwellAverage: dwellAverage,
-      individualDwellSessions: dwell?.loading &&
-        (!dwellTotals || dwellTotals.sessionCount === 0)
-        ? "—"
-        : dwellTotals
-        ? dwellTotals.sessionCount.toLocaleString("pt-BR")
-        : "—",
+      longestFree:
+        state.confirmedFreeSequenceCount > 0
+          ? formatOccupancyDuration(state.longestConfirmedFreeSeconds)
+          : "—",
+      longestOccupied:
+        state.confirmedOccupiedSequenceCount > 0
+          ? formatOccupancyDuration(state.longestConfirmedOccupiedSeconds)
+          : "—",
       minimumTransitions: state.minimumDetectedTransitions.toLocaleString(
         "pt-BR",
       ),
@@ -2078,8 +2597,8 @@ function DurationScenarioTextAlternative({
             <th scope="col">Livre confirmado</th>
             <th scope="col">Média do período ocupado</th>
             <th scope="col">Média do período desocupado</th>
-            <th scope="col">Permanência média concluída</th>
-            <th scope="col">Sessões concluídas</th>
+            <th scope="col">Maior período ocupado</th>
+            <th scope="col">Maior período desocupado</th>
             <th scope="col">Taxa de tempo ocupado</th>
             <th scope="col">Mudanças mínimas de estado</th>
             <th scope="col">Sem dados</th>
@@ -2096,8 +2615,8 @@ function DurationScenarioTextAlternative({
               <td>{row.free}</td>
               <td>{row.averageOccupied}</td>
               <td>{row.averageFree}</td>
-              <td>{row.individualDwellAverage}</td>
-              <td>{row.individualDwellSessions}</td>
+              <td>{row.longestOccupied}</td>
+              <td>{row.longestFree}</td>
               <td>{row.occupiedRate}</td>
               <td>{row.minimumTransitions}</td>
               <td>{row.unknown}</td>
@@ -2121,9 +2640,8 @@ function DurationScenarioTextAlternative({
                 <strong className="text-foreground">{row.name}:</strong>{" "}
                 ocupado {row.occupied}; transição {row.transition}; livre{" "}
                 {row.free}; média ocupada {row.averageOccupied}; média livre{" "}
-                {row.averageFree}; permanência média concluída{" "}
-                {row.individualDwellAverage}; sessões concluídas{" "}
-                {row.individualDwellSessions}; taxa ocupada {row.occupiedRate}; mudanças mínimas{" "}
+                {row.averageFree}; maior período ocupado {row.longestOccupied};{" "}
+                maior período livre {row.longestFree}; taxa ocupada {row.occupiedRate}; mudanças mínimas{" "}
                 {row.minimumTransitions}; sem dados {row.unknown}; cobertura{" "}
                 {row.coverage}; carga{" "}
                 {row.load}.
@@ -2145,21 +2663,21 @@ function DurationAverageByScenarioTextAlternative({
   const durationLabel = (value: number | null) =>
     value === null
       ? "—"
-      : formatOccupancyLoiteringDuration(value, true);
+      : formatOccupancyDuration(value);
 
   return (
     <>
       <table className="sr-only">
         <caption>
-          Permanência individual das sessões concluídas por cenário.
+          Duração dos períodos ocupados e livres por cenário.
         </caption>
         <thead>
           <tr>
             <th scope="col">Cenário</th>
-            <th scope="col">Permanência média</th>
-            <th scope="col">Menor permanência</th>
-            <th scope="col">Maior permanência</th>
-            <th scope="col">Sessões concluídas</th>
+            <th scope="col">Média ocupada</th>
+            <th scope="col">Média livre</th>
+            <th scope="col">Maior ocupada</th>
+            <th scope="col">Maior livre</th>
             <th scope="col">Situação</th>
           </tr>
         </thead>
@@ -2167,14 +2685,10 @@ function DurationAverageByScenarioTextAlternative({
           {entries.map((entry) => (
             <tr key={`${entry.scenarioId}-average-accessible`}>
               <th scope="row">{entry.name}</th>
-              <td>{durationLabel(entry.averageDurationSeconds)}</td>
-              <td>{durationLabel(entry.minimumDurationSeconds)}</td>
-              <td>{durationLabel(entry.maximumDurationSeconds)}</td>
-              <td>
-                {entry.sessionCount === null
-                  ? "—"
-                  : entry.sessionCount.toLocaleString("pt-BR")}
-              </td>
+              <td>{durationLabel(entry.averageOccupiedSeconds)}</td>
+              <td>{durationLabel(entry.averageFreeSeconds)}</td>
+              <td>{durationLabel(entry.longestOccupiedSeconds)}</td>
+              <td>{durationLabel(entry.longestFreeSeconds)}</td>
               <td>{durationAverageEntryStatus(entry)}</td>
             </tr>
           ))}
@@ -2192,12 +2706,10 @@ function DurationAverageByScenarioTextAlternative({
                 key={`${entry.scenarioId}-average-visible-summary`}
               >
                 <strong className="text-foreground">{entry.name}:</strong>{" "}
-                média {durationLabel(entry.averageDurationSeconds)}; mínimo{" "}
-                {durationLabel(entry.minimumDurationSeconds)}; máximo{" "}
-                {durationLabel(entry.maximumDurationSeconds)};{" "}
-                {entry.sessionCount === null
-                  ? "sessões indisponíveis"
-                  : `${entry.sessionCount.toLocaleString("pt-BR")} sessão(ões) concluída(s)`}.
+                média ocupada {durationLabel(entry.averageOccupiedSeconds)};{" "}
+                média livre {durationLabel(entry.averageFreeSeconds)}; maior{" "}
+                ocupada {durationLabel(entry.longestOccupiedSeconds)}; maior{" "}
+                livre {durationLabel(entry.longestFreeSeconds)}.
               </p>
             ))}
           </div>
@@ -2291,29 +2803,13 @@ function compactDurationChartOption(
 function durationScenarioAverageLabel(
   scenario: OccupancyDurationScenarioSeries,
 ) {
-  const dwell = scenario.individualDwell;
-  if (dwell) {
-    const totals = dwell.totals;
-    if (dwell.loading && (!totals || totals.sessionCount === 0)) {
-      return "Média carregando…";
-    }
-    if (totals && totals.sessionCount > 0) {
-      return `Média ${formatOccupancyLoiteringDuration(
-        totals.avgDurationSeconds,
-      )} · ${totals.sessionCount.toLocaleString("pt-BR")} sess.`;
-    }
-    if (totals && totals.sessionCount === 0) {
-      return "Média —";
-    }
-    if (dwell.error) return "Média indisponível";
-    return "Média —";
-  }
-  const average = deriveOccupancyStateMetrics(
-    scenario.summary,
-  ).averageConfirmedOccupiedSequenceSeconds;
-  return average === null
-    ? "Média ocupada —"
-    : `Média ocupada ${formatOccupancyDuration(average)}`;
+  const state = deriveOccupancyStateMetrics(scenario.summary);
+  const occupied = state.averageConfirmedOccupiedSequenceSeconds;
+  const free = state.averageConfirmedFreeSequenceSeconds;
+  if (occupied === null && free === null) return "Médias O — · L —";
+  return `Médias O ${
+    occupied === null ? "—" : formatOccupancyDuration(occupied)
+  } · L ${free === null ? "—" : formatOccupancyDuration(free)}`;
 }
 
 function durationScenarioAxisLabel(
@@ -2326,27 +2822,23 @@ function durationScenarioAxisLabel(
   )}\n${durationScenarioAverageLabel(scenario)}`;
 }
 
-function durationScenarioDwellTooltipLines(
+function durationScenarioLongestTooltipLines(
   scenario: OccupancyDurationScenarioSeries | undefined,
 ) {
-  const dwell = scenario?.individualDwell;
-  if (!dwell) return [];
-  const totals = dwell.totals;
-  if (dwell.loading && (!totals || totals.sessionCount === 0)) {
-    return ["Permanência média concluída: carregando…"];
-  }
-  if (totals && totals.sessionCount > 0) {
-    return [
-      `Permanência média concluída: ${escapeHtml(
-        formatOccupancyLoiteringDuration(totals.avgDurationSeconds, true),
-      )}`,
-      `Sessões concluídas: ${totals.sessionCount.toLocaleString("pt-BR")}`,
-    ];
-  }
-  if (totals && totals.sessionCount === 0) {
-    return ["Permanência média concluída: —"];
-  }
-  return ["Permanência média concluída: indisponível"];
+  if (!scenario) return [];
+  const state = deriveOccupancyStateMetrics(scenario.summary);
+  return [
+    `Maior período ocupado: ${escapeHtml(
+      state.confirmedOccupiedSequenceCount > 0
+        ? formatOccupancyDuration(state.longestConfirmedOccupiedSeconds)
+        : "—",
+    )}`,
+    `Maior período desocupado: ${escapeHtml(
+      state.confirmedFreeSequenceCount > 0
+        ? formatOccupancyDuration(state.longestConfirmedFreeSeconds)
+        : "—",
+    )}`,
+  ];
 }
 
 function buildOccupancyDurationTimelineOption({
@@ -2527,7 +3019,7 @@ function buildOccupancyDurationTimelineOption({
                 )}`,
               ]
             : []),
-          ...durationScenarioDwellTooltipLines(scenario),
+          ...durationScenarioLongestTooltipLines(scenario),
         ].join("<br/>");
       },
       textStyle: { color: palette.tooltipText },
@@ -2712,54 +3204,44 @@ function durationTimelineRenderItem(
 }
 
 function buildOccupancyDurationAverageByScenarioEntries(
-  series: OccupancyIndividualDwellScenarioSeries[],
+  series: OccupancyDurationScenarioSeries[],
 ): OccupancyDurationAverageByScenarioEntry[] {
-  return series
-    .map((scenario) => {
-      const dwell = scenario.individualDwell;
-      const totals = dwell.totals;
-      const hasCompletedSessions = Boolean(
-        totals && totals.sessionCount > 0,
-      );
-      return {
-        averageDurationSeconds: hasCompletedSessions
-          ? totals?.avgDurationSeconds ?? null
+  // The widget compares four independent duration measures. There is no
+  // mathematically honest single ranking key, so preserve the scenario order
+  // chosen by the user instead of mixing occupied and free averages.
+  return series.map((scenario) => {
+    const state = deriveOccupancyStateMetrics(scenario.summary);
+    return {
+      averageFreeSeconds: state.averageConfirmedFreeSequenceSeconds,
+      averageOccupiedSeconds:
+        state.averageConfirmedOccupiedSequenceSeconds,
+      error: scenario.error,
+      longestFreeSeconds:
+        state.confirmedFreeSequenceCount > 0
+          ? state.longestConfirmedFreeSeconds
           : null,
-        error: dwell.error,
-        loading: dwell.loading,
-        maximumDurationSeconds: hasCompletedSessions
-          ? totals?.maxDurationSeconds ?? null
+      longestOccupiedSeconds:
+        state.confirmedOccupiedSequenceCount > 0
+          ? state.longestConfirmedOccupiedSeconds
           : null,
-        minimumDurationSeconds: hasCompletedSessions
-          ? totals?.minDurationSeconds ?? null
-          : null,
-        name: scenario.name,
-        scenarioId: scenario.scenarioId,
-        sessionCount: totals?.sessionCount ?? null,
-      };
-    })
-    .sort((left, right) => {
-      if (left.averageDurationSeconds === null) {
-        return right.averageDurationSeconds === null ? 0 : 1;
-      }
-      if (right.averageDurationSeconds === null) return -1;
-      return right.averageDurationSeconds - left.averageDurationSeconds;
-    });
+      name: scenario.name,
+      scenarioId: scenario.scenarioId,
+    };
+  });
 }
 
 function durationAverageEntryStatus(
   entry: OccupancyDurationAverageByScenarioEntry,
 ) {
   if (entry.error) {
-    return entry.averageDurationSeconds === null
+    return entry.averageOccupiedSeconds === null &&
+        entry.averageFreeSeconds === null
       ? "Fonte indisponível"
       : "Último valor disponível";
   }
-  if (entry.loading && entry.sessionCount === null) return "Carregando";
-  return entry.sessionCount === 0
-    ? "Aguardando amostra"
-    : entry.averageDurationSeconds === null
-      ? "Dados indisponíveis"
+  return entry.averageOccupiedSeconds === null &&
+      entry.averageFreeSeconds === null
+    ? "Sem estado confirmado"
     : "Disponível";
 }
 
@@ -2778,6 +3260,28 @@ function buildOccupancyDurationAverageByScenarioOption({
 }): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
   const showVerticalZoom = interactive && entries.length > 8;
+  const durationSeries = [
+    {
+      color: widgetColor,
+      key: "averageOccupiedSeconds",
+      name: "Média ocupada",
+    },
+    {
+      color: theme === "dark" ? "#34D399" : "#16A34A",
+      key: "averageFreeSeconds",
+      name: "Média livre",
+    },
+    {
+      color: theme === "dark" ? "#60A5FA" : "#1D4ED8",
+      key: "longestOccupiedSeconds",
+      name: "Maior ocupada",
+    },
+    {
+      color: theme === "dark" ? "#6EE7B7" : "#047857",
+      key: "longestFreeSeconds",
+      name: "Maior livre",
+    },
+  ] as const;
 
   return {
     animation: !monitorMode,
@@ -2785,7 +3289,7 @@ function buildOccupancyDurationAverageByScenarioOption({
       show: true,
       label: {
         description:
-          "Ranking por cenário da permanência média individual nas sessões concluídas. Ausência de sessões permanece sem valor.",
+          "Comparação por cenário da duração média e da maior sequência continuamente ocupada ou desocupada, calculada a partir dos snapshots agregados.",
       },
     },
     dataZoom: showVerticalZoom
@@ -2809,20 +3313,28 @@ function buildOccupancyDurationAverageByScenarioOption({
         ]
       : undefined,
     grid: {
-      bottom: 32,
+      bottom: 36,
       containLabel: true,
       left: 12,
       right: showVerticalZoom ? 92 : 76,
-      top: 18,
+      top: 48,
     },
-    series: [
-      {
-        barMaxWidth: 28,
-        data: entries.map((entry) => entry.averageDurationSeconds),
+    legend: {
+      data: durationSeries.map((item) => item.name),
+      itemHeight: 8,
+      itemWidth: 14,
+      left: 8,
+      textStyle: { color: palette.legendText, fontSize: 10 },
+      top: 4,
+      type: "scroll",
+    },
+    series: durationSeries.map((item) => ({
+        barMaxWidth: 12,
+        data: entries.map((entry) => entry[item.key]),
         emphasis: { focus: "self" },
         itemStyle: {
           borderRadius: [0, 5, 5, 0],
-          color: widgetColor,
+          color: item.color,
         },
         label: {
           color: palette.legendText,
@@ -2830,19 +3342,19 @@ function buildOccupancyDurationAverageByScenarioOption({
             const record = isRecord(params) ? params : {};
             const seconds = numericValue(record.value);
             return seconds !== null && seconds > 0
-              ? formatOccupancyLoiteringDuration(seconds, true)
+              ? formatOccupancyDuration(seconds)
               : "";
           },
-          fontSize: 10,
+          fontSize: 9,
           fontWeight: 600,
           position: "right",
-          show: true,
+          show: item.key === "averageOccupiedSeconds" ||
+            item.key === "averageFreeSeconds",
         },
-        labelLayout: { hideOverlap: false },
-        name: "Permanência média",
+        labelLayout: { hideOverlap: true },
+        name: item.name,
         type: "bar",
-      },
-    ],
+      })),
     tooltip: {
       axisPointer: { type: "shadow" },
       backgroundColor: palette.tooltipBackground,
@@ -2854,30 +3366,14 @@ function buildOccupancyDurationAverageByScenarioOption({
         const dataIndex = numericValue(record.dataIndex);
         const entry = dataIndex === null ? undefined : entries[dataIndex];
         if (!entry) return "";
-        const average = entry.averageDurationSeconds === null
-          ? "—"
-          : formatOccupancyLoiteringDuration(
-              entry.averageDurationSeconds,
-              true,
-            );
-        const minimum = entry.minimumDurationSeconds === null
-          ? "—"
-          : formatOccupancyLoiteringDuration(
-              entry.minimumDurationSeconds,
-              true,
-            );
-        const maximum = entry.maximumDurationSeconds === null
-          ? "—"
-          : formatOccupancyLoiteringDuration(
-              entry.maximumDurationSeconds,
-              true,
-            );
+        const duration = (value: number | null) =>
+          value === null ? "—" : formatOccupancyDuration(value);
         return [
           `<strong>${escapeHtml(entry.name)}</strong>`,
-          `Permanência média: ${escapeHtml(average)}`,
-          `Menor permanência: ${escapeHtml(minimum)}`,
-          `Maior permanência: ${escapeHtml(maximum)}`,
-          `Sessões concluídas: ${entry.sessionCount === null ? "—" : entry.sessionCount.toLocaleString("pt-BR")}`,
+          `Média ocupada: ${escapeHtml(duration(entry.averageOccupiedSeconds))}`,
+          `Média desocupada: ${escapeHtml(duration(entry.averageFreeSeconds))}`,
+          `Maior período ocupado: ${escapeHtml(duration(entry.longestOccupiedSeconds))}`,
+          `Maior período desocupado: ${escapeHtml(duration(entry.longestFreeSeconds))}`,
           `Situação: ${escapeHtml(durationAverageEntryStatus(entry))}`,
         ].join("<br/>");
       },
@@ -2888,12 +3384,12 @@ function buildOccupancyDurationAverageByScenarioOption({
       axisLabel: {
         color: palette.axisText,
         formatter: (value: number) =>
-          value > 0 ? formatOccupancyLoiteringDuration(value, true) : "",
+          value > 0 ? formatOccupancyDuration(value) : "",
         hideOverlap: true,
       },
       axisLine: { lineStyle: { color: palette.axisLine } },
       min: 0,
-      name: "Permanência média",
+      name: "Duração do período",
       nameTextStyle: { color: palette.axisText },
       splitLine: { lineStyle: { color: palette.gridLine }, show: true },
       type: "value",
@@ -2944,7 +3440,7 @@ function buildOccupancyDurationByScenarioOption({
       show: true,
       label: {
         description:
-          "Barras empilhadas por cenário com tempo ocupado confirmado, transição, livre, sem dados e a permanência média das sessões concluídas visível em cada linha.",
+          "Barras empilhadas por cenário com tempo ocupado confirmado, transição, livre e sem dados; as médias contínuas ocupada e livre aparecem em cada linha.",
       },
     },
     dataZoom: showVerticalZoom
@@ -3085,7 +3581,7 @@ function buildOccupancyDurationByScenarioOption({
                 )}`,
               ]
             : []),
-          ...durationScenarioDwellTooltipLines(scenario),
+          ...durationScenarioLongestTooltipLines(scenario),
         ].join("<br/>");
       },
       textStyle: { color: palette.tooltipText },
@@ -3126,10 +3622,12 @@ function buildOccupancyDurationByScenarioOption({
 }
 
 function buildDurationReportContext({
+  historical,
   inheritedScenarios,
   preferenceByCardId,
   scenarioOptions,
 }: {
+  historical: boolean;
   inheritedScenarios: DurationScenario[];
   preferenceByCardId: Map<string, CardPreference>;
   scenarioOptions: DurationScenario[];
@@ -3144,19 +3642,29 @@ function buildDurationReportContext({
     );
     const composition = describeDurationScenarioComposition(selectedScenarios);
     return [
-      `Composição de duração — ${CARD_LABELS[cardId]}: ${composition.fullLabel}.`,
+      `Composição de duração — ${durationCardLabel(cardId, historical)}: ${composition.fullLabel}.`,
     ];
   });
 }
 
 function buildDurationReportMetrics({
+  historicalPeriodLabel,
   inheritedScenarios,
   preferenceByCardId,
+  resolveSelectedCurrentSnapshots,
+  resolveSelectedLoiteringSummaryModel,
   resolveSelectedSeries,
   scenarioOptions,
 }: {
+  historicalPeriodLabel?: string;
   inheritedScenarios: DurationScenario[];
   preferenceByCardId: Map<string, CardPreference>;
+  resolveSelectedCurrentSnapshots: (
+    selection: CardScenarioSelection,
+  ) => readonly OccupancyScenarioSnapshot[];
+  resolveSelectedLoiteringSummaryModel: (
+    selection: CardScenarioSelection,
+  ) => OccupancyLoiteringSummaryModel;
   resolveSelectedSeries: (
     selection: CardScenarioSelection,
   ) => OccupancyDurationScenarioSeries[];
@@ -3170,7 +3678,7 @@ function buildDurationReportMetrics({
     { cardId: "occupancy_duration_free", kind: "free" },
     { cardId: "occupancy_duration_average", kind: "average" },
     { cardId: "occupancy_duration_rate", kind: "rate" },
-    { cardId: "occupancy_duration_transitions", kind: "transitions" },
+    { cardId: "occupancy_duration_transitions", kind: "current" },
     { cardId: "occupancy_duration_longest", kind: "longest" },
     { cardId: "occupancy_duration_load", kind: "load" },
     { cardId: "occupancy_duration_coverage", kind: "coverage" },
@@ -3190,15 +3698,21 @@ function buildDurationReportMetrics({
       inheritedScenarios,
     );
     const selectedSeries = resolveSelectedSeries(selection);
+    const selectedSnapshots =
+      kind === "current"
+        ? resolveSelectedCurrentSnapshots(selection)
+        : [];
     const stats = summarizeSelectedSeries(
       selectedSeries,
       selectedScenarios.length,
     );
     const composition = describeDurationScenarioComposition(selectedScenarios);
     if (cardId === "occupancy_duration_average") {
+      const loiteringModel = resolveSelectedLoiteringSummaryModel(selection);
       const comparisonRows = buildDurationAverageComparisonRows(
         selectedScenarios,
         selectedSeries,
+        loiteringModel,
       );
       const globalSummary = comparisonRows[0]?.summary;
       const validScenarioCount = comparisonRows
@@ -3215,18 +3729,36 @@ function buildDurationReportMetrics({
               globalSummary?.averageOccupiedSeconds == null
                 ? "Tempo médio ocupado indisponível."
                 : `Tempo médio ocupado: ${formatOccupancyDuration(globalSummary.averageOccupiedSeconds)}.`,
+              globalSummary?.averageIndividualDwellSeconds == null
+                ? "Permanência média individual concluída indisponível."
+                : `Permanência média individual concluída: ${formatOccupancyLoiteringDuration(globalSummary.averageIndividualDwellSeconds, true)}. A consolidação usa média ponderada por registro concluído e deduplica áreas físicas compartilhadas entre cenários.`,
               globalSummary?.averageFreeSeconds == null
                 ? "Tempo médio livre indisponível."
                 : `Tempo médio livre: ${formatOccupancyDuration(globalSummary.averageFreeSeconds)}.`,
+              globalSummary?.longestOccupiedSeconds == null
+                ? "Maior período ocupado indisponível."
+                : `Maior período ocupado: ${formatOccupancyDuration(globalSummary.longestOccupiedSeconds)}.`,
+              globalSummary?.longestFreeSeconds == null
+                ? "Maior período livre indisponível."
+                : `Maior período livre: ${formatOccupancyDuration(globalSummary.longestFreeSeconds)}.`,
               globalSummary?.coverage == null
                 ? "Cobertura indisponível."
                 : `Cobertura: ${formatDecimal(globalSummary.coverage * 100, 1)}%.`,
+              comparisonRows.length > 1
+                ? `Permanência média individual por cenário: ${comparisonRows
+                    .slice(1)
+                    .map(
+                      (row) =>
+                        `${row.label}: ${formatOccupancyLoiteringDuration(row.summary.averageIndividualDwellSeconds, true)}`,
+                    )
+                    .join("; ")}.`
+                : undefined,
               `Composição: ${composition.fullLabel}.`,
               stats.errorCount
                 ? `${stats.errorCount} cenário(s) sem dados válidos.`
                 : undefined,
               ...stats.warnings,
-            ) ?? "Resumo médio de ocupação.",
+            ) ?? "Resumo de ocupação e permanência.",
           label: `${CARD_LABELS[cardId]} · Ocupação média`,
           value:
             globalSummary?.averageOccupancy == null
@@ -3235,7 +3767,14 @@ function buildDurationReportMetrics({
         },
       }];
     }
-    const definition = durationMetricDefinition(kind, stats);
+    const definition = durationMetricDefinition(
+      kind,
+      stats,
+      selectedSeries,
+      selectedScenarios.length,
+      selectedSnapshots,
+      historicalPeriodLabel,
+    );
     return [{
       cardId,
       metric: {
@@ -3243,12 +3782,15 @@ function buildDurationReportMetrics({
           joinMessages(
             definition.description,
             `Composição: ${composition.fullLabel}.`,
+            kind === "current"
+              ? selectedSnapshotErrors(selectedSnapshots)
+              : undefined,
             stats.errorCount
               ? `${stats.errorCount} cenário(s) sem dados válidos.`
               : undefined,
             ...stats.warnings,
           ) ?? definition.description,
-        label: CARD_LABELS[cardId],
+        label: durationCardLabel(cardId, Boolean(historicalPeriodLabel)),
         value: definition.value,
       },
     }];
@@ -3260,7 +3802,6 @@ function buildDurationReportAssets({
   monitorMode,
   preferenceByCardId,
   range,
-  resolveSelectedIndividualDwellSeries,
   resolveSelectedSeries,
   scenarioOptions,
   timeZone,
@@ -3270,9 +3811,6 @@ function buildDurationReportAssets({
   monitorMode: boolean;
   preferenceByCardId: Map<string, CardPreference>;
   range: OccupancyDurationMinuteRange | null;
-  resolveSelectedIndividualDwellSeries: (
-    selection: CardScenarioSelection,
-  ) => OccupancyIndividualDwellScenarioSeries[];
   resolveSelectedSeries: (
     selection: CardScenarioSelection,
   ) => OccupancyDurationScenarioSeries[];
@@ -3314,7 +3852,7 @@ function buildDurationReportAssets({
     scenarioOptions,
     averageByScenarioSelection,
     inheritedScenarios,
-    resolveSelectedIndividualDwellSeries(averageByScenarioSelection),
+    resolveSelectedSeries(averageByScenarioSelection),
   );
   const timelineComposition = describeDurationScenarioComposition(
     resolveWidgetScenarios(
@@ -3341,10 +3879,9 @@ function buildDurationReportAssets({
 
   if (
     timelinePreference?.visible !== false &&
-    range &&
-    timelineSeries.length
+    range
   ) {
-    const chunks = chunkDurationSeries(timelineSeries);
+    const chunks = chunkDurationReportSeries(timelineSeries);
     const visuals = durationStateVisuals(
       "light",
       timelinePreference?.color ?? "#1267C4",
@@ -3388,8 +3925,8 @@ function buildDurationReportAssets({
     });
   }
 
-  if (comparisonPreference?.visible !== false && comparisonSeries.length) {
-    const chunks = chunkDurationSeries(comparisonSeries);
+  if (comparisonPreference?.visible !== false) {
+    const chunks = chunkDurationReportSeries(comparisonSeries);
     const visuals = durationStateVisuals(
       "light",
       comparisonPreference?.color ?? "#1267C4",
@@ -3429,32 +3966,25 @@ function buildDurationReportAssets({
   }
 
   if (
-    averageByScenarioPreference?.visible !== false &&
-    averageByScenarioSeries.length
+    averageByScenarioPreference?.visible !== false
   ) {
     const entries = buildOccupancyDurationAverageByScenarioEntries(
       averageByScenarioSeries,
     );
-    const chunks = chunkDurationSeries(entries);
+    const chunks = chunkDurationReportSeries(entries);
     chunks.forEach((chunk, index) => {
       assets.push({
         cardId: "occupancy_duration_average_by_scenario",
         chart: {
           description: joinMessages(
-            "Ranking da permanência individual real das sessões concluídas, com média, menor duração, maior duração e total de sessões por cenário.",
+            "Comparação da duração média e da maior sequência continuamente ocupada ou desocupada, calculada exclusivamente dos snapshots agregados.",
             `Composição: ${averageByScenarioComposition.fullLabel}.`,
             chunks.length > 1
               ? `Cenários ${index * MAX_REPORT_SCENARIOS_PER_CHART + 1}–${
                   index * MAX_REPORT_SCENARIOS_PER_CHART + chunk.length
                 } de ${entries.length}.`
               : undefined,
-            joinMessages(
-              ...averageByScenarioSeries.map((item) =>
-                item.individualDwell.error
-                  ? `${item.name}: ${item.individualDwell.error}`
-                  : undefined,
-              ),
-            ),
+            selectedSeriesErrors(averageByScenarioSeries),
             timeZoneWarning,
           ),
           option: buildOccupancyDurationAverageByScenarioOption({
@@ -3485,52 +4015,54 @@ function buildDurationAverageByScenarioReportTable(
     columns: [
       { key: "scenario", label: "Cenário", width: 26 },
       {
-        key: "averageDurationSeconds",
-        label: "Permanência média (s)",
+        key: "averageOccupiedSeconds",
+        label: "Média ocupada (s)",
         numeric: true,
         width: 18,
       },
       {
-        key: "minimumDurationSeconds",
-        label: "Menor permanência (s)",
+        key: "averageFreeSeconds",
+        label: "Média livre (s)",
         numeric: true,
         width: 18,
       },
       {
-        key: "maximumDurationSeconds",
-        label: "Maior permanência (s)",
+        key: "longestOccupiedSeconds",
+        label: "Maior ocupada (s)",
         numeric: true,
         width: 18,
       },
       {
-        key: "sessionCount",
-        label: "Sessões concluídas",
+        key: "longestFreeSeconds",
+        label: "Maior livre (s)",
         numeric: true,
         width: 17,
       },
       { key: "status", label: "Situação", width: 20 },
     ],
     description:
-      "Valores auditáveis das sessões individuais concluídas retornadas pelo resumo de permanência. Ausência de sessões preserva as durações sem valor e não inventa zero.",
+      "Períodos contínuos ocupados e livres derivados dos snapshots agregados por minuto. Ausência de estado confirmado permanece sem valor e não inventa zero.",
     rows: entries.map((entry) => ({
-      averageDurationSeconds: roundLoiteringSeconds(
-        entry.averageDurationSeconds,
+      averageFreeSeconds: roundDurationSeconds(
+        entry.averageFreeSeconds,
       ),
-      maximumDurationSeconds: roundLoiteringSeconds(
-        entry.maximumDurationSeconds,
+      averageOccupiedSeconds: roundDurationSeconds(
+        entry.averageOccupiedSeconds,
       ),
-      minimumDurationSeconds: roundLoiteringSeconds(
-        entry.minimumDurationSeconds,
+      longestFreeSeconds: roundDurationSeconds(
+        entry.longestFreeSeconds,
+      ),
+      longestOccupiedSeconds: roundDurationSeconds(
+        entry.longestOccupiedSeconds,
       ),
       scenario: entry.name,
-      sessionCount: entry.sessionCount,
       status: durationAverageEntryStatus(entry),
     })),
     title: CARD_LABELS.occupancy_duration_average_by_scenario,
   };
 }
 
-function roundLoiteringSeconds(value: number | null) {
+function roundDurationSeconds(value: number | null) {
   return value === null ? null : Number(value.toFixed(2));
 }
 
@@ -3547,11 +4079,10 @@ function buildDurationSummaryReportTable(
     columns: [
       { key: "scenario", label: "Cenário", width: 24 },
       { key: "occupied", label: "Ocupado (min)", numeric: true, width: 14 },
-      { key: "longest", label: "Maior sequência (min)", numeric: true, width: 16 },
+      { key: "longestOccupied", label: "Maior ocupada (min)", numeric: true, width: 16 },
+      { key: "longestFree", label: "Maior livre (min)", numeric: true, width: 16 },
       { key: "averageOccupied", label: "Média ocupado (min)", numeric: true, width: 16 },
       { key: "averageFree", label: "Média desocupado (min)", numeric: true, width: 17 },
-      { key: "individualDwellAverage", label: "Permanência média (s)", numeric: true, width: 17 },
-      { key: "individualDwellSessions", label: "Sessões concluídas", numeric: true, width: 15 },
       { key: "occupiedRate", label: "Tempo ocupado (%)", numeric: true, width: 15 },
       { key: "stateChanges", label: "Mudanças mín.", numeric: true, width: 13 },
       { key: "transition", label: "Transição (min)", numeric: true, width: 14 },
@@ -3566,10 +4097,9 @@ function buildDurationSummaryReportTable(
       "pt-BR",
     )} intervalo(s) foram resumidos em ${series.length.toLocaleString(
       "pt-BR",
-    )} linha(s), sem truncar os totais. Permanência média considera sessões concluídas e é separada da média dos estados ocupado/desocupado.`,
+    )} linha(s), sem truncar os totais. Médias e maiores períodos representam sequências contínuas dos estados ocupados/desocupados confirmados nos snapshots.`,
     rows: series.map((scenario) => {
       const state = deriveOccupancyStateMetrics(scenario.summary);
-      const dwellTotals = scenario.individualDwell?.totals;
       return {
         averageFree:
           state.averageConfirmedFreeSequenceSeconds === null
@@ -3597,15 +4127,17 @@ function buildDurationSummaryReportTable(
             : null,
         expected: scenario.summary.expectedSeconds / 60,
         free: scenario.summary.confirmedFreeSeconds / 60,
-        individualDwellAverage:
-          dwellTotals && dwellTotals.sessionCount > 0
-            ? Number((dwellTotals.avgDurationSeconds ?? 0).toFixed(4))
-            : null,
-        individualDwellSessions: dwellTotals?.sessionCount ?? null,
         load: Number(
           (scenario.summary.loadUnitSeconds / HOUR_SECONDS).toFixed(6),
         ),
-        longest: scenario.summary.longestConfirmedOccupiedSeconds / 60,
+        longestFree:
+          state.confirmedFreeSequenceCount > 0
+            ? state.longestConfirmedFreeSeconds / 60
+            : null,
+        longestOccupied:
+          state.confirmedOccupiedSequenceCount > 0
+            ? state.longestConfirmedOccupiedSeconds / 60
+            : null,
         observed: scenario.summary.observedSeconds / 60,
         occupied: scenario.summary.confirmedOccupiedSeconds / 60,
         occupiedRate:
@@ -3632,6 +4164,15 @@ function chunkDurationSeries<T>(series: T[]) {
     chunks.push(series.slice(index, index + MAX_REPORT_SCENARIOS_PER_CHART));
   }
   return chunks;
+}
+
+function chunkDurationReportSeries<T>(series: T[]) {
+  const chunks = chunkDurationSeries(series);
+  // A seleção vazia é uma escolha explícita do usuário. O card continua
+  // pertencendo ao relatório com uma tabela sem linhas, em vez de desaparecer
+  // como se estivesse oculto. Como não há cenário no chunk, nenhum carregador
+  // de dados é acionado para produzir este asset de apresentação.
+  return chunks.length ? chunks : [[]];
 }
 
 function orderedSelectedSeries<T extends { scenarioId: string }>(
@@ -3664,6 +4205,7 @@ function summarizeSelectedSeries(
     errorCount: 0,
     expectedSeconds: 0,
     loadUnitSeconds: 0,
+    longestConfirmedFreeSeconds: 0,
     longestConfirmedOccupiedSeconds: 0,
     minimumDetectedTransitions: 0,
     observedSeconds: 0,
@@ -3683,6 +4225,10 @@ function summarizeSelectedSeries(
       state.confirmedOccupiedSequenceCount;
     totals.expectedSeconds += scenario.summary.expectedSeconds;
     totals.loadUnitSeconds += scenario.summary.loadUnitSeconds;
+    totals.longestConfirmedFreeSeconds = Math.max(
+      totals.longestConfirmedFreeSeconds,
+      state.longestConfirmedFreeSeconds,
+    );
     totals.longestConfirmedOccupiedSeconds = Math.max(
       totals.longestConfirmedOccupiedSeconds,
       scenario.summary.longestConfirmedOccupiedSeconds,
@@ -3709,6 +4255,7 @@ function durationAverageSummary(
       stats.confirmedFreeSequenceCount > 0
         ? stats.confirmedFreeSeconds / stats.confirmedFreeSequenceCount
         : null,
+    averageIndividualDwellSeconds: null,
     // The denominator is scenario-time rather than wall-clock time. This
     // remains mathematically valid when selected scenarios have different
     // coverage and avoids presenting an inferred simultaneous total.
@@ -3725,12 +4272,21 @@ function durationAverageSummary(
       stats.successfulScenarioCount > 0 && stats.expectedSeconds > 0
         ? stats.observedSeconds / stats.expectedSeconds
         : null,
+    longestFreeSeconds:
+      stats.confirmedFreeSequenceCount > 0
+        ? stats.longestConfirmedFreeSeconds
+        : null,
+    longestOccupiedSeconds:
+      stats.confirmedOccupiedSequenceCount > 0
+        ? stats.longestConfirmedOccupiedSeconds
+        : null,
   };
 }
 
 function buildDurationAverageComparisonRows(
   selectedScenarios: DurationScenario[],
   selectedSeries: OccupancyDurationScenarioSeries[],
+  loiteringModel?: OccupancyLoiteringSummaryModel,
 ): DurationAverageComparisonRow[] {
   const selectedIds = new Set(
     selectedScenarios.map((scenario) => scenario.id),
@@ -3745,6 +4301,12 @@ function buildDurationAverageComparisonRows(
     return series ? [series] : [];
   });
   const scenarioCount = selectedScenarios.length;
+  const loiteringTotalsByScenarioId = new Map(
+    (loiteringModel?.scenarios ?? []).map((scenario) => [
+      scenario.scenarioId,
+      scenario.totals,
+    ]),
+  );
   const globalLabel = scenarioCount === 1
     ? "Média global · 1 cenário"
     : `Média global · ${scenarioCount} cenários`;
@@ -3761,6 +4323,12 @@ function buildDurationAverageComparisonRows(
       };
     },
   );
+  scenarioRows.forEach((row) => {
+    if (!row.scenarioId) return;
+    row.summary.averageIndividualDwellSeconds =
+      loiteringTotalsByScenarioId.get(row.scenarioId)?.avgDurationSeconds ??
+      null;
+  });
   const globalSummary = durationAverageSummary(
     summarizeSelectedSeries(scopedSeries, scenarioCount),
   );
@@ -3776,6 +4344,12 @@ function buildDurationAverageComparisonRows(
       label: globalLabel,
       summary: {
         ...globalSummary,
+        // The model-wide total deduplicates a physical
+        // camera+area+object_class shared by more than one scenario. Its
+        // weighted mean is Σ(avg × count) / Σcount; count is never presented
+        // as a business metric.
+        averageIndividualDwellSeconds:
+          loiteringModel?.totals.avgDurationSeconds ?? null,
         // The global occupancy is the arithmetic mean of the selected
         // scenarios that actually have a certified value. A scenario without
         // coverage must not become an artificial zero or enter the divisor.
@@ -3793,16 +4367,43 @@ function buildDurationAverageComparisonRows(
   ];
 }
 
+type CurrentOccupancyState = "free" | "mixed" | "occupied" | "unknown";
+
+function resolveCurrentOccupancyState(
+  snapshots: readonly OccupancyScenarioSnapshot[],
+  selectedScenarioCount = snapshots.length,
+): CurrentOccupancyState {
+  if (
+    selectedScenarioCount <= 0 ||
+    snapshots.length !== selectedScenarioCount
+  ) {
+    return "unknown";
+  }
+  const states = snapshots.map((snapshot) => {
+    if (snapshot.error) return "unknown";
+    const state = classifyOccupancySnapshot(snapshot);
+    return state === "unoccupied" ? "free" : state;
+  });
+  if (states.some((state) => state === "unknown")) return "unknown";
+  if (states.every((state) => state === "occupied")) return "occupied";
+  if (states.every((state) => state === "free")) return "free";
+  return "mixed";
+}
+
 function durationMetricDefinition(
   kind: DurationMetricKind,
   stats: DurationSelectionStats,
+  series: OccupancyDurationScenarioSeries[] = [],
+  selectedScenarioCount = series.length,
+  currentSnapshots: readonly OccupancyScenarioSnapshot[] = [],
+  historicalPeriodLabel?: string,
 ) {
   const hasObservedData = stats.observedSeconds > 0;
+  const periodPrefix = historicalPeriodLabel ? "No período aplicado" : "Hoje";
   if (kind === "confirmed") {
     return {
       color: "#1267C4",
-      description:
-        "Hoje: tempo mínimo confirmado; transições e ausência de dados não entram na soma.",
+      description: `${periodPrefix}: tempo mínimo confirmado; transições e ausência de dados não entram na soma.`,
       icon: Clock3,
       value: hasObservedData
         ? formatOccupancyDuration(stats.confirmedOccupiedSeconds)
@@ -3812,8 +4413,7 @@ function durationMetricDefinition(
   if (kind === "free") {
     return {
       color: "#16A34A",
-      description:
-        "Hoje: tempo mínimo confirmado sem ocupação; transições e ausência de dados não entram na soma.",
+      description: `${periodPrefix}: tempo mínimo confirmado sem ocupação; transições e ausência de dados não entram na soma.`,
       icon: CircleOff,
       value: hasObservedData
         ? formatOccupancyDuration(stats.confirmedFreeSeconds)
@@ -3831,7 +4431,7 @@ function durationMetricDefinition(
     return {
       color: "#0F766E",
       description: joinMessages(
-        "Hoje: média das sequências continuamente ocupadas; não representa permanência individual.",
+        `${periodPrefix}: média das sequências continuamente ocupadas; não representa permanência individual.`,
         averageFree === null
           ? "Nenhum período desocupado foi confirmado."
           : `Média dos períodos desocupados: ${formatOccupancyDuration(
@@ -3850,8 +4450,7 @@ function durationMetricDefinition(
       stats.confirmedOccupiedSeconds + stats.confirmedFreeSeconds;
     return {
       color: "#2563EB",
-      description:
-        "Hoje: participação ocupada somente no tempo com estado confirmado; minutos mistos e sem dados ficam fora da base.",
+      description: `${periodPrefix}: participação ocupada somente no tempo com estado confirmado; minutos mistos e sem dados ficam fora da base.`,
       icon: Percent,
       value:
         confirmedSeconds > 0
@@ -3862,24 +4461,60 @@ function durationMetricDefinition(
           : "—",
     };
   }
-  if (kind === "transitions") {
-    return {
-      color: "#D97706",
-      description:
-        "Hoje: piso conservador de mudanças ocupado/desocupado; cada minuto misto representa ao menos uma mudança.",
-      icon: RefreshCw,
-      value: hasObservedData
-        ? formatDecimal(stats.minimumDetectedTransitions, 0)
-        : "—",
-    };
+  if (kind === "current") {
+    const state = resolveCurrentOccupancyState(
+      currentSnapshots,
+      selectedScenarioCount,
+    );
+    const definitions = {
+      free: {
+        color: "#16A34A",
+        description: historicalPeriodLabel
+          ? "No fechamento do período, todos os cenários selecionados estavam desocupados."
+          : "Na leitura atual, todos os cenários selecionados estão desocupados.",
+        icon: CircleOff,
+        value: "Livre",
+      },
+      mixed: {
+        color: "#D97706",
+        description: historicalPeriodLabel
+          ? "No fechamento do período, a composição tinha cenários ocupados e desocupados."
+          : "Na leitura atual, a composição possui cenários ocupados e desocupados.",
+        icon: Activity,
+        value: "Misto",
+      },
+      occupied: {
+        color: "#1267C4",
+        description: historicalPeriodLabel
+          ? "No fechamento do período, todos os cenários selecionados estavam ocupados."
+          : "Na leitura atual, todos os cenários selecionados estão ocupados.",
+        icon: Activity,
+        value: "Ocupado",
+      },
+      unknown: {
+        color: "#64748B",
+        description: historicalPeriodLabel
+          ? "O estado no fechamento do período não foi fornecido para toda a composição selecionada; o estado atual não é usado como substituto."
+          : "A leitura atual ainda não está confirmada para toda a composição selecionada.",
+        icon: ShieldCheck,
+        value: selectedScenarioCount > 0 ? "Sem leitura" : "—",
+      },
+    } as const;
+    return definitions[state];
   }
   if (kind === "longest") {
     return {
       color: "#0F766E",
-      description:
-        "Hoje: maior sequência confirmada em um cenário; simultâneos não são unidos.",
+      description: joinMessages(
+        `${periodPrefix}: maior sequência ocupada confirmada em um cenário; simultâneos não são unidos.`,
+        stats.confirmedFreeSequenceCount > 0
+          ? `Maior período livre: ${formatOccupancyDuration(
+              stats.longestConfirmedFreeSeconds,
+            )}.`
+          : "Nenhum período livre foi confirmado.",
+      ) ?? "Maior sequência ocupada confirmada.",
       icon: Activity,
-      value: hasObservedData
+      value: stats.confirmedOccupiedSequenceCount > 0
         ? formatOccupancyDuration(stats.longestConfirmedOccupiedSeconds)
         : "—",
     };
@@ -3887,8 +4522,7 @@ function durationMetricDefinition(
   if (kind === "load") {
     return {
       color: "#7C3AED",
-      description:
-        "Hoje: integral da ocupação média em unidades-hora; não é permanência individual.",
+      description: `${periodPrefix}: integral da ocupação média em unidades-hora; não é permanência individual.`,
       icon: Gauge,
       value: hasObservedData
         ? `${formatDecimal(stats.loadUnitSeconds / HOUR_SECONDS, 2)} unid·h`
@@ -3897,8 +4531,7 @@ function durationMetricDefinition(
   }
   return {
     color: "#16A34A",
-    description:
-      "Hoje: minutos com dados sobre todos os minutos encerrados esperados.",
+    description: `${periodPrefix}: minutos com dados sobre todos os minutos encerrados esperados.`,
     icon: ShieldCheck,
     value:
       stats.successfulScenarioCount > 0 && stats.expectedSeconds > 0
@@ -4021,6 +4654,213 @@ type CompleteDurationAggregate = {
 };
 
 type DurationAggregateGranularity = "hour" | "minute";
+
+async function loadOccupancyDurationCurrentSnapshots({
+  companyScopeId,
+  requestedAt,
+  scenarios,
+  signal,
+  timeZone,
+}: {
+  companyScopeId: string;
+  requestedAt: Date;
+  scenarios: readonly OccupancyScenario[];
+  signal: AbortSignal;
+  timeZone: string;
+}): Promise<OccupancyScenarioSnapshot[]> {
+  if (!scenarios.length) return [];
+  signal.throwIfAborted();
+  const query = occupancyLiveSnapshotQuery({ now: requestedAt });
+  const expectedAreas = Array.from(
+    new Map(
+      scenarios.flatMap((scenario) =>
+        scenario.areas.map((area) => [
+          JSON.stringify([
+            area.camera_id,
+            area.area_id,
+            scenario.object_class,
+          ]),
+          {
+            area_id: area.area_id,
+            camera_id: area.camera_id,
+            object_class: scenario.object_class,
+          },
+        ] as const),
+      ),
+    ).values(),
+  );
+  const response = await fetchSharedOccupancyQuery<unknown>({
+    cacheTtlMs: OCCUPANCY_LIVE_SNAPSHOT_CACHE_TTL_MS,
+    companyScopeId,
+    path: query.path,
+    priority: "normal",
+    scenarioId: OCCUPANCY_LIVE_SNAPSHOT_QUERY_ID,
+    signal,
+    timeZone,
+  });
+  signal.throwIfAborted();
+  const rows = requireOccupancyCurrentSnapshotRows(response, {
+    expectedAreas,
+  });
+  return scenarios.map((scenario) => {
+    if (!occupancyScenarioSnapshotHasCompleteCoverage(scenario, rows)) {
+      return {
+        error: "A leitura atual não cobriu todas as áreas do cenário.",
+        name: scenario.name,
+        occupied: null,
+        scenarioId: scenario.id,
+        total: null,
+      };
+    }
+    try {
+      return buildOccupancyScenarioSnapshotValue(scenario, rows);
+    } catch (error) {
+      return {
+        error: durationRequestError(
+          error,
+          "A leitura atual não está disponível.",
+        ),
+        name: scenario.name,
+        occupied: null,
+        scenarioId: scenario.id,
+        total: null,
+      };
+    }
+  });
+}
+
+async function loadOccupancyDurationReportSeries({
+  cache,
+  companyScopeId,
+  range,
+  scenarios,
+  signal,
+  timeZone,
+}: {
+  cache: Map<string, OccupancyDurationScenarioCache>;
+  companyScopeId: string;
+  range: OccupancyDurationMinuteRange;
+  scenarios: readonly DurationScenario[];
+  signal: AbortSignal;
+  timeZone: string;
+}): Promise<OccupancyDurationScenarioSeries[]> {
+  return mapWithConcurrency(
+    scenarios,
+    MAX_PARALLEL_REQUESTS,
+    async (scenario): Promise<OccupancyDurationScenarioSeries> => {
+      signal.throwIfAborted();
+      const cached = cache.get(scenario.id);
+      if (range.buckets.length === 0) {
+        return {
+          name: scenario.name,
+          scenarioId: scenario.id,
+          summary: buildOccupancyDurationSummary([], new Map()),
+        };
+      }
+
+      const refreshPlan = planOccupancyDurationCacheRefresh({
+        cached,
+        fullRefreshMs: DURATION_FULL_REFRESH_MS,
+        rangeFrom: range.from.getTime(),
+        rangeTo: range.to.getTime(),
+        requestedAt: range.requestedAt.getTime(),
+      });
+      if (refreshPlan.cacheMatchesRange && !refreshPlan.needsFullRefresh) {
+        touchOccupancyDurationScenarioCache(cache, scenario.id, cached!);
+        return {
+          ...(cached!.asOf ? { asOf: cached!.asOf } : {}),
+          name: scenario.name,
+          scenarioId: scenario.id,
+          summary: buildOccupancyDurationSummary(
+            range.buckets,
+            cached!.totals,
+          ),
+          warning: joinMessages(
+            occupancyAggregateCoverageWarning(
+              range.buckets.length - cached!.totals.size,
+              range.buckets.length,
+            ),
+            ...cached!.metadataWarnings,
+          ),
+        };
+      }
+
+      const requestedBuckets = range.buckets.filter(
+        (bucket) => bucket.getTime() >= refreshPlan.reconciliationFrom,
+      );
+
+      try {
+        const aggregate = await fetchCompleteDurationAggregate({
+          buckets: requestedBuckets,
+          cacheTtlMs: refreshPlan.needsFullRefresh
+            ? DURATION_TRANSPORT_CACHE_TTL_MS
+            : occupancyDurationMinuteTransportTtl(
+                range.requestedAt.getTime(),
+              ),
+          companyScopeId,
+          scenarioId: scenario.id,
+          signal,
+          timeZone,
+        });
+        const totals = refreshPlan.needsFullRefresh
+          ? new Map(aggregate.totals)
+          : reconcileOccupancyDurationMetrics(
+              cached!.totals,
+              aggregate.totals,
+              refreshPlan.reconciliationFrom,
+              range.to.getTime(),
+            );
+        const nextCache: OccupancyDurationScenarioCache = {
+          asOf: aggregate.asOf,
+          from: range.from.getTime(),
+          lastFullRefreshAt: refreshPlan.needsFullRefresh
+            ? range.requestedAt.getTime()
+            : cached!.lastFullRefreshAt,
+          metadataWarnings: aggregate.metadataWarnings,
+          to: range.to.getTime(),
+          totals,
+        };
+        touchOccupancyDurationScenarioCache(cache, scenario.id, nextCache);
+        return {
+          ...(nextCache.asOf ? { asOf: nextCache.asOf } : {}),
+          name: scenario.name,
+          scenarioId: scenario.id,
+          summary: buildOccupancyDurationSummary(
+            range.buckets,
+            nextCache.totals,
+          ),
+          warning: joinMessages(
+            occupancyAggregateCoverageWarning(
+              range.buckets.length - nextCache.totals.size,
+              range.buckets.length,
+            ),
+            ...nextCache.metadataWarnings,
+          ),
+        };
+      } catch (error) {
+        if (isAbortError(error, signal)) throw error;
+        const preservedTotals = refreshPlan.cacheMatchesDay
+          ? cached!.totals
+          : new Map<number, OccupancyAggregateMetric>();
+        return {
+          ...(refreshPlan.cacheMatchesDay && cached!.asOf
+            ? { asOf: cached!.asOf }
+            : {}),
+          error: durationRequestError(
+            error,
+            "Não foi possível validar a duração deste cenário para o relatório.",
+          ),
+          name: scenario.name,
+          scenarioId: scenario.id,
+          summary: buildOccupancyDurationSummary(
+            range.buckets,
+            preservedTotals,
+          ),
+        };
+      }
+    },
+  );
+}
 
 async function fetchCompleteDurationAggregate({
   buckets,
@@ -4398,12 +5238,147 @@ function touchOccupancyDurationFailureBackoff(
   }
 }
 
+function occupancyDurationManualPeriodFromKey(
+  key: string,
+): OccupancyDurationInsightAnalysisPeriod | null {
+  if (!key) return null;
+  const [
+    from,
+    to,
+    monthEnd,
+    timeZone,
+    dateKeys,
+    contextLabel,
+    clippedToFinalMonth,
+  ] = JSON.parse(key) as [
+    number,
+    number,
+    number,
+    string,
+    string[],
+    string,
+    boolean,
+  ];
+  return {
+    clippedToFinalMonth,
+    contextLabel,
+    dateKeys,
+    from: new Date(from),
+    monthEnd: new Date(monthEnd),
+    timeZone,
+    to: new Date(to),
+  };
+}
+
 function durationRequestError(error: unknown, fallback: string) {
   return userFacingErrorMessage(error, fallback);
 }
 
+function durationSeriesDataCompleteUntil(
+  series: readonly OccupancyDurationScenarioSeries[],
+  expectedScenarioCount: number,
+  datasetError?: string,
+) {
+  if (expectedScenarioCount === 0) return undefined;
+  const incomplete =
+    Boolean(datasetError) ||
+    series.length !== expectedScenarioCount ||
+    series.some(
+      (item) => Boolean(item.error) || item.summary.unknownSeconds > 0,
+    );
+  return !incomplete && series.every((item) => item.asOf)
+    ? earliestDate(...series.map((item) => item.asOf))
+    : null;
+}
+
+function durationCurrentSnapshotsDataCompleteUntil(
+  snapshots: readonly OccupancyScenarioSnapshot[],
+  expectedScenarioIds: readonly string[],
+) {
+  if (expectedScenarioIds.length === 0) return undefined;
+  const expectedIds = new Set(expectedScenarioIds);
+  if (
+    expectedIds.size !== expectedScenarioIds.length ||
+    snapshots.length !== expectedIds.size
+  ) {
+    return null;
+  }
+
+  const observedIds = new Set<string>();
+  const instants: Date[] = [];
+  for (const snapshot of snapshots) {
+    if (
+      !expectedIds.has(snapshot.scenarioId) ||
+      observedIds.has(snapshot.scenarioId) ||
+      Boolean(snapshot.error) ||
+      typeof snapshot.occupied !== "boolean" ||
+      snapshot.total === null ||
+      !Number.isFinite(snapshot.total) ||
+      snapshot.total < 0 ||
+      !snapshot.asOf
+    ) {
+      return null;
+    }
+    const instant = new Date(snapshot.asOf);
+    if (!Number.isFinite(instant.getTime())) return null;
+    observedIds.add(snapshot.scenarioId);
+    instants.push(instant);
+  }
+
+  return observedIds.size === expectedIds.size
+    ? earliestDate(...instants)
+    : null;
+}
+
+function combineDurationDataCompleteUntil(
+  ...cutoffs: Array<Date | null | undefined>
+) {
+  const participants = cutoffs.filter(
+    (cutoff): cutoff is Date | null => cutoff !== undefined,
+  );
+  if (participants.length === 0) return undefined;
+  if (
+    participants.some(
+      (cutoff) =>
+        cutoff === null || !Number.isFinite(cutoff.getTime()),
+    )
+  ) {
+    return null;
+  }
+  return earliestDate(...participants);
+}
+
+function durationReportWarnings(
+  series: readonly OccupancyDurationScenarioSeries[],
+  ...messages: Array<string | undefined>
+) {
+  return Array.from(
+    new Set(
+      [
+        ...messages,
+        ...series.flatMap((item) => [item.error, item.warning]),
+      ]
+        .map(occupancyAggregatePresentationWarning)
+        .filter((value): value is string => Boolean(value?.trim())),
+    ),
+  );
+}
+
 function selectedSeriesErrors(series: OccupancyDurationScenarioSeries[]) {
   const errors = series.flatMap((item) => (item.error ? [item.error] : []));
+  if (!errors.length) return undefined;
+  const unique = Array.from(new Set(errors));
+  return unique.length === 1
+    ? unique[0]
+    : `${unique[0]} · mais ${unique.length - 1} falha(s).`;
+}
+
+function selectedSnapshotErrors(
+  snapshots: readonly OccupancyScenarioSnapshot[],
+) {
+  const errors = snapshots.flatMap((snapshot) =>
+    snapshot.error ? [snapshot.error] : [],
+  );
   if (!errors.length) return undefined;
   const unique = Array.from(new Set(errors));
   return unique.length === 1

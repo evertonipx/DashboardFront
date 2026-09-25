@@ -273,6 +273,81 @@ test("métricas Swagger completas não dependem de final; lacunas continuam indi
   assert.match(source, /dailyState\.error \|\| dailyState\.incomplete/);
 });
 
+test("current_value só representa o bucket aberto que contém current_at", () => {
+  const row = {
+    area: undefined,
+    avg: 5.4,
+    camera_id: "camera-a",
+    current_at: "2026-09-10T13:42:30.000Z",
+    current_value: 7,
+    min: 0,
+    object_class: "person",
+    occupied: true,
+    peak: 12,
+  };
+  const window = {
+    from: new Date("2026-09-10T13:42:00.000Z"),
+    open: true,
+    to: new Date("2026-09-10T13:43:00.000Z"),
+  };
+
+  assert.deepEqual(reports.buildRowsMetric([row], window), {
+    average: 5.4,
+    current: 7,
+    minimum: 0,
+    peak: 12,
+  });
+  assert.equal(
+    reports.buildRowsMetric([row], { ...window, open: false }).current,
+    null,
+    "bucket fechado não pode repetir a fotografia atual",
+  );
+  assert.equal(
+    reports.buildRowsMetric([row], {
+      ...window,
+      from: new Date("2026-09-10T12:00:00.000Z"),
+      to: new Date("2026-09-10T13:00:00.000Z"),
+    }).current,
+    null,
+    "current_at fora do bucket aberto não pode preencher o período",
+  );
+});
+
+test("leitura aberta prefere o lote raw e completa áreas quietas pelo histórico pontual", () => {
+  const source = readFileSync(
+    resolve(root, "components/app/occupancy-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const loaderStart = source.indexOf(
+    "async function loadOccupancyReportCurrentSnapshot",
+  );
+  const loaderEnd = source.indexOf("\nfunction occupancyPath", loaderStart);
+  const loader =
+    loaderStart >= 0 && loaderEnd > loaderStart
+      ? source.slice(loaderStart, loaderEnd)
+      : "";
+
+  assert.ok(loader, "o loader da leitura atual deve estar declarado");
+  assert.match(loader, /occupancyLiveSnapshotQuery\(\{ now: requestedAt }\)/);
+  assert.match(loader, /requireOccupancyCurrentSnapshotRows\(response,/);
+  assert.match(
+    loader,
+    /occupancyScenarioSnapshotHasCompleteCoverage\(scenario, rows\)/,
+  );
+  assert.match(loader, /buildOccupancyScenarioSnapshotValue\(scenario, rows\)/);
+  assert.match(loader, /rows\.filter\(\(row\) => row\.occupied\)\.length/);
+  assert.match(
+    loader,
+    /!occupancyScenarioSnapshotHasCompleteCoverage\(scenario, rows\)[\s\S]*?occupancyScenarioHistoryPath\([\s\S]*?requireAreaSnapshots: true[\s\S]*?area\.value > 0/,
+    "uma resposta parcial precisa completar somente o cenário demandado sem inventar zero",
+  );
+  assert.match(
+    source,
+    /usesLiveDay\s*\? loadOccupancyReportCurrentSnapshot\([\s\S]*?: scheduleQuery\([\s\S]*?occupancyScenarioHistoryPath/,
+    "somente o intervalo fechado pode recorrer ao snapshot histórico",
+  );
+});
+
 function inTimeZones(zones: RuntimeFixture, run: (...args: RuntimeFixture[]) => RuntimeFixture) {
   const previous = process.env.TZ;
   try { for (const timeZone of zones) { process.env.TZ = timeZone; run(); } }
@@ -306,5 +381,5 @@ function loadReportFunctions(): RuntimeFixture {
     MAX_OCCUPANCY_REPORT_BUCKETS: 500,
   };
   const output = ts.transpileModule(declarations, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React }, fileName: file }).outputText;
-  return new Function("exports", ...Object.keys(bindings), `${output};return {buildOccupancyReportDefinitions,listBucketStarts,buildEmptyPoints,buildComparisonDefinition,alignMinuteComparisonPoints,maskOpenBucketComparisons,buildOccupancyAiDailyTable,buildScenarioPoints,summarizeOccupancyRangeMetrics,cacheCertifiedClosedSegment};`)({}, ...Object.values(bindings));
+  return new Function("exports", ...Object.keys(bindings), `${output};return {buildOccupancyReportDefinitions,listBucketStarts,buildEmptyPoints,buildComparisonDefinition,alignMinuteComparisonPoints,maskOpenBucketComparisons,buildOccupancyAiDailyTable,buildScenarioPoints,summarizeOccupancyRangeMetrics,cacheCertifiedClosedSegment,buildRowsMetric};`)({}, ...Object.values(bindings));
 }

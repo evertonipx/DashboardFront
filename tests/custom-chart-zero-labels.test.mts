@@ -87,27 +87,32 @@ test("duração zero omite somente texto, mantendo o intervalo e sua geometria",
 test("prévia HTML do editor conserva SVG e descrição acessível com zero", () => {
   const editor = standalone("components/app/occupancy-hex-layout-editor.tsx", "HexEditorCell", {
     ...visualBindings, React,
-    editorCellState: (_cell: unknown, _scenario: unknown, total: number | null) => total === null ? "unknown" : total > 0 ? "occupied" : "unoccupied",
+    editorCellState: (_cell: unknown, _scenario: unknown, occupied: boolean | null) => occupied === null ? "unknown" : occupied ? "occupied" : "unoccupied",
     editorCellStatus: (_state: unknown, total: number | null) => total === null ? "sem dados" : `ocupação ${total}`,
     formatNumber: String,
     cn: (...values: unknown[]) => values.filter(Boolean).join(" "),
   });
-  const render = (total: number | null, displayMode = "actual") => renderToStaticMarkup(editor({
+  const render = (
+    total: number | null,
+    occupied: boolean | null,
+    displayMode = "actual",
+  ) => renderToStaticMarkup(editor({
     cell: { id: "cell-a", column: 0, row: 0, label: "Sala 00", scenarioId: "scenario-a" },
     displayMode, moving: false, onMove() {}, onNavigate() {}, onSelect() {},
-    palette, scale: 1, scenario: { id: "scenario-a", name: "Sala 00" },
+    occupied, palette, scale: 1, scenario: { id: "scenario-a", name: "Sala 00" },
     selected: true, showDetails: true, total,
   }));
-  const zero = render(0);
-  const positive = render(7);
+  const zero = render(0, false);
+  const positive = render(7, true);
   assert.equal(zero.match(/<polygon\b/g)?.length, 2);
   assert.equal(zero.match(/<polygon\b/g)?.length, positive.match(/<polygon\b/g)?.length);
   assert.match(zero, /aria-label="Sala 00; linha 1, coluna 1; ocupação 0"/);
   assert.match(zero, /<span class="block truncate">Sala 00<\/span>/);
   assert.doesNotMatch(zero, /mt-1 block text-\[11px\] font-extrabold/);
   assert.match(positive, /font-extrabold">7<\/span>/);
-  assert.match(render(0, "status"), />DESOCUPADO<\/span>/);
-  assert.match(render(null), />SEM DADOS<\/span>/);
+  assert.match(render(0, false, "status"), />DESOCUPADO<\/span>/);
+  assert.match(render(7, false, "status"), />DESOCUPADO<\/span>/);
+  assert.match(render(null, null), />SEM DADOS<\/span>/);
 });
 
 function hexFixture(total: number | null, displayMode = "actual", state = (total ?? 0) > 0 ? "occupied" : "unoccupied") {

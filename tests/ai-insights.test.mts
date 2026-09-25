@@ -1021,7 +1021,7 @@ test("ação abre a última análise, gera sob demanda e exporta o IA Advisor", 
   assert.doesNotMatch(periodAnalysis, /const reportPayload = composePeriodAnalysisReport/);
   assert.match(
     occupancyReports,
-    /getPayload=\{buildOccupancyReportPayload\}/,
+    /getPayload=\{getOccupancyReportPayload\}/,
   );
   assert.doesNotMatch(
     occupancyReports,

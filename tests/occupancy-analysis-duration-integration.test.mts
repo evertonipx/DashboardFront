@@ -139,9 +139,27 @@ test("hidratação remota pendente mantém a demanda histórica vazia e não con
 test("CardLayout recebe tempo ocupado em Análises e permanência individual também em Relatórios", () => {
   const cardsExpression = dashboardVariable("occupancyReportLayoutCards").getText(dashboardAst);
   const cards = insightIds.map((id) => ({ id }));
+  const comparisonCards = [{ id: "occupancy_scenario_half_donut" }];
+  const durationCards = [{ id: "occupancy_duration_confirmed" }];
   const loiteringCards = [{ id: "occupancy_loitering_summary" }];
-  const bindings = { analysis: true, metricCards: [], definitions: [], customMetricCards: [], customTrendCards: [], occupancyDurationInsights: { cards }, occupancyLoitering: { cards: loiteringCards } };
-  assert.deepEqual(evaluateDashboard(`return (${cardsExpression});`, bindings), [...loiteringCards, ...cards]);
+  const bindings = {
+    analysis: true,
+    selectedScope: null,
+    metricCards: [],
+    definitions: [],
+    customMetricCards: [],
+    customTrendCards: [],
+    occupancyAnalysisComparison: { cards: comparisonCards },
+    occupancyAnalysisDuration: { cards: durationCards },
+    occupancyDurationInsights: { cards },
+    occupancyLoitering: { cards: loiteringCards },
+  };
+  assert.deepEqual(evaluateDashboard(`return (${cardsExpression});`, bindings), [
+    ...loiteringCards,
+    ...comparisonCards,
+    ...durationCards,
+    ...cards,
+  ]);
   assert.deepEqual(evaluateDashboard(`return (${cardsExpression});`, { ...bindings, analysis: false }), loiteringCards);
   const layout = dashboardJsxTag("CardLayout");
   const options = [{ id: "scenario-a", name: "Entrada", company_id: "company-a" }];
@@ -156,12 +174,13 @@ test("exportação ordena assets paginados junto aos cards visíveis e mantém t
   const payload = dashboardNodes().find((node): node is ts.FunctionDeclaration =>
     ts.isFunctionDeclaration(node) && node.name?.text === "buildOccupancyReportPayload");
   assert.ok(payload?.body);
-  const mapStatement = payload.body.statements.find((node) =>
-    ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => declaration.name.getText(dashboardAst) === "durationInsightChartsByCardId"));
-  const populate = payload.body.statements.find((node) =>
-    ts.isExpressionStatement(node) && node.expression.getText(dashboardAst).startsWith("occupancyDurationInsights.reportAssets.forEach"));
+  const mapStatementIndex = payload.body.statements.findIndex((node) =>
+    ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => declaration.name.getText(dashboardAst) === "supplementalChartsByCardId"));
+  const tablesStatementIndex = payload.body.statements.findIndex((node) =>
+    ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => declaration.name.getText(dashboardAst) === "supplementalTables"));
   const returned = payload.body.statements.find((node): node is ts.ReturnStatement => ts.isReturnStatement(node));
-  assert.ok(mapStatement && populate && returned?.expression && ts.isObjectLiteralExpression(returned.expression));
+  assert.ok(mapStatementIndex >= 0 && tablesStatementIndex > mapStatementIndex);
+  assert.ok(returned?.expression && ts.isObjectLiteralExpression(returned.expression));
   const charts = returned.expression.properties.find((property): property is ts.PropertyAssignment =>
     ts.isPropertyAssignment(property) && property.name.getText(dashboardAst) === "charts");
   assert.ok(charts);
@@ -171,33 +190,71 @@ test("exportação ordena assets paginados junto aos cards visíveis e mantém t
     { cardId: insightIds[1], titleSuffix: " · 2/2", chart: { title: "Cenários", table: { rows: ["second-page"] } } },
     { cardId: insightIds[2], chart: { title: "Oculto", table: { rows: ["hidden"] } } },
   ];
-  const result = evaluateDashboard(`${mapStatement.getText(dashboardAst)}\n${populate.getText(dashboardAst)}\nreturn (${charts.initializer.getText(dashboardAst)});`, {
+  const supplementalStatements = payload.body.statements
+    .slice(mapStatementIndex, tablesStatementIndex)
+    .map((statement) => statement.getText(dashboardAst))
+    .join("\n");
+  const comparisonReportAssets = [
+    { cardId: "occupancy_scenario_half_donut", chart: { title: "Comparativo", table: { rows: ["comparison"] } } },
+  ];
+  const durationReportAssets = [
+    { cardId: "occupancy_duration_confirmed", chart: { title: "Duração", table: { rows: ["duration"] } } },
+  ];
+  const result = evaluateDashboard(`${supplementalStatements}\nreturn (${charts.initializer.getText(dashboardAst)});`, {
+    comparisonReportSnapshot: { reportAssets: comparisonReportAssets },
+    durationReportSnapshot: { reportAssets: durationReportAssets },
     occupancyDurationInsights: { reportAssets },
-    orderedVisibleReportCardIds: ["occupancy_report_day", insightIds[1], insightIds[0]],
+    loiteringReportAssets: [],
+    orderedVisibleReportCardIds: [
+      "occupancy_report_day",
+      "occupancy_scenario_half_donut",
+      "occupancy_duration_confirmed",
+      insightIds[1],
+      insightIds[0],
+    ],
     exportChartByCardId: new Map([["occupancy_report_day", { title: "Histórico" }]]),
     resolveReportCardTitle: (id: string, fallback: string) => id === insightIds[1] ? "Minha comparação" : fallback,
   });
-  assert.deepEqual(result.map((chart: RuntimeFixture) => chart.title), ["Histórico", "Minha comparação · 1/2", "Minha comparação · 2/2", "Dias"]);
-  assert.deepEqual(result.slice(1).map((chart: RuntimeFixture) => chart.table.title), ["Dados - Minha comparação · 1/2", "Dados - Minha comparação · 2/2", "Dados - Dias"]);
-  assert.deepEqual(result.slice(1).flatMap((chart: RuntimeFixture) => chart.table.rows), ["first-page", "second-page", "days"]);
+  assert.deepEqual(result.map((chart: RuntimeFixture) => chart.title), [
+    "Histórico",
+    "Comparativo",
+    "Duração",
+    "Minha comparação · 1/2",
+    "Minha comparação · 2/2",
+    "Dias",
+  ]);
+  assert.deepEqual(result.slice(1).flatMap((chart: RuntimeFixture) => chart.table.rows), [
+    "comparison",
+    "duration",
+    "first-page",
+    "second-page",
+    "days",
+  ]);
 });
 
 test("carregamento e corte dos insights participam das travas de exportação e IA", () => {
   const pending = dashboardVariable("chartsPending").getText(dashboardAst);
   assert.equal(evaluateDashboard(`return (${pending});`, {
     loadingCharts: false, occupancyDurationInsights: { loading: true }, reportRequested: false,
+    occupancyAnalysisComparison: { loading: false }, occupancyAnalysisDuration: { loading: false },
     occupancyLoitering: { loading: false }, selectedScope: {}, chartDataIsCurrent: true,
   }), true);
   const partial = dashboardVariable("hasPartialOccupancyCoverage").getText(dashboardAst);
   const coverageBindings = {
     currentSnapshotRequested: false, queriedDefinitions: [],
+    occupancyAnalysisComparison: { dataCompleteUntil: undefined },
+    occupancyAnalysisDuration: { dataCompleteUntil: undefined },
     occupancyDurationInsights: { dataCompleteUntil: null },
   };
   assert.equal(evaluateDashboard(`return (${partial});`, coverageBindings), true);
   assert.equal(evaluateDashboard(`return (${partial});`, {
     ...coverageBindings, occupancyDurationInsights: { dataCompleteUntil: undefined },
   }), false);
-  assert.match(dashboardVariable("reportDataCompleteUntil").getText(dashboardAst), /mergeOccupancyDataCompleteUntil\([\s\S]*occupancyDurationInsights\.dataCompleteUntil/);
+  const cutoff = dashboardVariable("payloadDataCompleteUntil").getText(dashboardAst);
+  assert.match(cutoff, /coreReportDataCompleteUntil/);
+  assert.match(cutoff, /comparisonReportSnapshot\.dataCompleteUntil/);
+  assert.match(cutoff, /durationReportSnapshot\.dataCompleteUntil/);
+  assert.match(cutoff, /occupancyDurationInsights\.dataCompleteUntil/);
   for (const tagName of ["ReportExportActions", "AiAnalysisAction"]) {
     const disabled = jsxAttribute(dashboardJsxTag(tagName), "disabled");
     const options = { chartsPending: false, selectedScope: {}, occupancyCertificationError: "", hasPartialOccupancyCoverage: false, reportRequested: true };
@@ -240,17 +297,19 @@ test("botão Consultar/Atualizar recarrega permanência nas duas superfícies e 
       analysis, selectedScope: { scenario: { id: "scenario-a" } },
       setReportRequested: () => calls.push("requested"),
       setDurationAnalysisCutoff: () => calls.push("cutoff"),
+      refreshOccupancyAnalysisComparison: () => calls.push("comparison"),
+      refreshOccupancyAnalysisDuration: () => calls.push("duration"),
       refreshOccupancyDurationInsights: () => calls.push("insights"),
       refreshOccupancyLoitering: () => calls.push("loitering"),
       loadCharts: () => calls.push("charts"), loadScopes: () => calls.push("scopes"),
     });
     assert.deepEqual(calls, analysis
-      ? ["requested", "cutoff", "insights", "loitering", "charts"]
+      ? ["requested", "cutoff", "comparison", "duration", "insights", "loitering", "charts"]
       : ["requested", "cutoff", "loitering", "charts"]);
   }
   assert.match(
     dashboardVariable("retryOccupancyData").getText(dashboardAst),
-    /setDurationAnalysisCutoff\(refreshAt\);[\s\S]*if \(analysis\) \{[\s\S]*refreshOccupancyDurationInsights\(\)[\s\S]*refreshOccupancyLoitering\(\)/,
+    /setDurationAnalysisCutoff\(refreshAt\);[\s\S]*if \(analysis\) \{[\s\S]*refreshOccupancyAnalysisComparison\(\)[\s\S]*refreshOccupancyAnalysisDuration\(\)[\s\S]*refreshOccupancyDurationInsights\(\)[\s\S]*refreshOccupancyLoitering\(\)/,
   );
 });
 
@@ -327,20 +386,76 @@ test("antes de Gerar/Atualizar, enabled=false não consulta nem agenda timer", a
   } finally { fixture.cleanup(); }
 });
 
-test("seleção customizada vazia, widgets ocultos e IDs de outra empresa não geram consultas", async () => {
-  for (const preferences of [
-    insightIds.map((id) => ({ id, visible: true, scenarioSelectionMode: "custom", scenarioIds: [] })),
-    insightIds.map((id) => ({ id, visible: false })),
-    insightIds.map((id) => ({ id, visible: true, scenarioSelectionMode: "custom", scenarioIds: ["foreign-scenario"] })),
+test("seleção vazia preserva assets sem dados, sem consultar; widgets ocultos continuam ausentes", async () => {
+  for (const { preferences, expectedAssets } of [
+    {
+      expectedAssets: insightIds.length,
+      preferences: insightIds.map((id) => ({ id, visible: true, scenarioSelectionMode: "custom", scenarioIds: [] })),
+    },
+    {
+      expectedAssets: 0,
+      preferences: insightIds.map((id) => ({ id, visible: false })),
+    },
+    {
+      expectedAssets: insightIds.length,
+      preferences: insightIds.map((id) => ({ id, visible: true, scenarioSelectionMode: "custom", scenarioIds: ["foreign-scenario"] })),
+    },
   ]) {
     const fixture = createInsightHookFixture({ refreshMode: "manual", preferences });
     try {
       await fixture.flush();
       assert.equal(fixture.requests.length, 0);
       assert.equal(fixture.timers.size, 0);
-      assert.equal(fixture.result.reportAssets.length, 0);
+      assert.equal(fixture.result.reportAssets.length, expectedAssets);
+      assert.ok(
+        fixture.result.reportAssets.every(
+          (asset: RuntimeFixture) => asset.chart.scenarioIds.length === 0,
+        ),
+        "assets visíveis sem seleção devem permanecer explicitamente sem dados",
+      );
     } finally { fixture.cleanup(); }
   }
+});
+
+test("assets de duração visíveis permanecem no relatório quando a seleção não contém cenários", () => {
+  const durationSource = source("components/app/occupancy-duration-widgets.tsx");
+  assert.match(
+    durationSource,
+    /function chunkDurationReportSeries<[^>]+>\(series: T\[\]\) \{[\s\S]*?return chunks\.length \? chunks : \[\[\]\];/,
+  );
+  assert.doesNotMatch(
+    durationSource,
+    /(?:timeline|comparison|averageByScenario)Preference\?\.visible !== false &&[\s\S]{0,80}(?:timeline|comparison|averageByScenario)Series\.length/,
+    "visibilidade do asset não pode ser condicionada à existência de série",
+  );
+  assert.match(
+    durationSource,
+    /const range =\s*queryEnabled && companyScopeId\.trim\(\)\s*\? refreshMode === "manual"/,
+    "o eixo temporal do asset vazio deve nascer do período sem depender de cenários",
+  );
+  assert.match(
+    durationSource,
+    /if \(range && reportScenarios\.length > 0\) \{/,
+    "construir o asset vazio não pode acionar uma consulta sem cenários",
+  );
+});
+
+test("tabela histórica exporta também a base comparativa usada pelo gráfico e pelo modo Só dados", () => {
+  const payload = dashboardNodes().find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "buildOccupancyReportPayload");
+  assert.ok(payload?.body);
+  const buildExportChart = dashboardNodes().find((node): node is ts.VariableDeclaration =>
+    ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "buildExportChart");
+  assert.ok(buildExportChart?.initializer);
+  const exportSource = buildExportChart.initializer.getText(dashboardAst);
+  assert.match(exportSource, /const tableIncludesPrevious =\s*showPreviousPeriod && previousPoints\.length > 0/);
+  assert.match(exportSource, /series: "Período analisado"/);
+  assert.match(exportSource, /previousPoints\.map\(\(point\) => \(\{[\s\S]*?series: "Base comparativa"/);
+  assert.match(
+    source("lib/report-export.ts"),
+    /reportTablesForMode\(payload\.tables, mode, payload\.charts\)/,
+    "Só dados deve continuar consumindo as tabelas anexadas aos gráficos",
+  );
 });
 
 test("seleções independentes deduplicam a consulta e exportam os mesmos cenários", async () => {
@@ -358,6 +473,7 @@ test("seleções independentes deduplicam a consulta e exportam os mesmos cenár
     })), [
       { id: insightIds[0], scenarioIds: ["scenario-b"] },
       { id: insightIds[1], scenarioIds: ["scenario-a", "scenario-b"] },
+      { id: insightIds[2], scenarioIds: [] },
     ]);
     await fixture.render({ preferences: fixture.props.preferences.map((preference: RuntimeFixture) => ({
       ...preference, title: "Título alterado", color: "#123456", widthLevel: 2, heightLevel: 6,

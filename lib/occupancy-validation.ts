@@ -8,21 +8,33 @@ import { createTenantCompanyIdResolver } from "@/lib/tenant-scope-validation";
 
 type UnknownRecord = Record<string, unknown>;
 
+const OCCUPANCY_STATE_ALIAS_KEYS = [
+  "is_occupied",
+  "isOccupied",
+  "occupancy_state",
+  "occupancyState",
+] as const;
+
 export type CertifiedOccupancyRow = OccupancyRow & {
   avg: number;
   camera_id: string;
   current_at: string;
   current_value: number;
   min: number;
+  occupied: boolean;
   peak: number;
 };
 
 export type CertifiedOccupancyCurrentSnapshotRow = OccupancyRow & {
   area: string;
+  avg: number;
   camera_id: string;
   current_at: string;
   current_value: number;
+  min: number;
   object_class: string;
+  occupied: boolean;
+  peak: number;
 };
 
 export type OccupancySnapshotValidationScope = {
@@ -36,8 +48,8 @@ export type OccupancyCurrentSnapshotValidationScope = {
   expectedAreas: ReadonlyArray<{
     area_id: string;
     camera_id: string;
+    object_class: string;
   }>;
-  expectedObjectClass?: string;
 };
 
 export type OccupancyHistoryValidationScope = {
@@ -271,9 +283,10 @@ export function requireOccupancySnapshotRowsForCameras(
  * current value is intentionally not compared with those statistics and its
  * timestamp is intentionally not constrained to that interval.
  *
- * The endpoint can return every area of an object class. Only rows matching
- * the explicitly requested camera/area identities are interpreted here, so
- * an unrelated tenant row cannot invalidate the requested live snapshot.
+ * The endpoint can return every area and object class in the tenant. Only
+ * rows matching the explicitly requested camera/area/object-class identities
+ * are interpreted here, so an unrelated tenant row cannot invalidate the
+ * requested live snapshot.
  * Missing requested identities remain missing from the returned array; the
  * scenario composer can then report absence per scenario without inventing a
  * zero or rejecting readings that were successfully certified.
@@ -287,21 +300,19 @@ export function requireOccupancyCurrentSnapshotRows(
     OCCUPANCY_ROW_COLLECTION_KEYS,
     "snapshots atuais de ocupação",
   );
-  const expectedObjectClass = scope.expectedObjectClass
-    ? requireId(
-        scope.expectedObjectClass,
-        "object_class esperado dos snapshots atuais de ocupação",
-      )
-    : undefined;
-  const expectedAreaIdentities = requireAreaIdentities(
+  const expectedAreaIdentities = requireCurrentAreaIdentities(
     scope.expectedAreas,
     "áreas esperadas dos snapshots atuais de ocupação",
   );
   const returnedAreaIdentities = new Set<string>();
 
-  return rawRows.flatMap(
-    (candidate, index): CertifiedOccupancyCurrentSnapshotRow[] => {
-      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+  const selectedRows = rawRows.flatMap(
+    (candidate, index): Array<{ index: number; row: UnknownRecord }> => {
+      if (
+        !candidate ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate)
+      ) {
         return [];
       }
       const row = candidate as UnknownRecord;
@@ -309,17 +320,26 @@ export function requireOccupancyCurrentSnapshotRows(
         typeof row.camera_id === "string" ? row.camera_id.trim() : "";
       const candidateAreaId =
         typeof row.area === "string" ? row.area.trim() : "";
+      const candidateObjectClass =
+        typeof row.object_class === "string" ? row.object_class.trim() : "";
       const candidateIdentity = JSON.stringify([
         candidateCameraId,
         candidateAreaId,
+        candidateObjectClass,
       ]);
-      if (!expectedAreaIdentities.has(candidateIdentity)) return [];
-
+      return expectedAreaIdentities.has(candidateIdentity)
+        ? [{ index, row }]
+        : [];
+    },
+  );
+  return selectedRows.map(
+    ({ index, row }): CertifiedOccupancyCurrentSnapshotRow => {
       if (
         row.area_id !== undefined ||
         row.areaId !== undefined ||
         row.cameraId !== undefined ||
-        row.currentValue !== undefined
+        row.currentValue !== undefined ||
+        hasOccupancyStateAlias(row)
       ) {
         throw new Error(
           `A API retornou aliases não certificados no snapshot atual de ocupação na posição ${index}.`,
@@ -334,42 +354,60 @@ export function requireOccupancyCurrentSnapshotRows(
         row.area,
         `area do snapshot atual de ocupação na posição ${index}`,
       );
-      const identity = JSON.stringify([cameraId, areaId]);
-      if (returnedAreaIdentities.has(identity)) {
-        throw new Error(
-          `A API retornou um snapshot atual de ocupação duplicado para a câmera "${cameraId}" e área "${areaId}".`,
-        );
-      }
-      returnedAreaIdentities.add(identity);
-
       const objectClass = requireId(
         row.object_class,
         `object_class do snapshot atual de ocupação na posição ${index}`,
       );
-      if (expectedObjectClass && objectClass !== expectedObjectClass) {
+      const identity = JSON.stringify([cameraId, areaId, objectClass]);
+      if (returnedAreaIdentities.has(identity)) {
         throw new Error(
-          `A API retornou object_class "${objectClass}" ao consultar "${expectedObjectClass}".`,
+          `A API retornou um snapshot atual de ocupação duplicado para a câmera "${cameraId}", área "${areaId}" e classe "${objectClass}".`,
         );
       }
-      const current = requireNonNegativeNumber(
+      returnedAreaIdentities.add(identity);
+      const current = requireNonNegativeSafeInteger(
         row.current_value,
         `current_value do snapshot atual de ocupação na posição ${index}`,
+      );
+      const average = requireNonNegativeNumber(
+        row.avg,
+        `avg do snapshot atual de ocupação na posição ${index}`,
+      );
+      const minimum = requireNonNegativeNumber(
+        row.min,
+        `min do snapshot atual de ocupação na posição ${index}`,
+      );
+      const peak = requireNonNegativeNumber(
+        row.peak,
+        `peak do snapshot atual de ocupação na posição ${index}`,
+      );
+      if (minimum > average || average > peak) {
+        throw new Error(
+          `A API retornou métricas inconsistentes no snapshot atual de ocupação na posição ${index}.`,
+        );
+      }
+      const occupied = requireOccupancyState(
+        row,
+        current,
+        `snapshot atual de ocupação na posição ${index}`,
       );
       requireTimestamp(
         row.current_at,
         `current_at do snapshot atual de ocupação na posição ${index}`,
       );
 
-      return [
-        {
-          ...row,
-          area: areaId,
-          camera_id: cameraId,
-          current_at: row.current_at as string,
-          current_value: current,
-          object_class: objectClass,
-        } as CertifiedOccupancyCurrentSnapshotRow,
-      ];
+      return {
+        ...row,
+        area: areaId,
+        avg: average,
+        camera_id: cameraId,
+        current_at: row.current_at as string,
+        current_value: current,
+        min: minimum,
+        object_class: objectClass,
+        occupied,
+        peak,
+      } as CertifiedOccupancyCurrentSnapshotRow;
     },
   );
 }
@@ -402,119 +440,126 @@ function requireOccupancySnapshotRowsInternal(
     { hasCameraTotal: boolean; hasAreas: boolean }
   >();
 
-  const rows = Array.from(
-    rawRows,
-    (candidate, index): CertifiedOccupancyRow => {
-    const row = requireRecord(
-      candidate,
-      `snapshot de ocupação na posição ${index}`,
-    );
-    if (
-      row.area_id !== undefined ||
-      row.areaId !== undefined ||
-      row.cameraId !== undefined ||
-      row.currentValue !== undefined ||
-      row.average !== undefined ||
-      row.minimum !== undefined ||
-      row.maximum !== undefined
-    ) {
-      throw new Error(
-        `A API retornou aliases não certificados no snapshot de ocupação na posição ${index}.`,
-      );
-    }
-    const cameraId = requireId(
-      row.camera_id,
-      `camera_id do snapshot de ocupação na posição ${index}`,
-    );
-    const areaId = requireOptionalId(
-      row.area,
-      `area do snapshot de ocupação na posição ${index}`,
-    );
-    const current = requireNonNegativeNumber(
-      row.current_value,
-      `current_value do snapshot de ocupação na posição ${index}`,
-    );
-    const average = requireNonNegativeNumber(
-      row.avg,
-      `avg do snapshot de ocupação na posição ${index}`,
-    );
-    const minimum = requireNonNegativeNumber(
-      row.min,
-      `min do snapshot de ocupação na posição ${index}`,
-    );
-    const peak = requireNonNegativeNumber(
-      row.peak,
-      `peak do snapshot de ocupação na posição ${index}`,
-    );
-    // Swagger deliberately exposes two different clocks in the same row:
-    // `current_*` is the latest raw snapshot, while avg/min/peak describe only
-    // the requested [from,to) interval. The current value may therefore sit
-    // outside the historical extrema without making either measurement
-    // invalid. Only the statistics tuple is ordered here.
-    if (minimum > average || average > peak) {
-      throw new Error(
-        `A API retornou métricas inconsistentes no snapshot de ocupação na posição ${index}.`,
-      );
-    }
-    requireTimestamp(
-      row.current_at,
-      `current_at do snapshot de ocupação na posição ${index}`,
-    );
-
-    const identity = JSON.stringify([cameraId, areaId ?? ""]);
-    if (identities.has(identity)) {
-      throw new Error(
-        `A API retornou um snapshot de ocupação duplicado para a câmera "${cameraId}"${
-          areaId ? ` e área "${areaId}"` : ""
-        }.`,
-      );
-    }
-    identities.add(identity);
-
-    const levels = cameraLevels.get(cameraId) ?? {
-      hasCameraTotal: false,
-      hasAreas: false,
-    };
-    levels.hasCameraTotal ||= areaId === undefined;
-    levels.hasAreas ||= areaId !== undefined;
-    if (levels.hasCameraTotal && levels.hasAreas) {
-      throw new Error(
-        `A API retornou simultaneamente total da câmera "${cameraId}" e suas áreas; a soma seria ambígua.`,
-      );
-    }
-    cameraLevels.set(cameraId, levels);
-    returnedCameraIds.add(cameraId);
-
-    const objectClass = scope.expectedObjectClass
-      ? requireId(
-          row.object_class,
-          `object_class do snapshot de ocupação na posição ${index}`,
-        )
-      : requireOptionalText(
-          row.object_class,
-          `object_class do snapshot de ocupação na posição ${index}`,
+  const indexedRows = Array.from(rawRows, (candidate, index) => ({
+    index,
+    row: requireRecord(candidate, `snapshot de ocupação na posição ${index}`),
+  }));
+  const rows = indexedRows.map(
+    ({ index, row }): CertifiedOccupancyRow => {
+      if (
+        row.area_id !== undefined ||
+        row.areaId !== undefined ||
+        row.cameraId !== undefined ||
+        row.currentValue !== undefined ||
+        row.average !== undefined ||
+        row.minimum !== undefined ||
+        row.maximum !== undefined ||
+        hasOccupancyStateAlias(row)
+      ) {
+        throw new Error(
+          `A API retornou aliases não certificados no snapshot de ocupação na posição ${index}.`,
         );
-    if (
-      scope.expectedObjectClass &&
-      objectClass !== scope.expectedObjectClass
-    ) {
-      throw new Error(
-        `A API retornou object_class "${objectClass}" ao consultar "${scope.expectedObjectClass}".`,
+      }
+      const cameraId = requireId(
+        row.camera_id,
+        `camera_id do snapshot de ocupação na posição ${index}`,
       );
-    }
+      const areaId = requireOptionalId(
+        row.area,
+        `area do snapshot de ocupação na posição ${index}`,
+      );
+      const current = requireNonNegativeSafeInteger(
+        row.current_value,
+        `current_value do snapshot de ocupação na posição ${index}`,
+      );
+      const average = requireNonNegativeNumber(
+        row.avg,
+        `avg do snapshot de ocupação na posição ${index}`,
+      );
+      const minimum = requireNonNegativeNumber(
+        row.min,
+        `min do snapshot de ocupação na posição ${index}`,
+      );
+      const peak = requireNonNegativeNumber(
+        row.peak,
+        `peak do snapshot de ocupação na posição ${index}`,
+      );
+      const occupied = requireOccupancyState(
+        row,
+        current,
+        `snapshot de ocupação na posição ${index}`,
+      );
+      // Swagger deliberately exposes two different clocks in the same row:
+      // `current_*` is the latest raw snapshot, while avg/min/peak describe only
+      // the requested [from,to) interval. The current value may therefore sit
+      // outside the historical extrema without making either measurement
+      // invalid. Only the statistics tuple is ordered here.
+      if (minimum > average || average > peak) {
+        throw new Error(
+          `A API retornou métricas inconsistentes no snapshot de ocupação na posição ${index}.`,
+        );
+      }
+      requireTimestamp(
+        row.current_at,
+        `current_at do snapshot de ocupação na posição ${index}`,
+      );
 
-    return {
-      ...row,
-      camera_id: cameraId,
-      area: areaId,
-      current_at: row.current_at as string,
-      current_value: current,
-      avg: average,
-      min: minimum,
-      object_class: objectClass,
-      peak,
-    } as CertifiedOccupancyRow;
-  });
+      const identity = JSON.stringify([cameraId, areaId ?? ""]);
+      if (identities.has(identity)) {
+        throw new Error(
+          `A API retornou um snapshot de ocupação duplicado para a câmera "${cameraId}"${
+            areaId ? ` e área "${areaId}"` : ""
+          }.`,
+        );
+      }
+      identities.add(identity);
+
+      const levels = cameraLevels.get(cameraId) ?? {
+        hasCameraTotal: false,
+        hasAreas: false,
+      };
+      levels.hasCameraTotal ||= areaId === undefined;
+      levels.hasAreas ||= areaId !== undefined;
+      if (levels.hasCameraTotal && levels.hasAreas) {
+        throw new Error(
+          `A API retornou simultaneamente total da câmera "${cameraId}" e suas áreas; a soma seria ambígua.`,
+        );
+      }
+      cameraLevels.set(cameraId, levels);
+      returnedCameraIds.add(cameraId);
+
+      const objectClass = scope.expectedObjectClass
+        ? requireId(
+            row.object_class,
+            `object_class do snapshot de ocupação na posição ${index}`,
+          )
+        : requireOptionalText(
+            row.object_class,
+            `object_class do snapshot de ocupação na posição ${index}`,
+          );
+      if (
+        scope.expectedObjectClass &&
+        objectClass !== scope.expectedObjectClass
+      ) {
+        throw new Error(
+          `A API retornou object_class "${objectClass}" ao consultar "${scope.expectedObjectClass}".`,
+        );
+      }
+
+      return {
+        ...row,
+        camera_id: cameraId,
+        area: areaId,
+        current_at: row.current_at as string,
+        current_value: current,
+        avg: average,
+        min: minimum,
+        object_class: objectClass,
+        occupied,
+        peak,
+      } as CertifiedOccupancyRow;
+    },
+  );
 
   const missingCameraIds = Array.from(expectedCameraIds).filter(
     (cameraId) => !returnedCameraIds.has(cameraId),
@@ -730,6 +775,7 @@ export function requireOccupancyHistoryResponse(
         ...area,
         area_id: areaId,
         camera_id: cameraId,
+        occupied: undefined,
         value: areaValue,
       };
     });
@@ -766,6 +812,7 @@ export function requireOccupancyHistoryResponse(
   return {
     ...response,
     as_of: response.as_of as string,
+    occupied: undefined,
     scenario_id: scenarioId,
     total,
     areas,
@@ -841,6 +888,24 @@ function requireOptionalText(value: unknown, context: string) {
   return requireText(value, context);
 }
 
+function requireOccupancyState(
+  row: UnknownRecord,
+  currentValue: number,
+  context: string,
+) {
+  const occupied = requireBoolean(row.occupied, `occupied do ${context}`);
+  if (occupied !== (currentValue > 0)) {
+    throw new Error(
+      `A API retornou occupied divergente de current_value no ${context}.`,
+    );
+  }
+  return occupied;
+}
+
+function hasOccupancyStateAlias(row: UnknownRecord) {
+  return OCCUPANCY_STATE_ALIAS_KEYS.some((key) => Object.hasOwn(row, key));
+}
+
 function requireBoolean(value: unknown, context: string) {
   if (typeof value !== "boolean") {
     throw new Error(`A API retornou ${context} inválido.`);
@@ -857,6 +922,14 @@ function requireNonNegativeNumber(value: unknown, context: string) {
     throw new Error(`A API retornou ${context} inválido.`);
   }
   return value;
+}
+
+function requireNonNegativeSafeInteger(value: unknown, context: string) {
+  const number = requireNonNegativeNumber(value, context);
+  if (!Number.isSafeInteger(number)) {
+    throw new Error(`A API retornou ${context} inválido.`);
+  }
+  return number;
 }
 
 function requireOptionalNonNegativeNumber(
@@ -922,6 +995,41 @@ function requireAreaIdentities(
       `area_id em ${context}, posição ${index}`,
     );
     const identity = JSON.stringify([cameraId, areaId]);
+    if (identities.has(identity)) {
+      throw new Error(`A API recebeu uma identidade duplicada em ${context}.`);
+    }
+    identities.add(identity);
+  });
+  return identities;
+}
+
+function requireCurrentAreaIdentities(
+  values: ReadonlyArray<{
+    area_id: string;
+    camera_id: string;
+    object_class: string;
+  }>,
+  context: string,
+) {
+  if (!Array.isArray(values)) {
+    throw new Error(`A API recebeu ${context} inválidas.`);
+  }
+  const identities = new Set<string>();
+  values.forEach((value, index) => {
+    const row = requireRecord(value, `${context}, posição ${index}`);
+    const cameraId = requireId(
+      row.camera_id,
+      `camera_id em ${context}, posição ${index}`,
+    );
+    const areaId = requireId(
+      row.area_id,
+      `area_id em ${context}, posição ${index}`,
+    );
+    const objectClass = requireId(
+      row.object_class,
+      `object_class em ${context}, posição ${index}`,
+    );
+    const identity = JSON.stringify([cameraId, areaId, objectClass]);
     if (identities.has(identity)) {
       throw new Error(`A API recebeu uma identidade duplicada em ${context}.`);
     }

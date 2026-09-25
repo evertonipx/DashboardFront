@@ -249,135 +249,31 @@ test("summary não acrescenta seletores de câmera, área ou classe", async () =
   assert.deepEqual(Array.from(parsed.searchParams.keys()), ["from", "to"]);
 });
 
-test("Ao Vivo lê o prefixo uma vez e depois consulta somente promoção e cauda móvel", async () => {
-  const summaries = [
-    summaryResponse(10, 20, 10, 30),
-    summaryResponse(2, 40, 35, 45),
-    summaryResponse(3, 42, 36, 50),
-    summaryResponse(1, 60, 60, 60),
-    summaryResponse(4, 30, 20, 40),
-  ];
-  let responseIndex = 0;
-  const { calls, query } = createFixture(() => summaries[responseIndex++]);
-  const firstTo = new Date("2026-09-17T03:00:37.000Z");
-  const first = await query.fetchLiveOccupancyLoiteringSummary({
-    companyScopeId: "company-selected",
-    from: FROM,
-    timeZone: "America/Sao_Paulo",
-    to: firstTo,
-  });
-  assert.equal(calls.length, 2, "prefixo e cauda inicial devem rodar em paralelo");
+test("Ao Vivo envia um summary diário civil completo em cada corte", async () => {
+  const { calls, query } = createFixture(() => ({ data: [] }));
+  const from = new Date("2026-09-17T03:00:00.000Z");
+  for (const to of [
+    new Date("2026-09-17T15:00:10.000Z"),
+    new Date("2026-09-17T15:00:15.000Z"),
+  ]) {
+    await query.fetchOccupancyLoiteringSummary({
+      companyScopeId: "company-selected",
+      from,
+      live: true,
+      timeZone: "America/Sao_Paulo",
+      to,
+    });
+  }
+
   assert.deepEqual(
     calls.map((call) => queryRange(call.path)),
     [
-      [FROM.toISOString(), "2026-09-17T02:55:00.000Z"],
-      ["2026-09-17T02:55:00.000Z", firstTo.toISOString()],
+      ["2026-09-17T03:00:00.000Z", "2026-09-17T15:00:10.000Z"],
+      ["2026-09-17T03:00:00.000Z", "2026-09-17T15:00:15.000Z"],
     ],
   );
-  assertAdjacentRanges(
-    queryRange(calls[0].path),
-    queryRange(calls[1].path),
-    "prefixo e cauda iniciais",
-  );
-  assert.equal(first.rows[0].session_count, 12);
-  assert.equal(first.rows[0].avg_duration_seconds, (10 * 20 + 2 * 40) / 12);
-  assert.equal(
-    first.state.stableRows[0].session_count,
-    10,
-    "a cauda mutável não pode ser incorporada antecipadamente ao prefixo",
-  );
-
-  const secondTo = new Date("2026-09-17T03:00:42.000Z");
-  const second = await query.fetchLiveOccupancyLoiteringSummary({
-    companyScopeId: "company-selected",
-    from: FROM,
-    previous: first.state,
-    timeZone: "America/Sao_Paulo",
-    to: secondTo,
-  });
-  assert.equal(calls.length, 3, "no mesmo minuto somente a cauda deve ser relida");
-  assert.deepEqual(queryRange(calls[2].path), [
-    "2026-09-17T02:55:00.000Z",
-    secondTo.toISOString(),
-  ]);
-  assert.equal(second.rows[0].session_count, 13);
-  assert.equal(
-    second.state.stableRows[0].session_count,
-    10,
-    "reler a mesma cauda deve substituir a leitura anterior, sem duplicá-la",
-  );
-
-  const thirdTo = new Date("2026-09-17T03:01:05.000Z");
-  const third = await query.fetchLiveOccupancyLoiteringSummary({
-    companyScopeId: "company-selected",
-    from: FROM,
-    previous: second.state,
-    timeZone: "America/Sao_Paulo",
-    to: thirdTo,
-  });
-  assert.equal(calls.length, 5, "na virada do minuto há uma promoção e uma cauda");
-  assert.deepEqual(
-    calls.slice(3).map((call) => queryRange(call.path)),
-    [
-      ["2026-09-17T02:55:00.000Z", "2026-09-17T02:56:00.000Z"],
-      ["2026-09-17T02:56:00.000Z", thirdTo.toISOString()],
-    ],
-  );
-  assertAdjacentRanges(
-    queryRange(calls[3].path),
-    queryRange(calls[4].path),
-    "promoção e nova cauda",
-  );
-  assert.equal(
-    second.state.stableTo,
-    first.state.stableTo,
-    "polls dentro do mesmo minuto devem preservar a fronteira estável",
-  );
-  assert.equal(
-    queryRange(calls[3].path)[0],
-    new Date(second.state.stableTo).toISOString(),
-    "a promoção deve começar exatamente na fronteira do prefixo anterior",
-  );
-  assert.equal(third.rows[0].session_count, 15);
-  assert.equal(
-    third.state.stableRows[0].session_count,
-    11,
-    "somente a faixa promovida entra no prefixo; a cauda permanece substituível",
-  );
-  assert.equal(third.rows[0].min_duration_seconds, 10);
-  assert.equal(third.rows[0].max_duration_seconds, 60);
-});
-
-test("Ao Vivo inclui as áreas esperadas na identidade incremental", async () => {
-  const { calls, query } = createFixture(() => ({ data: [] }));
-  const to = new Date("2026-09-17T03:00:37.000Z");
-  const first = await query.fetchLiveOccupancyLoiteringSummary({
-    companyScopeId: "company-selected",
-    expectedAreas: [
-      { area: "espera", cameraId: "camera-a", objectClass: "person" },
-    ],
-    from: FROM,
-    timeZone: "America/Sao_Paulo",
-    to,
-  });
-  assert.equal(calls.length, 2);
-
-  await query.fetchLiveOccupancyLoiteringSummary({
-    companyScopeId: "company-selected",
-    expectedAreas: [
-      { area: "parado", cameraId: "camera-a", objectClass: "person" },
-    ],
-    from: FROM,
-    previous: first.state,
-    timeZone: "America/Sao_Paulo",
-    to: new Date(to.getTime() + 5_000),
-  });
-
-  assert.equal(
-    calls.length,
-    4,
-    "mudar o escopo esperado deve invalidar prefixo e cauda anteriores",
-  );
+  assert.ok(calls.every((call) => call.cacheTtlMs === 4_000));
+  assert.ok(calls.every((call) => call.priority === "background"));
 });
 
 test("sessions consulta o tenant sob demanda somente por período", async () => {
@@ -493,40 +389,7 @@ function createFixture(
   };
 }
 
-function summaryResponse(
-  sessionCount: number,
-  average: number,
-  minimum: number,
-  maximum: number,
-) {
-  return {
-    data: [
-      {
-        area: "espera",
-        avg_duration_seconds: average,
-        camera_id: "camera-a",
-        max_duration_seconds: maximum,
-        min_duration_seconds: minimum,
-        object_class: "person",
-        session_count: sessionCount,
-      },
-    ],
-  };
-}
-
 function queryRange(path: string): [string | null, string | null] {
   const query = new URL(path, "https://dashboard.invalid").searchParams;
   return [query.get("from"), query.get("to")];
-}
-
-function assertAdjacentRanges(
-  left: [string | null, string | null],
-  right: [string | null, string | null],
-  label: string,
-) {
-  assert.equal(
-    left[1],
-    right[0],
-    `${label}: os intervalos semiabertos precisam ser adjacentes, sem lacuna nem sobreposição`,
-  );
 }

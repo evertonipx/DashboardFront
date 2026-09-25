@@ -352,6 +352,7 @@ export type OccupancyRow = {
   current_value?: number;
   min?: number;
   object_class?: string;
+  occupied?: boolean;
   peak?: number;
 };
 
@@ -418,6 +419,7 @@ export type OccupancyScenarioAggregateResponse = {
 export type OccupancyScenarioHistoryAreaRow = {
   area_id: string;
   camera_id: string;
+  occupied?: boolean;
   snapshot_at?: string;
   value: number;
 };
@@ -425,6 +427,7 @@ export type OccupancyScenarioHistoryAreaRow = {
 export type OccupancyScenarioHistoryResponse = {
   areas?: OccupancyScenarioHistoryAreaRow[];
   as_of?: string;
+  occupied?: boolean;
   scenario_id?: string;
   total: number;
 };

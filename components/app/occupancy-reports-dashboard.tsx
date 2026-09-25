@@ -27,6 +27,14 @@ import {
   COMPACT_METRIC_LAYOUT_DEFAULTS,
   CompactMetricCard,
 } from "@/components/app/compact-metric-card";
+import {
+  useOccupancyComparisonCards,
+  type OccupancyComparisonReportSnapshot,
+} from "@/components/app/occupancy-comparison-widgets";
+import {
+  useOccupancyDurationCards,
+  type OccupancyDurationReportSnapshot,
+} from "@/components/app/occupancy-duration-widgets";
 import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
 import { OccupancyBlockingState } from "@/components/app/occupancy-blocking-state";
 import {
@@ -190,11 +198,17 @@ import { occupancyComparisonBucketStarts } from "@/lib/occupancy-report-comparis
 import {
   buildOccupancyReportResourcePlan,
   createOccupancyQueryScheduler,
+  occupancyLiveSnapshotQuery,
   type OccupancyQueryScheduler,
 } from "@/lib/occupancy-dashboard-query";
 import { fetchOccupancyCivilAggregate } from "@/lib/occupancy-civil-aggregate-query";
 import { sharedOccupancyCivilCapabilities } from "@/lib/occupancy-shared-query";
 import {
+  buildOccupancyScenarioSnapshotValue,
+  occupancyScenarioSnapshotHasCompleteCoverage,
+} from "@/lib/occupancy-scenario-snapshots";
+import {
+  requireOccupancyCurrentSnapshotRows,
   requireOccupancyHistoryResponse,
   requireOccupancyScenarioRows,
   requireOccupancySnapshotRowsForCameras,
@@ -296,6 +310,11 @@ type OccupancyReportMetric = {
 
 type CertifiedCurrentSnapshot = {
   activeAreas: number | null;
+  areas: Array<{
+    areaId: string;
+    cameraId: string;
+    value: number;
+  }>;
   asOf: string;
   total: number;
 };
@@ -752,6 +771,32 @@ export function OccupancyReportsDashboard({
       to,
     });
   }, [analysis, companyTimeZone, durationAnalysisCutoff, reportRange]);
+  const occupancyAnalysisComparisonPeriod = React.useMemo(() => {
+    if (!analysis) return null;
+    const from =
+      reportRange.instantFrom ??
+      occupancyCalendarBoundaryInstant(reportRange.from, companyTimeZone);
+    const rangeTo =
+      reportRange.instantTo ??
+      occupancyCalendarBoundaryInstant(reportRange.to, companyTimeZone);
+    const to =
+      reportRange.includesToday && durationAnalysisCutoff < rangeTo
+        ? durationAnalysisCutoff
+        : rangeTo;
+    if (from >= to) return null;
+    return {
+      contextLabel: formatOccupancyAnalysisRangeLabel(analysisRangeInput),
+      from,
+      referenceAt: new Date(to.getTime() - 1),
+      to,
+    };
+  }, [
+    analysis,
+    analysisRangeInput,
+    companyTimeZone,
+    durationAnalysisCutoff,
+    reportRange,
+  ]);
   const occupancyDurationInsights = useOccupancyDurationInsights({
     companyScopeId,
     defaultWidgetColor: getOccupancyColorPalette(
@@ -776,6 +821,31 @@ export function OccupancyReportsDashboard({
     userId,
   });
   const refreshOccupancyDurationInsights = occupancyDurationInsights.refresh;
+  const occupancyAnalysisComparison = useOccupancyComparisonCards({
+    companyScopeId,
+    enabled: Boolean(
+      companyTimeZoneCertified &&
+        analysis &&
+        layoutPreferencesReady &&
+        reportRequested &&
+        selectedScope?.scenario &&
+        occupancyAnalysisComparisonPeriod
+    ),
+    focusScenarioId: selectedScope?.scenario?.id ?? "",
+    monitorMode,
+    period: occupancyAnalysisComparisonPeriod,
+    preferenceScopeId: reportPreferenceScopeId,
+    preferences: layoutPreferencesReady ? layoutPreferences : [],
+    refreshMode: "manual",
+    reportPreferences: layoutPreferencesReady ? layoutPreferences : [],
+    requestedCardIds: requestedHistoricalCardIds,
+    scenarios,
+    timeZone: companyTimeZone,
+    timeZoneWarning: companyTimeZoneResolution.warning,
+    userId,
+  });
+  const refreshOccupancyAnalysisComparison =
+    occupancyAnalysisComparison.refresh;
   const occupancyLoiteringPeriod = React.useMemo(() => {
     if (!reportRequested) return null;
     if (analysis) {
@@ -844,6 +914,33 @@ export function OccupancyReportsDashboard({
     userId,
   });
   const refreshOccupancyLoitering = occupancyLoitering.refresh;
+  const occupancyAnalysisDuration = useOccupancyDurationCards({
+    companyScopeId,
+    enabled: Boolean(
+      companyTimeZoneCertified &&
+        analysis &&
+        layoutPreferencesReady &&
+        reportRequested &&
+        selectedScope?.scenario &&
+        occupancyDurationAnalysisPeriod
+    ),
+    finalSnapshots: occupancyAnalysisComparison.snapshots,
+    finalSnapshotsLoading: occupancyAnalysisComparison.snapshotsLoading,
+    focusScenarioId: selectedScope?.scenario?.id ?? "",
+    loadLoiteringSummaryRows: occupancyLoitering.loadReportSummaryRows,
+    loiteringSummaryError: occupancyLoitering.summaryError,
+    loiteringSummaryLoading: occupancyLoitering.summaryLoading,
+    loiteringSummaryRows: occupancyLoitering.summaryRows,
+    monitorMode,
+    period: occupancyDurationAnalysisPeriod,
+    preferences: layoutPreferencesReady ? layoutPreferences : [],
+    refreshMode: "manual",
+    requestedCardIds: requestedHistoricalCardIds,
+    scenarios,
+    timeZone: companyTimeZone,
+    timeZoneWarning: companyTimeZoneResolution.warning,
+  });
+  const refreshOccupancyAnalysisDuration = occupancyAnalysisDuration.refresh;
   const reportResourcePlan = React.useMemo(() =>
     layoutPreferencesReady
       ? buildOccupancyReportResourcePlan({
@@ -939,6 +1036,8 @@ export function OccupancyReportsDashboard({
   const visibleLastUpdated = chartDataIsCurrent ? lastUpdated : null;
   const chartsPending =
     loadingCharts ||
+    occupancyAnalysisComparison.loading ||
+    occupancyAnalysisDuration.loading ||
     occupancyDurationInsights.loading ||
     occupancyLoitering.loading ||
     Boolean(reportRequested && selectedScope && !chartDataIsCurrent);
@@ -955,6 +1054,8 @@ export function OccupancyReportsDashboard({
   const occupancyCertificationError =
     metadataError || (chartDataIsCurrent ? chartLoadError : "");
   const hasPartialOccupancyCoverage = Boolean(
+    occupancyAnalysisComparison.dataCompleteUntil === null ||
+    occupancyAnalysisDuration.dataCompleteUntil === null ||
     occupancyDurationInsights.dataCompleteUntil === null ||
     (currentSnapshotRequested && visibleCurrentSnapshotError) ||
       queriedDefinitions.some((definition) => {
@@ -1203,29 +1304,47 @@ export function OccupancyReportsDashboard({
             ),
             currentSnapshotRequested && snapshotScenario
               ? captureOccupancyLoad(
-                  scheduleQuery(`snapshot:${snapshotScenario.id}:${currentRange.reference.toISOString()}`, () => apiFetch<unknown>(
-                    occupancyScenarioHistoryPath(
-                      snapshotScenario.id,
-                      currentRange.reference,
-                    ),
-                    { companyScopeId, signal: controller.signal },
-                  )).then((response) => {
-                    const history = requireOccupancyHistoryResponse(
-                      response,
-                      snapshotScenario.id,
-                      {
-                        expectedAreas: snapshotScenario.areas,
-                        requestedAt: currentRange.reference,
-                      },
-                    );
-                    return {
-                      activeAreas: history.areas
-                        ? history.areas.filter((area) => area.value > 0).length
-                        : null,
-                      asOf: history.as_of!,
-                      total: history.total,
-                    };
-                  }),
+                  usesLiveDay
+                    ? loadOccupancyReportCurrentSnapshot({
+                        companyScopeId,
+                        requestedAt: now,
+                        scenario: snapshotScenario,
+                        scheduleQuery,
+                        signal: controller.signal,
+                      })
+                    : scheduleQuery(
+                        `snapshot:${snapshotScenario.id}:${currentRange.reference.toISOString()}`,
+                        () =>
+                          apiFetch<unknown>(
+                            occupancyScenarioHistoryPath(
+                              snapshotScenario.id,
+                              currentRange.reference,
+                            ),
+                            { companyScopeId, signal: controller.signal },
+                          ),
+                      ).then((response) => {
+                        const history = requireOccupancyHistoryResponse(
+                          response,
+                          snapshotScenario.id,
+                          {
+                            expectedAreas: snapshotScenario.areas,
+                            requestedAt: currentRange.reference,
+                          },
+                        );
+                        return {
+                          activeAreas: history.areas
+                            ? history.areas.filter((area) => area.value > 0)
+                                .length
+                            : null,
+                          areas: (history.areas ?? []).map((area) => ({
+                            areaId: area.area_id,
+                            cameraId: area.camera_id,
+                            value: area.value,
+                          })),
+                          asOf: history.as_of!,
+                          total: history.total,
+                        };
+                      }),
                   analysis && !usesLiveDay
                     ? "Não foi possível carregar a leitura final do intervalo."
                     : "Não foi possível carregar a leitura atual.",
@@ -1361,6 +1480,8 @@ export function OccupancyReportsDashboard({
       setReportRequested(true);
       setDurationAnalysisCutoff(refreshAt);
       if (analysis) {
+        refreshOccupancyAnalysisComparison();
+        refreshOccupancyAnalysisDuration();
         refreshOccupancyDurationInsights();
       }
       refreshOccupancyLoitering();
@@ -1371,6 +1492,8 @@ export function OccupancyReportsDashboard({
     loadCharts,
     loadScopes,
     metadataError,
+    refreshOccupancyAnalysisComparison,
+    refreshOccupancyAnalysisDuration,
     refreshOccupancyDurationInsights,
     refreshOccupancyLoitering,
     selectedScope,
@@ -1763,6 +1886,22 @@ export function OccupancyReportsDashboard({
           : selectedScope?.name ?? "visão selecionada"),
       tone: "primary" as const,
     },
+    ...(analysis
+      ? [
+          {
+            id: "occupancy_active_areas",
+            icon: MapPinned,
+            label: "Áreas ocupadas no fechamento",
+            value: selectedScope?.scenario
+              ? visibleCurrentSnapshot?.activeAreas ?? null
+              : null,
+            description: visibleCurrentSnapshotError
+              ? "leitura de fechamento temporariamente indisponível"
+              : "áreas com contagem positiva na última leitura do período",
+            tone: "primary" as const,
+          },
+        ]
+      : []),
     {
       id: "occupancy_report_average",
       icon: Gauge,
@@ -1857,6 +1996,27 @@ export function OccupancyReportsDashboard({
       titleEditable: true,
     })),
     ...occupancyLoitering.cards,
+    ...(analysis && selectedScope?.scenario
+      ? [
+          {
+            colorEditable: false,
+            defaultHeightLevel: 4 as const,
+            defaultSize: "wide" as const,
+            id: "occupancy_scenario_detail",
+            label: "Cenário de ocupação",
+            node: () => (
+              <OccupancyHistoricalScenarioDetailCard
+                error={visibleCurrentSnapshotError}
+                loading={chartsPending}
+                scenario={selectedScope.scenario!}
+                snapshot={visibleCurrentSnapshot}
+                timeZone={companyTimeZone}
+              />
+            ),
+            titleEditable: true,
+          },
+        ]
+      : []),
     ...definitions.map((definition) => ({
       chartTypeEnabled: true,
       colorEditable: true,
@@ -1892,6 +2052,8 @@ export function OccupancyReportsDashboard({
       titleEditable: true,
       zoomEnabled: true,
     })),
+    ...(analysis ? occupancyAnalysisComparison.cards : []),
+    ...(analysis ? occupancyAnalysisDuration.cards : []),
     ...(analysis ? occupancyDurationInsights.cards : []),
     ...customMetricCards.map(({ presentation, widget }) => {
       const configurationContent =
@@ -2033,12 +2195,19 @@ export function OccupancyReportsDashboard({
   const coreReportDataCompleteUntil = reportCertificationSources.length
     ? resolveCertifiedOccupancyDataCutoff(reportCertificationSources)
     : undefined;
-  const reportDataCompleteUntil = mergeOccupancyDataCompleteUntil(
-    coreReportDataCompleteUntil,
-    occupancyDurationInsights.dataCompleteUntil,
-  );
   function buildOccupancyReportPayload(
     loiteringReportAssets = occupancyLoitering.reportAssets,
+    comparisonReportSnapshot: OccupancyComparisonReportSnapshot = {
+      dataCompleteUntil: occupancyAnalysisComparison.dataCompleteUntil,
+      reportAssets: occupancyAnalysisComparison.reportAssets,
+    },
+    durationReportSnapshot: OccupancyDurationReportSnapshot = {
+      dataCompleteUntil: occupancyAnalysisDuration.dataCompleteUntil,
+      reportAssets: occupancyAnalysisDuration.getReportAssets(),
+      reportContext: occupancyAnalysisDuration.reportContext,
+      reportMetrics: occupancyAnalysisDuration.reportMetrics,
+      reportWarnings: occupancyAnalysisDuration.reportWarnings,
+    },
   ): ReportPayload {
     const exportMetricByCardId = new Map<string, ReportMetric>(
       metricCards.map((card) => [
@@ -2059,6 +2228,12 @@ export function OccupancyReportsDashboard({
           typeof presentation.value === "string"
             ? presentation.value
             : formatOccupancyValue(presentation.value),
+      });
+    });
+    durationReportSnapshot.reportMetrics.forEach(({ cardId, metric }) => {
+      exportMetricByCardId.set(cardId, {
+        ...metric,
+        label: resolveReportCardTitle(cardId, metric.label),
       });
     });
 
@@ -2082,8 +2257,13 @@ export function OccupancyReportsDashboard({
         buildEmptyPoints(sourceDefinition);
       const previousPoints =
         visibleChartData[previousId(sourceDefinition.id)]?.points ?? [];
+      const tableIncludesPrevious =
+        showPreviousPeriod && previousPoints.length > 0;
       const table: ReportTable = {
         columns: [
+          ...(tableIncludesPrevious
+            ? [{ key: "series", label: "Referência", width: 18 }]
+            : []),
           { key: "period", label: "Período", width: 24 },
           { key: "current", label: "Atual", numeric: true, width: 16 },
           ...(visibility.average
@@ -2097,13 +2277,28 @@ export function OccupancyReportsDashboard({
             : []),
         ],
         description: definition.description,
-        rows: points.map((point) => ({
-          average: point.average,
-          current: point.current,
-          minimum: point.minimum,
-          peak: point.peak,
-          period: point.label,
-        })),
+        rows: [
+          ...points.map((point) => ({
+            average: point.average,
+            current: point.current,
+            minimum: point.minimum,
+            peak: point.peak,
+            period: point.label,
+            ...(tableIncludesPrevious
+              ? { series: "Período analisado" }
+              : {}),
+          })),
+          ...(tableIncludesPrevious
+            ? previousPoints.map((point) => ({
+                average: point.average,
+                current: null,
+                minimum: point.minimum,
+                peak: point.peak,
+                period: point.label,
+                series: "Base comparativa",
+              }))
+            : []),
+        ],
         title: `Dados - ${title}`,
       };
       return {
@@ -2152,42 +2347,95 @@ export function OccupancyReportsDashboard({
         ),
       );
     });
-    const durationInsightChartsByCardId = new Map<string, ReportChart[]>();
+    const supplementalChartsByCardId = new Map<string, ReportChart[]>();
+    const registerSupplementalChart = (
+      cardId: string,
+      chart: ReportChart,
+      titleSuffix = "",
+    ) => {
+      const title = `${resolveReportCardTitle(cardId, chart.title)}${titleSuffix}`;
+      const charts = supplementalChartsByCardId.get(cardId) ?? [];
+      charts.push({
+        ...chart,
+        table: {
+          ...chart.table,
+          title: `Dados - ${title}`,
+        },
+        title,
+      });
+      supplementalChartsByCardId.set(cardId, charts);
+    };
+    comparisonReportSnapshot.reportAssets.forEach(({ cardId, chart }) => {
+      registerSupplementalChart(cardId, chart);
+    });
+    durationReportSnapshot.reportAssets.forEach(
+      ({ cardId, chart, titleSuffix = "" }) => {
+        registerSupplementalChart(cardId, chart, titleSuffix);
+      },
+    );
     occupancyDurationInsights.reportAssets.forEach(
       ({ cardId, chart, titleSuffix = "" }) => {
-        const title = `${resolveReportCardTitle(cardId, chart.title)}${titleSuffix}`;
-        const charts = durationInsightChartsByCardId.get(cardId) ?? [];
-        charts.push({
-          ...chart,
-          table: {
-            ...chart.table,
-            title: `Dados - ${title}`,
-          },
-          title,
-        });
-        durationInsightChartsByCardId.set(cardId, charts);
+        registerSupplementalChart(cardId, chart, titleSuffix);
       },
     );
     loiteringReportAssets.forEach(
       ({ cardId, chart, titleSuffix = "" }) => {
-        const title = `${resolveReportCardTitle(cardId, chart.title)}${titleSuffix}`;
-        const charts = durationInsightChartsByCardId.get(cardId) ?? [];
-        charts.push({
-          ...chart,
-          table: {
-            ...chart.table,
-            title: `Dados - ${title}`,
-          },
-          title,
-        });
-        durationInsightChartsByCardId.set(cardId, charts);
+        registerSupplementalChart(cardId, chart, titleSuffix);
       },
+    );
+    const supplementalTables: ReportTable[] = [];
+    if (
+      orderedVisibleReportCardIds.includes("occupancy_scenario_detail") &&
+      selectedScope?.scenario &&
+      visibleCurrentSnapshot
+    ) {
+      const areaValueByIdentity = new Map(
+        visibleCurrentSnapshot.areas.map((area) => [
+          JSON.stringify([area.cameraId, area.areaId]),
+          area.value,
+        ]),
+      );
+      supplementalTables.push({
+        columns: [
+          { key: "area", label: "Área", width: 32 },
+          { key: "occupancy", label: "Ocupação", numeric: true, width: 18 },
+          { key: "status", label: "Estado", width: 20 },
+        ],
+        description: `Leitura final certificada em ${formatDateTime(visibleCurrentSnapshot.asOf, companyTimeZone)}.`,
+        rows: selectedScope.scenario.areas.map((area, index) => {
+          const value = areaValueByIdentity.get(
+            JSON.stringify([area.camera_id, area.area_id]),
+          );
+          return {
+            area: area.label || `Área ${index + 1}`,
+            occupancy: value ?? null,
+            status:
+              value === undefined
+                ? "Sem leitura"
+                : value > 0
+                  ? "Ocupada"
+                  : "Desocupada",
+          };
+        }),
+        title: `Dados - ${resolveReportCardTitle("occupancy_scenario_detail", "Cenário de ocupação")}`,
+      });
+    }
+
+    const payloadDataCompleteUntil = mergeOccupancyDataCompleteUntil(
+      coreReportDataCompleteUntil,
+      mergeOccupancyDataCompleteUntil(
+        comparisonReportSnapshot.dataCompleteUntil,
+        mergeOccupancyDataCompleteUntil(
+          durationReportSnapshot.dataCompleteUntil,
+          occupancyDurationInsights.dataCompleteUntil,
+        ),
+      ),
     );
 
     return {
       charts: orderedVisibleReportCardIds.flatMap((id) => {
-        const durationCharts = durationInsightChartsByCardId.get(id);
-        if (durationCharts) return durationCharts;
+        const supplementalCharts = supplementalChartsByCardId.get(id);
+        if (supplementalCharts) return supplementalCharts;
         const chart = exportChartByCardId.get(id);
         return chart ? [chart] : [];
       }),
@@ -2205,13 +2453,15 @@ export function OccupancyReportsDashboard({
         occupancyDurationAnalysisPeriod
           ? `Tempo ocupado detalhado: ${occupancyDurationAnalysisPeriod.contextLabel}.`
           : "",
+        ...durationReportSnapshot.reportContext,
+        ...durationReportSnapshot.reportWarnings,
         loiteringReportAssets.length && occupancyLoiteringPeriod
-          ? `Permanência: ${occupancyLoiteringPeriod.contextLabel}; sessões concluídas e estatísticas de duração por área.`
+          ? `Permanência: ${occupancyLoiteringPeriod.contextLabel}; registros concluídos e estatísticas de duração por área.`
           : "",
       ].filter(Boolean),
-      dataCompleteUntil: reportDataCompleteUntil,
+      dataCompleteUntil: payloadDataCompleteUntil,
       filename: `ipxdata-ocupacao-${analysis ? "analise" : "relatorio"}-${occupancyReportDateSlug(
-        reportDataCompleteUntil ?? clock,
+        payloadDataCompleteUntil ?? clock,
       )}`,
       generatedAt: clock,
       metrics: orderedVisibleReportCardIds
@@ -2220,7 +2470,7 @@ export function OccupancyReportsDashboard({
       subtitle: analysis
         ? `Intervalo ${formatOccupancyAnalysisRangeLabel(analysisRangeInput)}`
         : "Séries históricas e leitura atual da visão selecionada.",
-      tables: [],
+      tables: supplementalTables,
       timeZone: companyTimeZone,
       title: selectedScope
         ? `${analysis ? "Análise" : "Relatório"} de Ocupação - ${selectedScope.name}`
@@ -2237,10 +2487,34 @@ export function OccupancyReportsDashboard({
     // fonte não pode virar silenciosamente um PDF/Excel sem os cards visíveis.
     // Quando nenhum card de permanência foi solicitado, o hook retorna [] sem
     // efetuar requisição e o restante do relatório segue normalmente.
-    const loiteringReportAssets =
-      await occupancyLoitering.loadReportAssets(signal);
+    const [
+      loiteringReportAssets,
+      comparisonReportSnapshot,
+      durationReportSnapshot,
+    ] = await Promise.all([
+      occupancyLoitering.loadReportAssets(signal),
+      analysis
+        ? occupancyAnalysisComparison.loadReportSnapshot(signal)
+        : Promise.resolve<OccupancyComparisonReportSnapshot>({
+            dataCompleteUntil: undefined,
+            reportAssets: [],
+          }),
+      analysis
+        ? occupancyAnalysisDuration.loadReportSnapshot(signal)
+        : Promise.resolve<OccupancyDurationReportSnapshot>({
+            dataCompleteUntil: undefined,
+            reportAssets: [],
+            reportContext: [],
+            reportMetrics: [],
+            reportWarnings: [],
+          }),
+    ]);
     signal?.throwIfAborted();
-    return buildOccupancyReportPayload(loiteringReportAssets);
+    return buildOccupancyReportPayload(
+      loiteringReportAssets,
+      comparisonReportSnapshot,
+      durationReportSnapshot,
+    );
   }
 
   function buildOccupancyDailyAiTableFromVisibleData(
@@ -2456,6 +2730,8 @@ export function OccupancyReportsDashboard({
             setReportRequested(true);
             setDurationAnalysisCutoff(refreshAt);
             if (analysis) {
+              refreshOccupancyAnalysisComparison();
+              refreshOccupancyAnalysisDuration();
               refreshOccupancyDurationInsights();
             }
             refreshOccupancyLoitering();
@@ -3088,7 +3364,7 @@ function occupancyAnalysisCustomMetricPresentation(
   if (metric === "active_areas") {
     return {
       description: snapshot
-        ? "Áreas ocupadas na última leitura certificada do período."
+        ? "Áreas com contagem positiva na última leitura certificada do período."
         : snapshotUnavailable,
       icon: UsersRound,
       tone: "primary",
@@ -3130,6 +3406,79 @@ function mergeOccupancyDataCompleteUntil(
   if (supplemental === undefined) return primary;
   if (primary === null || supplemental === null) return null;
   return new Date(Math.min(primary.getTime(), supplemental.getTime()));
+}
+
+function OccupancyHistoricalScenarioDetailCard({
+  error,
+  loading,
+  scenario,
+  snapshot,
+  timeZone,
+}: {
+  error: string;
+  loading: boolean;
+  scenario: OccupancyScenario;
+  snapshot: CertifiedCurrentSnapshot | null;
+  timeZone: string;
+}) {
+  const valueByArea = new Map(
+    (snapshot?.areas ?? []).map((area) => [
+      JSON.stringify([area.cameraId, area.areaId]),
+      area.value,
+    ]),
+  );
+
+  return (
+    <Card className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+      <CardHeader className="min-w-0 pb-2">
+        <CardTitle className="min-w-0 [overflow-wrap:anywhere]">
+          <WidgetTitleText fallback="Cenário de ocupação" />
+        </CardTitle>
+        <CardDescription className="line-clamp-2 [overflow-wrap:anywhere]">
+          {snapshot
+            ? `Fechamento em ${formatDateTime(snapshot.asOf, timeZone)} · ${occupancyObjectClassLabel(scenario.object_class)}`
+            : "Composição e leitura final das áreas no período selecionado."}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden pt-0">
+        {loading && !snapshot ? (
+          <Skeleton className="min-h-28 w-full flex-1" />
+        ) : error || !snapshot ? (
+          <div className="flex min-h-24 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/20 px-3 text-center text-xs text-muted-foreground">
+            Leitura de fechamento indisponível para este período.
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto rounded-md border border-border/70">
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 border-b border-border/70 bg-muted/25 px-3 py-2 text-xs font-semibold">
+              <span>Área</span>
+              <span className="text-right">Ocupação</span>
+            </div>
+            {scenario.areas.map((area, index) => {
+              const value = valueByArea.get(
+                JSON.stringify([area.camera_id, area.area_id]),
+              );
+              return (
+                <div
+                  className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 border-b border-border/50 px-3 py-2 text-xs last:border-b-0"
+                  key={`${area.camera_id}:${area.area_id}`}
+                >
+                  <span
+                    className="truncate"
+                    title={area.label || `Área ${index + 1}`}
+                  >
+                    {area.label || `Área ${index + 1}`}
+                  </span>
+                  <span className="font-semibold tabular-nums">
+                    {value === undefined ? "—" : formatOccupancyValue(value)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function MetricCard({
@@ -3789,9 +4138,23 @@ async function loadOccupancyReportState(
             from: instantFrom,
             to: instantTo,
           });
-          const metric = buildRowsMetric(rows);
+          const currentWindow = {
+            from: instantFrom,
+            open:
+              segment.openBucket?.getTime() === bucketStart.getTime(),
+            to: instantTo,
+          };
+          const metric = buildRowsMetric(rows, currentWindow);
           const sourceAsOf = rows.reduce<string | undefined>((latest, row) => {
-            if (!row.current_at) return latest;
+            if (
+              !currentWindow.open ||
+              !occupancyCurrentReadingBelongsToWindow(
+                row.current_at,
+                currentWindow,
+              )
+            ) {
+              return latest;
+            }
             if (!latest) return row.current_at;
             return Date.parse(row.current_at) > Date.parse(latest)
               ? row.current_at
@@ -3988,7 +4351,10 @@ function joinOccupancyWarnings(...warnings: Array<string | undefined>) {
   return unique.join(" ") || undefined;
 }
 
-function buildRowsMetric(rows: CertifiedOccupancyRow[]): OccupancyReportMetric {
+function buildRowsMetric(
+  rows: CertifiedOccupancyRow[],
+  currentWindow?: { from: Date; open: boolean; to: Date },
+): OccupancyReportMetric {
   if (rows.length !== 1 || rows[0].area !== undefined) {
     throw new Error(
       "O total do período não está disponível para esta seleção. Uma área isolada, ou os extremos de várias áreas, não representa o total combinado.",
@@ -3998,10 +4364,26 @@ function buildRowsMetric(rows: CertifiedOccupancyRow[]): OccupancyReportMetric {
 
   return {
     average: roundValue(row.avg),
-    current: roundValue(row.current_value),
+    current:
+      currentWindow?.open &&
+      occupancyCurrentReadingBelongsToWindow(row.current_at, currentWindow)
+        ? roundValue(row.current_value)
+        : null,
     minimum: roundValue(row.min),
     peak: roundValue(row.peak),
   };
+}
+
+function occupancyCurrentReadingBelongsToWindow(
+  currentAt: string,
+  window: { from: Date; to: Date },
+) {
+  const timestamp = Date.parse(currentAt);
+  return (
+    Number.isFinite(timestamp) &&
+    timestamp >= window.from.getTime() &&
+    timestamp < window.to.getTime()
+  );
 }
 
 function buildOccupancyReportChartOption(
@@ -5016,6 +5398,81 @@ function occupancyScenarioAggregatePath(
 function occupancyScenarioHistoryPath(scenarioId: string, at: Date) {
   const params = new URLSearchParams({ at: at.toISOString() });
   return `/occupancy/scenarios/${encodeURIComponent(scenarioId)}/history?${params.toString()}`;
+}
+
+async function loadOccupancyReportCurrentSnapshot({
+  companyScopeId,
+  requestedAt,
+  scenario,
+  scheduleQuery,
+  signal,
+}: {
+  companyScopeId: string;
+  requestedAt: Date;
+  scenario: OccupancyScenario;
+  scheduleQuery: OccupancyQueryScheduler;
+  signal: AbortSignal;
+}): Promise<CertifiedCurrentSnapshot> {
+  const query = occupancyLiveSnapshotQuery({ now: requestedAt });
+  const response = await scheduleQuery(`current-snapshot:${query.path}`, () =>
+    apiFetch<unknown>(query.path, { companyScopeId, signal }),
+  );
+  signal.throwIfAborted();
+  const rows = requireOccupancyCurrentSnapshotRows(response, {
+    expectedAreas: scenario.areas.map((area) => ({
+      area_id: area.area_id,
+      camera_id: area.camera_id,
+      object_class: scenario.object_class,
+    })),
+  });
+  if (!occupancyScenarioSnapshotHasCompleteCoverage(scenario, rows)) {
+    const historyPath = occupancyScenarioHistoryPath(
+      scenario.id,
+      requestedAt,
+    );
+    const historyResponse = await scheduleQuery(
+      `current-history:${historyPath}`,
+      () => apiFetch<unknown>(historyPath, { companyScopeId, signal }),
+    );
+    signal.throwIfAborted();
+    const history = requireOccupancyHistoryResponse(
+      historyResponse,
+      scenario.id,
+      {
+        expectedAreas: scenario.areas,
+        requireAreaSnapshots: true,
+        requestedAt,
+      },
+    );
+    if (!history.areas || !history.as_of) {
+      throw new Error("A leitura atual não possui detalhes certificados.");
+    }
+    return {
+      activeAreas: history.areas.filter((area) => area.value > 0).length,
+      areas: history.areas.map((area) => ({
+        areaId: area.area_id,
+        cameraId: area.camera_id,
+        value: area.value,
+      })),
+      asOf: history.as_of,
+      total: history.total,
+    };
+  }
+  const snapshot = buildOccupancyScenarioSnapshotValue(scenario, rows);
+  if (!snapshot.asOf) {
+    throw new Error("A leitura atual não possui horário certificado.");
+  }
+
+  return {
+    activeAreas: rows.filter((row) => row.occupied).length,
+    areas: rows.map((row) => ({
+      areaId: row.area,
+      cameraId: row.camera_id,
+      value: row.current_value,
+    })),
+    asOf: snapshot.asOf,
+    total: snapshot.total,
+  };
 }
 
 function occupancyPath(from: Date, to: Date) {

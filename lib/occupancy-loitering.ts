@@ -299,6 +299,15 @@ export function requireOccupancyLoiteringSummaryRows(
       session_count: count,
     });
   });
+  if (
+    expectedClassesByPair &&
+    response.data.length > 0 &&
+    rows.length === 0
+  ) {
+    throw new RangeError(
+      "As permanências disponíveis não correspondem às áreas configuradas nos cenários selecionados.",
+    );
+  }
   return rows;
 }
 
@@ -308,6 +317,7 @@ export function requireOccupancyLoiteringSummaryRows(
  */
 export function requireOccupancyLoiteringSessionRows(
   value: unknown,
+  expectedAreas?: readonly OccupancyLoiteringExpectedArea[],
 ): OccupancyLoiteringSessionRow[] {
   const response = requireRecordWithFields(
     value,
@@ -320,7 +330,7 @@ export function requireOccupancyLoiteringSessionRows(
     );
   }
 
-  return Array.from(response.data, (candidate, index) => {
+  const rows = Array.from(response.data, (candidate, index) => {
     const row = requireRecordWithFields(
       candidate,
       SESSION_ROW_KEYS,
@@ -359,6 +369,28 @@ export function requireOccupancyLoiteringSessionRows(
         right.instant - left.instant || left.index - right.index,
     )
     .map(({ row }) => row);
+  if (expectedAreas === undefined) return rows;
+
+  const expectedKeys = new Set(
+    expectedAreas.map((area) =>
+      occupancyLoiteringKey(
+        area.cameraId,
+        area.area,
+        area.objectClass,
+      ),
+    ),
+  );
+  const selected = rows.filter((row) =>
+    expectedKeys.has(
+      occupancyLoiteringKey(row.camera_id, row.area, row.object_class),
+    ),
+  );
+  if (rows.length > 0 && selected.length === 0) {
+    throw new RangeError(
+      "As permanências disponíveis não correspondem às áreas configuradas nos cenários selecionados.",
+    );
+  }
+  return selected;
 }
 
 /**

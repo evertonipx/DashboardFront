@@ -47,6 +47,10 @@ import {
   useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
 import type { ReportPayload } from "@/lib/report-export";
+import {
+  abortPendingRequestsAfterFailure,
+  abortRequest,
+} from "@/lib/request-cancellation";
 import type { CurrentUser } from "@/lib/types";
 
 export type AiAnalysisActionProps = {
@@ -285,9 +289,14 @@ export function AiAnalysisAction({
       toast.success("Insights gerados para esta visão.");
       window.requestAnimationFrame(() => resultHeadingRef.current?.focus());
     } catch (error) {
+      const requestWasAborted = abortPendingRequestsAfterFailure(
+        controller,
+        error,
+        "A geração dos insights falhou; as consultas pendentes foram canceladas.",
+      );
       if (
         analysisRequestSequence.current !== requestId ||
-        isAbortError(error, controller.signal)
+        requestWasAborted
       ) {
         return;
       }
@@ -498,15 +507,7 @@ function toUiError(error: unknown, fallback: string) {
 
 function abortAnalysis(controller: AbortController | null, message: string) {
   if (!controller || controller.signal.aborted) return;
-  controller.abort(new DOMException(message, "AbortError"));
-}
-
-function isAbortError(error: unknown, signal: AbortSignal) {
-  return (
-    signal.aborted ||
-    (error instanceof DOMException && error.name === "AbortError") ||
-    (error instanceof Error && error.name === "AbortError")
-  );
+  abortRequest(controller, message);
 }
 
 function formatLatestReportDateTime(report: AiInsightsReport) {

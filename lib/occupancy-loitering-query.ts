@@ -1,8 +1,6 @@
 "use client";
 
 import {
-  combineOccupancyLoiteringSummaryRows,
-  occupancyLoiteringKey,
   requireOccupancyLoiteringSessionRows,
   requireOccupancyLoiteringSummaryRows,
   type OccupancyLoiteringExpectedArea,
@@ -19,8 +17,6 @@ import { fetchSharedOccupancyQuery } from "@/lib/occupancy-shared-query";
 const LIVE_SUMMARY_CACHE_TTL_MS = 4_000;
 const HISTORICAL_SUMMARY_CACHE_TTL_MS = 5 * 60_000;
 const SESSION_CACHE_TTL_MS = 60_000;
-const LIVE_MUTABLE_TAIL_MS = 5 * 60_000;
-const LIVE_FULL_RECONCILIATION_MS = 6 * 60 * 60_000;
 const FULL_SESSION_PERIOD_MAX_MS = 31 * 24 * 60 * 60_000;
 
 type OccupancyLoiteringPeriod = {
@@ -32,18 +28,6 @@ type OccupancyLoiteringQueryScope = OccupancyLoiteringPeriod & {
   companyScopeId: string;
   signal?: AbortSignal;
   timeZone: string;
-};
-
-export type OccupancyLoiteringLiveSummaryState = {
-  identity: string;
-  reconciledAt: number;
-  stableRows: OccupancyLoiteringSummaryRow[];
-  stableTo: number;
-};
-
-export type OccupancyLoiteringLiveSummaryResult = {
-  rows: OccupancyLoiteringSummaryRow[];
-  state: OccupancyLoiteringLiveSummaryState;
 };
 
 export async function fetchOccupancyLoiteringSummary({
@@ -79,108 +63,17 @@ export async function fetchOccupancyLoiteringSummary({
   return requireOccupancyLoiteringSummaryRows(response, expectedAreas);
 }
 
-/**
- * Keeps the growing civil-day prefix out of the five-second polling path.
- * Only the mutable five-minute tail is reread; newly closed minutes are
- * promoted once into the weighted prefix. A periodic/full manual
- * reconciliation absorbs late backend corrections without scanning the day
- * on every pulse.
- */
-export async function fetchLiveOccupancyLoiteringSummary({
-  companyScopeId,
-  expectedAreas,
-  from,
-  previous = null,
-  reconcile = false,
-  signal,
-  timeZone,
-  to,
-}: OccupancyLoiteringQueryScope & {
-  expectedAreas?: readonly OccupancyLoiteringExpectedArea[];
-  previous?: OccupancyLoiteringLiveSummaryState | null;
-  reconcile?: boolean;
-}): Promise<OccupancyLoiteringLiveSummaryResult> {
-  requireValidPeriod(from, to);
-  const identity = liveSummaryIdentity({
-    companyScopeId,
-    expectedAreas,
-    from,
-    timeZone,
-  });
-  const stableTo = liveStablePrefixEnd(from, to);
-  const reusable = Boolean(
-    previous &&
-      previous.identity === identity &&
-      previous.stableTo >= from.getTime() &&
-      previous.stableTo <= stableTo.getTime() &&
-      previous.reconciledAt <= to.getTime() &&
-      to.getTime() - previous.reconciledAt < LIVE_FULL_RECONCILIATION_MS &&
-      !reconcile,
-  );
-
-  const fetchRange = (
-    rangeFrom: Date,
-    rangeTo: Date,
-    bypassCache = false,
-  ) => rangeTo > rangeFrom
-    ? fetchOccupancyLoiteringSummary({
-        bypassCache,
-        companyScopeId,
-        expectedAreas,
-        from: rangeFrom,
-        live: true,
-        signal,
-        timeZone,
-        to: rangeTo,
-      })
-    : Promise.resolve([] as OccupancyLoiteringSummaryRow[]);
-
-  let stableRows: OccupancyLoiteringSummaryRow[];
-  let tailRows: OccupancyLoiteringSummaryRow[];
-  let reconciledAt: number;
-  if (!reusable) {
-    [stableRows, tailRows] = await Promise.all([
-      fetchRange(from, stableTo, reconcile),
-      fetchRange(stableTo, to, reconcile),
-    ]);
-    reconciledAt = to.getTime();
-  } else {
-    const cached = previous!;
-    const [promotionRows, nextTailRows] = await Promise.all([
-      fetchRange(new Date(cached.stableTo), stableTo),
-      fetchRange(stableTo, to),
-    ]);
-    stableRows = promotionRows.length
-      ? combineOccupancyLoiteringSummaryRows([
-          cached.stableRows,
-          promotionRows,
-        ])
-      : cached.stableRows;
-    tailRows = nextTailRows;
-    reconciledAt = cached.reconciledAt;
-  }
-
-  signal?.throwIfAborted();
-  return {
-    rows: combineOccupancyLoiteringSummaryRows([stableRows, tailRows]),
-    state: {
-      identity,
-      reconciledAt,
-      stableRows,
-      stableTo: stableTo.getTime(),
-    },
-  };
-}
-
 export async function fetchOccupancyLoiteringSessions({
   bypassCache = false,
   companyScopeId,
+  expectedAreas,
   from,
   signal,
   timeZone,
   to,
 }: OccupancyLoiteringQueryScope & {
   bypassCache?: boolean;
+  expectedAreas?: readonly OccupancyLoiteringExpectedArea[];
 }): Promise<OccupancyLoiteringSessionRow[]> {
   const path = occupancyLoiteringPath("sessions", {
     from,
@@ -196,7 +89,7 @@ export async function fetchOccupancyLoiteringSessions({
     signal,
     timeZone,
   });
-  const rows = requireOccupancyLoiteringSessionRows(response);
+  const rows = requireOccupancyLoiteringSessionRows(response, expectedAreas);
   const fromTime = from.getTime();
   const toTime = to.getTime();
   if (
@@ -293,35 +186,4 @@ function requireValidPeriod(from: Date, to: Date) {
   ) {
     throw new Error("O período de permanência selecionado é inválido.");
   }
-}
-
-function liveStablePrefixEnd(from: Date, to: Date) {
-  const closedMinute = Math.floor(to.getTime() / 60_000) * 60_000;
-  return new Date(
-    Math.max(from.getTime(), closedMinute - LIVE_MUTABLE_TAIL_MS),
-  );
-}
-
-function liveSummaryIdentity({
-  companyScopeId,
-  expectedAreas,
-  from,
-  timeZone,
-}: Omit<OccupancyLoiteringQueryScope, "signal" | "to"> & {
-  expectedAreas?: readonly OccupancyLoiteringExpectedArea[];
-}) {
-  return JSON.stringify([
-    companyScopeId.trim(),
-    timeZone.trim(),
-    from.getTime(),
-    expectedAreas === undefined
-      ? null
-      : Array.from(
-          new Set(
-            expectedAreas.map(({ area: expectedArea, cameraId: expectedCameraId, objectClass }) =>
-              occupancyLoiteringKey(expectedCameraId, expectedArea, objectClass),
-            ),
-          ),
-        ).sort(),
-  ]);
 }

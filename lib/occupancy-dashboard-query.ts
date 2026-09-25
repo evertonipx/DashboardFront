@@ -90,6 +90,7 @@ const OCCUPANCY_LIVE_HISTORY_CARD_IDS = new Set([
   "occupancy_current_total",
   "occupancy_active_areas",
   "occupancy_scenario_detail",
+  "occupancy_duration_transitions",
 ]);
 
 const OCCUPANCY_LIVE_HISTORY_CUSTOM_METRICS = new Set([
@@ -151,7 +152,11 @@ export function buildOccupancyReportResourcePlan({
     visible("occupancy_report_minimum");
   return {
     comparisonDefinitionIds: definitionIds.filter(visible).sort().join("|"),
-    currentSnapshot: hasScenario && visible("occupancy_report_current"),
+    currentSnapshot:
+      hasScenario &&
+      (visible("occupancy_report_current") ||
+        visible("occupancy_active_areas") ||
+        visible("occupancy_scenario_detail")),
     definitionIds: definitionIds.filter((id) => visible(id) ||
       (id === "occupancy_report_day" && needsDailyMetrics)).sort().join("|"),
   };

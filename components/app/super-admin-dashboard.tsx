@@ -20,6 +20,7 @@ import {
 import { toast } from "sonner";
 
 import { DeferredAiInsightsDashboard as AiInsightsDashboard } from "@/components/app/deferred-route-panels";
+import { CompanyBrandingEditor } from "@/components/app/company-branding-editor";
 import { CompanyTimeZoneSelect } from "@/components/app/company-time-zone-select";
 import { useAuth } from "@/components/app/auth-provider";
 import { UserAccessGrid } from "@/components/app/user-access-grid";
@@ -74,6 +75,11 @@ import {
   normalizeCompanyRecord,
   writeCompanyCache,
 } from "@/lib/company-cache";
+import {
+  companyBrandingFileError,
+  uploadCompanyBranding,
+  type CompanyBrandingKind,
+} from "@/lib/company-branding";
 import { canonicalCompanyTimeZone } from "@/lib/company-time-zone";
 import {
   enabledCompanyAdminGrantSlugs,
@@ -142,6 +148,8 @@ type Company = {
   plan?: string | null;
   timezone?: string | null;
   user_limit?: number | null;
+  logo_url?: string | null;
+  banner_url?: string | null;
   active: boolean;
   created_at?: string;
   updated_at?: string;
@@ -394,6 +402,8 @@ export function SuperAdminDashboard() {
     React.useState<ManagedUser | null>(null);
   const [companyForm, setCompanyForm] =
     React.useState<CompanyFormState>(emptyCompanyForm);
+  const [companyLogoFile, setCompanyLogoFile] = React.useState<File | null>(null);
+  const [companyBannerFile, setCompanyBannerFile] = React.useState<File | null>(null);
   const [userForm, setUserForm] = React.useState<UserFormState>(emptyUserForm);
   const [userProfileDirty, setUserProfileDirty] = React.useState(false);
   const [masterUserForm, setMasterUserForm] =
@@ -1530,6 +1540,8 @@ export function SuperAdminDashboard() {
   ]);
 
   function openCompany(company?: Company) {
+    setCompanyLogoFile(null);
+    setCompanyBannerFile(null);
     setEditingCompany(company ?? null);
     setCompanyForm(
       company
@@ -1545,6 +1557,34 @@ export function SuperAdminDashboard() {
         : emptyCompanyForm,
     );
     setCompanyDialog(true);
+  }
+
+  function handleCompanyDialogOpenChange(open: boolean) {
+    setCompanyDialog(open);
+    if (open) return;
+
+    setEditingCompany(null);
+    setCompanyLogoFile(null);
+    setCompanyBannerFile(null);
+  }
+
+  function selectCompanyBrandingFile(
+    kind: CompanyBrandingKind,
+    file: File | null,
+  ) {
+    if (file) {
+      const validationError = companyBrandingFileError(file, kind);
+      if (validationError) {
+        toast.error(validationError);
+        return;
+      }
+    }
+
+    if (kind === "logo") {
+      setCompanyLogoFile(file);
+      return;
+    }
+    setCompanyBannerFile(file);
   }
 
   function openUser(user?: ManagedUser) {
@@ -2161,10 +2201,14 @@ export function SuperAdminDashboard() {
       toast.error("Nome da empresa obrigatório.");
       return;
     }
+    if (name.length > 255) {
+      toast.error("O nome da empresa deve ter no máximo 255 caracteres.");
+      return;
+    }
 
     const userLimit = Number(companyForm.user_limit);
-    if (!Number.isFinite(userLimit) || userLimit < 1) {
-      toast.error("Limite de usuários deve ser maior que zero.");
+    if (!Number.isInteger(userLimit) || userLimit < 1) {
+      toast.error("O limite de usuários deve ser um número inteiro maior que zero.");
       return;
     }
 
@@ -2174,6 +2218,12 @@ export function SuperAdminDashboard() {
       return;
     }
 
+    const wasEditing = Boolean(editingCompany);
+    const hasPendingBranding = Boolean(companyLogoFile || companyBannerFile);
+    let metadataSaved = false;
+    let brandingKindInProgress: CompanyBrandingKind | null = null;
+    let savedCompany: Company | null = null;
+
     setSaving(true);
     try {
       const body = {
@@ -2182,7 +2232,7 @@ export function SuperAdminDashboard() {
         cnpj: companyForm.cnpj.trim() || undefined,
         plan: companyForm.plan,
         timezone: timeZone,
-        user_limit: Math.trunc(userLimit),
+        user_limit: userLimit,
         ...(editingCompany
           ? { active: companyForm.active === "true" }
           : undefined),
@@ -2197,15 +2247,14 @@ export function SuperAdminDashboard() {
             body,
           },
         );
-        publishSavedCompany({
+        savedCompany = {
           ...editingCompany,
           ...(response ?? {}),
           ...body,
           id: editingCompany.id,
           name,
           timezone: timeZone,
-        });
-        toast.success("Empresa atualizada.");
+        };
       } else {
         const response = await apiFetch<Company>("/companies", {
           method: "POST",
@@ -2214,7 +2263,7 @@ export function SuperAdminDashboard() {
         if (!response?.id?.trim()) {
           throw new Error("A empresa foi salva sem uma identidade válida.");
         }
-        const company: Company = {
+        savedCompany = {
           ...response,
           ...body,
           id: response.id,
@@ -2222,23 +2271,73 @@ export function SuperAdminDashboard() {
           timezone: timeZone,
           active: response.active ?? true,
         };
-        publishSavedCompany(company);
-        selectCompanyId(company.id);
-        setStoredMasterCompanyScope({
-          id: company.id,
-          name: company.name,
-          timezone: company.timezone,
-          trade_name: company.trade_name ?? null,
-        });
-        toast.success("Empresa criada.");
       }
 
-      setCompanyDialog(false);
+      metadataSaved = true;
+      publishSavedCompany(savedCompany);
+      setEditingCompany(savedCompany);
+
+      if (!wasEditing) {
+        selectCompanyId(savedCompany.id);
+        setStoredMasterCompanyScope({
+          id: savedCompany.id,
+          name: savedCompany.name,
+          timezone: savedCompany.timezone,
+          trade_name: savedCompany.trade_name ?? null,
+        });
+      }
+
+      const pendingBranding: Array<{
+        file: File | null;
+        kind: CompanyBrandingKind;
+      }> = [
+        { file: companyLogoFile, kind: "logo" },
+        { file: companyBannerFile, kind: "banner" },
+      ];
+
+      for (const { file, kind } of pendingBranding) {
+        if (!file) continue;
+
+        brandingKindInProgress = kind;
+        const branding = await uploadCompanyBranding({
+          companyId: savedCompany.id,
+          file,
+          kind,
+        });
+        const responseUrl: string =
+          branding.url ||
+          `/api/v1/companies/${encodeURIComponent(savedCompany.id)}/${kind}`;
+        savedCompany = {
+          ...savedCompany,
+          [kind === "logo" ? "logo_url" : "banner_url"]: responseUrl,
+        };
+        publishSavedCompany(savedCompany);
+        setEditingCompany(savedCompany);
+        if (kind === "logo") setCompanyLogoFile(null);
+        else setCompanyBannerFile(null);
+        brandingKindInProgress = null;
+      }
+
+      toast.success(
+        wasEditing
+          ? hasPendingBranding
+            ? "Empresa e identidade visual atualizadas."
+            : "Empresa atualizada."
+          : hasPendingBranding
+            ? "Empresa criada com identidade visual."
+            : "Empresa criada.",
+      );
+      handleCompanyDialogOpenChange(false);
       await loadCompanies();
     } catch (error) {
-      toast.error(
-        managementErrorMessage(error, "Não foi possível salvar a empresa."),
-      );
+      if (metadataSaved && brandingKindInProgress) {
+        toast.error(companyBrandingSaveErrorMessage(error, brandingKindInProgress));
+        await loadCompanies();
+      } else {
+        toast.error(
+          managementErrorMessage(error, "Não foi possível salvar a empresa."),
+        );
+      }
     } finally {
       setSaving(false);
     }
@@ -3472,6 +3571,7 @@ export function SuperAdminDashboard() {
                         <TableHead>CNPJ</TableHead>
                         <TableHead>Plano</TableHead>
                         <TableHead>Status</TableHead>
+                        <TableHead>Identidade visual</TableHead>
                         <TableHead>Atualizado</TableHead>
                         <TableHead className="text-right">Ações</TableHead>
                       </TableRow>
@@ -3521,6 +3621,22 @@ export function SuperAdminDashboard() {
                           </TableCell>
                           <TableCell>
                             <StatusBadge active={company.active} />
+                          </TableCell>
+                          <TableCell>
+                            {company.logo_url?.trim() || company.banner_url?.trim() ? (
+                              <div className="flex flex-wrap gap-1">
+                                {company.logo_url?.trim() ? (
+                                  <Badge variant="secondary">Logo</Badge>
+                                ) : null}
+                                {company.banner_url?.trim() ? (
+                                  <Badge variant="secondary">Banner</Badge>
+                                ) : null}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">
+                                Não configurada
+                              </span>
+                            )}
                           </TableCell>
                           <TableCell className="whitespace-nowrap text-muted-foreground">
                             {formatDateTime(company.updated_at ?? company.created_at)}
@@ -4322,20 +4438,22 @@ export function SuperAdminDashboard() {
         </div>
       </section>
 
-      <Dialog open={companyDialog} onOpenChange={setCompanyDialog}>
-        <DialogContent className="sm:max-w-2xl">
+      <Dialog open={companyDialog} onOpenChange={handleCompanyDialogOpenChange}>
+        <DialogContent className="sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>
               {editingCompany ? "Editar empresa" : "Nova empresa"}
             </DialogTitle>
             <DialogDescription>
-              Dados da empresa e limites operacionais.
+              Dados da empresa, limites operacionais e identidade visual.
             </DialogDescription>
           </DialogHeader>
 
           <div className="grid gap-4 md:grid-cols-2">
             <FormField label="Nome">
               <Input
+                maxLength={255}
+                disabled={saving}
                 value={companyForm.name}
                 onChange={(event) =>
                   setCompanyForm((form) => ({ ...form, name: event.target.value }))
@@ -4344,6 +4462,7 @@ export function SuperAdminDashboard() {
             </FormField>
             <FormField label="Nome fantasia">
               <Input
+                disabled={saving}
                 value={companyForm.trade_name}
                 onChange={(event) =>
                   setCompanyForm((form) => ({
@@ -4358,6 +4477,7 @@ export function SuperAdminDashboard() {
           <div className="grid gap-4 md:grid-cols-2">
             <FormField label="CNPJ">
               <Input
+                disabled={saving}
                 value={companyForm.cnpj}
                 onChange={(event) =>
                   setCompanyForm((form) => ({ ...form, cnpj: event.target.value }))
@@ -4366,6 +4486,7 @@ export function SuperAdminDashboard() {
             </FormField>
             <FormField label="Plano">
               <Select
+                disabled={saving}
                 value={companyForm.plan}
                 onValueChange={(plan) =>
                   setCompanyForm((form) => ({ ...form, plan }))
@@ -4401,6 +4522,8 @@ export function SuperAdminDashboard() {
               <Input
                 type="number"
                 min={1}
+                step={1}
+                disabled={saving}
                 value={companyForm.user_limit}
                 onChange={(event) =>
                   setCompanyForm((form) => ({
@@ -4414,6 +4537,7 @@ export function SuperAdminDashboard() {
 
           {editingCompany ? (
             <StatusSelect
+              disabled={saving}
               value={companyForm.active}
               onValueChange={(active) =>
                 setCompanyForm((form) => ({ ...form, active }))
@@ -4421,17 +4545,28 @@ export function SuperAdminDashboard() {
             />
           ) : null}
 
+          <CompanyBrandingEditor
+            bannerFile={companyBannerFile}
+            companyId={editingCompany?.id}
+            disabled={saving}
+            hasBanner={Boolean(editingCompany?.banner_url?.trim())}
+            hasLogo={Boolean(editingCompany?.logo_url?.trim())}
+            logoFile={companyLogoFile}
+            onFileChange={selectCompanyBrandingFile}
+          />
+
           <DialogFooter>
             <Button
               type="button"
               variant="outline"
-              onClick={() => setCompanyDialog(false)}
+              onClick={() => handleCompanyDialogOpenChange(false)}
+              disabled={saving}
             >
               Cancelar
             </Button>
             <Button type="button" onClick={saveCompany} disabled={saving}>
               <Save className="h-4 w-4" />
-              Salvar
+              {saving ? "Salvando..." : "Salvar"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -4756,6 +4891,25 @@ function managementErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+function companyBrandingSaveErrorMessage(
+  error: unknown,
+  kind: CompanyBrandingKind,
+) {
+  const label = kind === "logo" ? "logo" : "banner";
+  if (error instanceof ApiError && error.status === 413) {
+    return `Os dados da empresa foram salvos, mas o ${label} excede o limite de 5 MB.`;
+  }
+  if (error instanceof ApiError && error.status === 415) {
+    return `Os dados da empresa foram salvos, mas o formato do ${label} não é compatível. Use PNG, JPEG, GIF ou WebP.`;
+  }
+
+  const detail = managementErrorMessage(
+    error,
+    `Não foi possível enviar o ${label}.`,
+  );
+  return `Os dados da empresa foram salvos. ${detail}`;
+}
+
 function ExecutiveStat({
   label,
   value,
@@ -4823,7 +4977,7 @@ function CompanySummary({
           </Button>
         </div>
       </div>
-      <dl className="mt-4 grid gap-x-6 gap-y-3 border-t border-border pt-3 text-sm sm:grid-cols-3">
+      <dl className="mt-4 grid gap-x-6 gap-y-3 border-t border-border pt-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
           <Detail
             label="Plano"
             value={planLabels[company.plan ?? ""] ?? "Personalizado"}
@@ -4835,12 +4989,25 @@ function CompanySummary({
             }
           />
           <Detail
+            label="Identidade visual"
+            value={companyBrandingStatus(company)}
+          />
+          <Detail
             label="Atualizado"
             value={formatDateTime(company.updated_at ?? company.created_at)}
           />
       </dl>
     </header>
   );
+}
+
+function companyBrandingStatus(company: Company) {
+  const hasLogo = Boolean(company.logo_url?.trim());
+  const hasBanner = Boolean(company.banner_url?.trim());
+  if (hasLogo && hasBanner) return "Logo e banner";
+  if (hasLogo) return "Somente logo";
+  if (hasBanner) return "Somente banner";
+  return "Não configurada";
 }
 
 function OperationalResourceWarningNotice({

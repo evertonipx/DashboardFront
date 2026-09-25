@@ -15,7 +15,7 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const echarts: typeof import("echarts") = require("echarts");
 const cardId = "occupancy_loitering_summary";
-const averageCardId = "occupancy_duration_average_by_scenario";
+const averageCardId = "occupancy_duration_average";
 const sessionCountCardId = "occupancy_loitering_session_count_by_area";
 const minimumCardId = "occupancy_loitering_minimum_by_area";
 const maximumCardId = "occupancy_loitering_maximum_by_area";
@@ -30,19 +30,20 @@ const durationDistributionCardId =
 const areaPeriodHeatmapCardId =
   "occupancy_loitering_area_period_heatmap";
 const summaryCardIds = [
-  averageCardId,
-  sessionCountCardId,
   minimumCardId,
   maximumCardId,
   rangeCardId,
 ] as const;
 const temporalCardIds = [
-  sessionsOverTimeCardId,
   averageOverTimeCardId,
   accumulatedSessionTimeCardId,
   percentilesByAreaCardId,
-  durationDistributionCardId,
   areaPeriodHeatmapCardId,
+] as const;
+const retiredSessionCountCardIds = [
+  sessionCountCardId,
+  sessionsOverTimeCardId,
+  durationDistributionCardId,
 ] as const;
 const baseLoiteringCardIds = [cardId, ...summaryCardIds] as const;
 const sessionCardIds = [cardId, ...temporalCardIds] as const;
@@ -50,9 +51,16 @@ const loiteringCardIds = [
   ...baseLoiteringCardIds,
   ...temporalCardIds,
 ] as const;
+const loiteringPreferenceIds = [
+  ...loiteringCardIds,
+  averageCardId,
+] as const;
 function loiteringPreferencesWithVisible(...visibleIds: string[]) {
   const visible = new Set(visibleIds);
-  return loiteringCardIds.map((id) => ({ id, visible: visible.has(id) }));
+  return loiteringPreferenceIds.map((id) => ({
+    id,
+    visible: visible.has(id),
+  }));
 }
 const certifiedSessionRows = [
   {
@@ -90,7 +98,7 @@ const temporalWidgetSource = source(
 const liveSource = source("components/app/occupancy-scenario-dashboard.tsx");
 const reportsSource = source("components/app/occupancy-reports-dashboard.tsx");
 
-test("os doze cards de permanência estão registrados no catálogo, Ao Vivo, Análises e Relatórios", () => {
+test("os oito cards de permanência úteis estão registrados e os contadores de sessões foram aposentados", () => {
   const load = createModuleLoader(projectRoot);
   const preferences = load<typeof import("../lib/view-preferences.ts")>(
     "lib/view-preferences.ts",
@@ -101,6 +109,13 @@ test("os doze cards de permanência estão registrados no catálogo, Ao Vivo, An
     assert.ok(
       occupancyMenu.cards.some((card) => card.id === id),
       `o organizador precisa persistir a preferência de ${id}`,
+    );
+  });
+  retiredSessionCountCardIds.forEach((id) => {
+    assert.equal(
+      occupancyMenu.cards.some((card) => card.id === id),
+      false,
+      `${id} não pode continuar disponível no organizador`,
     );
   });
   assert.match(
@@ -139,7 +154,7 @@ test("os doze cards de permanência estão registrados no catálogo, Ao Vivo, An
   );
 });
 
-test("visões antigas de Ocupação recebem os doze cards de permanência ocultos sem alterar os defaults novos", () => {
+test("visões novas e antigas recebem os oito cards ativos ocultos e preservam habilitação explícita", () => {
   const load = createModuleLoader(projectRoot);
   const preferences = load<typeof import("../lib/view-preferences.ts")>(
     "lib/view-preferences.ts",
@@ -165,13 +180,34 @@ test("visões antigas de Ocupação recebem os doze cards de permanência oculto
 
   const explicitlyEnabled = preferences.normalizeCardPreferences("occupancy", [
     { id: "occupancy_current_total", visible: true },
-    { id: sessionsOverTimeCardId, visible: true },
+    { id: averageOverTimeCardId, visible: true },
   ]);
   assert.equal(
-    explicitlyEnabled.find(({ id }) => id === sessionsOverTimeCardId)?.visible,
+    explicitlyEnabled.find(({ id }) => id === averageOverTimeCardId)?.visible,
     true,
     "uma preferência explícita nunca pode ser sobrescrita pela migração",
   );
+  retiredSessionCountCardIds.forEach((id) => {
+    assert.equal(
+      legacyById.has(id),
+      false,
+      `${id} precisa ser removido até de preferências históricas normalizadas`,
+    );
+  });
+
+  const retiredOnly = preferences.normalizeCardPreferences("occupancy", [
+    { id: retiredSessionCountCardIds[0], visible: true },
+  ]);
+  const retiredOnlyById = new Map(
+    retiredOnly.map((preference) => [preference.id, preference]),
+  );
+  loiteringCardIds.forEach((id) => {
+    assert.equal(
+      retiredOnlyById.get(id)?.visible,
+      false,
+      `${id} deve permanecer oculto quando a visão salva continha somente um card aposentado`,
+    );
+  });
 
   for (const emptyPreference of [undefined, []]) {
     const fresh = preferences.normalizeCardPreferences(
@@ -182,8 +218,8 @@ test("visões antigas de Ocupação recebem os doze cards de permanência oculto
     loiteringCardIds.forEach((id) => {
       assert.equal(
         freshById.get(id)?.visible,
-        true,
-        `${id} deve continuar visível numa visão nova`,
+        false,
+        `${id} deve nascer oculto numa visão nova até existir intenção explícita`,
       );
     });
   }
@@ -218,18 +254,18 @@ test("hidratação histórica pendente não abre o summary de permanência", asy
   }
 });
 
-test("widget temporal isolado consulta sessions uma vez sem abrir summary", async () => {
+test("widget temporal ativo isolado consulta sessions uma vez sem abrir summary", async () => {
   const fixture = createLoiteringHookFixture({
     preferences: [
       { id: cardId, visible: false },
       {
-        id: sessionsOverTimeCardId,
+        id: averageOverTimeCardId,
         scenarioIds: ["scenario-b"],
         scenarioSelectionMode: "custom",
         visible: true,
       },
     ],
-    requestedCardIds: new Set([sessionsOverTimeCardId]),
+    requestedCardIds: new Set([averageOverTimeCardId]),
   });
   try {
     await fixture.flush();
@@ -240,7 +276,7 @@ test("widget temporal isolado consulta sessions uma vez sem abrir summary", asyn
     assert.equal(fixture.timers.size, 1);
 
     const temporalCard = fixture.result.cards.find(
-      (candidate: RuntimeFixture) => candidate.id === sessionsOverTimeCardId,
+      (candidate: RuntimeFixture) => candidate.id === averageOverTimeCardId,
     );
     assert.ok(temporalCard);
     const rendered = temporalCard.node({
@@ -255,7 +291,7 @@ test("widget temporal isolado consulta sessions uma vez sem abrir summary", asyn
   }
 });
 
-test("Permanência individual e os seis temporais compartilham uma sessions e um timer", async () => {
+test("Permanência individual e os quatro temporais ativos compartilham uma sessions e um timer", async () => {
   const fixture = createLoiteringHookFixture({
     preferences: sessionCardIds.map((id) => ({
       id,
@@ -285,7 +321,7 @@ test("widget temporal e widget de summary usam somente dois recursos compartilha
     preferences: [
       { id: cardId, visible: false },
       {
-        id: averageCardId,
+        id: minimumCardId,
         scenarioSelectionMode: "all",
         visible: true,
       },
@@ -295,7 +331,7 @@ test("widget temporal e widget de summary usam somente dois recursos compartilha
         visible: true,
       },
     ],
-    requestedCardIds: new Set([averageCardId, averageOverTimeCardId]),
+    requestedCardIds: new Set([minimumCardId, averageOverTimeCardId]),
   });
   try {
     await fixture.flush();
@@ -312,8 +348,8 @@ test("widget temporal e widget de summary usam somente dois recursos compartilha
 
 test("todos os cards de permanência ocultos não consultam sessions nem summary", async () => {
   const fixture = createLoiteringHookFixture({
-    preferences: loiteringCardIds.map((id) => ({ id, visible: false })),
-    requestedCardIds: new Set(loiteringCardIds),
+    preferences: loiteringPreferenceIds.map((id) => ({ id, visible: false })),
+    requestedCardIds: new Set(loiteringPreferenceIds),
   });
   try {
     await fixture.flush();
@@ -326,11 +362,98 @@ test("todos os cards de permanência ocultos não consultam sessions nem summary
   }
 });
 
+test("Resumo médio visível compartilha somente summary e exporta o mesmo one-shot", async () => {
+  const fixture = createLoiteringHookFixture({
+    preferences: loiteringPreferencesWithVisible(averageCardId),
+    requestedCardIds: new Set([averageCardId]),
+  });
+  fixture.setSummaryResponseRows([
+    {
+      area: "area-a",
+      avg_duration_seconds: 24,
+      camera_id: "camera-a",
+      max_duration_seconds: 44,
+      min_duration_seconds: 5,
+      object_class: "person",
+      session_count: 14,
+    },
+  ]);
+  try {
+    await fixture.flush();
+    assert.deepEqual(
+      fixture.requests.map((request) => request.resource),
+      ["summary"],
+    );
+    assert.equal(fixture.timers.size, 1);
+    assert.equal(fixture.result.summaryRows[0]?.avg_duration_seconds, 24);
+    assert.equal(
+      fixture.requests[0].from.toISOString(),
+      "2026-09-17T03:00:00.000Z",
+      "o summary ao vivo deve começar à meia-noite civil da empresa",
+    );
+    assert.equal(
+      fixture.requests[0].to.toISOString(),
+      "2026-09-17T15:00:10.000Z",
+      "o corte ao vivo deve ser truncado ao pulso de cinco segundos",
+    );
+    assert.equal(fixture.requests[0].live, true);
+
+    await fixture.runNextTimer();
+    assert.equal(fixture.requests.length, 2, "cada ciclo deve compartilhar um único GET");
+    assert.equal(
+      fixture.requests[1].from.toISOString(),
+      "2026-09-17T03:00:00.000Z",
+      "os polls do mesmo dia devem repetir o início civil completo",
+    );
+    assert.equal(
+      fixture.requests[1].to.toISOString(),
+      "2026-09-17T15:00:15.000Z",
+    );
+    assert.equal(fixture.requests[1].live, true);
+
+    fixture.requests.length = 0;
+    const controller = new AbortController();
+    const [assets, rows] = await Promise.all([
+      fixture.result.loadReportAssets(controller.signal),
+      fixture.result.loadReportSummaryRows(controller.signal),
+    ]);
+    assert.deepEqual(assets, []);
+    assert.equal(rows[0]?.avg_duration_seconds, 24);
+    assert.deepEqual(
+      fixture.requests.map((request) => request.resource),
+      ["summary"],
+      "assets e métrica de duração devem compartilhar o mesmo GET de exportação",
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("widgets aposentados de quantidade de sessões não pertencem ao plano e não consultam dados", async () => {
+  const fixture = createLoiteringHookFixture({
+    preferences: retiredSessionCountCardIds.map((id) => ({ id, visible: true })),
+    requestedCardIds: new Set(retiredSessionCountCardIds),
+  });
+  try {
+    await fixture.flush();
+    assert.equal(fixture.requests.length, 0);
+    assert.equal(fixture.timers.size, 0);
+    assert.ok(
+      fixture.result.cards.every(
+        (candidate: RuntimeFixture) =>
+          !retiredSessionCountCardIds.includes(candidate.id),
+      ),
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("exportação explícita carrega todos os cards visíveis fora da viewport com somente sessions e summary", async () => {
   const fixture = createLoiteringHookFixture({
     preferences: loiteringPreferencesWithVisible(
-      averageCardId,
-      sessionsOverTimeCardId,
+      minimumCardId,
+      averageOverTimeCardId,
     ),
     requestedCardIds: new Set<string>(),
   });
@@ -371,7 +494,7 @@ test("exportação explícita carrega todos os cards visíveis fora da viewport 
     );
     assert.deepEqual(
       assets.map((asset: RuntimeFixture) => asset.cardId).sort(),
-      [averageCardId, sessionsOverTimeCardId].sort(),
+      [minimumCardId, averageOverTimeCardId].sort(),
     );
   } finally {
     fixture.cleanup();
@@ -387,7 +510,7 @@ test("exportação extensa limita sessions à prévia civil diária e mantém su
   const fixture = createLoiteringHookFixture({
     period,
     preferences: loiteringPreferencesWithVisible(
-      averageCardId,
+      minimumCardId,
       areaPeriodHeatmapCardId,
     ),
     refreshMode: "manual",
@@ -427,7 +550,7 @@ test("exportação extensa limita sessions à prévia civil diária e mantém su
       (asset: RuntimeFixture) => asset.cardId === areaPeriodHeatmapCardId,
     );
     const summaryAsset = assets.find(
-      (asset: RuntimeFixture) => asset.cardId === averageCardId,
+      (asset: RuntimeFixture) => asset.cardId === minimumCardId,
     );
     assert.match(temporalAsset?.titleSuffix ?? "", /prévia de/i);
     assert.equal(summaryAsset?.titleSuffix, undefined);
@@ -438,7 +561,7 @@ test("exportação extensa limita sessions à prévia civil diária e mantém su
 
 test("exportação explícita propaga falha de loitering em vez de omitir o widget", async () => {
   const fixture = createLoiteringHookFixture({
-    preferences: loiteringPreferencesWithVisible(sessionsOverTimeCardId),
+    preferences: loiteringPreferencesWithVisible(averageOverTimeCardId),
     requestedCardIds: new Set<string>(),
   });
   try {
@@ -459,7 +582,7 @@ test("exportação explícita propaga falha de loitering em vez de omitir o widg
 
 test("exportação explícita aceita resposta vazia certificada sem inventar falha", async () => {
   const fixture = createLoiteringHookFixture({
-    preferences: loiteringPreferencesWithVisible(sessionsOverTimeCardId),
+    preferences: loiteringPreferencesWithVisible(averageOverTimeCardId),
     requestedCardIds: new Set<string>(),
   });
   try {
@@ -474,7 +597,7 @@ test("exportação explícita aceita resposta vazia certificada sem inventar fal
   }
 });
 
-test("Permanência individual usa sessions e permanência média usa summary", () => {
+test("Permanências registradas usam sessions e métricas de duração do summary ficam independentes", () => {
   const consumerSection = hookSource.slice(
     hookSource.indexOf("const LOITERING_DATA_CONSUMER_CARD_IDS"),
     hookSource.indexOf("type OccupancyLoiteringRefreshMode"),
@@ -491,8 +614,8 @@ test("Permanência individual usa sessions e permanência média usa summary", (
   );
   assert.doesNotMatch(
     consumerSection,
-    /occupancy_duration_(?:timeline|by_scenario)/,
-    "timeline e duração total não podem iniciar implicitamente outro polling",
+    /occupancy_duration_(?:average_by_scenario|timeline|by_scenario)/,
+    "cards calculados por snapshots não podem iniciar implicitamente o polling de loitering",
   );
   assert.match(
     hookSource,
@@ -512,41 +635,38 @@ test("Permanência individual usa sessions e permanência média usa summary", (
   assert.match(
     hookSource,
     /resolveSummaryModel[\s\S]*?buildOccupancyLoiteringSummaryModel\(selected, current\.rows\)/,
-    "o card médio deve continuar usando o endpoint summary",
-  );
-  assert.match(
-    liveSource,
-    /individualDwellTotalsByScenarioId:\s*occupancyLoitering\.scenarioTotalsById/,
-  );
-  assert.match(
-    liveSource,
-    /individualDwellLoading: occupancyLoitering\.loading/,
-    "a permanência pode completar depois sem bloquear o gráfico principal",
+    "as métricas de mínimo, máximo e faixa devem usar o endpoint summary",
   );
 });
 
-test("Permanência média isolada demanda somente sua seleção no summary", async () => {
+test("Menor permanência isolada demanda somente sua seleção no summary", async () => {
   const fixture = createLoiteringHookFixture({
     preferences: [
       { id: cardId, visible: false },
       {
-        id: "occupancy_duration_average_by_scenario",
+        id: minimumCardId,
         scenarioIds: ["scenario-b"],
         scenarioSelectionMode: "custom",
         visible: true,
       },
     ],
-    requestedCardIds: new Set([
-      "occupancy_duration_average_by_scenario",
-    ]),
+    requestedCardIds: new Set([minimumCardId]),
   });
   try {
     await fixture.flush();
     assert.equal(fixture.requests.length, 1);
-    assert.deepEqual(
-      Array.from(fixture.result.scenarioTotalsById.keys()),
-      ["scenario-b"],
+    assert.equal(fixture.requests[0].resource, "summary");
+    const card = fixture.result.cards.find(
+      (candidate: RuntimeFixture) => candidate.id === minimumCardId,
     );
+    assert.ok(card);
+    const rendered = card.node({
+      scenarioSelection: {
+        mode: "custom",
+        scenarioIds: ["scenario-b"],
+      },
+    });
+    assert.deepEqual(rendered.props.model.selectedScenarioIds, ["scenario-b"]);
   } finally {
     fixture.cleanup();
   }
@@ -695,7 +815,7 @@ test("sair da viewport pausa a permanência sem apagar o último dataset", async
 
   const scopeDefinition = hookSource.slice(
     hookSource.indexOf("const scopeKey = React.useMemo"),
-    hookSource.indexOf("const liveCacheScopeKey"),
+    hookSource.indexOf("const sessionScopeKey"),
   );
   assert.doesNotMatch(
     scopeDefinition,
@@ -794,7 +914,7 @@ test("Timeline isolada não inicia o recurso separado de permanência", async ()
   try {
     await fixture.flush();
     assert.equal(fixture.requests.length, 0);
-    assert.deepEqual(Array.from(fixture.result.scenarioTotalsById.keys()), []);
+    assert.equal(fixture.timers.size, 0);
   } finally {
     fixture.cleanup();
   }
@@ -805,12 +925,12 @@ test("summary consulta uma vez por empresa e filtra os cenários localmente", as
     preferences: [
       { id: cardId, visible: false },
       {
-        id: "occupancy_duration_average_by_scenario",
+        id: minimumCardId,
         scenarioSelectionMode: "all",
         visible: true,
       },
     ],
-    requestedCardIds: new Set(["occupancy_duration_average_by_scenario"]),
+    requestedCardIds: new Set([minimumCardId]),
   });
   try {
     await fixture.flush();
@@ -822,8 +942,15 @@ test("summary consulta uma vez por empresa e filtra os cenários localmente", as
       { area: "area-a", cameraId: "camera-a", objectClass: "person" },
       { area: "area-b", cameraId: "camera-b", objectClass: "person" },
     ]);
+    const card = fixture.result.cards.find(
+      (candidate: RuntimeFixture) => candidate.id === minimumCardId,
+    );
+    assert.ok(card);
+    const rendered = card.node({
+      scenarioSelection: { mode: "all", scenarioIds: [] },
+    });
     assert.deepEqual(
-      Array.from(fixture.result.scenarioTotalsById.keys()),
+      rendered.props.model.selectedScenarioIds,
       ["scenario-a", "scenario-b"],
       "o superset certificado do tenant deve ser composto por cenário no cliente",
     );
@@ -832,7 +959,7 @@ test("summary consulta uma vez por empresa e filtra os cenários localmente", as
   }
 });
 
-test("cinco widgets agregados reutilizam uma única consulta summary", async () => {
+test("três widgets agregados reutilizam uma única consulta summary", async () => {
   const fixture = createLoiteringHookFixture({
     preferences: [
       { id: cardId, visible: false },
@@ -872,12 +999,12 @@ test("áreas da mesma câmera reutilizam o único summary tenant-wide", async ()
     preferences: [
       { id: cardId, visible: false },
       {
-        id: "occupancy_duration_average_by_scenario",
+        id: minimumCardId,
         scenarioSelectionMode: "all",
         visible: true,
       },
     ],
-    requestedCardIds: new Set(["occupancy_duration_average_by_scenario"]),
+    requestedCardIds: new Set([minimumCardId]),
     scenarios: [
       {
         areas: [{ area_id: "area-a", camera_id: "shared-camera" }],
@@ -1176,13 +1303,13 @@ test("alternar consumidores mantém sessions e summary independentes", async () 
         visible: true,
       },
       {
-        id: averageCardId,
+        id: minimumCardId,
         scenarioIds: ["scenario-b"],
         scenarioSelectionMode: "custom",
         visible: true,
       },
     ],
-    requestedCardIds: new Set([cardId, averageCardId]),
+    requestedCardIds: new Set([cardId, minimumCardId]),
   });
   try {
     await fixture.flush();
@@ -1197,7 +1324,7 @@ test("alternar consumidores mantém sessions e summary independentes", async () 
       preferences: [
         { id: cardId, visible: false },
         {
-          id: averageCardId,
+          id: minimumCardId,
           scenarioIds: ["scenario-b"],
           scenarioSelectionMode: "custom",
           visible: true,
@@ -1210,8 +1337,17 @@ test("alternar consumidores mantém sessions e summary independentes", async () 
       1,
       "o summary remanescente deve conservar somente seu polling",
     );
+    const summaryCard = fixture.result.cards.find(
+      (candidate: RuntimeFixture) => candidate.id === minimumCardId,
+    );
+    assert.ok(summaryCard);
     assert.deepEqual(
-      Array.from(fixture.result.scenarioTotalsById.keys()),
+      summaryCard.node({
+        scenarioSelection: {
+          mode: "custom",
+          scenarioIds: ["scenario-b"],
+        },
+      }).props.model.selectedScenarioIds,
       ["scenario-b"],
       "trocar o consumidor deve apenas reprojetar o dataset local",
     );
@@ -1224,21 +1360,16 @@ test("alternar consumidores mantém sessions e summary independentes", async () 
           scenarioSelectionMode: "custom",
           visible: true,
         },
-        { id: averageCardId, visible: false },
+        { id: minimumCardId, visible: false },
       ],
     });
     assert.equal(fixture.requests.length, 2);
     assert.equal(fixture.timers.size, 1);
-    assert.deepEqual(
-      Array.from(fixture.result.scenarioTotalsById.keys()),
-      [],
-      "sem o card médio, scenarioTotalsById não deve projetar sessions como summary",
-    );
 
     await fixture.render({
       preferences: [
         { id: cardId, visible: false },
-        { id: averageCardId, visible: false },
+        { id: minimumCardId, visible: false },
       ],
     });
     assert.equal(fixture.requests.length, 2);
@@ -1294,12 +1425,12 @@ test("403 no summary tenant-wide encerra somente seu polling", async () => {
     preferences: [
       { id: cardId, visible: false },
       {
-        id: "occupancy_duration_average_by_scenario",
+        id: minimumCardId,
         scenarioSelectionMode: "all",
         visible: true,
       },
     ],
-    requestedCardIds: new Set(["occupancy_duration_average_by_scenario"]),
+    requestedCardIds: new Set([minimumCardId]),
   });
   fixture.setSummaryResponseRows([{ marker: "certified" }]);
   try {
@@ -1337,7 +1468,7 @@ test("modo manual individual consulta sessions uma vez e não instala timer", as
     assert.deepEqual(
       fixture.result.cards.map((card: RuntimeFixture) => card.id),
       loiteringCardIds,
-      "Análises e Relatórios devem expor os doze cards configuráveis",
+      "Análises e Relatórios devem expor os oito cards configuráveis",
     );
     assert.equal(fixture.requests[0].bypassCache, false);
     assert.equal(fixture.timers.size, 0);
@@ -1383,21 +1514,57 @@ test("modo manual individual consulta sessions uma vez e não instala timer", as
   }
 });
 
+test("modo manual preserva exatamente o período do summary sem polling", async () => {
+  const period = {
+    contextLabel: "14/09/2026 a 16/09/2026",
+    from: new Date("2026-09-14T03:00:00.000Z"),
+    to: new Date("2026-09-17T03:00:00.000Z"),
+  };
+  const fixture = createLoiteringHookFixture({
+    period,
+    preferences: loiteringPreferencesWithVisible(minimumCardId),
+    refreshMode: "manual",
+    requestedCardIds: new Set([minimumCardId]),
+  });
+  try {
+    await fixture.flush();
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0].resource, "summary");
+    assert.equal(fixture.requests[0].from.toISOString(), period.from.toISOString());
+    assert.equal(fixture.requests[0].to.toISOString(), period.to.toISOString());
+    assert.equal(fixture.requests[0].live, false);
+    assert.equal(fixture.requests[0].bypassCache, false);
+    assert.equal(fixture.timers.size, 0);
+
+    await fixture.render({});
+    assert.equal(fixture.requests.length, 1);
+    fixture.result.refresh();
+    await fixture.flush();
+    assert.equal(fixture.requests.length, 2);
+    assert.equal(fixture.requests[1].bypassCache, true);
+    assert.equal(fixture.requests[1].from.toISOString(), period.from.toISOString());
+    assert.equal(fixture.requests[1].to.toISOString(), period.to.toISOString());
+    assert.equal(fixture.timers.size, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("composição configurável entrega ao card somente os cenários selecionados", async () => {
   const fixture = createLoiteringHookFixture();
   fixture.setSessionResponseRows([...selectableSessionRows]);
   try {
     await fixture.flush();
-    const [card, averageCard] = fixture.result.cards;
+    const [card, minimumCard] = fixture.result.cards;
     assert.equal(
       fixture.result.cards.length,
       loiteringCardIds.length,
       "Ao Vivo, Análises e Relatórios devem expor todo o catálogo de permanência",
     );
     assert.equal(card.id, cardId);
-    assert.equal(averageCard.id, averageCardId);
+    assert.equal(minimumCard.id, minimumCardId);
     assert.equal(card.scenarioConfigurable, true);
-    assert.equal(averageCard.scenarioConfigurable, true);
+    assert.equal(minimumCard.scenarioConfigurable, true);
     assert.equal(card.scenarioOrderingDisabled, true);
     assert.equal(card.scenarioSelectionPolicy, "compare");
     assert.deepEqual(card.inheritedScenarioIds, ["scenario-a"]);
@@ -1540,7 +1707,7 @@ test("gráfico individual preserva uma sessão por ponto no horário e duração
   assert.ok(!tooltip.includes("camera_id"));
 });
 
-test("gráfico médio representa mínimo, máximo, média e quantidade do summary", () => {
+test("gráfico de faixa representa mínimo, máximo e média sem promover quantidade de sessões", () => {
   const widgets = loadLoiteringWidgets();
   const entries = widgets.occupancyLoiteringChartEntries({
     areas: [],
@@ -1575,7 +1742,7 @@ test("gráfico médio representa mínimo, máximo, média e quantidade do summar
   assert.deepEqual(option.series[0].data[0].value, [7, 85, 46.5, 0]);
   assert.deepEqual(option.series[1].data[0], [46.5, 0]);
   const tooltip = option.tooltip.formatter({ dataIndex: 0 });
-  assert.match(tooltip, /28/);
+  assert.doesNotMatch(tooltip, /Sessões concluídas|\b28\b/i);
   assert.match(tooltip, /46,5 s/);
   assert.match(tooltip, /7 s/);
   assert.match(tooltip, /1 min 25 s/);
@@ -1641,14 +1808,14 @@ test("payload real do summary vira uma área e usa escala adaptativa sem perder 
   ) as RuntimeFixture;
   assert.match(option.xAxis.name, /escala log adaptativa/);
   const tooltip = option.tooltip.formatter({ dataIndex: 0 });
-  assert.match(tooltip, /24/);
+  assert.doesNotMatch(tooltip, /Sessões concluídas|\b24\b/i);
   assert.match(tooltip, /32\.910\.546,625 s/);
   assert.match(tooltip, /789\.852\.803 s/);
   assert.match(tooltip, /25 anos/);
   assert.ok(!tooltip.includes("6c0a1124"));
 });
 
-test("quantidade, média, mínimo, máximo e faixa usam campos distintos do summary", () => {
+test("média, mínimo, máximo e faixa usam campos distintos do summary", () => {
   const widgets = loadLoiteringWidgets();
   const entries = [
     {
@@ -1665,7 +1832,6 @@ test("quantidade, média, mínimo, máximo e faixa usam campos distintos do summ
     average: 32_910_546.625,
     maximum: 789_852_803,
     minimum: 0,
-    sessions: 24,
   } as const;
 
   for (const metric of Object.keys(expected) as Array<keyof typeof expected>) {
@@ -1861,7 +2027,7 @@ test("exportação individual preserva uma linha e um ponto por sessão real", (
 
   assert.ok(chart);
   const option = chart.option as RuntimeFixture;
-  assert.equal(chart.title, "Permanência individual");
+  assert.equal(chart.title, "Permanências registradas");
   assert.equal(
     option.series.flatMap((series: RuntimeFixture) => series.data).length,
     3,
@@ -1896,15 +2062,19 @@ test("exportação individual preserva uma linha e um ponto por sessão real", (
     ],
     "a tabela auditável precisa manter cada sessão carregada",
   );
-  assert.match(chart.description ?? "", /Cada ponto representa uma sessão real/);
+  assert.match(
+    chart.description ?? "",
+    /Cada ponto apresenta quando o registro terminou e sua duração/,
+  );
   assert.match(
     liveSource,
-    /async function getOccupancyReportPayload\(signal\?: AbortSignal\)[\s\S]*?await occupancyLoitering\.loadReportAssets\(signal\)[\s\S]*?occupancyLoiteringReportAssets,/,
+    /async function getOccupancyReportPayload\(signal\?: AbortSignal\)[\s\S]*?await Promise\.all\(\[[\s\S]*?occupancyLoitering\.loadReportAssets\(signal\),[\s\S]*?loadOccupancyDurationReportSnapshot\(signal\),[\s\S]*?\]\)[\s\S]*?occupancyDurationReportAssets:\s*occupancyDurationReportSnapshot\.reportAssets,[\s\S]*?occupancyLoiteringReportAssets,/,
+    "o Ao Vivo deve certificar permanência e duração juntas antes de montar o relatório",
   );
   assert.match(
     reportsSource,
-    /async function getOccupancyReportPayload\([\s\S]*?await occupancyLoitering\.loadReportAssets\(signal\)[\s\S]*?buildOccupancyReportPayload\(loiteringReportAssets\)/,
-    "Relatórios históricos precisam falhar antes de montar o arquivo se a fonte demandada falhar",
+    /async function getOccupancyReportPayload\([\s\S]*?await Promise\.all\(\[[\s\S]*?occupancyLoitering\.loadReportAssets\(signal\),[\s\S]*?occupancyAnalysisComparison\.loadReportSnapshot\(signal\)[\s\S]*?occupancyAnalysisDuration\.loadReportSnapshot\(signal\)[\s\S]*?\]\)[\s\S]*?buildOccupancyReportPayload\(\s*loiteringReportAssets,\s*comparisonReportSnapshot,\s*durationReportSnapshot,?\s*\)/,
+    "Relatórios históricos precisam certificar permanência, comparativos e duração antes de montar o arquivo",
   );
   assert.match(
     reportsSource,
@@ -1921,7 +2091,7 @@ test("exportação individual preserva uma linha e um ponto por sessão real", (
   assert.ok(!serialized.includes("second-technical-id"));
 });
 
-test("exportação média preserva a área, os segundos brutos e a quantidade do summary", () => {
+test("exportação média preserva a área e os segundos brutos sem expor quantidade de sessões", () => {
   const widgets = loadLoiteringWidgets();
   const chart = widgets.buildOccupancyLoiteringAverageReport(
     {
@@ -1964,25 +2134,23 @@ test("exportação média preserva a área, os segundos brutos e a quantidade do
       minimum: "7 s",
       minimumSeconds: 7,
       scenario: "Parado",
-      sessions: 28,
     },
   ]);
+  assert.doesNotMatch(JSON.stringify(chart), /"sessions"\s*:/i);
   assert.ok(!JSON.stringify(chart).includes("technical-scenario-id"));
 });
 
-test("textos não prometem pessoas únicas, não dizem quem e não exibem IDs técnicos", () => {
-  assert.match(
-    widgetSource,
-    /Não representa pessoas únicas|não equivale necessariamente a uma pessoa única/i,
-  );
+test("textos focam duração e horário sem contadores nem IDs técnicos", () => {
+  assert.match(widgetSource, /Duração e horário de saída/);
   assert.doesNotMatch(
     widgetSource,
-    /(?:total|quantidade|número) de pessoas únicas/i,
+    /Exibindo[\s\S]*?\bde\b[\s\S]*?sessionEntries\.length/i,
+    "o card não deve promover quantidade de registros como indicador",
   );
   assert.doesNotMatch(widgetSource, /["'`][^"'`]*\bquem\b[^"'`]*["'`]/i);
 
   const tableStart = widgetSource.indexOf(
-    '<Table scrollRegionLabel="Sessões de permanência do período">',
+    '<Table scrollRegionLabel="Permanências do período">',
   );
   const tableEnd = widgetSource.indexOf("</Table>", tableStart);
   assert.ok(tableStart >= 0 && tableEnd > tableStart);
@@ -2168,7 +2336,7 @@ function createLoiteringHookFixture(
     type,
   });
   const widgetMock = {
-    OCCUPANCY_LOITERING_AVERAGE_CARD_ID: averageCardId,
+    OCCUPANCY_DURATION_AVERAGE_CARD_ID: averageCardId,
     OCCUPANCY_LOITERING_CARD_ID: cardId,
     OCCUPANCY_LOITERING_CARD_IDS: baseLoiteringCardIds,
     OCCUPANCY_LOITERING_MAXIMUM_CARD_ID: maximumCardId,
@@ -2176,6 +2344,10 @@ function createLoiteringHookFixture(
     OCCUPANCY_LOITERING_RANGE_CARD_ID: rangeCardId,
     OCCUPANCY_LOITERING_SESSION_COUNT_CARD_ID: sessionCountCardId,
     OCCUPANCY_LOITERING_SUMMARY_CARD_IDS: summaryCardIds,
+    OCCUPANCY_LOITERING_SUMMARY_CONSUMER_CARD_IDS: [
+      averageCardId,
+      ...summaryCardIds,
+    ],
     OccupancyLoiteringAverageByScenarioCard:
       "OccupancyLoiteringAverageByScenarioCard",
     OccupancyLoiteringRangeCard: "OccupancyLoiteringRangeCard",
@@ -2304,9 +2476,6 @@ function createLoiteringHookFixture(
               sessionCount: 0,
             },
           }),
-          combineOccupancyLoiteringSummaryRows: (
-            groups: RuntimeFixture[][],
-          ) => groups.flat(),
           selectOccupancyLoiteringSessions:
             occupancyLoiteringModel.selectOccupancyLoiteringSessions,
           summarizeOccupancyLoiteringSessions: (
@@ -2319,20 +2488,6 @@ function createLoiteringHookFixture(
       }
       if (specifier === "@/lib/occupancy-loitering-query") {
         return {
-          fetchLiveOccupancyLoiteringSummary: async (request: RuntimeFixture) => {
-            requests.push({ ...request, resource: "summary" });
-            const error = takeRequestError(request);
-            if (error) throw error;
-            return {
-              rows: summaryResponseRows,
-              state: request.previous ?? {
-                identity: "live",
-                reconciledAt: request.to.getTime(),
-                stableRows: [],
-                stableTo: request.from.getTime(),
-              },
-            };
-          },
           fetchOccupancyLoiteringSummary: async (request: RuntimeFixture) => {
             requests.push({ ...request, resource: "summary" });
             const error = takeRequestError(request);

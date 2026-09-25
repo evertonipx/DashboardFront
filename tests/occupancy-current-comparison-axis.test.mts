@@ -92,7 +92,7 @@ test("barras horizontal e vertical usam escala discreta estável sem perder o ze
   }
   assert.match(source, /const \[rememberedAxisMemory, setRememberedAxisMemory\]/);
   assert.match(source, /rememberedAxisMemory\.scopeKey === axisScopeKey/);
-  assert.match(source, /Todos desocupados · 0/);
+  assert.match(source, /Todos desocupados/);
 });
 
 test("ranking ao vivo usa somente rótulos, tooltips e ticks inteiros", () => {

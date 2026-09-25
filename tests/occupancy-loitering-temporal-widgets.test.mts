@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import test from "node:test";
 
 import {
@@ -20,6 +21,8 @@ import {
   type OccupancyLoiteringSessionRow,
 } from "../lib/occupancy-loitering.ts";
 import type { OccupancyScenario } from "../lib/types.ts";
+
+const require = createRequire(import.meta.url);
 
 const scenario: OccupancyScenario = {
   active: true,
@@ -78,15 +81,23 @@ function seriesFrom(option: unknown) {
   return Array.isArray(series) ? series : series ? [series] : [];
 }
 
-test("catálogo temporal possui seis IDs estáveis, únicos e com opção ECharts", () => {
+test("catálogo temporal mantém quatro widgets de duração e aposenta os contadores de sessões", () => {
   assert.deepEqual(OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS, [
-    OCCUPANCY_LOITERING_SESSIONS_OVER_TIME_CARD_ID,
     OCCUPANCY_LOITERING_AVERAGE_OVER_TIME_CARD_ID,
     OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID,
     OCCUPANCY_LOITERING_PERCENTILES_BY_AREA_CARD_ID,
-    OCCUPANCY_LOITERING_DURATION_DISTRIBUTION_CARD_ID,
     OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID,
   ]);
+  assert.ok(
+    !(OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS as readonly string[]).includes(
+      OCCUPANCY_LOITERING_SESSIONS_OVER_TIME_CARD_ID,
+    ),
+  );
+  assert.ok(
+    !(OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS as readonly string[]).includes(
+      OCCUPANCY_LOITERING_DURATION_DISTRIBUTION_CARD_ID,
+    ),
+  );
   assert.equal(
     new Set(OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS).size,
     OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS.length,
@@ -194,9 +205,18 @@ test("heatmap diferencia bucket observado sem sessão e mantém maior intensidad
   assert.ok(valueSeries.data.some((point) => point.rawValue === 0));
   assert.notEqual(emptySeries.itemStyle?.color, "#F8FAFC");
 
-  const colors = (option as {
-    visualMap: { inRange: { color: string[] } };
-  }).visualMap.inRange.color;
+  const visualMaps = (option as {
+    visualMap: Array<{
+      inRange?: { color: string[] };
+      seriesIndex?: number | number[];
+      type?: string;
+    }>;
+  }).visualMap;
+  assert.equal(visualMaps[0]?.type, "piecewise");
+  assert.equal(visualMaps[0]?.seriesIndex, 0);
+  assert.equal(visualMaps[1]?.type, "continuous");
+  assert.equal(visualMaps[1]?.seriesIndex, 1);
+  const colors = visualMaps[1]?.inRange?.color ?? [];
   assert.equal(colors[0]?.toUpperCase(), "#FFFFFF");
   assert.notEqual(colors.at(-1)?.toUpperCase(), "#FFFFFF");
   assert.notEqual(typeof valueSeries.label?.color, "function");
@@ -213,7 +233,78 @@ test("heatmap diferencia bucket observado sem sessão e mantém maior intensidad
   );
 });
 
-test("relatório explicita pessoa-tempo, prévia e nunca expõe IDs operacionais", () => {
+test("heatmap temporal cobre cada série com visualMap e renderiza no ECharts", () => {
+  const echarts = require("echarts/core");
+  const { HeatmapChart } = require("echarts/charts");
+  const {
+    DataZoomComponent,
+    GridComponent,
+    TooltipComponent,
+    VisualMapComponent,
+  } = require("echarts/components");
+  const { LegacyGridContainLabel } = require("echarts/features");
+  const { SVGRenderer } = require("echarts/renderers");
+  echarts.use([
+    DataZoomComponent,
+    GridComponent,
+    HeatmapChart,
+    LegacyGridContainLabel,
+    TooltipComponent,
+    VisualMapComponent,
+    SVGRenderer,
+  ]);
+
+  const option = buildOccupancyLoiteringAreaPeriodHeatmapOption(
+    temporalModel(),
+    "dark",
+    "#1267C4",
+  );
+  const heatmapSeriesIndexes = seriesFrom(option).flatMap((series, index) =>
+    (series as { type?: unknown }).type === "heatmap" ? [index] : [],
+  );
+  const visualMaps = Array.isArray(
+    (option as { visualMap?: unknown }).visualMap,
+  )
+    ? (option as {
+        visualMap: Array<{ seriesIndex?: number | number[] }>;
+      }).visualMap
+    : [(option as {
+        visualMap?: { seriesIndex?: number | number[] };
+      }).visualMap].filter(Boolean);
+  const coveredSeriesIndexes = new Set(
+    visualMaps.flatMap((visualMap) => {
+      const seriesIndex = visualMap?.seriesIndex;
+      return Array.isArray(seriesIndex)
+        ? seriesIndex
+        : typeof seriesIndex === "number"
+          ? [seriesIndex]
+          : heatmapSeriesIndexes;
+    }),
+  );
+  assert.deepEqual(
+    heatmapSeriesIndexes.filter((index) => !coveredSeriesIndexes.has(index)),
+    [],
+    "toda série heatmap precisa estar associada a um visualMap",
+  );
+
+  const chart = echarts.init(null, null, {
+    height: 420,
+    renderer: "svg",
+    ssr: true,
+    width: 760,
+  });
+  try {
+    assert.doesNotThrow(
+      () => chart.setOption(option),
+      "a opção completa não pode disparar 'Heatmap must use with visualMap'",
+    );
+    assert.match(chart.renderToSVGString(), /<svg/);
+  } finally {
+    chart.dispose();
+  }
+});
+
+test("relatório explicita duração, prévia e nunca expõe IDs operacionais", () => {
   const assets = buildOccupancyLoiteringTemporalReportAssets({
     contextLabel: "01/09/2026 a 19/09/2026",
     dataContextLabel: "19/09/2026",
@@ -223,11 +314,11 @@ test("relatório explicita pessoa-tempo, prévia e nunca expõe IDs operacionais
   });
   assert.equal(assets.length, OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS.length);
   assets.forEach(({ chart }) => {
-    assert.match(chart.description ?? "", /sessões concluídas/i);
-    assert.match(chart.description ?? "", /não pessoas únicas/i);
+    assert.match(chart.description ?? "", /permanênc/i);
+    assert.match(chart.description ?? "", /não o tempo cronológico/i);
     assert.match(chart.description ?? "", /prévia efetivamente carregada/i);
     assert.match(chart.description ?? "", /horário de encerramento/i);
-    assert.match(chart.description ?? "", /bucket de saída/i);
+    assert.match(chart.description ?? "", /período de saída/i);
     const presentation = JSON.stringify({
       description: chart.description,
       table: chart.table,

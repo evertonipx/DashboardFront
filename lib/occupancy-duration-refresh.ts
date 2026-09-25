@@ -9,6 +9,19 @@ const MINUTE_MS = 60 * SECOND_MS;
 export const OCCUPANCY_DURATION_MINUTE_REFRESH_GRACE_MS = SECOND_MS;
 export const OCCUPANCY_DURATION_RECONCILIATION_MINUTES = 5;
 
+export type OccupancyDurationCacheWindow = {
+  from: number;
+  lastFullRefreshAt: number;
+  to: number;
+};
+
+export type OccupancyDurationCacheRefreshPlan = {
+  cacheMatchesDay: boolean;
+  cacheMatchesRange: boolean;
+  needsFullRefresh: boolean;
+  reconciliationFrom: number;
+};
+
 /** Align every duration consumer to the same post-boundary pulse. */
 export function occupancyDurationNextMinuteRefreshDelay(
   now = Date.now(),
@@ -50,6 +63,66 @@ export function occupancyDurationReconciliationFrom(
     rangeFrom,
     Math.min(previousTo, rangeTo - minutes * MINUTE_MS),
   );
+}
+
+/**
+ * Chooses between a complete audit and the small rolling edge shared by live
+ * duration and explicit report exports. A cache from another civil day, a
+ * clock rollback, or an expired audit is never reconciled incrementally.
+ */
+export function planOccupancyDurationCacheRefresh({
+  cached,
+  fullRefreshMs,
+  rangeFrom,
+  rangeTo,
+  requestedAt,
+}: {
+  cached?: OccupancyDurationCacheWindow | null;
+  fullRefreshMs: number;
+  rangeFrom: number;
+  rangeTo: number;
+  requestedAt: number;
+}): OccupancyDurationCacheRefreshPlan {
+  if (
+    !Number.isFinite(rangeFrom) ||
+    !Number.isFinite(rangeTo) ||
+    rangeFrom > rangeTo ||
+    !Number.isFinite(requestedAt) ||
+    !Number.isFinite(fullRefreshMs) ||
+    fullRefreshMs <= 0
+  ) {
+    throw new RangeError("A janela de atualização da duração é inválida.");
+  }
+
+  const cacheIsFinite = Boolean(
+    cached &&
+      Number.isFinite(cached.from) &&
+      Number.isFinite(cached.to) &&
+      Number.isFinite(cached.lastFullRefreshAt),
+  );
+  const cacheMatchesDay = Boolean(
+    cacheIsFinite &&
+      cached!.from === rangeFrom &&
+      cached!.to >= rangeFrom &&
+      cached!.to <= rangeTo,
+  );
+  const needsFullRefresh =
+    !cacheMatchesDay ||
+    requestedAt < cached!.lastFullRefreshAt ||
+    requestedAt - cached!.lastFullRefreshAt >= fullRefreshMs;
+
+  return {
+    cacheMatchesDay,
+    cacheMatchesRange: cacheMatchesDay && cached!.to === rangeTo,
+    needsFullRefresh,
+    reconciliationFrom: needsFullRefresh
+      ? rangeFrom
+      : occupancyDurationReconciliationFrom(
+          rangeFrom,
+          rangeTo,
+          cached!.to,
+        ),
+  };
 }
 
 /** Cache an exact closed-edge response through the next aligned pulse. */

@@ -539,15 +539,18 @@ export function useOccupancyDurationInsights({
   const getReportAssets = React.useCallback<
     () => OccupancyDurationInsightReportAsset[]
   >(() => {
-    if (!current.month) return [];
-    const month = current.month;
+    const month = current.month ??
+      (refreshMode === "manual" ? stablePeriod : null);
+    if (!month) return [];
     return OCCUPANCY_DURATION_INSIGHT_CARD_IDS.flatMap((kind) => {
       const preference = preferenceById.get(kind);
       if (!preference?.visible) return [];
       const selected = resolveSeries(selectionFromPreference(preference));
-      if (!selected.length) return [];
       const pages: OccupancyDurationInsightScenario[][] = [];
-      if (kind === "occupancy_duration_scenario_heatmap") {
+      if (
+        kind === "occupancy_duration_scenario_heatmap" &&
+        selected.length > 0
+      ) {
         for (let index = 0; index < selected.length; index += REPORT_SCENARIOS_PER_PAGE) {
           pages.push(selected.slice(index, index + REPORT_SCENARIOS_PER_PAGE));
         }
@@ -564,7 +567,14 @@ export function useOccupancyDurationInsights({
         titleSuffix: pages.length > 1 ? ` · ${index + 1}/${pages.length}` : "",
       }));
     });
-  }, [current.month, defaultWidgetColor, preferenceById, refreshMode, resolveSeries]);
+  }, [
+    current.month,
+    defaultWidgetColor,
+    preferenceById,
+    refreshMode,
+    resolveSeries,
+    stablePeriod,
+  ]);
   // Historical analysis builds its static report once after the explicit
   // query. The live surface keeps export models lazy so its polling cycle does
   // not rebuild four charts and tables before the user asks to export.

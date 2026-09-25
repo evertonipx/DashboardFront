@@ -24,6 +24,10 @@ import type {
   ReportExportMode,
   ReportPayload,
 } from "@/lib/report-export";
+import {
+  abortPendingRequestsAfterFailure,
+  abortRequest,
+} from "@/lib/request-cancellation";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
 
 type ReportExportActionsProps = {
@@ -48,9 +52,7 @@ export function ReportExportActions({
     () => () => {
       const controller = exportControllerRef.current;
       if (controller && !controller.signal.aborted) {
-        controller.abort(
-          new DOMException("A exportação foi fechada.", "AbortError"),
-        );
+        abortRequest(controller, "A exportação foi fechada.");
       }
     },
     [],
@@ -90,7 +92,12 @@ export function ReportExportActions({
         toast.success("PDF gerado.");
       }
     } catch (error) {
-      if (isExportAbort(error, controller.signal)) return;
+      const requestWasAborted = abortPendingRequestsAfterFailure(
+        controller,
+        error,
+        "A geração do relatório falhou; as consultas pendentes foram canceladas.",
+      );
+      if (requestWasAborted) return;
       toast.error(userFacingErrorMessage(error, "Não foi possível gerar o relatório."));
     } finally {
       if (exportControllerRef.current === controller) {
@@ -232,13 +239,5 @@ export function ReportExportActions({
           : ""}
       </span>
     </div>
-  );
-}
-
-function isExportAbort(error: unknown, signal: AbortSignal) {
-  return (
-    signal.aborted ||
-    (error instanceof DOMException && error.name === "AbortError") ||
-    (error instanceof Error && error.name === "AbortError")
   );
 }

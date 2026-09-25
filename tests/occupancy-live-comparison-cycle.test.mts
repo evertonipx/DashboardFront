@@ -155,6 +155,7 @@ function row(
     current_value: currentValue,
     min: currentValue,
     object_class: "person",
+    occupied: currentValue > 0,
     peak: currentValue,
   };
 }

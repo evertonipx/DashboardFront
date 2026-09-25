@@ -67,7 +67,7 @@ test("mapas de calor e índices de máximos usam a mesma data/hora da empresa", 
     assert.deepEqual(days.dayKeys, ["2025-12-31"]); assert.equal(days.cells[0].y, 22);
     const scenarios = comparison.buildScenariosHoursOccupancyCells({ buckets: [bucket], dateKey: "2025-12-31", metric: "peak", series: [scenario], timeZone });
     assert.equal(scenarios.cells[0].y, 22); assert.equal(scenarios.cells[0].value, 3);
-    const series = widgets.buildMaximumLineSeries({ buckets: [bucket], currentBucket: bucket, currentSnapshots: [{ scenarioId: "a", name: "Entrada", total: 7, asOf: instant.toISOString() }], currentSeries: [], granularity: "hour", monthlySourceBuckets: [], scenarios: [{ id: "a", name: "Entrada" }], series: [scenario], timeZone });
+    const series = widgets.buildMaximumLineSeries({ buckets: [bucket], currentBucket: bucket, currentSnapshots: [{ scenarioId: "a", name: "Entrada", occupied: true, total: 7, asOf: instant.toISOString() }], currentSeries: [], granularity: "hour", monthlySourceBuckets: [], scenarios: [{ id: "a", name: "Entrada" }], series: [scenario], timeZone });
     assert.deepEqual(series[0].partialIndexes, [22]); assert.equal(series[0].values[22], 7);
     assert.equal(series[0].values[1], null);
   });
@@ -78,7 +78,7 @@ test("exportação preserva data, hora e instante local do widget, não do naveg
     const bucket = new Date("2026-01-01T01:00:00Z");
     const scenario = { id: "a", name: "Entrada" };
     const series = [{ scenarioId: "a", name: "Entrada", metrics: new Map([[bucket.getTime(), { average: 3, peak: 3, minimum: 3 }]]) }];
-    const reports = widgets.buildOccupancyComparisonReportAssets({ aggregateBuckets: [bucket], aggregateSeries: series, currentHourBucket: bucket, currentHourSeries: [], heatmapScenarioId: "a", hexSnapshots: [], hourlyMaximumBuckets: [bucket], hourlyMaximumSeries: series, maximumTrendRanges: null, maximumTrendSeries: [], scenarioHeatmapBuckets: [bucket], scenarioHeatmapSeries: series, scenarioHourHeatmapDateKey: "2025-12-31", scenarios: [scenario], selectedScenarioIds: ["a"], settings: load("lib/occupancy-widget-settings.ts").DEFAULT_OCCUPANCY_WIDGET_SETTINGS, snapshots: [{ scenarioId: "a", name: "Entrada", total: 3, asOf: instant.toISOString() }], timeZone });
+    const reports = widgets.buildOccupancyComparisonReportAssets({ aggregateBuckets: [bucket], aggregateSeries: series, currentHourBucket: bucket, currentHourSeries: [], heatmapScenarioId: "a", hexSnapshots: [], hourlyMaximumBuckets: [bucket], hourlyMaximumSeries: series, maximumTrendRanges: null, maximumTrendSeries: [], scenarioHeatmapBuckets: [bucket], scenarioHeatmapSeries: series, scenarioHourHeatmapDateKey: "2025-12-31", scenarios: [scenario], selectedScenarioIds: ["a"], settings: load("lib/occupancy-widget-settings.ts").DEFAULT_OCCUPANCY_WIDGET_SETTINGS, snapshots: [{ scenarioId: "a", name: "Entrada", occupied: true, total: 3, asOf: instant.toISOString() }], timeZone });
     const byId = new Map<string, RuntimeFixture>(reports.map((report: RuntimeFixture) => [report.cardId, report.chart]));
     const heat = byId.get("occupancy_day_hour_heatmap");
     assert.equal(heat.table.rows[0].date, "2025-12-31"); assert.equal(heat.table.rows[0].hour, "22h");
@@ -122,9 +122,9 @@ test("ranking ao vivo exporta gráfico e tabela somente com contagens inteiras",
     selectedScenarioIds: scenarios.map((scenario) => scenario.id),
     settings,
     snapshots: [
-      { scenarioId: "a", name: "Entrada", total: 3.6 },
-      { scenarioId: "b", name: "Praça", total: 0.4 },
-      { scenarioId: "c", name: "Sem leitura", total: null },
+      { scenarioId: "a", name: "Entrada", occupied: true, total: 3.6 },
+      { scenarioId: "b", name: "Praça", occupied: true, total: 0.4 },
+      { scenarioId: "c", name: "Sem leitura", occupied: null, total: null },
     ],
     timeZone,
   });
@@ -259,8 +259,13 @@ test("callbacks passam explicitamente o fuso aos intervalos, exportação e redu
   assert.equal(certifiedTimeZoneCount, documentedResponseCount);
   assert.match(
     source,
-    /occupancySnapshotEffectiveAt\(snapshots, requestedAt\)[\s\S]*?formatDateTime\(effectiveAt, timeZone\)/,
-    "o horário visível deve usar current_at/as_of efetivo do worker, não o relógio da requisição",
+    /occupancySnapshotEffectiveAt\(snapshots\)[\s\S]*?formatDateTime\(effectiveAt, timeZone\)/,
+    "o horário visível deve usar somente current_at/as_of efetivo do worker",
+  );
+  assert.match(
+    source,
+    /return instants\.length \? new Date\(Math\.min\(\.\.\.instants\)\) : null;/,
+    "sem timestamp certificado, o frontend não pode inventar recência com o relógio da requisição",
   );
 });
 

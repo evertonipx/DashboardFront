@@ -12,6 +12,7 @@ import {
   occupancyDurationMinuteTransportTtl,
   occupancyDurationNextMinuteRefreshDelay,
   occupancyDurationReconciliationFrom,
+  planOccupancyDurationCacheRefresh,
 } from "../lib/occupancy-duration-refresh.ts";
 
 const require = createRequire(import.meta.url);
@@ -102,6 +103,59 @@ test("cadência e reconciliação de duração são alinhadas ao minuto fechado"
     /granularity === "minute"[\s\S]*?occupancyDurationMinuteTransportTtl\(\)/,
     "as duas superfícies precisam compartilhar a validade do GET exato",
   );
+});
+
+test("exportação reconcilia somente a borda recente de um cache válido", () => {
+  const requestedAt = 20 * 60_000;
+  const plan = planOccupancyDurationCacheRefresh({
+    cached: {
+      from: 0,
+      lastFullRefreshAt: requestedAt - 60_000,
+      to: 9 * 60_000,
+    },
+    fullRefreshMs: 6 * HOUR,
+    rangeFrom: 0,
+    rangeTo: 10 * 60_000,
+    requestedAt,
+  });
+
+  assert.deepEqual(plan, {
+    cacheMatchesDay: true,
+    cacheMatchesRange: false,
+    needsFullRefresh: false,
+    reconciliationFrom: 5 * 60_000,
+  });
+});
+
+test("exportação só refaz o período completo com cache inválido ou auditoria vencida", () => {
+  const requestedAt = 7 * HOUR;
+  const base = {
+    fullRefreshMs: 6 * HOUR,
+    rangeFrom: 0,
+    rangeTo: 10 * 60_000,
+    requestedAt,
+  };
+  const expired = planOccupancyDurationCacheRefresh({
+    ...base,
+    cached: {
+      from: 0,
+      lastFullRefreshAt: requestedAt - 6 * HOUR,
+      to: 9 * 60_000,
+    },
+  });
+  const wrongDay = planOccupancyDurationCacheRefresh({
+    ...base,
+    cached: {
+      from: 60_000,
+      lastFullRefreshAt: requestedAt - 60_000,
+      to: 9 * 60_000,
+    },
+  });
+
+  assert.equal(expired.needsFullRefresh, true);
+  assert.equal(expired.reconciliationFrom, 0);
+  assert.equal(wrongDay.needsFullRefresh, true);
+  assert.equal(wrongDay.reconciliationFrom, 0);
 });
 
 test("horas fechadas reutilizam e aceitam correção 1→0 no TTL de 6h com período idêntico", async (t) => {

@@ -14,10 +14,12 @@ const require = createRequire(import.meta.url);
 const ts: typeof import("typescript") = require("typescript");
 const occupancyDuration: typeof import("../lib/occupancy-duration.ts") =
   require("../lib/occupancy-duration.ts");
-const occupancyLoitering: typeof import("../lib/occupancy-loitering.ts") =
-  require("../lib/occupancy-loitering.ts");
 const occupancyDurationQueryPlan: typeof import("../lib/occupancy-duration-query-plan.ts") =
   require("../lib/occupancy-duration-query-plan.ts");
+const occupancyComparisonSelection: typeof import("../lib/occupancy-comparison-selection.ts") =
+  require("../lib/occupancy-comparison-selection.ts");
+const occupancyComparison: typeof import("../lib/occupancy-comparison.ts") =
+  require("../lib/occupancy-comparison.ts");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const widgetPath = resolve(
   root,
@@ -29,6 +31,14 @@ const widgetSource = readFileSync(
 );
 const preferenceSource = readFileSync(
   resolve(root, "lib/view-preferences.ts"),
+  "utf8",
+);
+const comparisonSource = readFileSync(
+  resolve(root, "components/app/occupancy-comparison-widgets.tsx"),
+  "utf8",
+);
+const dashboardSource = readFileSync(
+  resolve(root, "components/app/occupancy-scenario-dashboard.tsx"),
   "utf8",
 );
 
@@ -158,7 +168,106 @@ test("indicadores de estado entram no catálogo configurável e no relatório do
   }
 });
 
-test("resumo médio deixa quatro leituras visíveis sem criar outra consulta", () => {
+test("estado atual usa o snapshot corrente de toda a composição", () => {
+  const { resolveCurrentOccupancyState } = loadCurrentStateResolver();
+  assert.equal(
+    resolveCurrentOccupancyState([
+      currentSnapshot("a", 1),
+      currentSnapshot("b", 3),
+    ], 2),
+    "occupied",
+  );
+  assert.equal(
+    resolveCurrentOccupancyState([
+      currentSnapshot("a", 0),
+      currentSnapshot("b", 0),
+    ], 2),
+    "free",
+  );
+  assert.equal(
+    resolveCurrentOccupancyState([
+      currentSnapshot("a", 2),
+      currentSnapshot("b", 0),
+    ], 2),
+    "mixed",
+  );
+  assert.equal(
+    resolveCurrentOccupancyState([
+      currentSnapshot("a", null, "Leitura indisponível"),
+    ], 1),
+    "unknown",
+  );
+  assert.equal(
+    resolveCurrentOccupancyState([
+      currentSnapshot("a", null),
+    ], 1),
+    "unknown",
+  );
+  assert.equal(
+    resolveCurrentOccupancyState([
+      currentSnapshot("a", 1),
+    ], 2),
+    "unknown",
+    "uma composição parcialmente carregada não pode certificar o estado",
+  );
+  assert.match(
+    widgetSource,
+    /occupancy_duration_transitions: "Estado atual confirmado"/,
+  );
+  assert.match(
+    widgetSource,
+    /cardId: "occupancy_duration_transitions", kind: "current"/,
+  );
+  assert.match(
+    widgetSource,
+    /currentStateCard\s*=\s*kind === "current"[\s\S]*?resolveSelectedCurrentSnapshots/,
+    "o card atual deve receber snapshots, não a série agregada do dia",
+  );
+});
+
+test("estado atual entra no pulso único de /occupancy a cada cinco segundos", () => {
+  const plan = occupancyComparisonSelection.buildOccupancyComparisonSelectionPlan({
+    hexScenarioIds: [],
+    inheritedHeatmapScenarioId: "scenario-a",
+    inheritedScenarioIds: ["scenario-a", "scenario-b"],
+    preferences: [
+      {
+        id: "occupancy_duration_transitions",
+        visible: true,
+      },
+    ],
+    scenarios: [
+      { id: "scenario-a" },
+      { id: "scenario-b" },
+    ],
+  });
+
+  assert.deepEqual(plan.snapshots, ["scenario-a", "scenario-b"]);
+  assert.deepEqual(plan.hourly, []);
+  assert.deepEqual(plan.currentHour, []);
+  assert.deepEqual(plan.trends, []);
+  assert.match(
+    comparisonSource,
+    /OCCUPANCY_HISTORICAL_SNAPSHOT_CARD_IDS = new Set\(\[[\s\S]*?"occupancy_duration_transitions"/,
+  );
+  assert.match(
+    comparisonSource,
+    /return \{[\s\S]*?snapshots: certifiedSnapshots,[\s\S]*?snapshotsLoading: snapshotLoading/,
+    "o hook comparativo precisa compartilhar o resultado e o loading do mesmo snapshot",
+  );
+  assert.match(dashboardSource, /const OCCUPANCY_REFRESH_SECONDS = 5/);
+  assert.match(
+    dashboardSource,
+    /useOccupancyComparisonCards\(\{[\s\S]*?snapshotRefreshMs: liveRefreshMs/,
+  );
+  assert.match(
+    dashboardSource,
+    /useOccupancyDurationCards\(\{[\s\S]*?currentSnapshots:[\s\S]*?currentSnapshotsLoading:/,
+    "o dashboard deve ligar o snapshot comparativo diretamente ao card de estado atual",
+  );
+});
+
+test("resumo médio deixa médias e maiores períodos visíveis sem criar outra consulta", () => {
   const { durationAverageSummary } = loadDurationAverageSummaryBuilder();
   const summary = durationAverageSummary({
     confirmedFreeSeconds: 30,
@@ -168,6 +277,7 @@ test("resumo médio deixa quatro leituras visíveis sem criar outra consulta", (
     errorCount: 0,
     expectedSeconds: 360,
     loadUnitSeconds: 900,
+    longestConfirmedFreeSeconds: 20,
     longestConfirmedOccupiedSeconds: 120,
     minimumDetectedTransitions: 2,
     observedSeconds: 300,
@@ -180,6 +290,8 @@ test("resumo médio deixa quatro leituras visíveis sem criar outra consulta", (
   assert.equal(summary.averageOccupancy, 3);
   assert.equal(summary.averageOccupiedSeconds, 120);
   assert.equal(summary.averageFreeSeconds, 10);
+  assert.equal(summary.longestOccupiedSeconds, 120);
+  assert.equal(summary.longestFreeSeconds, 20);
   assert.ok(Math.abs(summary.coverage - 5 / 6) < Number.EPSILON);
 
   const unavailable = durationAverageSummary({
@@ -190,6 +302,7 @@ test("resumo médio deixa quatro leituras visíveis sem criar outra consulta", (
     errorCount: 0,
     expectedSeconds: 0,
     loadUnitSeconds: 0,
+    longestConfirmedFreeSeconds: 0,
     longestConfirmedOccupiedSeconds: 0,
     minimumDetectedTransitions: 0,
     observedSeconds: 0,
@@ -201,9 +314,12 @@ test("resumo médio deixa quatro leituras visíveis sem criar outra consulta", (
   });
   assert.deepEqual(unavailable, {
     averageFreeSeconds: null,
+    averageIndividualDwellSeconds: null,
     averageOccupancy: null,
     averageOccupiedSeconds: null,
     coverage: null,
+    longestFreeSeconds: null,
+    longestOccupiedSeconds: null,
   });
 
   const componentSource = widgetSource.slice(
@@ -211,9 +327,12 @@ test("resumo médio deixa quatro leituras visíveis sem criar outra consulta", (
     widgetSource.indexOf("function OccupancyDurationTimelineCard"),
   );
   for (const label of [
-    "Ocupação média",
-    "Tempo médio ocupado",
-    "Tempo médio livre",
+    "Média de pessoas",
+    "Pessoa · permanência média",
+    "Área ocupada · média",
+    "Área livre · média",
+    "Área ocupada · máximo",
+    "Área livre · máximo",
     "Cobertura",
   ]) {
     assert.match(componentSource, new RegExp(label));
@@ -225,7 +344,7 @@ test("resumo médio deixa quatro leituras visíveis sem criar outra consulta", (
   );
   assert.match(
     preferenceSource,
-    /card\("occupancy_duration_average", "Resumo médio de ocupação"/,
+    /card\("occupancy_duration_average", "Ocupação e permanência"/,
   );
 });
 
@@ -238,11 +357,27 @@ test("resumo médio compara o consolidado global com cada cenário selecionado",
     { id: "livre", name: "Livre" },
     { id: "sem-cobertura", name: "Sem cobertura" },
   ];
-  const rows = buildDurationAverageComparisonRows(selectedScenarios, [
-    durationSeries("entrada", "Entrada", ["occupied", "occupied", "free"]),
-    durationSeries("espera", "Espera", ["occupied", "free", "free"]),
-    durationSeries("livre", "Livre", ["free", "free", "free"]),
-  ]);
+  const rows = buildDurationAverageComparisonRows(
+    selectedScenarios,
+    [
+      durationSeries("entrada", "Entrada", ["occupied", "occupied", "free"]),
+      durationSeries("espera", "Espera", ["occupied", "free", "free"]),
+      durationSeries("livre", "Livre", ["free", "free", "free"]),
+    ],
+    {
+      scenarios: [
+        {
+          scenarioId: "entrada",
+          totals: { avgDurationSeconds: 20 },
+        },
+        {
+          scenarioId: "espera",
+          totals: { avgDurationSeconds: 40 },
+        },
+      ],
+      totals: { avgDurationSeconds: 32 },
+    },
+  );
 
   assert.deepEqual(
     rows.map((row: RuntimeFixture) => [row.kind, row.label]),
@@ -259,7 +394,10 @@ test("resumo médio compara o consolidado global com cada cenário selecionado",
     "a ocupação global calcula a média aritmética apenas dos cenários com valor válido",
   );
   assert.equal(rows[0].summary.averageOccupiedSeconds, 90);
+  assert.equal(rows[0].summary.averageIndividualDwellSeconds, 32);
   assert.equal(rows[0].summary.averageFreeSeconds, 120);
+  assert.equal(rows[0].summary.longestOccupiedSeconds, 120);
+  assert.equal(rows[0].summary.longestFreeSeconds, 180);
   assert.equal(
     rows[0].summary.coverage,
     1,
@@ -271,6 +409,9 @@ test("resumo médio compara o consolidado global com cada cenário selecionado",
   assert.ok(
     Math.abs(rows[2].summary.averageOccupancy - 1 / 3) < Number.EPSILON,
   );
+  assert.equal(rows[1].summary.averageIndividualDwellSeconds, 20);
+  assert.equal(rows[2].summary.averageIndividualDwellSeconds, 40);
+  assert.equal(rows[3].summary.averageIndividualDwellSeconds, null);
   assert.equal(
     rows[3].summary.averageOccupancy,
     0,
@@ -278,16 +419,26 @@ test("resumo médio compara o consolidado global com cada cenário selecionado",
   );
   assert.deepEqual(rows[4].summary, {
     averageFreeSeconds: null,
+    averageIndividualDwellSeconds: null,
     averageOccupancy: null,
     averageOccupiedSeconds: null,
     coverage: null,
+    longestFreeSeconds: null,
+    longestOccupiedSeconds: null,
   });
 
   const componentSource = widgetSource.slice(
     widgetSource.indexOf("function OccupancyDurationAverageSummaryCard"),
     widgetSource.indexOf("function OccupancyDurationTimelineCard"),
   );
-  assert.match(componentSource, /Média entre cenários · tempos médios ponderados/);
+  assert.match(
+    componentSource,
+    /Detecção média · durações calculadas separadamente/,
+  );
+  assert.match(
+    componentSource,
+    /quantidade de registros é usada somente como denominador interno/,
+  );
   assert.match(componentSource, /data-duration-average-row-scope/);
   assert.doesNotMatch(componentSource, /fetch|apiFetch/);
 
@@ -305,6 +456,10 @@ test("resumo médio compara o consolidado global com cada cenário selecionado",
     /value:[\s\S]*?globalSummary\?\.averageOccupancy/,
     "a exportação deve publicar a ocupação média, não a soma nem somente a duração",
   );
+  assert.match(
+    reportMetricSource,
+    /média ponderada por registro concluído e deduplica áreas físicas compartilhadas/,
+  );
 });
 
 test("Tempo por cenário publica médias e índices por linha sem inferir identidade", () => {
@@ -319,66 +474,88 @@ test("Tempo por cenário publica médias e índices por linha sem inferir identi
   assert.match(widgetSource, /não representa permanência individual/);
 });
 
-test("Timeline e Tempo por cenário deixam a permanência média visível em cada linha", () => {
+test("Timeline e Tempo por cenário mostram médias e maiores períodos dos snapshots", () => {
   assert.match(
     widgetSource,
-    /function durationScenarioAverageLabel[\s\S]*?individualDwell[\s\S]*?Permanência[\s\S]*?sessionCount/,
+    /function durationScenarioAverageLabel[\s\S]*?averageConfirmedOccupiedSequenceSeconds[\s\S]*?averageConfirmedFreeSequenceSeconds/,
   );
   assert.equal(
     (widgetSource.match(/durationScenarioAxisLabel\(scenario, 18\)/g) ?? [])
       .length,
     2,
-    "os dois eixos por cenário precisam mostrar a permanência sem hover",
+    "os dois eixos por cenário precisam mostrar as médias de estado sem hover",
   );
   assert.equal(
-    (widgetSource.match(/\.\.\.durationScenarioDwellTooltipLines\(scenario\)/g) ?? [])
+    (widgetSource.match(/\.\.\.durationScenarioLongestTooltipLines\(scenario\)/g) ?? [])
       .length,
     2,
-    "os dois tooltips precisam identificar média e quantidade de sessões",
+    "os dois tooltips precisam identificar os maiores períodos ocupado e livre",
   );
-  assert.match(widgetSource, /Permanência média \(s\)/);
-  assert.match(widgetSource, /Sessões concluídas/);
+  assert.match(widgetSource, /Maior ocupada \(s\)/);
+  assert.match(widgetSource, /Maior livre \(s\)/);
+  assert.doesNotMatch(widgetSource, /sessionCount|Sessões concluídas/);
 });
 
-test("rótulo por cenário distingue permanência, ausência e carregamento", () => {
+test("rótulo por cenário distingue médias ocupada, livre e ausência", () => {
   const { durationScenarioAxisLabel } = loadDurationScenarioLabelBuilder();
   const ready: RuntimeFixture = durationSeries("ready", "Entrada principal", [
     "occupied",
     "occupied",
   ]);
-  ready.individualDwell = {
-    loading: false,
-    totals: {
-      avgDurationSeconds: 24.07,
-      maxDurationSeconds: 44,
-      minDurationSeconds: 5,
-      sessionCount: 14,
-    },
-  };
   assert.equal(
     durationScenarioAxisLabel(ready, 18),
-    "Entrada principal\nMédia 24,1 s · 14 sess.",
+    "Entrada principal\nMédias O 2min · L —",
   );
 
   const empty: RuntimeFixture = durationSeries("empty", "Espera", ["free"]);
-  empty.individualDwell = {
-    loading: false,
-    totals: {
-      avgDurationSeconds: null,
-      maxDurationSeconds: null,
-      minDurationSeconds: null,
-      sessionCount: 0,
-    },
-  };
   assert.equal(
     durationScenarioAxisLabel(empty, 18),
-    "Espera\nMédia —",
+    "Espera\nMédias O — · L 1min",
   );
 
-  empty.individualDwell.loading = true;
+  const unknown = durationSeries("unknown", "Sem leitura", ["unknown"]);
   assert.equal(
-    durationScenarioAxisLabel(empty, 18),
-    "Espera\nMédia carregando…",
+    durationScenarioAxisLabel(unknown, 18),
+    "Sem leitura\nMédias O — · L —",
+  );
+});
+
+test("ausência de sequência permanece indisponível em vez de virar zero minuto", () => {
+  const { durationScenarioAxisLabel } = loadDurationScenarioLabelBuilder();
+  const { durationAverageSummary } = loadDurationAverageSummaryBuilder();
+  const withoutSequences = durationAverageSummary({
+    confirmedFreeSeconds: 0,
+    confirmedFreeSequenceCount: 0,
+    confirmedOccupiedSeconds: 0,
+    confirmedOccupiedSequenceCount: 0,
+    errorCount: 0,
+    expectedSeconds: 60,
+    loadUnitSeconds: 0,
+    longestConfirmedFreeSeconds: 0,
+    longestConfirmedOccupiedSeconds: 0,
+    minimumDetectedTransitions: 1,
+    observedSeconds: 60,
+    scenarioCount: 1,
+    successfulScenarioCount: 1,
+    transitionSeconds: 60,
+    unknownSeconds: 0,
+    warnings: [],
+  });
+  const label = durationScenarioAxisLabel(
+    durationSeries("transition", "Em transição", ["transition"]),
+    18,
+  );
+
+  assert.equal(withoutSequences.averageOccupiedSeconds, null);
+  assert.equal(withoutSequences.averageFreeSeconds, null);
+  assert.equal(withoutSequences.longestOccupiedSeconds, null);
+  assert.equal(withoutSequences.longestFreeSeconds, null);
+  assert.equal(label, "Em transição\nMédias O — · L —");
+  assert.doesNotMatch(label, /0\s*min/i);
+  assert.match(
+    widgetSource,
+    /averageOccupiedSeconds === null[\s\S]*?"—"[\s\S]*?averageFreeSeconds === null[\s\S]*?"—"/,
+    "a apresentação deve testar ausência antes de formatar a duração",
   );
 });
 
@@ -460,18 +637,211 @@ test("duração publica cenários progressivamente e estabiliza o catálogo equi
   );
   assert.match(
     widgetSource,
-    /loading=\{individualDwellLoading\}[\s\S]*?selectedSeries=\{resolveSelectedIndividualDwellSeries/,
-    "o ranking de permanência deve carregar separadamente do agregado de estados",
+    /const OCCUPANCY_AGGREGATE_DURATION_CARD_IDS =\s*OCCUPANCY_DURATION_CARD_IDS\.filter\([\s\S]*?cardId !== "occupancy_duration_transitions"/,
+    "o estado atual não pode baixar o agregado diário usado pelas durações históricas",
   );
   assert.match(
     widgetSource,
-    /totals: individualDwellLoading\s*\? undefined\s*: individualDwellTotalsByScenarioId\?\.get/,
-    "uma resposta ainda pendente não pode ser apresentada como zero sessão",
+    /id: "occupancy_duration_average_by_scenario"[\s\S]*?selectedSeries=\{resolveSelectedSeries\(scenarioSelection\)\}/,
+    "o comparativo médio por cenário precisa reutilizar o dataset agregado",
   );
   assert.match(
     widgetSource,
     /!hasDueScenario && publishedRangeEnd === range\.to\.getTime\(\)[\s\S]*?scheduleNext\(\);[\s\S]*?return;/,
     "um pulso sem novo minuto ou auditoria não deve reconstruir o mesmo resumo",
+  );
+});
+
+test("exportação de duração faz uma carga one-shot completa sem instalar polling", () => {
+  const start = widgetSource.indexOf("const loadReportSnapshot = React.useCallback");
+  const end = widgetSource.indexOf(
+    "const durationDataCompleteUntil",
+    start,
+  );
+  assert.ok(start >= 0 && end > start, "callback one-shot de exportação ausente");
+  const callbackSource = widgetSource.slice(start, end);
+
+  assert.match(callbackSource, /reportScenarios\.length > 0/);
+  assert.match(
+    callbackSource,
+    /loadOccupancyDurationReportSeries\(\{[\s\S]*?scenarios: reportScenarios,[\s\S]*?signal: requestSignal/,
+    "todos os cenários dos widgets visíveis devem ser certificados na ação de exportar",
+  );
+  assert.match(
+    callbackSource,
+    /loadOccupancyDurationCurrentSnapshots\(\{[\s\S]*?scenarios: currentStateScenarios,[\s\S]*?signal: requestSignal/,
+    "o estado atual visível também deve receber um snapshot one-shot fora da viewport",
+  );
+  assert.match(
+    callbackSource,
+    /resolveSelectedCurrentSnapshots: resolveReportCurrentSnapshots/,
+    "a métrica exportada deve usar o snapshot one-shot, não o cache da viewport",
+  );
+  assert.match(
+    callbackSource,
+    /const reportNeedsIndividualDwell =\s*averagePreference\?\.visible !== false/,
+    "uma preferência ausente deve manter o resumo médio visível e carregar a permanência na exportação",
+  );
+  assert.match(
+    callbackSource,
+    /catch \(error\)[\s\S]*?return currentStateScenarioOptions\.map\([\s\S]*?error: message,[\s\S]*?total: null/,
+    "falha do snapshot one-shot deve invalidar todos os valores anteriores",
+  );
+  assert.match(
+    callbackSource,
+    /const requestedAt = new Date\(\)[\s\S]*?buildOccupancyClosedDayMinuteRange\(requestedAt, timeZone\)[\s\S]*?loadOccupancyDurationCurrentSnapshots\(\{[\s\S]*?requestedAt,[\s\S]*?reportSeries,[\s\S]*?reportCurrentSnapshots,[\s\S]*?reportLoiteringSummary,[\s\S]*?await Promise\.all/,
+    "série e estado atual devem partir do mesmo instante e carregar em paralelo",
+  );
+  assert.match(
+    callbackSource,
+    /durationReportWarnings\([\s\S]*?selectedSnapshotErrors\(reportCurrentSnapshots\)/,
+    "a falha fechada precisa permanecer explícita no relatório",
+  );
+  assert.match(
+    widgetSource,
+    /function loadOccupancyDurationCurrentSnapshots[\s\S]*?occupancyLiveSnapshotQuery\(\{ now: requestedAt \}\)[\s\S]*?priority: "normal"[\s\S]*?requireOccupancyCurrentSnapshotRows/,
+  );
+  assert.match(callbackSource, /signal\?\.throwIfAborted\(\)/);
+  assert.match(callbackSource, /requestSignal\.throwIfAborted\(\)/);
+  assert.doesNotMatch(
+    callbackSource,
+    /setTimeout|setInterval|scheduleNext/,
+    "o one-shot não pode criar outro relógio de atualização",
+  );
+  for (const field of [
+    "dataCompleteUntil",
+    "reportAssets",
+    "reportContext",
+    "reportMetrics",
+    "reportWarnings",
+  ]) {
+    assert.match(callbackSource, new RegExp(`\\b${field}\\b`), `${field} ausente`);
+  }
+  assert.match(
+    widgetSource,
+    /return \{[\s\S]*?loadReportSnapshot,[\s\S]*?reportMetrics,[\s\S]*?reportWarnings/,
+    "o snapshot de exportação precisa ser exposto pelo hook",
+  );
+});
+
+test("corte da exportação inclui o snapshot atual e falha fechado", () => {
+  const {
+    combineDurationDataCompleteUntil,
+    durationCurrentSnapshotsDataCompleteUntil,
+  } = loadDurationReportCutoffHelpers();
+  const expectedScenarioIds = ["scenario-a", "scenario-b"];
+  const completeSnapshots = [
+    {
+      asOf: "2026-09-21T15:00:05.000Z",
+      name: "A",
+      occupied: false,
+      scenarioId: "scenario-a",
+      total: 0,
+    },
+    {
+      asOf: "2026-09-21T15:00:02.000Z",
+      name: "B",
+      occupied: true,
+      scenarioId: "scenario-b",
+      total: 3,
+    },
+  ];
+
+  assert.equal(
+    durationCurrentSnapshotsDataCompleteUntil(
+      completeSnapshots,
+      expectedScenarioIds,
+    )?.toISOString(),
+    "2026-09-21T15:00:02.000Z",
+    "o estado composto deve usar o asOf mais antigo dos cenários certificados",
+  );
+  assert.equal(
+    durationCurrentSnapshotsDataCompleteUntil([], []),
+    undefined,
+    "card oculto ou sem composição não participa do corte",
+  );
+  assert.equal(
+    durationCurrentSnapshotsDataCompleteUntil(
+      completeSnapshots.slice(0, 1),
+      expectedScenarioIds,
+    ),
+    null,
+    "composição parcial não pode certificar o corte",
+  );
+  assert.equal(
+    durationCurrentSnapshotsDataCompleteUntil(
+      [{ ...completeSnapshots[0], error: "indisponível", total: null }],
+      ["scenario-a"],
+    ),
+    null,
+    "erro ou total ausente precisa invalidar o corte",
+  );
+  assert.equal(
+    durationCurrentSnapshotsDataCompleteUntil(
+      [{ ...completeSnapshots[0], asOf: "inválido" }],
+      ["scenario-a"],
+    ),
+    null,
+    "asOf inválido precisa invalidar o corte",
+  );
+  assert.equal(
+    durationCurrentSnapshotsDataCompleteUntil(
+      [{ ...completeSnapshots[0], occupied: null }],
+      ["scenario-a"],
+    ),
+    null,
+    "estado atual ausente não pode certificar o corte",
+  );
+
+  const aggregateCutoff = new Date("2026-09-21T14:59:00.000Z");
+  const snapshotCutoff = new Date("2026-09-21T15:00:02.000Z");
+  assert.equal(
+    combineDurationDataCompleteUntil(
+      aggregateCutoff,
+      snapshotCutoff,
+    )?.toISOString(),
+    aggregateCutoff.toISOString(),
+    "o relatório deve publicar o menor corte entre todas as fontes participantes",
+  );
+  assert.equal(combineDurationDataCompleteUntil(undefined, undefined), undefined);
+  assert.equal(combineDurationDataCompleteUntil(aggregateCutoff, null), null);
+
+  const callbackSource = widgetSource.slice(
+    widgetSource.indexOf("const loadReportSnapshot = React.useCallback"),
+    widgetSource.indexOf("const durationDataCompleteUntil"),
+  );
+  assert.match(
+    callbackSource,
+    /dataCompleteUntil = combineDurationDataCompleteUntil\([\s\S]*?durationSeriesDataCompleteUntil\([\s\S]*?durationCurrentSnapshotsDataCompleteUntil\(/,
+    "o callback de exportação precisa compor agregado e snapshot atual",
+  );
+});
+
+test("dashboard aguarda duração e permanência antes de montar o relatório", () => {
+  const start = dashboardSource.indexOf(
+    "async function getOccupancyReportPayload",
+  );
+  const end = dashboardSource.indexOf("return (", start);
+  assert.ok(start >= 0 && end > start, "montagem do relatório Ao Vivo ausente");
+  const exportSource = dashboardSource.slice(start, end);
+
+  assert.match(exportSource, /loadOccupancyDurationReportSnapshot\(signal\)/);
+  assert.match(exportSource, /occupancyLoitering\.loadReportAssets\(signal\)/);
+  assert.match(
+    exportSource,
+    /occupancyDurationReportSnapshot\.reportAssets/,
+  );
+  assert.match(
+    exportSource,
+    /occupancyDurationReportSnapshot\.reportMetrics/,
+  );
+  assert.match(
+    exportSource,
+    /occupancyDurationReportSnapshot\.dataCompleteUntil/,
+  );
+  assert.match(
+    exportSource,
+    /occupancyDurationReportSnapshot\.reportWarnings/,
   );
 });
 
@@ -492,10 +862,8 @@ test("permanência média por cenário entra no catálogo com composição compa
   );
   assert.match(
     widgetSource,
-    new RegExp(
-      `id: "${averageByScenarioCardId}"[\\s\\S]*?scenarioOrderingDisabled: true`,
-    ),
-    "a ordem deste ranking deve continuar automática pelo valor médio",
+    /buildOccupancyDurationAverageByScenarioEntries[\s\S]*?preserve the scenario order[\s\S]*?return series\.map/,
+    "sem uma chave matemática única, o comparativo deve preservar a ordem escolhida pelo usuário",
   );
   assert.match(
     widgetSource,
@@ -508,35 +876,22 @@ test("permanência média por cenário entra no catálogo com composição compa
   );
 });
 
-test("permanência média por cenário usa somente o summary individual real", () => {
+test("tempo médio por cenário usa exclusivamente sequências dos snapshots", () => {
   const {
     buildDurationAverageByScenarioReportTable,
     buildOccupancyDurationAverageByScenarioEntries,
   } =
     loadAverageByScenarioBuilders();
   const series = [
-    individualDwellSeries("empty-first", "Sem sessões A", {
-      avgDurationSeconds: null,
-      maxDurationSeconds: null,
-      minDurationSeconds: null,
-      sessionCount: 0,
-    }),
-    individualDwellSeries("average-24", "Espera", {
-      avgDurationSeconds: 24.07,
-      maxDurationSeconds: 44,
-      minDurationSeconds: 5,
-      sessionCount: 14,
-    }),
-    individualDwellSeries("loading", "Carregando", undefined, {
-      loading: true,
-    }),
-    individualDwellSeries("average-46", "Parado", {
-      avgDurationSeconds: 46.5,
-      maxDurationSeconds: 85,
-      minDurationSeconds: 7,
-      sessionCount: 28,
-    }),
-    individualDwellSeries("error", "Indisponível", undefined, {
+    durationSeries("mixed", "Misto", ["occupied", "free", "occupied"]),
+    durationSeries("free-only", "Livre", ["free", "free"]),
+    durationSeries("occupied-long", "Ocupado", [
+      "occupied",
+      "occupied",
+      "occupied",
+      "free",
+    ]),
+    durationSeries("error", "Indisponível", ["unknown"], {
       error: "Atualização indisponível",
     }),
   ];
@@ -546,45 +901,52 @@ test("permanência média por cenário usa somente o summary individual real", (
   assert.deepEqual(
     entries.map((entry: RuntimeFixture) => entry.scenarioId),
     [
-      "average-46",
-      "average-24",
-      "empty-first",
-      "loading",
+      "mixed",
+      "free-only",
+      "occupied-long",
       "error",
     ],
-    "médias reais descem; ausências ficam no fim na ordem original",
+    "a composição deve respeitar exatamente a ordem escolhida pelo usuário",
   );
   assert.deepEqual(
-    entries.map((entry: RuntimeFixture) => entry.averageDurationSeconds),
-    [46.5, 24.07, null, null, null],
-    "cenário sem sessão concluída deve continuar sem duração, nunca zero",
+    entries.map((entry: RuntimeFixture) => entry.averageOccupiedSeconds),
+    [60, null, 180, null],
   );
-  assert.equal(entries[0].sessionCount, 28);
-  assert.equal(entries[0].minimumDurationSeconds, 7);
-  assert.equal(entries[0].maximumDurationSeconds, 85);
-  assert.equal(entries[4].error, "Atualização indisponível");
-  assert.equal(entries[2].sessionCount, 0);
-  assert.equal(entries[2].minimumDurationSeconds, null);
-  assert.equal(entries[2].maximumDurationSeconds, null);
+  assert.equal(entries[0].averageFreeSeconds, 60);
+  assert.equal(entries[0].longestOccupiedSeconds, 60);
+  assert.equal(entries[0].longestFreeSeconds, 60);
+  assert.equal(entries[1].averageFreeSeconds, 120);
+  assert.equal(entries[1].longestFreeSeconds, 120);
+  assert.equal(entries[3].error, "Atualização indisponível");
   const table = buildDurationAverageByScenarioReportTable(entries);
   assert.deepEqual(
     table.rows.slice(0, 2).map((row: RuntimeFixture) => ({
-      average: row.averageDurationSeconds,
-      maximum: row.maximumDurationSeconds,
-      minimum: row.minimumDurationSeconds,
-      sessions: row.sessionCount,
+      averageFree: row.averageFreeSeconds,
+      averageOccupied: row.averageOccupiedSeconds,
+      longestFree: row.longestFreeSeconds,
+      longestOccupied: row.longestOccupiedSeconds,
     })),
     [
-      { average: 46.5, maximum: 85, minimum: 7, sessions: 28 },
-      { average: 24.07, maximum: 44, minimum: 5, sessions: 14 },
+      {
+        averageFree: 60,
+        averageOccupied: 60,
+        longestFree: 60,
+        longestOccupied: 60,
+      },
+      {
+        averageFree: 120,
+        averageOccupied: null,
+        longestFree: 120,
+        longestOccupied: null,
+      },
     ],
-    "o relatório deve preservar média, mínimo, máximo e contagem documentados",
+    "o relatório deve preservar médias e maiores períodos dos dois estados",
   );
-  assert.equal(table.rows[2].averageDurationSeconds, null);
+  assert.equal(table.rows[3].averageOccupiedSeconds, null);
   assert.match(
     widgetSource,
-    /const dwell = scenario\.individualDwell;[\s\S]*?const totals = dwell\.totals;/,
-    "o ranking deve ler o resultado de /loitering/summary",
+    /buildOccupancyDurationAverageByScenarioEntries[\s\S]*?deriveOccupancyStateMetrics\(scenario\.summary\)/,
+    "o comparativo deve derivar seus valores do resumo agregado do cenário",
   );
   const entryBuilderSource = widgetSource.slice(
     widgetSource.indexOf(
@@ -592,27 +954,28 @@ test("permanência média por cenário usa somente o summary individual real", (
     ),
     widgetSource.indexOf("function durationAverageEntryStatus"),
   );
-  assert.doesNotMatch(
+  assert.match(
     entryBuilderSource,
     /deriveOccupancyStateMetrics|averageConfirmedOccupiedSequenceSeconds/,
-    "o fallback não pode inventar permanência a partir de sequências de estado",
+    "médias contínuas precisam vir dos estados observados nos snapshots",
   );
+  assert.doesNotMatch(entryBuilderSource, /sessionCount|individualDwell/);
 });
 
-test("permanência média diferencia carregamento, erro e período sem sessões", () => {
+test("tempo médio diferencia carregamento, erro e ausência de estado confirmado", () => {
   const cardSource = widgetSource.slice(
     widgetSource.indexOf("function OccupancyDurationAverageByScenarioCard"),
     widgetSource.indexOf("function DurationChartCard"),
   );
   assert.match(
     cardSource,
-    /const hasCompletedSessions = entries\.some\([\s\S]*?entry\.sessionCount !== null && entry\.sessionCount > 0/,
-    "somente uma sessão realmente concluída deve habilitar o gráfico",
+    /const hasStateDuration = entries\.some\([\s\S]*?entry\.averageOccupiedSeconds !== null[\s\S]*?entry\.averageFreeSeconds !== null/,
+    "ao menos um estado confirmado deve habilitar o gráfico",
   );
-  assert.match(cardSource, /hasData=\{hasCompletedSessions\}/);
+  assert.match(cardSource, /hasData=\{hasStateDuration\}/);
   assert.match(
     cardSource,
-    /noDataText="Nenhuma sessão de permanência foi concluída neste período\."/,
+    /noDataText="Ainda não há intervalos ocupados ou desocupados confirmados neste período\."/,
   );
 
   const chartCardSource = widgetSource.slice(
@@ -622,7 +985,7 @@ test("permanência média diferencia carregamento, erro e período sem sessões"
   assert.match(
     chartCardSource,
     /loading \?[\s\S]*?!hasSelection \?[\s\S]*?error && !hasData \?[\s\S]*?!hasData \?[\s\S]*?<EChart/,
-    "loading, falta de seleção, erro e zero sessões devem anteceder o ECharts",
+    "loading, falta de seleção, erro e ausência de estados devem anteceder o ECharts",
   );
   assert.match(
     chartCardSource,
@@ -631,18 +994,17 @@ test("permanência média diferencia carregamento, erro e período sem sessões"
   );
 });
 
-test("gráfico da permanência média mantém rótulos reais e zooma mais de oito cenários", () => {
+test("gráfico de duração média mostra os dois estados e zooma mais de oito cenários", () => {
   const { buildOccupancyDurationAverageByScenarioOption } =
     loadAverageByScenarioBuilders();
   const entries = Array.from({ length: 9 }, (_, index) => ({
-    averageDurationSeconds: index === 8 ? null : (9 - index) * 10.25,
+    averageFreeSeconds: index === 8 ? null : (9 - index) * 8,
+    averageOccupiedSeconds: index === 8 ? null : (9 - index) * 10.25,
     error: undefined,
-    loading: false,
-    maximumDurationSeconds: index === 8 ? null : (9 - index) * 20,
-    minimumDurationSeconds: index === 8 ? null : 5,
+    longestFreeSeconds: index === 8 ? null : (9 - index) * 16,
+    longestOccupiedSeconds: index === 8 ? null : (9 - index) * 20,
     name: `Cenário ${index + 1}`,
     scenarioId: `scenario-${index + 1}`,
-    sessionCount: index === 8 ? 0 : index + 1,
   }));
   const option = buildOccupancyDurationAverageByScenarioOption({
     entries,
@@ -659,7 +1021,7 @@ test("gráfico da permanência média mantém rótulos reais e zooma mais de oit
   assert.equal(chartSeries.label?.show, true);
   assert.equal(
     chartSeries.label?.formatter?.({ dataIndex: 0, value: 92.25 }),
-    "1 min 32,25 s",
+    "1min 32s",
   );
   assert.equal(
     chartSeries.label?.formatter?.({ dataIndex: 8, value: null }),
@@ -676,10 +1038,12 @@ test("gráfico da permanência média mantém rótulos reais e zooma mais de oit
   const tooltip = option.tooltip?.formatter?.([
     { dataIndex: 0, value: 92.25 },
   ]);
-  assert.match(String(tooltip), /Permanência média: 1 min 32,25 s/);
-  assert.match(String(tooltip), /Menor permanência: 5 s/);
-  assert.match(String(tooltip), /Maior permanência: 3 min/);
-  assert.match(String(tooltip), /Sessões concluídas: 1/);
+  assert.match(String(tooltip), /Média ocupada: 1min 32s/);
+  assert.match(String(tooltip), /Média desocupada: 1min 12s/);
+  assert.match(String(tooltip), /Maior período ocupado: 3min/);
+  assert.match(String(tooltip), /Maior período desocupado: 2min 24s/);
+  assert.doesNotMatch(String(tooltip), /Sessões/);
+  assert.equal(option.series.length, 4);
   assert.ok(
     option.dataZoom.some(
       (zoom: RuntimeFixture) =>
@@ -697,7 +1061,7 @@ test("gráfico da permanência média mantém rótulos reais e zooma mais de oit
   assert.equal(exportOption.dataZoom, undefined);
 });
 
-test("permanência média por cenário gera asset e tabela exata no relatório", () => {
+test("tempo médio por cenário gera asset e tabela snapshot no relatório", () => {
   const reportBuilderSource = widgetSource.slice(
     widgetSource.indexOf("function buildDurationReportAssets"),
     widgetSource.indexOf("function buildDurationSummaryReportTable"),
@@ -717,9 +1081,10 @@ test("permanência média por cenário gera asset e tabela exata no relatório",
   );
   assert.match(
     widgetSource,
-    /averageDurationSeconds[\s\S]*?Permanência média \(s\)[\s\S]*?minimumDurationSeconds[\s\S]*?maximumDurationSeconds[\s\S]*?sessionCount/,
-    "o PDF precisa levar média, mínimo, máximo e sessões auditáveis",
+    /averageOccupiedSeconds[\s\S]*?Média ocupada \(s\)[\s\S]*?averageFreeSeconds[\s\S]*?longestOccupiedSeconds[\s\S]*?longestFreeSeconds/,
+    "o PDF precisa levar médias e maiores períodos auditáveis dos snapshots",
   );
+  assert.doesNotMatch(reportBuilderSource, /sessionCount|individualDwell/);
 });
 
 function loadAverageByScenarioBuilders() {
@@ -739,7 +1104,7 @@ function loadAverageByScenarioBuilders() {
     "formatDecimal",
     "isRecord",
     "numericValue",
-    "roundLoiteringSeconds",
+    "roundDurationSeconds",
     "truncateLabel",
   ]);
   const declarations = ast.statements.filter(
@@ -771,11 +1136,12 @@ function loadAverageByScenarioBuilders() {
   ).outputText;
   const bindings: Record<string, RuntimeFixture> = {
     CARD_LABELS: {
-      occupancy_duration_average_by_scenario: "Permanência média por cenário",
+      occupancy_duration_average_by_scenario:
+        "Tempo médio ocupado/livre por cenário",
     },
+    deriveOccupancyStateMetrics:
+      occupancyDuration.deriveOccupancyStateMetrics,
     formatOccupancyDuration: occupancyDuration.formatOccupancyDuration,
-    formatOccupancyLoiteringDuration:
-      occupancyLoitering.formatOccupancyLoiteringDuration,
     getOccupancyChartPalette: (theme: "dark" | "light") =>
       theme === "dark"
         ? chartPalette("#A8B3C7", "#273244", "#0F172A", "#E2E8F0")
@@ -784,28 +1150,6 @@ function loadAverageByScenarioBuilders() {
   return new Function(...Object.keys(bindings), output)(
     ...Object.values(bindings),
   );
-}
-
-function individualDwellSeries(
-  scenarioId: string,
-  name: string,
-  totals?: {
-    avgDurationSeconds: number | null;
-    maxDurationSeconds: number | null;
-    minDurationSeconds: number | null;
-    sessionCount: number;
-  },
-  annotations: { error?: string; loading?: boolean } = {},
-) {
-  return {
-    individualDwell: {
-      ...annotations,
-      loading: annotations.loading ?? false,
-      totals,
-    },
-    name,
-    scenarioId,
-  };
 }
 
 function loadDurationScenarioLabelBuilder() {
@@ -840,8 +1184,6 @@ function loadDurationScenarioLabelBuilder() {
     deriveOccupancyStateMetrics:
       occupancyDuration.deriveOccupancyStateMetrics,
     formatOccupancyDuration: occupancyDuration.formatOccupancyDuration,
-    formatOccupancyLoiteringDuration:
-      occupancyLoitering.formatOccupancyLoiteringDuration,
   };
   return new Function(...Object.keys(bindings), output)(
     ...Object.values(bindings),
@@ -891,6 +1233,68 @@ function timelineSegment(
     state,
     to: new Date(from + minutes * 60_000),
   };
+}
+
+function loadCurrentStateResolver() {
+  const ast = ts.createSourceFile(
+    widgetPath,
+    widgetSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const declaration = ast.statements.find(
+    (node) =>
+      ts.isFunctionDeclaration(node) &&
+      node.name?.text === "resolveCurrentOccupancyState",
+  );
+  assert.ok(declaration, "resolveCurrentOccupancyState precisa existir");
+  const output = ts.transpileModule(
+    `${declaration.getText(ast)}\nreturn { resolveCurrentOccupancyState };`,
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+      fileName: widgetPath,
+    },
+  ).outputText;
+  return new Function(
+    "classifyOccupancySnapshot",
+    output,
+  )(occupancyComparison.classifyOccupancySnapshot);
+}
+
+function loadDurationReportCutoffHelpers() {
+  const ast = ts.createSourceFile(
+    widgetPath,
+    widgetSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const targetNames = new Set([
+    "combineDurationDataCompleteUntil",
+    "durationCurrentSnapshotsDataCompleteUntil",
+    "earliestDate",
+  ]);
+  const declarations = ast.statements.filter(
+    (node) =>
+      ts.isFunctionDeclaration(node) &&
+      targetNames.has(node.name?.text ?? ""),
+  );
+  assert.equal(declarations.length, targetNames.size);
+  const output = ts.transpileModule(
+    `${declarations.map((node) => node.getText(ast)).join("\n")}\nreturn { combineDurationDataCompleteUntil, durationCurrentSnapshotsDataCompleteUntil };`,
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+      fileName: widgetPath,
+    },
+  ).outputText;
+  return new Function(output)();
 }
 
 function loadDurationAverageSummaryBuilder() {
@@ -987,6 +1391,20 @@ function durationSeries(
     name,
     scenarioId,
     summary: occupancyDuration.buildOccupancyDurationSummary(buckets, metrics),
+  };
+}
+
+function currentSnapshot(
+  scenarioId: string,
+  total: number | null,
+  error?: string,
+) {
+  return {
+    error,
+    name: scenarioId,
+    occupied: total === null ? null : total > 0,
+    scenarioId,
+    total,
   };
 }
 

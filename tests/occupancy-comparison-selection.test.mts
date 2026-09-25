@@ -16,6 +16,7 @@ const modules = new Map();
 const selection = load("lib/occupancy-comparison-selection.ts");
 const comparison = load("lib/occupancy-comparison.ts");
 const source = readFileSync(resolve(root, "components/app/occupancy-comparison-widgets.tsx"), "utf8");
+const dashboardSource = readFileSync(resolve(root, "components/app/occupancy-scenario-dashboard.tsx"), "utf8");
 const scenarios = ["a", "b", "c", "d"].map((id) => ({ id, name: `Cenário ${id}` }));
 const ids = selection.OCCUPANCY_COMPARISON_SCENARIO_CARD_IDS;
 
@@ -296,8 +297,8 @@ test("mapa por cenários consulta somente a granularidade visível e não refaz 
   );
   assert.match(
     source,
-    /const scenarioHeatmapRangeDayCount =[\s\S]*?settings\.scenarioHeatmapGranularity === "hour"[\s\S]*?settings\.scenarioHeatmapGranularity === "day"[\s\S]*?\? settings\.dayCount\s*: 7;[\s\S]*?scenarioHeatmapScopeKey = `\$\{companyScopeId\}\|\$\{timeZone\}\|\$\{settings\.scenarioHeatmapGranularity\}\|\$\{scenarioHeatmapRangeDayCount\}\|\$\{scenarioHeatmapSelectionKey\}`/,
-    "minute/week/month devem manter uma chave estável quando outro widget altera dayCount",
+    /const scenarioHeatmapRangeDayCount =[\s\S]*?settings\.scenarioHeatmapGranularity === "hour"[\s\S]*?settings\.scenarioHeatmapGranularity === "day"[\s\S]*?\? settings\.dayCount\s*: 7;[\s\S]*?scenarioHeatmapScopeKey = `\$\{companyScopeId\}\|\$\{timeZone\}\|\$\{comparisonWindowKey\}\|\$\{settings\.scenarioHeatmapGranularity\}\|\$\{scenarioHeatmapRangeDayCount\}\|\$\{scenarioHeatmapSelectionKey\}`/,
+    "minute/week/month devem manter uma chave estável por janela quando outro widget altera dayCount",
   );
   assert.doesNotMatch(effect, /settings\.(?:metric|colorPaletteId)/);
 });
@@ -505,6 +506,84 @@ test("hexágonos preservam vínculos próprios e não ampliam séries histórica
   assert.deepEqual(result.trends, []);
 });
 
+test("exportação inclui card visível fora da viewport e preserva sua seleção e ordem", () => {
+  const report = selection.buildOccupancyComparisonReportSelectionPlan({
+    scenarios,
+    preferences: [
+      {
+        id: "occupancy_scenario_half_donut",
+        scenarioIds: ["a"],
+        scenarioSelectionMode: "custom",
+        visible: true,
+      },
+      {
+        id: "occupancy_scenario_max_month",
+        scenarioIds: ["c", "a"],
+        scenarioOrder: ["c", "a"],
+        scenarioSelectionMode: "custom",
+        visible: true,
+      },
+      {
+        id: "occupancy_scenario_max_year",
+        scenarioIds: ["d"],
+        scenarioSelectionMode: "custom",
+        visible: false,
+      },
+    ],
+    inheritedScenarioIds: ["b", "a"],
+    inheritedHeatmapScenarioId: "a",
+    hexScenarioIds: ["d"],
+  });
+
+  assert.deepEqual(report.visibleCardIds, [
+    "occupancy_scenario_half_donut",
+    "occupancy_scenario_max_month",
+  ]);
+  assert.deepEqual(
+    report.byCard.get("occupancy_scenario_max_month"),
+    ["c", "a"],
+    "a ordem salva do card offscreen deve chegar intacta à exportação",
+  );
+  assert.deepEqual(report.snapshots, ["a"]);
+  assert.deepEqual(report.trends, ["a", "c"]);
+  assert.ok(!report.trends.includes("d"), "card oculto não pode solicitar rede");
+});
+
+test("loader explícito do relatório não herda viewport nem cria polling", () => {
+  const start = source.indexOf(
+    "const loadReportSnapshot = React.useCallback",
+  );
+  const end = source.indexOf("\n  return {\n    cards,", start);
+  assert.ok(start >= 0 && end > start);
+  const loader = source.slice(start, end);
+
+  assert.match(
+    loader,
+    /buildOccupancyComparisonReportSelectionPlan\(\{[\s\S]*?preferences: reportPreferences,/,
+    "o relatório deve partir das preferências completas, não da demanda virtualizada",
+  );
+  assert.doesNotMatch(loader, /requestedPreferences|requestedCardIds/);
+  assert.match(loader, /await Promise\.all\(\[/);
+  assert.match(loader, /loadOccupancyComparisonReportSnapshots\(/);
+  assert.match(loader, /loadOccupancyComparisonReportAggregate\(/);
+  assert.doesNotMatch(loader, /setTimeout|setInterval|scheduleNext/);
+  assert.match(
+    dashboardSource,
+    /preferences: secondaryOccupancyPreferences,[\s\S]*?reportPreferences: hydratedOccupancyPreferences/,
+    "a exportação deve receber preferências completas mesmo antes de um card entrar na viewport",
+  );
+  assert.match(
+    dashboardSource,
+    /loadOccupancyComparisonReportAssets\(signal\)[\s\S]*?occupancyLoitering\.loadReportAssets\(signal\)[\s\S]*?loadOccupancyDurationReportSnapshot\(signal\)/,
+    "a exportação deve aguardar o snapshot explícito dos comparativos",
+  );
+  assert.match(
+    source,
+    /scenarioId: OCCUPANCY_LIVE_SNAPSHOT_QUERY_ID,[\s\S]*?signal,[\s\S]*?timeZone/,
+    "o snapshot de exportação deve compartilhar a mesma identidade de transporte dos demais consumidores",
+  );
+});
+
 test("IDs de outra empresa, removidos ou duplicados não entram na seleção", () => {
   const result = plan([preference(ids[0], ["foreign", "c", "c", "a"])]);
   assert.deepEqual(result.byCard.get(ids[0]), ["c", "a"]);
@@ -629,7 +708,12 @@ test("exportação usa os mesmos cenários independentes, inclusive seleção va
     scenarioHourHeatmapDateKey: "",
     scenarios, selectionsByCard, selectedScenarioIds: ["a", "b", "c", "d"],
     settings: load("lib/occupancy-widget-settings.ts").DEFAULT_OCCUPANCY_WIDGET_SETTINGS,
-    snapshots: scenarios.map((scenario, index) => ({ scenarioId: scenario.id, name: scenario.name, total: index + 1 })),
+    snapshots: scenarios.map((scenario, index) => ({
+      scenarioId: scenario.id,
+      name: scenario.name,
+      occupied: true,
+      total: index + 1,
+    })),
   });
   const byId = new Map<string, RuntimeFixture>(reports.map((report: RuntimeFixture) => [report.cardId, report.chart.table.rows]));
   assert.deepEqual(byId.get(ids[0]).map((row: RuntimeFixture) => row.scenario), [

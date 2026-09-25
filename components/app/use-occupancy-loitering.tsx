@@ -4,15 +4,14 @@ import * as React from "react";
 
 import type { LayoutCard } from "@/components/app/card-layout";
 import {
-  OCCUPANCY_LOITERING_AVERAGE_CARD_ID,
   OCCUPANCY_LOITERING_CARD_ID,
   OCCUPANCY_LOITERING_CARD_IDS,
+  OCCUPANCY_DURATION_AVERAGE_CARD_ID,
   OCCUPANCY_LOITERING_MAXIMUM_CARD_ID,
   OCCUPANCY_LOITERING_MINIMUM_CARD_ID,
   OCCUPANCY_LOITERING_RANGE_CARD_ID,
-  OCCUPANCY_LOITERING_SESSION_COUNT_CARD_ID,
   OCCUPANCY_LOITERING_SUMMARY_CARD_IDS,
-  OccupancyLoiteringAverageByScenarioCard,
+  OCCUPANCY_LOITERING_SUMMARY_CONSUMER_CARD_IDS,
   OccupancyLoiteringRangeCard,
   OccupancyLoiteringSummaryCard,
   OccupancyLoiteringSummaryMetricCard,
@@ -43,12 +42,10 @@ import {
   type OccupancyLoiteringSummaryRow,
 } from "@/lib/occupancy-loitering";
 import {
-  fetchLiveOccupancyLoiteringSummary,
   fetchOccupancyLoiteringSessions,
   fetchOccupancyLoiteringSummary,
   initialOccupancyLoiteringSessionDay,
   occupancyLoiteringSessionsQueryRange,
-  type OccupancyLoiteringLiveSummaryState,
 } from "@/lib/occupancy-loitering-query";
 import { ApiError } from "@/lib/api";
 import { abortRequest, isAbortError } from "@/lib/request-cancellation";
@@ -71,20 +68,9 @@ const LOITERING_SESSION_CARD_IDS = [
 const LOITERING_DATA_CONSUMER_CARD_IDS = [
   ...OCCUPANCY_LOITERING_CARD_IDS,
   ...OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS,
+  OCCUPANCY_DURATION_AVERAGE_CARD_ID,
 ] as const;
 const LOITERING_SUMMARY_METRIC_CARDS = [
-  {
-    color: "#0F766E",
-    id: OCCUPANCY_LOITERING_AVERAGE_CARD_ID,
-    label: "Permanência média por área",
-    metric: "average",
-  },
-  {
-    color: "#2563EB",
-    id: OCCUPANCY_LOITERING_SESSION_COUNT_CARD_ID,
-    label: "Sessões concluídas por área",
-    metric: "sessions",
-  },
   {
     color: "#15803D",
     id: OCCUPANCY_LOITERING_MINIMUM_CARD_ID,
@@ -112,14 +98,6 @@ type OccupancyLoiteringDataset = {
   period: OccupancyLoiteringPeriod | null;
   rows: OccupancyLoiteringSummaryRow[];
   scopeKey: string;
-};
-
-type OccupancyLoiteringLiveCache = {
-  from: number;
-  lastSuccessfulTo: number;
-  rows: OccupancyLoiteringSummaryRow[];
-  scopeKey: string;
-  state: OccupancyLoiteringLiveSummaryState;
 };
 
 type OccupancyLoiteringSessionDataset = {
@@ -158,6 +136,18 @@ type OccupancyLoiteringSessionReportDataset = {
   period: OccupancyLoiteringPeriod;
   rows: OccupancyLoiteringSessionRow[];
   slicedByDay: boolean;
+};
+
+type OccupancyLoiteringReportSummaryRequest = {
+  key: string;
+  promise: Promise<OccupancyLoiteringSummaryRow[]>;
+  signal?: AbortSignal;
+};
+
+type OccupancyLoiteringReportPeriodRequest = {
+  key: string;
+  period: OccupancyLoiteringPeriod | null;
+  signal: AbortSignal;
 };
 
 export function useOccupancyLoitering({
@@ -237,7 +227,7 @@ export function useOccupancyLoitering({
   }, [requestedScenariosByCard]);
   const summaryRequestedScenarios = React.useMemo(() => {
     const unique = new Map<string, OccupancyScenario>();
-    OCCUPANCY_LOITERING_SUMMARY_CARD_IDS.forEach((cardId) => {
+    OCCUPANCY_LOITERING_SUMMARY_CONSUMER_CARD_IDS.forEach((cardId) => {
       (requestedScenariosByCard.get(cardId) ?? EMPTY_OCCUPANCY_SCENARIOS)
         .forEach((scenario) => unique.set(scenario.id, scenario));
     });
@@ -247,7 +237,7 @@ export function useOccupancyLoitering({
     () =>
       LOITERING_SESSION_CARD_IDS.some((cardId) => {
         const cardPreference = preferenceById.get(cardId);
-        if (cardPreference?.visible === false) return false;
+        if (cardPreference?.visible !== true) return false;
         return resolveWidgetScenarios(
           scopedScenarios,
           selectionFromPreference(cardPreference),
@@ -258,9 +248,9 @@ export function useOccupancyLoitering({
   );
   const reportNeedsSummary = React.useMemo(
     () =>
-      OCCUPANCY_LOITERING_SUMMARY_CARD_IDS.some((cardId) => {
+      OCCUPANCY_LOITERING_SUMMARY_CONSUMER_CARD_IDS.some((cardId) => {
         const cardPreference = preferenceById.get(cardId);
-        if (cardPreference?.visible === false) return false;
+        if (cardPreference?.visible !== true) return false;
         return resolveWidgetScenarios(
           scopedScenarios,
           selectionFromPreference(cardPreference),
@@ -327,16 +317,6 @@ export function useOccupancyLoitering({
       userId,
     ],
   );
-  const liveCacheScopeKey = React.useMemo(
-    () =>
-      JSON.stringify([
-        userId ?? "",
-        companyScopeId,
-        timeZone,
-        expectedAreasKey,
-      ]),
-    [companyScopeId, expectedAreasKey, timeZone, userId],
-  );
   const sessionScopeKey = React.useMemo(
     () =>
       JSON.stringify([
@@ -357,9 +337,12 @@ export function useOccupancyLoitering({
   const [refreshVersion, setRefreshVersion] = React.useState(0);
   const handledRefreshVersionRef = React.useRef(0);
   const handledSessionRefreshVersionRef = React.useRef(0);
-  const liveCacheRef = React.useRef<OccupancyLoiteringLiveCache | null>(null);
   const liveSessionCacheRef =
     React.useRef<OccupancyLoiteringLiveSessionCache | null>(null);
+  const reportSummaryRequestRef =
+    React.useRef<OccupancyLoiteringReportSummaryRequest | null>(null);
+  const reportPeriodRequestRef =
+    React.useRef<OccupancyLoiteringReportPeriodRequest | null>(null);
   const [sessionDataset, setSessionDataset] =
     React.useState<OccupancyLoiteringSessionDataset>({
       loading: false,
@@ -381,6 +364,7 @@ export function useOccupancyLoitering({
     let completed = false;
     let running = false;
     let authorizationBlocked = false;
+    let lastSuccessfulLivePeriod: { from: number; to: number } | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     function clearScheduledLoad() {
@@ -448,23 +432,12 @@ export function useOccupancyLoitering({
       if (!queryPeriod) return;
       const refreshRequested =
         refreshVersion > handledRefreshVersionRef.current;
-      const liveCache =
-        liveCacheRef.current?.scopeKey === liveCacheScopeKey &&
-        liveCacheRef.current.from === queryPeriod.from.getTime()
-          ? liveCacheRef.current
-          : null;
       if (
         refreshMode === "poll" &&
         !refreshRequested &&
-        queryPeriod.to.getTime() <=
-          (liveCache?.lastSuccessfulTo ?? Number.NEGATIVE_INFINITY)
+        lastSuccessfulLivePeriod?.from === queryPeriod.from.getTime() &&
+        queryPeriod.to.getTime() <= lastSuccessfulLivePeriod.to
       ) {
-        setDataset({
-          loading: false,
-          period: queryPeriod,
-          rows: liveCache?.rows ?? [],
-          scopeKey,
-        });
         scheduleAfterCycle(cycleStartedAt);
         return;
       }
@@ -478,6 +451,10 @@ export function useOccupancyLoitering({
           rows: [],
           scopeKey,
         });
+        lastSuccessfulLivePeriod = {
+          from: queryPeriod.from.getTime(),
+          to: queryPeriod.to.getTime(),
+        };
         scheduleAfterCycle(cycleStartedAt);
         return;
       }
@@ -508,40 +485,22 @@ export function useOccupancyLoitering({
         };
       });
       try {
-        let nextLiveCache: OccupancyLoiteringLiveCache | null = null;
-        const rows = refreshMode === "poll"
-          ? await fetchLiveOccupancyLoiteringSummary({
-              companyScopeId,
-              expectedAreas,
-              from: queryPeriod.from,
-              previous: liveCache?.state ?? null,
-              reconcile: refreshRequested,
-              signal: requestController.signal,
-              timeZone,
-              to: queryPeriod.to,
-            }).then((result) => {
-              nextLiveCache = {
-                from: queryPeriod.from.getTime(),
-                lastSuccessfulTo: queryPeriod.to.getTime(),
-                rows: result.rows,
-                scopeKey: liveCacheScopeKey,
-                state: result.state,
-              };
-              return result.rows;
-            })
-          : await fetchOccupancyLoiteringSummary({
-              bypassCache: refreshRequested,
-              companyScopeId,
-              expectedAreas,
-              from: queryPeriod.from,
-              live: false,
-              signal: requestController.signal,
-              timeZone,
-              to: queryPeriod.to,
-            });
+        const rows = await fetchOccupancyLoiteringSummary({
+          bypassCache: refreshRequested,
+          companyScopeId,
+          expectedAreas,
+          from: queryPeriod.from,
+          live: refreshMode === "poll",
+          signal: requestController.signal,
+          timeZone,
+          to: queryPeriod.to,
+        });
         if (disposed || controller.signal.aborted) return;
-        if (refreshMode === "poll" && nextLiveCache) {
-          liveCacheRef.current = nextLiveCache;
+        if (refreshMode === "poll") {
+          lastSuccessfulLivePeriod = {
+            from: queryPeriod.from.getTime(),
+            to: queryPeriod.to.getTime(),
+          };
         }
         setDataset({
           loading: false,
@@ -555,12 +514,6 @@ export function useOccupancyLoitering({
         const authorizationFailed =
           isAuthorizationFailure(error);
         authorizationBlocked = authorizationFailed;
-        if (
-          authorizationFailed &&
-          liveCacheRef.current?.scopeKey === liveCacheScopeKey
-        ) {
-          liveCacheRef.current = null;
-        }
         setDataset((current) => ({
           error: "Não foi possível carregar o resumo de permanência neste período.",
           loading: false,
@@ -610,7 +563,6 @@ export function useOccupancyLoitering({
     companyScopeId,
     expectedAreas,
     summaryQueryEnabled,
-    liveCacheScopeKey,
     refreshMode,
     refreshVersion,
     scopeKey,
@@ -794,6 +746,7 @@ export function useOccupancyLoitering({
         const fetchedRows = await fetchOccupancyLoiteringSessions({
           bypassCache: refreshRequested,
           companyScopeId,
+          expectedAreas,
           from: requestFrom,
           signal: requestController.signal,
           timeZone,
@@ -839,7 +792,7 @@ export function useOccupancyLoitering({
           liveSessionCacheRef.current = null;
         }
         setSessionDataset((current) => ({
-          error: "Não foi possível carregar as sessões de permanência neste período.",
+          error: "Não foi possível carregar as permanências neste período.",
           loading: false,
           period: queryPeriod,
           previewPeriod: sessionRequestRange,
@@ -886,6 +839,7 @@ export function useOccupancyLoitering({
     };
   }, [
     companyScopeId,
+    expectedAreas,
     refreshMode,
     refreshVersion,
     sessionQueryEnabled,
@@ -996,31 +950,6 @@ export function useOccupancyLoitering({
       stableManualPeriod,
     ],
   );
-  const requestedModel = React.useMemo(
-    () => {
-      const requestedScenarios =
-        requestedScenariosByCard.get(OCCUPANCY_LOITERING_AVERAGE_CARD_ID) ??
-        EMPTY_OCCUPANCY_SCENARIOS;
-      return requestedScenarios.length
-        ? buildOccupancyLoiteringSummaryModel(
-            requestedScenarios,
-            current.rows,
-          )
-        : emptyModel;
-    },
-    [current.rows, emptyModel, requestedScenariosByCard],
-  );
-  const scenarioTotalsById = React.useMemo(
-    () =>
-      new Map(
-        requestedModel.scenarios.map((scenario) => [
-          scenario.scenarioId,
-          scenario.totals,
-        ]),
-      ),
-    [requestedModel],
-  );
-
   const cards = React.useMemo<LayoutCard[]>(
     () => {
       const inheritedScenarioIds = inheritedScenarios.map(
@@ -1037,7 +966,7 @@ export function useOccupancyLoitering({
         id: OCCUPANCY_LOITERING_CARD_ID,
         inheritedScenarioIds,
         inheritedScenarioLabel,
-        label: "Permanência individual",
+        label: "Permanências registradas",
         previewKind: "chart",
         scenarioConfigurable: true,
         scenarioOrderingDisabled: true,
@@ -1078,23 +1007,15 @@ export function useOccupancyLoitering({
           scenarioSelectionPolicy: "compare",
           titleEditable: true,
           zoomEnabled: true,
-          node: ({ scenarioSelection }) =>
-            metric === "average" ? (
-              <OccupancyLoiteringAverageByScenarioCard
-                error={current.error}
-                loading={current.loading}
-                model={resolveSummaryModel(scenarioSelection)}
-                monitorMode={monitorMode}
-              />
-            ) : (
-              <OccupancyLoiteringSummaryMetricCard
-                error={current.error}
-                loading={current.loading}
-                metric={metric}
-                model={resolveSummaryModel(scenarioSelection)}
-                monitorMode={monitorMode}
-              />
-            ),
+          node: ({ scenarioSelection }) => (
+            <OccupancyLoiteringSummaryMetricCard
+              error={current.error}
+              loading={current.loading}
+              metric={metric}
+              model={resolveSummaryModel(scenarioSelection)}
+              monitorMode={monitorMode}
+            />
+          ),
         }),
       );
       const rangeCard: LayoutCard = {
@@ -1375,6 +1296,102 @@ export function useOccupancyLoitering({
       currentSessions.slicedByDay,
     ],
   );
+  const resolveReportPeriod = React.useCallback(
+    (signal?: AbortSignal) => {
+      const key = JSON.stringify([
+        companyScopeId,
+        timeZone,
+        refreshMode,
+        refreshMode === "manual" ? manualPeriodKey : "live",
+      ]);
+      const shared = reportPeriodRequestRef.current;
+      if (signal && shared?.signal === signal && shared.key === key) {
+        return shared.period;
+      }
+      const period =
+        refreshMode === "manual"
+          ? stableManualPeriod
+          : liveLoiteringPeriod(new Date(), timeZone);
+      if (signal) {
+        reportPeriodRequestRef.current = { key, period, signal };
+      }
+      return period;
+    },
+    [
+      companyScopeId,
+      manualPeriodKey,
+      refreshMode,
+      stableManualPeriod,
+      timeZone,
+    ],
+  );
+  const loadReportSummaryRows = React.useCallback(
+    (signal?: AbortSignal): Promise<OccupancyLoiteringSummaryRow[]> => {
+      signal?.throwIfAborted();
+      if (!reportNeedsSummary) return Promise.resolve([]);
+      requireSupportedTimeZone(timeZone);
+      if (!companyScopeId) {
+        return Promise.reject(
+          new Error(
+            "A empresa do relatório de permanência não está disponível.",
+          ),
+        );
+      }
+      const reportPeriod = resolveReportPeriod(signal);
+      if (!reportPeriod) {
+        return Promise.reject(
+          new Error(
+            "O período do relatório de permanência não está disponível.",
+          ),
+        );
+      }
+      const key = JSON.stringify([
+        companyScopeId,
+        timeZone,
+        reportPeriod.from.getTime(),
+        reportPeriod.to.getTime(),
+        expectedAreasKey,
+      ]);
+      const pending = reportSummaryRequestRef.current;
+      if (pending && pending.signal === signal && pending.key === key) {
+        return pending.promise;
+      }
+
+      const promise = (async () => {
+        return fetchOccupancyLoiteringSummary({
+          bypassCache: true,
+          companyScopeId,
+          expectedAreas,
+          from: reportPeriod.from,
+          signal,
+          timeZone,
+          to: reportPeriod.to,
+        });
+      })();
+      reportSummaryRequestRef.current = { key, promise, signal };
+      void promise.then(
+        () => {
+          if (reportSummaryRequestRef.current?.promise === promise) {
+            reportSummaryRequestRef.current = null;
+          }
+        },
+        () => {
+          if (reportSummaryRequestRef.current?.promise === promise) {
+            reportSummaryRequestRef.current = null;
+          }
+        },
+      );
+      return promise;
+    },
+    [
+      companyScopeId,
+      expectedAreas,
+      expectedAreasKey,
+      reportNeedsSummary,
+      resolveReportPeriod,
+      timeZone,
+    ],
+  );
   const loadReportAssets = React.useCallback(
     async (signal?: AbortSignal): Promise<OccupancyLoiteringReportAsset[]> => {
       signal?.throwIfAborted();
@@ -1383,10 +1400,7 @@ export function useOccupancyLoitering({
       if (!companyScopeId) {
         throw new Error("A empresa do relatório de permanência não está disponível.");
       }
-      const reportPeriod =
-        refreshMode === "manual"
-          ? stableManualPeriod
-          : liveLoiteringPeriod(new Date(), timeZone);
+      const reportPeriod = resolveReportPeriod(signal);
       if (!reportPeriod) {
         throw new Error("O período do relatório de permanência não está disponível.");
       }
@@ -1409,6 +1423,7 @@ export function useOccupancyLoitering({
           ? fetchOccupancyLoiteringSessions({
               bypassCache: true,
               companyScopeId,
+              expectedAreas,
               from: queryRange.from,
               signal,
               timeZone,
@@ -1416,15 +1431,7 @@ export function useOccupancyLoitering({
             })
           : Promise.resolve([] as OccupancyLoiteringSessionRow[]),
         reportNeedsSummary
-          ? fetchOccupancyLoiteringSummary({
-              bypassCache: true,
-              companyScopeId,
-              expectedAreas,
-              from: reportPeriod.from,
-              signal,
-              timeZone,
-              to: reportPeriod.to,
-            })
+          ? loadReportSummaryRows(signal)
           : Promise.resolve([] as OccupancyLoiteringSummaryRow[]),
       ]);
       signal?.throwIfAborted();
@@ -1452,10 +1459,10 @@ export function useOccupancyLoitering({
       buildReportAssets,
       companyScopeId,
       expectedAreas,
-      refreshMode,
+      loadReportSummaryRows,
       reportNeedsSessions,
       reportNeedsSummary,
-      stableManualPeriod,
+      resolveReportPeriod,
       timeZone,
     ],
   );
@@ -1469,12 +1476,15 @@ export function useOccupancyLoitering({
     error: current.error ?? currentSessions.error,
     getReportAssets,
     loadReportAssets,
+    loadReportSummaryRows,
     loading:
       (summaryQueryEnabled && current.loading) ||
       (sessionQueryEnabled && currentSessions.loading),
     refresh,
     reportAssets,
-    scenarioTotalsById,
+    summaryError: current.error,
+    summaryLoading: summaryQueryEnabled && current.loading,
+    summaryRows: current.rows,
   };
 }
 

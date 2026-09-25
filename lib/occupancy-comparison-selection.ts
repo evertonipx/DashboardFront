@@ -9,6 +9,21 @@ export const OCCUPANCY_COMPARISON_SCENARIO_CARD_IDS = [
   "occupancy_scenario_max_year",
   "occupancy_day_hour_heatmap",
   "occupancy_scenario_hour_heatmap",
+  // The current-state duration card is rendered with the same tenant-wide
+  // five-second snapshot as the live comparison widgets. Keeping it in this
+  // plan avoids an aggregate-day request for a value that is inherently live.
+  "occupancy_duration_transitions",
+] as const;
+
+export const OCCUPANCY_COMPARISON_REPORT_CARD_IDS = [
+  "occupancy_scenario_half_donut",
+  "occupancy_scenario_bar_race",
+  "occupancy_scenario_max_hour",
+  "occupancy_scenario_max_month",
+  "occupancy_scenario_max_year",
+  "occupancy_hex_layout",
+  "occupancy_day_hour_heatmap",
+  "occupancy_scenario_hour_heatmap",
 ] as const;
 
 const MIN_COMPARISON_SNAPSHOT_REFRESH_MS = 5_000;
@@ -154,7 +169,7 @@ export function buildOccupancyComparisonSelectionPlan({
   }
   return {
     byCard,
-    snapshots: union(["occupancy_scenario_half_donut", "occupancy_scenario_bar_race", "occupancy_scenario_max_hour", "occupancy_scenario_max_year"], true),
+    snapshots: union(["occupancy_scenario_half_donut", "occupancy_scenario_bar_race", "occupancy_scenario_max_hour", "occupancy_scenario_max_year", "occupancy_duration_transitions"], true),
     hourly: union([
       "occupancy_scenario_max_hour",
       "occupancy_day_hour_heatmap",
@@ -170,6 +185,40 @@ export function buildOccupancyComparisonSelectionPlan({
       "occupancy_scenario_max_year",
     ]),
     trends: union(["occupancy_scenario_max_month", "occupancy_scenario_max_year"]),
+  };
+}
+
+/**
+ * Report demand is intentionally independent from virtualized/viewport card
+ * demand. Every saved visible comparison card must be loaded exactly once
+ * when the user explicitly exports the dashboard.
+ */
+export function buildOccupancyComparisonReportSelectionPlan({
+  scenarios,
+  preferences,
+  inheritedScenarioIds,
+  inheritedHeatmapScenarioId,
+  hexScenarioIds,
+  scenarioHeatmapGranularity = "hour",
+}: Parameters<typeof buildOccupancyComparisonSelectionPlan>[0]) {
+  const reportCardIds = new Set<string>(
+    OCCUPANCY_COMPARISON_REPORT_CARD_IDS,
+  );
+  const reportPreferences = preferences.filter(
+    (preference) =>
+      preference.visible === true && reportCardIds.has(preference.id),
+  );
+  return {
+    ...buildOccupancyComparisonSelectionPlan({
+      scenarios,
+      preferences: reportPreferences,
+      inheritedScenarioIds,
+      inheritedHeatmapScenarioId,
+      hexScenarioIds,
+      scenarioHeatmapGranularity,
+    }),
+    preferences: reportPreferences,
+    visibleCardIds: reportPreferences.map((preference) => preference.id),
   };
 }
 

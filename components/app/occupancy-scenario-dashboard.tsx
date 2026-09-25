@@ -42,7 +42,7 @@ import {
 import { OCCUPANCY_DURATION_INSIGHT_CARD_IDS } from "@/components/app/occupancy-duration-insights-widgets";
 import { useOccupancyDurationInsights } from "@/components/app/use-occupancy-duration-insights";
 import {
-  OCCUPANCY_LOITERING_AVERAGE_CARD_ID,
+  OCCUPANCY_DURATION_AVERAGE_CARD_ID,
   OCCUPANCY_LOITERING_CARD_IDS,
 } from "@/components/app/occupancy-loitering-widgets";
 import { OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS } from "@/components/app/occupancy-loitering-temporal-widgets";
@@ -182,6 +182,7 @@ import {
 } from "@/lib/occupancy-live-retry";
 import {
   buildOccupancyScenarioCurrentHistory,
+  mergeOccupancyScenarioCurrentHistory,
   occupancyScenarioSnapshotHasCompleteCoverage,
 } from "@/lib/occupancy-scenario-snapshots";
 import {
@@ -204,6 +205,7 @@ import type {
   OccupancyScenario,
   OccupancyScenarioAggregateResponse,
   OccupancyScenarioBucketRow,
+  OccupancyScenarioHistoryAreaRow,
   OccupancyScenarioHistoryResponse,
 } from "@/lib/types";
 import {
@@ -349,11 +351,10 @@ const OCCUPANCY_LOITERING_NETWORK_CARD_IDS = new Set<string>(
   [
     ...OCCUPANCY_LOITERING_CARD_IDS,
     ...OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS,
+    OCCUPANCY_DURATION_AVERAGE_CARD_ID,
   ],
 );
-const OCCUPANCY_DURATION_LAYOUT_CARD_IDS = OCCUPANCY_DURATION_CARD_IDS.filter(
-  (cardId) => cardId !== OCCUPANCY_LOITERING_AVERAGE_CARD_ID,
-);
+const OCCUPANCY_DURATION_LAYOUT_CARD_IDS = OCCUPANCY_DURATION_CARD_IDS;
 const EMPTY_OCCUPANCY_CARD_IDS: string[] = [];
 const EMPTY_OCCUPANCY_ALERTS: OccupancyAlertRow[] = [];
 const EMPTY_OCCUPANCY_CHART_DATA: Record<string, OccupancyChartState> = {};
@@ -397,6 +398,10 @@ export function OccupancyScenarioDashboard() {
   >({});
   const [history, setHistory] =
     React.useState<OccupancyScenarioHistoryResponse | null>(null);
+  const historyRef = React.useRef<{
+    scopeKey: string;
+    value: OccupancyScenarioHistoryResponse | null;
+  }>({ scopeKey: "", value: null });
   const [historyRequestedAt, setHistoryRequestedAt] =
     React.useState<Date | null>(null);
   const [alerts, setAlerts] = React.useState<OccupancyAlertRow[]>([]);
@@ -441,6 +446,12 @@ export function OccupancyScenarioDashboard() {
     selectedId,
     companyTimeZone,
   );
+  React.useEffect(() => {
+    historyRef.current = {
+      scopeKey: activeDataScopeKey,
+      value: history,
+    };
+  }, [activeDataScopeKey, history]);
 
   const liveRequestRef = React.useRef<AbortController | null>(null);
   const secondaryRequestRef = React.useRef<AbortController | null>(null);
@@ -760,6 +771,7 @@ export function OccupancyScenarioDashboard() {
           ? {
               error: certifiedHistoryError,
               name: selectedScenario.name,
+              occupied: null,
               requestedAt: historyRequestedAt ?? clock,
               scenarioId: selectedScenario.id,
               total: null,
@@ -768,6 +780,7 @@ export function OccupancyScenarioDashboard() {
             ? {
               asOf: certifiedHistory.as_of,
               name: selectedScenario.name,
+              occupied: certifiedHistory.occupied ?? null,
               requestedAt: historyRequestedAt ?? clock,
               scenarioId: selectedScenario.id,
               total: certifiedHistory.total,
@@ -799,8 +812,10 @@ export function OccupancyScenarioDashboard() {
     : EMPTY_OCCUPANCY_PREFERENCES;
   const {
     cards: occupancyComparisonCards,
-    getReportAssets: getOccupancyComparisonReportAssets,
+    loadReportAssets: loadOccupancyComparisonReportAssets,
     settings: occupancyComparisonSettings,
+    snapshots: occupancyCurrentSnapshots,
+    snapshotsLoading: occupancyCurrentSnapshotsLoading,
     updateSettings: updateOccupancyComparisonSettings,
   } = useOccupancyComparisonCards({
     aggregateRefreshMs: OCCUPANCY_COMPARISON_AGGREGATE_REFRESH_MS,
@@ -812,6 +827,7 @@ export function OccupancyScenarioDashboard() {
     monitorMode,
     preferenceScopeId: selectedId,
     preferences: secondaryOccupancyPreferences,
+    reportPreferences: hydratedOccupancyPreferences,
     requestedCardIds: requestedOccupancyCardIds,
     scenarios: visibleScenarios,
     snapshotRefreshMs: liveRefreshMs,
@@ -835,21 +851,19 @@ export function OccupancyScenarioDashboard() {
   });
   const {
     cards: occupancyDurationCards,
-    dataCompleteUntil: occupancyDurationDataCompleteUntil,
-    getReportAssets: getOccupancyDurationReportAssets,
+    loadReportSnapshot: loadOccupancyDurationReportSnapshot,
     loading: occupancyDurationLoading,
-    reportContext: occupancyDurationReportContext,
-    reportMetrics: occupancyDurationReportMetrics,
-    reportWarnings: occupancyDurationReportWarnings,
   } = useOccupancyDurationCards({
     aggregateRefreshMs: MINUTE_MS,
     companyScopeId,
+    currentSnapshots: occupancyCurrentSnapshots,
+    currentSnapshotsLoading: occupancyCurrentSnapshotsLoading,
     enabled: secondaryOccupancyQueriesEnabled,
     focusScenarioId: selectedScenario?.id ?? "",
-    individualDwellError: occupancyLoitering.error,
-    individualDwellLoading: occupancyLoitering.loading,
-    individualDwellTotalsByScenarioId:
-      occupancyLoitering.scenarioTotalsById,
+    loadLoiteringSummaryRows: occupancyLoitering.loadReportSummaryRows,
+    loiteringSummaryError: occupancyLoitering.summaryError,
+    loiteringSummaryLoading: occupancyLoitering.summaryLoading,
+    loiteringSummaryRows: occupancyLoitering.summaryRows,
     monitorMode,
     preferences: secondaryOccupancyPreferences,
     requestedCardIds: requestedOccupancyCardIds,
@@ -1198,6 +1212,10 @@ export function OccupancyScenarioDashboard() {
             ? loadFocusedLiveSnapshot({
                 companyScopeId,
                 force,
+                previousHistory:
+                  historyRef.current.scopeKey === requestedScopeKey
+                    ? historyRef.current.value
+                    : null,
                 requestedAt: now,
                 scenario,
                 signal: controller.signal,
@@ -1411,6 +1429,10 @@ export function OccupancyScenarioDashboard() {
         }
         if (historyResult.requested) {
           if (historyResult.succeeded) {
+            historyRef.current = {
+              scopeKey: requestedScopeKey,
+              value: historyResult.data,
+            };
             setHistory(historyResult.data);
             setHistoryRequestedAt(new Date(requestStartedAt));
             setHistoryError("");
@@ -1651,6 +1673,7 @@ export function OccupancyScenarioDashboard() {
     secondaryRequestRef.current?.abort();
 
     if (loadedDataScopeKeyRef.current !== activeDataScopeKey) {
+      historyRef.current = { scopeKey: activeDataScopeKey, value: null };
       setAlertsLoadedScopeKey("");
       dataFreshnessRef.current =
         emptyOccupancyLiveDataFreshness(activeDataScopeKey);
@@ -1912,13 +1935,23 @@ export function OccupancyScenarioDashboard() {
   const currentTotal = certifiedHistoryError
     ? null
     : (certifiedHistory?.total ?? null);
+  const certifiedHistoryAreas = certifiedHistory?.areas;
   const activeAreas = React.useMemo(
-    () =>
-      certifiedHistoryError
-        ? null
-        : (certifiedHistory?.areas?.filter((area) => area.value > 0).length ??
-          null),
-    [certifiedHistory?.areas, certifiedHistoryError],
+    () => {
+      if (certifiedHistoryError || !certifiedHistoryAreas?.length) {
+        return null;
+      }
+      if (
+        certifiedHistoryAreas.some(
+          (area) => typeof area.occupied !== "boolean",
+        )
+      ) {
+        return null;
+      }
+      return certifiedHistoryAreas.filter((area) => area.occupied === true)
+        .length;
+    },
+    [certifiedHistoryAreas, certifiedHistoryError],
   );
   const todayMetric = React.useMemo(
     () =>
@@ -2348,6 +2381,7 @@ export function OccupancyScenarioDashboard() {
                     certifiedHistoryError ? null : certifiedHistory
                   }
                   scenario={selectedScenario}
+                  timeZone={companyTimeZone}
                 />
               ),
             },
@@ -2387,9 +2421,7 @@ export function OccupancyScenarioDashboard() {
       ...occupancyLoitering.cards,
       ...chartCards,
       ...occupancyComparisonCards,
-      ...occupancyDurationCards.filter(
-        (card) => card.id !== OCCUPANCY_LOITERING_AVERAGE_CARD_ID,
-      ),
+      ...occupancyDurationCards,
       ...occupancyDurationInsights.cards,
       ...customWidgetCards,
       ...(monitorMode ? [] : detailCards),
@@ -2447,8 +2479,15 @@ export function OccupancyScenarioDashboard() {
       ),
     );
 
-    const occupancyLoiteringReportAssets =
-      await occupancyLoitering.loadReportAssets(signal);
+    const [
+      occupancyComparisonReportAssets,
+      occupancyLoiteringReportAssets,
+      occupancyDurationReportSnapshot,
+    ] = await Promise.all([
+      loadOccupancyComparisonReportAssets(signal),
+      occupancyLoitering.loadReportAssets(signal),
+      loadOccupancyDurationReportSnapshot(signal),
+    ]);
     signal?.throwIfAborted();
 
     return buildOccupancyDashboardReport({
@@ -2464,12 +2503,17 @@ export function OccupancyScenarioDashboard() {
       generatedAt: lastUpdated ?? clock,
       history: certifiedHistoryError ? null : certifiedHistory,
       metricVisibility,
-      occupancyComparisonReportAssets: getOccupancyComparisonReportAssets(),
-      occupancyDurationDataCompleteUntil,
-      occupancyDurationReportAssets: getOccupancyDurationReportAssets(),
-      occupancyDurationReportContext,
-      occupancyDurationReportMetrics,
-      occupancyDurationReportWarnings,
+      occupancyComparisonReportAssets,
+      occupancyDurationDataCompleteUntil:
+        occupancyDurationReportSnapshot.dataCompleteUntil,
+      occupancyDurationReportAssets:
+        occupancyDurationReportSnapshot.reportAssets,
+      occupancyDurationReportContext:
+        occupancyDurationReportSnapshot.reportContext,
+      occupancyDurationReportMetrics:
+        occupancyDurationReportSnapshot.reportMetrics,
+      occupancyDurationReportWarnings:
+        occupancyDurationReportSnapshot.reportWarnings,
       occupancyDurationInsightReportAssets:
         occupancyDurationInsights.getReportAssets(),
       occupancyLoiteringReportAssets,
@@ -3035,9 +3079,11 @@ function MetricVisibilityControls({
 function OccupancyScenarioDetailCard({
   history,
   scenario,
+  timeZone,
 }: {
   history: OccupancyScenarioHistoryResponse | null;
   scenario: OccupancyScenario;
+  timeZone: string;
 }) {
   const widgetColor = useWidgetColor();
   const resolvedTitle = useWidgetTitle(scenario.name);
@@ -3093,22 +3139,51 @@ function OccupancyScenarioDetailCard({
                   item.area_id === area.area_id &&
                   item.camera_id === area.camera_id,
               );
+              const state = occupancyAreaStatePresentation(currentArea);
 
               return (
                 <div
                   key={`${area.camera_id}-${area.area_id}-${page * pageSize + index}`}
-                  className="grid min-w-0 gap-3 rounded-md border bg-muted/20 p-3 @sm:grid-cols-[minmax(0,1fr)_90px]"
+                  className="grid min-w-0 items-center gap-3 rounded-md border bg-muted/20 p-3 @sm:grid-cols-[minmax(0,1fr)_minmax(132px,auto)]"
                 >
                   <div className="min-w-0">
                     <div className="break-words text-sm font-medium [overflow-wrap:anywhere]">
                       {area.label || "Área sem nome"}
                     </div>
-                  </div>
-                  <div className="min-w-0 text-left @sm:text-right">
-                    <div className="break-all text-lg font-semibold tabular-nums">
-                      {formatOccupancyValue(currentArea?.value)}
+                    <div className="mt-1 flex min-w-0 items-start gap-1.5 text-[11px] leading-4 text-muted-foreground">
+                      <Clock3 className="mt-0.5 h-3 w-3 shrink-0" />
+                      <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                        {currentArea?.snapshot_at
+                          ? `Leitura em ${formatDateTime(currentArea.snapshot_at, timeZone)}`
+                          : "Horário da leitura indisponível"}
+                      </span>
                     </div>
-                    <div className="text-xs text-muted-foreground">agora</div>
+                  </div>
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 @sm:justify-end">
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "shrink-0 gap-1.5 whitespace-nowrap px-2 py-0.5",
+                        state.className,
+                      )}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "h-1.5 w-1.5 rounded-full",
+                          state.dotClassName,
+                        )}
+                      />
+                      {state.label}
+                    </Badge>
+                    <div className="min-w-0 text-left @sm:text-right">
+                      <div className="break-all text-lg font-semibold tabular-nums">
+                        {formatOccupancyValue(currentArea?.value)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        leitura atual
+                      </div>
+                    </div>
                   </div>
                 </div>
               );
@@ -3130,6 +3205,39 @@ function OccupancyScenarioDetailCard({
       </CardContent>
     </Card>
   );
+}
+
+function occupancyAreaStatePresentation(
+  area: OccupancyScenarioHistoryAreaRow | undefined,
+) {
+  if (!area) {
+    return {
+      className: "border-border bg-muted/35 text-muted-foreground",
+      dotClassName: "bg-muted-foreground/60",
+      label: "Sem leitura",
+    };
+  }
+  if (area.occupied === true) {
+    return {
+      className:
+        "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+      dotClassName: "bg-sky-500",
+      label: "Ocupada",
+    };
+  }
+  if (area.occupied === false) {
+    return {
+      className:
+        "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+      dotClassName: "bg-emerald-500",
+      label: "Desocupada",
+    };
+  }
+  return {
+    className: "border-border bg-muted/35 text-muted-foreground",
+    dotClassName: "bg-muted-foreground/60",
+    label: "Estado não certificado",
+  };
 }
 
 function OccupancyAlertsCard({
@@ -3712,6 +3820,7 @@ function occupancyScenarioHistoryPath(scenarioId: string, at: Date) {
 async function loadFocusedLiveSnapshot({
   companyScopeId,
   force,
+  previousHistory,
   requestedAt,
   scenario,
   signal,
@@ -3719,6 +3828,7 @@ async function loadFocusedLiveSnapshot({
 }: {
   companyScopeId: string;
   force: boolean;
+  previousHistory?: OccupancyScenarioHistoryResponse | null;
   requestedAt: Date;
   scenario: OccupancyScenario;
   signal: AbortSignal;
@@ -3756,10 +3866,19 @@ async function loadFocusedLiveSnapshot({
       timeZone,
     });
     const rows = requireOccupancyCurrentSnapshotRows(response, {
-      expectedAreas: scenario.areas,
+      expectedAreas: scenario.areas.map((area) => ({
+        area_id: area.area_id,
+        camera_id: area.camera_id,
+        object_class: scenario.object_class,
+      })),
     });
     if (!occupancyScenarioSnapshotHasCompleteCoverage(scenario, rows)) {
-      return loadHistoryFallback();
+      const merged = mergeOccupancyScenarioCurrentHistory(
+        scenario,
+        previousHistory,
+        rows,
+      );
+      return merged ?? loadHistoryFallback();
     }
     return buildOccupancyScenarioCurrentHistory(scenario, rows);
   } catch (snapshotError) {
@@ -3772,9 +3891,8 @@ async function loadFocusedLiveSnapshot({
     }
 
     // Compatibility for installations that have not deployed the raw current
-    // snapshot route yet. A valid but uncovered raw response takes the same
-    // history path above; neither fallback is cached into the next five-second
-    // live pulse.
+    // route. Successful partial responses are handled above because Swagger
+    // explicitly omits quiet areas from the requested window.
     try {
       return await loadHistoryFallback();
     } catch (historyError) {
@@ -4717,9 +4835,7 @@ function buildOccupancyDashboardReport({
   });
   const durationChartsByCardId = new Map<string, ReportChart[]>();
   [
-    ...occupancyDurationReportAssets.filter(
-      ({ cardId }) => cardId !== OCCUPANCY_LOITERING_AVERAGE_CARD_ID,
-    ),
+    ...occupancyDurationReportAssets,
     ...occupancyDurationInsightReportAssets,
     ...occupancyLoiteringReportAssets,
   ].forEach(({ cardId, chart, titleSuffix = "" }) => {
@@ -4741,18 +4857,27 @@ function buildOccupancyDashboardReport({
     tables.push({
       columns: [
         { key: "label", label: "Área" },
+        { key: "state", label: "Estado" },
         { key: "value", label: "Ocupação", numeric: true },
+        { key: "snapshotAt", label: "Leitura em" },
       ],
-      description: "Último valor disponível por área do cenário.",
-      rows: scenario.areas.map((area) => ({
-        label: area.label || "Área sem nome",
-        value:
-          history?.areas?.find(
-            (item) =>
-              item.area_id === area.area_id &&
-              item.camera_id === area.camera_id,
-          )?.value ?? null,
-      })),
+      description:
+        "Estado explícito, último valor e horário certificado por área do cenário.",
+      rows: scenario.areas.map((area) => {
+        const snapshot = history?.areas?.find(
+          (item) =>
+            item.area_id === area.area_id &&
+            item.camera_id === area.camera_id,
+        );
+        return {
+          label: area.label || "Área sem nome",
+          snapshotAt: snapshot?.snapshot_at
+            ? formatDateTime(snapshot.snapshot_at, timeZone)
+            : "—",
+          state: occupancyAreaStatePresentation(snapshot).label,
+          value: snapshot?.value ?? null,
+        };
+      }),
       title: resolveTitle("occupancy_scenario_detail", "Áreas do cenário"),
     });
   }
@@ -4795,7 +4920,7 @@ function buildOccupancyDashboardReport({
         : []),
       ...(occupancyLoiteringReportAssets.length
         ? [
-            "A permanência considera sessões concluídas e estatísticas de duração por área. Sessões não equivalem necessariamente a pessoas únicas.",
+            "A permanência considera registros concluídos e estatísticas de duração por área; cada registro representa um intervalo observado, não necessariamente uma pessoa única.",
           ]
         : []),
       ...occupancyDurationReportWarnings.map(
@@ -4958,7 +5083,7 @@ function occupancyCustomMetricPresentation(
   }
   if (metric === "active_areas") {
     return {
-      description: "áreas com ocupação maior que zero",
+      description: "áreas ocupadas na leitura atual",
       icon: MapPinned,
       tone: "slate" as const,
       value: values.activeAreas,

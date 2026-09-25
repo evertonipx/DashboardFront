@@ -89,6 +89,7 @@ type ApiFetchOptions = Omit<RequestInit, "body"> & {
   expectedStatus?: number;
   jwtCompanyScopeOnly?: boolean;
   readCacheTtlMs?: number;
+  responseType?: "auto" | "blob";
   retry?: boolean;
 };
 
@@ -236,8 +237,17 @@ function writeSessionSyncSignal() {
   );
 }
 
-async function parseResponse(response: Response) {
+async function parseResponse(
+  response: Response,
+  responseType: "auto" | "blob" = "auto",
+) {
   if (response.status === 204) return undefined;
+
+  // Binary endpoints still return JSON errors. Only consume a successful
+  // response as a Blob so ApiError can preserve the backend message on 4xx/5xx.
+  if (response.ok && responseType === "blob") {
+    return response.blob();
+  }
 
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
@@ -437,6 +447,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     expectedStatus,
     jwtCompanyScopeOnly = false,
     readCacheTtlMs,
+    responseType = "auto",
     retry = true,
     headers,
     ...init
@@ -559,14 +570,18 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     body === undefined || body instanceof FormData ? body : JSON.stringify(body);
   const readRequest = method === "GET" && requestBody === undefined;
   const executeTransport = (signal?: AbortSignal) =>
-    fetchApiTransport(requestUrl, {
-      ...init,
-      body: requestBody,
-      cache: "no-store",
-      headers: requestHeaders,
-      method,
-      signal,
-    });
+    fetchApiTransport(
+      requestUrl,
+      {
+        ...init,
+        body: requestBody,
+        cache: "no-store",
+        headers: requestHeaders,
+        method,
+        signal,
+      },
+      responseType,
+    );
   let response: ApiTransportResponse;
   if (readRequest && dedupe) {
     const cacheTtlMs = readCacheTtlMs ?? defaultApiReadCacheTtl(path);
@@ -773,11 +788,12 @@ export async function currentUserRequest() {
 async function fetchApiTransport(
   url: string,
   init: RequestInit,
+  responseType: "auto" | "blob" = "auto",
 ): Promise<ApiTransportResponse> {
   const response = await fetch(url, init);
   return {
     ok: response.ok,
-    payload: await parseResponse(response),
+    payload: await parseResponse(response, responseType),
     status: response.status,
     statusText: response.statusText,
   };

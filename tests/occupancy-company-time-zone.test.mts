@@ -70,8 +70,8 @@ test("Ao Vivo, Análises e Relatórios preservam a origem certificada do timezon
   );
   assert.equal(
     (reportSource.match(/companyTimeZoneCertified\s*&&/g) ?? []).length,
-    2,
-    "duração e permanência históricas precisam do mesmo gate certificado",
+    4,
+    "comparação, duração, permanência e insights históricos precisam do mesmo gate certificado",
   );
   assert.match(
     reportSource,

@@ -69,8 +69,11 @@ import { formatDateTime } from "@/lib/utils";
 
 export const OCCUPANCY_LOITERING_CARD_ID =
   "occupancy_loitering_summary" as const;
-export const OCCUPANCY_LOITERING_AVERAGE_CARD_ID =
-  "occupancy_duration_average_by_scenario" as const;
+// This is the combined occupancy-duration summary card. It consumes
+// `/loitering/summary` only for the explicitly labelled individual dwell
+// metric; occupied/free state and duration remain detection-derived.
+export const OCCUPANCY_DURATION_AVERAGE_CARD_ID =
+  "occupancy_duration_average" as const;
 export const OCCUPANCY_LOITERING_SESSION_COUNT_CARD_ID =
   "occupancy_loitering_session_count_by_area" as const;
 export const OCCUPANCY_LOITERING_MINIMUM_CARD_ID =
@@ -82,11 +85,18 @@ export const OCCUPANCY_LOITERING_RANGE_CARD_ID =
 
 /** Cards backed by the single tenant-wide `/loitering/summary` response. */
 export const OCCUPANCY_LOITERING_SUMMARY_CARD_IDS = [
-  OCCUPANCY_LOITERING_AVERAGE_CARD_ID,
-  OCCUPANCY_LOITERING_SESSION_COUNT_CARD_ID,
   OCCUPANCY_LOITERING_MINIMUM_CARD_ID,
   OCCUPANCY_LOITERING_MAXIMUM_CARD_ID,
   OCCUPANCY_LOITERING_RANGE_CARD_ID,
+] as const;
+
+/**
+ * Every widget that needs the tenant-wide `/loitering/summary` dataset.
+ * The duration summary owns its own visual card, but shares this transport.
+ */
+export const OCCUPANCY_LOITERING_SUMMARY_CONSUMER_CARD_IDS = [
+  OCCUPANCY_DURATION_AVERAGE_CARD_ID,
+  ...OCCUPANCY_LOITERING_SUMMARY_CARD_IDS,
 ] as const;
 
 /** Every card in this family, including the sessions endpoint consumer. */
@@ -470,7 +480,7 @@ export function OccupancyLoiteringSummaryMetricCard({
           <Skeleton className="min-h-28 w-full flex-1" />
         ) : !option ? (
           <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/15 px-3 text-center text-xs text-muted-foreground">
-            Nenhuma sessão de permanência foi concluída neste período.
+            Nenhum registro de permanência foi concluído neste período.
           </div>
         ) : (
           <div
@@ -533,7 +543,7 @@ export function OccupancyLoiteringRangeCard({
           <WidgetTitleText fallback="Faixa de permanência por área" />
         </CardTitle>
         <CardDescription className="line-clamp-2 text-xs leading-4">
-          Menor, média e maior duração observada em cada área física
+          Menor, média e maior duração das permanências concluídas em cada área física
         </CardDescription>
       </CardHeader>
       <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col p-3 pt-1">
@@ -548,7 +558,7 @@ export function OccupancyLoiteringRangeCard({
           <Skeleton className="min-h-28 w-full flex-1" />
         ) : !option ? (
           <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/15 px-3 text-center text-xs text-muted-foreground">
-            Nenhuma sessão de permanência foi concluída neste período.
+            Nenhum registro de permanência foi concluído neste período.
           </div>
         ) : (
           <div
@@ -557,7 +567,7 @@ export function OccupancyLoiteringRangeCard({
             data-echart-layout="natural"
           >
             <EChart
-              ariaDescription="Faixa entre a menor e a maior permanência, com a média destacada, por área física."
+              ariaDescription="Faixa entre a menor e a maior permanência concluída, com a média destacada, por área física."
               ariaLabel="Faixa de permanência por área"
               className="h-full min-h-0 w-full"
               option={option}
@@ -640,18 +650,18 @@ export function OccupancyLoiteringSummaryCard({
                   className="mt-0.5 h-4 w-4 shrink-0"
                   style={{ color: widgetColor }}
                 />
-                <WidgetTitleText fallback="Permanência individual" />
+                <WidgetTitleText fallback="Permanências registradas" />
               </CardTitle>
               <CardDescription
                 className="mt-0.5 line-clamp-2 text-xs leading-4"
-                title={`Sessões concluídas em ${previewContext}. Não representa pessoas únicas.`}
+                title={`Registros de permanência concluídos em ${previewContext}.`}
               >
                 Duração e horário de saída · {previewContext}
               </CardDescription>
             </div>
             {!monitorMode ? (
               <Button
-                aria-label="Consultar sessões individuais"
+                aria-label="Consultar registros individuais de permanência"
                 className="h-8 shrink-0 px-2.5"
                 disabled={!hasConfiguredAreas}
                 onClick={() => {
@@ -659,7 +669,7 @@ export function OccupancyLoiteringSummaryCard({
                   setSessionsOpen(true);
                 }}
                 size="sm"
-                title="Ver todas as sessões individuais"
+                title="Ver todos os registros individuais"
                 type="button"
                 variant="outline"
               >
@@ -685,7 +695,7 @@ export function OccupancyLoiteringSummaryCard({
             </div>
           ) : !chartOption ? (
             <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/15 px-3 text-center text-xs text-muted-foreground">
-              Nenhuma sessão individual foi concluída {sessionsSlicedByDay ? "neste dia" : "neste período"}.
+              Nenhum registro de permanência foi concluído {sessionsSlicedByDay ? "neste dia" : "neste período"}.
             </div>
           ) : (
             <div
@@ -694,8 +704,8 @@ export function OccupancyLoiteringSummaryCard({
               data-echart-layout="natural"
             >
               <EChart
-                ariaDescription="Cada ponto representa uma sessão concluída, posicionada pelo horário de saída e pela duração da permanência."
-                ariaLabel="Permanências individuais ao longo do tempo"
+                ariaDescription="Cada ponto representa um registro concluído, posicionado pelo horário de saída e pela duração da permanência."
+                ariaLabel="Permanências registradas ao longo do tempo"
                 className="h-full min-h-0 w-full"
                 option={chartOption}
                 themeMode="explicit"
@@ -704,13 +714,8 @@ export function OccupancyLoiteringSummaryCard({
             </div>
           )}
           {sessionEntries.length ? (
-            <div className="flex shrink-0 items-center justify-between gap-2 text-[11px] text-muted-foreground">
-              <span>
-                Sessões mais recentes{sessionsSlicedByDay ? " · prévia diária" : ""}
-              </span>
-              <span className="tabular-nums">
-                Exibindo {chartEntries.length.toLocaleString("pt-BR")} de {sessionEntries.length.toLocaleString("pt-BR")}
-              </span>
+            <div className="shrink-0 text-[11px] text-muted-foreground">
+              Registros mais recentes{sessionsSlicedByDay ? " · prévia diária" : ""}
             </div>
           ) : null}
         </CardContent>
@@ -744,6 +749,15 @@ function OccupancyLoiteringSessionsDialog({
   timeZone: string;
 }) {
   const areas = model.areas;
+  const expectedAreas = React.useMemo(
+    () =>
+      areas.map((area) => ({
+        area: area.area,
+        cameraId: area.cameraId,
+        objectClass: area.objectClass,
+      })),
+    [areas],
+  );
   const [areaIndex, setAreaIndex] = React.useState(0);
   const [dayStart, setDayStart] = React.useState(() =>
     initialOccupancyLoiteringSessionDay({
@@ -809,6 +823,7 @@ function OccupancyLoiteringSessionsDialog({
     );
     void fetchOccupancyLoiteringSessions({
       companyScopeId,
+      expectedAreas,
       from: sessionQueryRange.from,
       signal: controller.signal,
       timeZone,
@@ -834,6 +849,7 @@ function OccupancyLoiteringSessionsDialog({
     return () => abortRequest(controller);
   }, [
     companyScopeId,
+    expectedAreas,
     open,
     sessionQueryRange,
     scopeKey,
@@ -877,9 +893,9 @@ function OccupancyLoiteringSessionsDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="grid max-h-[92dvh] grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-4xl">
         <DialogHeader>
-          <DialogTitle>Sessões individuais de permanência</DialogTitle>
+          <DialogTitle>Permanências individuais</DialogTitle>
           <DialogDescription>
-            Uma linha por sessão concluída. Registros com o mesmo horário são
+            Uma linha por permanência concluída. Registros com o mesmo horário são
             preservados e podem representar saídas simultâneas.
           </DialogDescription>
         </DialogHeader>
@@ -963,13 +979,12 @@ function OccupancyLoiteringSessionsDialog({
             </div>
           ) : !selectedRows.length ? (
             <div className="flex min-h-40 items-center justify-center px-4 text-center text-sm text-muted-foreground">
-              Nenhuma sessão concluída nesta área e neste período.
+              Nenhuma permanência concluída nesta área e neste período.
             </div>
           ) : (
-            <Table scrollRegionLabel="Sessões de permanência do período">
+            <Table scrollRegionLabel="Permanências do período">
               <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
-                  <TableHead className="w-24">Sessão</TableHead>
                   <TableHead>Encerrada em</TableHead>
                   <TableHead className="text-right">Duração</TableHead>
                 </TableRow>
@@ -979,9 +994,6 @@ function OccupancyLoiteringSessionsDialog({
                   <TableRow
                     key={`${row.ended_at}|${row.duration_seconds}|${safePage * pageSize + index}`}
                   >
-                    <TableCell className="font-medium tabular-nums">
-                      {(safePage * pageSize + index + 1).toLocaleString("pt-BR")}
-                    </TableCell>
                     <TableCell className="tabular-nums">
                       {formatDateTime(row.ended_at, timeZone)}
                     </TableCell>
@@ -997,7 +1009,7 @@ function OccupancyLoiteringSessionsDialog({
 
         <DialogFooter className="items-center sm:justify-between">
           <span className="text-xs tabular-nums text-muted-foreground">
-            {selectedRows.length.toLocaleString("pt-BR")} sessão(ões) · página {safePage + 1} de {pageCount}
+            Página {safePage + 1} de {pageCount}
           </span>
           <div className="flex items-center justify-end gap-2">
             <Button
@@ -1099,13 +1111,11 @@ export function buildOccupancyLoiteringChartOption(
   const durationScale = buildDurationScale(
     entries.flatMap((entry) => [entry.minimum, entry.average, entry.maximum]),
   );
-  const averageLabel = (params: unknown, compact = false) => {
+  const averageLabel = (params: unknown) => {
     const index = chartDataIndex(params);
     const entry = index === null ? undefined : entries[index];
     if (!entry) return "";
-    return compact
-      ? formatHumanDuration(entry.average)
-      : `${formatHumanDuration(entry.average)} · ${entry.sessions.toLocaleString("pt-BR")} sess.`;
+    return formatHumanDuration(entry.average);
   };
   return {
     animation: false,
@@ -1196,7 +1206,6 @@ export function buildOccupancyLoiteringChartOption(
         if (!entry) return "";
         return [
           `<strong>${escapeHtml(entry.label)}</strong>`,
-          `Sessões concluídas: <strong>${entry.sessions.toLocaleString("pt-BR")}</strong>`,
           `Média: <strong>${escapeHtml(formatAuditableDuration(entry.average))}</strong>`,
           `Menor: ${escapeHtml(formatAuditableDuration(entry.minimum))}`,
           `Maior: ${escapeHtml(formatAuditableDuration(entry.maximum))}`,
@@ -1243,7 +1252,7 @@ export function buildOccupancyLoiteringChartOption(
             {
               id: "loitering-average",
               label: {
-                formatter: (params: unknown) => averageLabel(params, true),
+                formatter: (params: unknown) => averageLabel(params),
                 fontSize: 9,
               },
             },
@@ -1369,7 +1378,6 @@ export function buildOccupancyLoiteringSummaryMetricChartOption(
           `Média: ${escapeHtml(formatAuditableDuration(entry.average))}`,
           `Menor: ${escapeHtml(formatAuditableDuration(entry.minimum))}`,
           `Maior: ${escapeHtml(formatAuditableDuration(entry.maximum))}`,
-          `Sessões concluídas: ${entry.sessions.toLocaleString("pt-BR")}`,
         ].join("<br/>");
       },
       textStyle: { color: palette.tooltipText, fontSize: 12 },
@@ -1455,9 +1463,9 @@ export function buildOccupancyLoiteringReport(
   if (!entries.length) return null;
   const chartEntries = entries.slice(0, MAX_LOITERING_SESSION_CHART_POINTS);
   const description = [
-    `Sessões individuais concluídas em ${contextLabel}. Cada ponto representa uma sessão real; uma sessão não equivale necessariamente a uma pessoa única.`,
+    `Registros individuais de permanência concluídos em ${contextLabel}. Cada ponto apresenta quando o registro terminou e sua duração.`,
     entries.length > chartEntries.length
-      ? `O gráfico apresenta as ${chartEntries.length.toLocaleString("pt-BR")} sessões mais recentes; a tabela preserva os ${entries.length.toLocaleString("pt-BR")} registros carregados.`
+      ? "O gráfico prioriza os registros mais recentes; a tabela preserva todo o período carregado."
       : "",
   ].filter(Boolean).join(" ");
   const table: ReportTable = {
@@ -1481,7 +1489,7 @@ export function buildOccupancyLoiteringReport(
       endedAt: formatDateTime(entry.endedAt, timeZone),
       scenario: entry.scenarioLabel,
     })),
-    title: "Dados - Permanência individual",
+    title: "Dados - Permanências registradas",
   };
   return {
     description,
@@ -1492,7 +1500,7 @@ export function buildOccupancyLoiteringReport(
       timeZone,
     ),
     table,
-    title: "Permanência individual",
+    title: "Permanências registradas",
   };
 }
 
@@ -1529,7 +1537,6 @@ export function buildOccupancyLoiteringSummaryMetricReport(
       { key: "minimumSeconds", label: "Menor (s)", numeric: true },
       { key: "maximum", label: "Maior" },
       { key: "maximumSeconds", label: "Maior (s)", numeric: true },
-      { key: "sessions", label: "Sessões", numeric: true },
     ],
     description,
     rows: entries.map((entry) => ({
@@ -1541,7 +1548,6 @@ export function buildOccupancyLoiteringSummaryMetricReport(
       minimum: formatHumanDuration(entry.minimum, true),
       minimumSeconds: entry.minimum,
       scenario: loiteringEntryScenarioLabel(entry),
-      sessions: entry.sessions,
     })),
     title: `Dados - ${configuration.title}`,
   };
@@ -1616,7 +1622,6 @@ export function buildOccupancyLoiteringRangeReport(
       { key: "averageSeconds", label: "Média (s)", numeric: true },
       { key: "maximum", label: "Maior" },
       { key: "maximumSeconds", label: "Maior (s)", numeric: true },
-      { key: "sessions", label: "Sessões", numeric: true },
     ],
     description,
     rows: entries.map((entry) => ({
@@ -1628,7 +1633,6 @@ export function buildOccupancyLoiteringRangeReport(
       minimum: formatHumanDuration(entry.minimum, true),
       minimumSeconds: entry.minimum,
       scenario: loiteringEntryScenarioLabel(entry),
-      sessions: entry.sessions,
     })),
     title: "Dados - Faixa de permanência por área",
   };
@@ -1647,13 +1651,13 @@ function loiteringMetricConfiguration(
     case "average":
       return {
         ariaDescription:
-          "Permanência média das sessões concluídas em cada área física.",
+          "Permanência média dos registros concluídos em cada área física.",
         axisName: "Permanência média",
         color: "#0F766E",
         description:
-          "Tempo médio das sessões concluídas, separado por cenário e área",
+          "Tempo médio das permanências concluídas, separado por cenário e área",
         reportDescription:
-          "Permanência média das sessões concluídas por cenário e área",
+          "Permanência média dos registros concluídos por cenário e área",
         seriesName: "Permanência média",
         title: "Permanência média por área",
         valueLabel: "Permanência média",

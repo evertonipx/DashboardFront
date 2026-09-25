@@ -57,6 +57,7 @@ export type OccupancyScenarioSnapshot = {
   asOf?: string;
   error?: string;
   name: string;
+  occupied: boolean | null;
   scenarioId: string;
   total: number | null;
 };
@@ -598,14 +599,17 @@ export function occupancyMetricValue(
   return key === "peak" ? metric.peak : metric.average;
 }
 
-export function classifyOccupancyTotal(
-  total: number | null,
+export function classifyOccupancySnapshot(
+  snapshot: Pick<OccupancyScenarioSnapshot, "occupied">,
 ): OccupancyCertificationState {
-  if (total === null) return "unknown";
-  if (!Number.isFinite(total) || total < 0) {
-    throw new RangeError("O total de ocupação comparado é inválido.");
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new TypeError("O snapshot de ocupação comparado é inválido.");
   }
-  return total === 0 ? "unoccupied" : "occupied";
+  if (snapshot.occupied === null) return "unknown";
+  if (typeof snapshot.occupied !== "boolean") {
+    throw new RangeError("O estado do snapshot de ocupação é inválido.");
+  }
+  return snapshot.occupied ? "occupied" : "unoccupied";
 }
 
 export function occupancySnapshotTotalWithinHour(
@@ -635,15 +639,17 @@ export function filterOccupancySnapshots(
   filter: OccupancyComparisonFilter,
 ) {
   return snapshots.filter(
-    (snapshot) => classifyOccupancyTotal(snapshot.total) === filter,
+    (snapshot) => classifyOccupancySnapshot(snapshot) === filter,
   );
 }
 
 export function buildOccupancyLiveRaceEntries(
-  snapshots: readonly OccupancyScenarioSnapshot[],
+  snapshots: ReadonlyArray<
+    Pick<OccupancyScenarioSnapshot, "name" | "scenarioId" | "total">
+  >,
 ): OccupancyLiveRaceEntry[] {
   return snapshots.map((snapshot) => {
-    classifyOccupancyTotal(snapshot.total);
+    const total = requireOccupancySnapshotTotal(snapshot.total);
     return {
       name: snapshot.name,
       scenarioId: snapshot.scenarioId,
@@ -651,9 +657,9 @@ export function buildOccupancyLiveRaceEntries(
       // the field as a generic JSON number, so the ranking normalizes only its
       // presentation model instead of leaking fractional ticks and labels.
       value:
-        snapshot.total === null
+        total === null
           ? null
-          : Math.max(0, Math.round(snapshot.total)),
+          : Math.max(0, Math.round(total)),
     };
   });
 }
@@ -666,15 +672,16 @@ export function buildOccupancyHalfDonutEntries(
     throw new RangeError("O modo da comparação atual é inválido.");
   }
   return snapshots.flatMap((snapshot) => {
-    const state = classifyOccupancyTotal(snapshot.total);
-    if (state === "unknown" || snapshot.total === null) return [];
+    const state = classifyOccupancySnapshot(snapshot);
+    const total = requireOccupancySnapshotTotal(snapshot.total);
+    if (state === "unknown" || total === null) return [];
     return [
       {
-        chartValue: mode === "status" ? 1 : snapshot.total,
+        chartValue: mode === "status" ? 1 : total,
         name: snapshot.name,
         scenarioId: snapshot.scenarioId,
         state,
-        total: snapshot.total,
+        total,
       },
     ];
   });
@@ -688,18 +695,19 @@ export function buildOccupancyComparisonBarEntries(
     throw new RangeError("O modo da comparação atual é inválido.");
   }
   return snapshots.map((snapshot) => {
-    const state = classifyOccupancyTotal(snapshot.total);
+    const state = classifyOccupancySnapshot(snapshot);
+    const total = requireOccupancySnapshotTotal(snapshot.total);
     return {
       chartValue:
         mode === "status"
           ? state === "unknown"
             ? 0
             : 1
-          : snapshot.total ?? 0,
+          : total ?? 0,
       name: snapshot.name,
       scenarioId: snapshot.scenarioId,
       state,
-      total: snapshot.total,
+      total,
     };
   });
 }
@@ -828,7 +836,9 @@ export function buildOccupancyHexLayout({
     const snapshot = cell.scenarioId
       ? snapshotById.get(cell.scenarioId)
       : undefined;
-    const total = scenario ? snapshot?.total ?? null : null;
+    const total = scenario
+      ? requireOccupancySnapshotTotal(snapshot?.total ?? null)
+      : null;
     const capacity = scenario
       ? normalizeOccupancyCapacity(capacities[scenario.id], scenario)
       : null;
@@ -852,13 +862,22 @@ export function buildOccupancyHexLayout({
         cell.scenarioId === null
           ? "unlinked"
           : scenario
-            ? classifyOccupancyTotal(total)
+            ? snapshot
+              ? classifyOccupancySnapshot(snapshot)
+              : "unknown"
             : "unavailable",
       total,
       utilization:
         total === null || capacity === null ? null : total / capacity,
     };
   });
+}
+
+function requireOccupancySnapshotTotal(total: number | null) {
+  if (total !== null && (!Number.isFinite(total) || total < 0)) {
+    throw new RangeError("O total de ocupação comparado é inválido.");
+  }
+  return total;
 }
 
 export function normalizeOccupancyCapacity(

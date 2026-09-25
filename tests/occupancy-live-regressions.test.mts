@@ -245,8 +245,8 @@ test("Ao Vivo prioriza a leitura essencial e só monta relatórios sob demanda",
   );
   assert.match(
     source,
-    /await occupancyLoitering\.loadReportAssets\(signal\)/,
-    "exportação e IA devem aguardar os dados de permanência solicitados explicitamente",
+    /await Promise\.all\(\[[\s\S]*?loadOccupancyComparisonReportAssets\(signal\),[\s\S]*?occupancyLoitering\.loadReportAssets\(signal\),[\s\S]*?loadOccupancyDurationReportSnapshot\(signal\),[\s\S]*?\]\)/,
+    "exportação e IA devem aguardar comparativos, permanência e duração solicitados explicitamente",
   );
   assert.doesNotMatch(
     source,
@@ -259,11 +259,11 @@ test("Ao Vivo prioriza a leitura essencial e só monta relatórios sob demanda",
   );
   assert.match(
     source,
-    /occupancyComparisonReportAssets:\s*getOccupancyComparisonReportAssets\(\)/,
+    /occupancyComparisonReportAssets,/,
   );
   assert.match(
     source,
-    /occupancyDurationReportAssets:\s*getOccupancyDurationReportAssets\(\)/,
+    /occupancyDurationReportAssets:\s*occupancyDurationReportSnapshot\.reportAssets/,
   );
   assert.match(source, /occupancyDurationInsights\.getReportAssets\(\)/);
 });
@@ -288,8 +288,8 @@ test("Ao Vivo ativa fontes pesadas somente quando o widget se aproxima da viewpo
   );
   assert.match(
     source,
-    /OCCUPANCY_LOITERING_NETWORK_CARD_IDS = new Set<string>\(\s*\[\s*\.\.\.OCCUPANCY_LOITERING_CARD_IDS,\s*\.\.\.OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS,?\s*\],?\s*\)/,
-    "somente os catálogos explícitos de permanência base e temporal devem iniciar sessions ou summary",
+    /OCCUPANCY_LOITERING_NETWORK_CARD_IDS = new Set<string>\(\s*\[\s*\.\.\.OCCUPANCY_LOITERING_CARD_IDS,\s*\.\.\.OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS,\s*OCCUPANCY_DURATION_AVERAGE_CARD_ID,?\s*\],?\s*\)/,
+    "somente os catálogos explícitos de permanência e o resumo médio devem iniciar sessions ou summary",
   );
   assert.match(
     source,

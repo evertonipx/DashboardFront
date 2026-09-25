@@ -33,8 +33,11 @@ const durationCardIds = evaluateExpression<string[]>(
     duration.ast,
   ),
 );
-const aggregateDurationCardIds = durationCardIds.filter(
-  (id) => id !== "occupancy_duration_average_by_scenario",
+const aggregateDurationCardIds = evaluateExpression<string[]>(
+  variable(duration, "OCCUPANCY_AGGREGATE_DURATION_CARD_IDS").initializer!.getText(
+    duration.ast,
+  ),
+  { OCCUPANCY_DURATION_CARD_IDS: durationCardIds },
 );
 const durationInsightCardIds = evaluateExpression<string[]>(
   variable(
@@ -46,22 +49,24 @@ const chartCardIds = evaluateExpression<string[]>(
   variable(live, "OCCUPANCY_CHART_CARD_IDS").initializer!.getText(live.ast),
 );
 const temporalLoiteringCardIds = [
-  "occupancy_loitering_sessions_over_time",
   "occupancy_loitering_average_over_time",
   "occupancy_loitering_accumulated_session_time",
   "occupancy_loitering_percentiles_by_area",
-  "occupancy_loitering_duration_distribution",
   "occupancy_loitering_area_period_heatmap",
+] as const;
+const retiredSessionCountCardIds = [
+  "occupancy_loitering_session_count_by_area",
+  "occupancy_loitering_sessions_over_time",
+  "occupancy_loitering_duration_distribution",
 ] as const;
 const loiteringConsumerIds = evaluateExpression<string[]>(
   variable(loitering, "LOITERING_DATA_CONSUMER_CARD_IDS").initializer!.getText(
     loitering.ast,
   ),
   {
+    OCCUPANCY_DURATION_AVERAGE_CARD_ID: "occupancy_duration_average",
     OCCUPANCY_LOITERING_CARD_IDS: [
       "occupancy_loitering_summary",
-      "occupancy_duration_average_by_scenario",
-      "occupancy_loitering_session_count_by_area",
       "occupancy_loitering_minimum_by_area",
       "occupancy_loitering_maximum_by_area",
       "occupancy_loitering_range_by_area",
@@ -69,6 +74,99 @@ const loiteringConsumerIds = evaluateExpression<string[]>(
     OCCUPANCY_LOITERING_TEMPORAL_CARD_IDS: temporalLoiteringCardIds,
   },
 );
+
+test("contadores de sessões aposentados não são consumidores de dados", () => {
+  retiredSessionCountCardIds.forEach((id) => {
+    assert.equal(loiteringConsumerIds.includes(id), false);
+  });
+  assert.equal(
+    loiteringConsumerIds.includes("occupancy_duration_average_by_scenario"),
+    false,
+    "o tempo médio por cenário agora pertence ao hook de snapshots",
+  );
+  assert.equal(
+    loiteringConsumerIds.includes("occupancy_duration_average"),
+    true,
+    "o resumo médio visível deve compartilhar a consulta de loitering summary",
+  );
+  assert.equal(
+    aggregateDurationCardIds.includes("occupancy_duration_transitions"),
+    false,
+    "o estado atual pertence ao snapshot /occupancy, não ao agregado diário",
+  );
+});
+
+test("exportação de duração resolve todos os cenários visíveis fora da viewport", () => {
+  const scenarios = [
+    { id: "scenario-a", name: "Entrada" },
+    { id: "scenario-b", name: "Espera" },
+    { id: "scenario-c", name: "Saída" },
+  ];
+  const visibleCardId = "occupancy_duration_timeline";
+  const preferences = aggregateDurationCardIds.map((id) => ({
+    id,
+    scenarioIds: id === visibleCardId ? ["scenario-b", "scenario-a"] : [],
+    scenarioSelectionMode: id === visibleCardId ? "custom" : "inherit",
+    visible: id === visibleCardId,
+  }));
+  const preferenceByCardId = new Map(
+    preferences.map((preference) => [preference.id, preference]),
+  );
+  const resolveWidgetScenarios = (
+    options: RuntimeFixture[],
+    selection: RuntimeFixture,
+    inherited: RuntimeFixture[],
+  ) => {
+    const ids = selection.mode === "custom"
+      ? selection.scenarioIds
+      : inherited.map((scenario) => scenario.id);
+    const requested = new Set(ids);
+    return options.filter((scenario) => requested.has(scenario.id));
+  };
+  const scenarioSelectionFromPreference = (preference: RuntimeFixture) => ({
+    mode: preference?.scenarioSelectionMode ?? "inherit",
+    scenarioIds: preference?.scenarioIds ?? [],
+    scenarioOrder: [],
+  });
+
+  const liveScenarioKey = evaluateExpression<() => string>(
+    memoCallback(duration, "requestedScenarioKey"),
+    {
+      enabled: true,
+      queryEnabled: true,
+      inheritedScenarios: [scenarios[2]],
+      OCCUPANCY_AGGREGATE_DURATION_CARD_IDS: aggregateDurationCardIds,
+      preferenceByCardId,
+      requestedCardIds: new Set<string>(),
+      resolveWidgetScenarios,
+      scenarioOptions: scenarios,
+      scenarioSelectionFromPreference,
+    },
+  )();
+  const reportScenarios = evaluateExpression<() => RuntimeFixture[]>(
+    memoCallback(duration, "reportScenarios"),
+    {
+      inheritedScenarios: [scenarios[2]],
+      OCCUPANCY_AGGREGATE_DURATION_CARD_IDS: aggregateDurationCardIds,
+      preferenceByCardId,
+      requestedCardIds: new Set<string>(),
+      resolveWidgetScenarios,
+      scenarioOptions: scenarios,
+      scenarioSelectionFromPreference,
+    },
+  )();
+
+  assert.equal(liveScenarioKey, "", "sem viewport não deve haver polling");
+  assert.deepEqual(
+    reportScenarios.map((scenario) => scenario.id),
+    ["scenario-a", "scenario-b"],
+    "o one-shot deve ignorar a demanda de viewport e preservar todos os cenários do widget visível",
+  );
+  assert.doesNotMatch(
+    memoCallback(duration, "reportScenarios"),
+    /requestedCardIds/,
+  );
+});
 
 test("Análises e Relatórios sem widgets visíveis não planejam endpoint de dados", () => {
   const reportCardIds = [
@@ -116,6 +214,7 @@ test("Análises e Relatórios sem widgets visíveis não planejam endpoint de da
     durationSelection,
     {
       enabled: true,
+      queryEnabled: true,
       inheritedScenarios: [{ id: "scenario-a", name: "Entrada" }],
       OCCUPANCY_AGGREGATE_DURATION_CARD_IDS: aggregateDurationCardIds,
       preferenceByCardId: new Map(
@@ -187,6 +286,7 @@ test("preferências ausentes ou parciais não ativam hooks compartilhados", () =
       memoCallback(duration, "requestedScenarioKey"),
       {
         enabled: true,
+        queryEnabled: true,
         inheritedScenarios: [scenario],
         OCCUPANCY_AGGREGATE_DURATION_CARD_IDS: aggregateDurationCardIds,
         preferenceByCardId: new Map(),
@@ -244,6 +344,7 @@ test("preferências ausentes ou parciais não ativam hooks compartilhados", () =
       memoCallback(duration, "requestedScenarioKey"),
       {
         enabled: true,
+        queryEnabled: true,
         inheritedScenarios: [scenario],
         OCCUPANCY_AGGREGATE_DURATION_CARD_IDS: aggregateDurationCardIds,
         preferenceByCardId: new Map([
@@ -412,6 +513,7 @@ test("ocultar o último consumidor aborta duração e permanência em voo", () =
   assertCleanupAborts(duration, durationEffect, {
     document: { removeEventListener: () => undefined },
     progressTimer: undefined,
+    refreshMode: "poll",
     resume: () => undefined,
     timer: undefined,
     window: {

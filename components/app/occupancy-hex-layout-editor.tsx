@@ -77,7 +77,7 @@ import {
   type OccupancyHexVisualState,
 } from "@/lib/occupancy-hex-visual";
 import {
-  classifyOccupancyTotal,
+  classifyOccupancySnapshot,
   normalizeOccupancyCapacity,
 } from "@/lib/occupancy-comparison";
 import type {
@@ -88,6 +88,7 @@ import type { OccupancyScenario } from "@/lib/types";
 import { cn, formatNumber } from "@/lib/utils";
 
 type Snapshot = {
+  occupied: boolean | null;
   scenarioId: string;
   total: number | null;
 };
@@ -174,8 +175,15 @@ export function OccupancyHexLayoutEditor({
     () => new Map(scenarios.map((scenario) => [scenario.id, scenario])),
     [scenarios],
   );
+  const snapshotByScenario = React.useMemo(
+    () => new Map(snapshots.map((snapshot) => [snapshot.scenarioId, snapshot])),
+    [snapshots],
+  );
   const totalByScenario = React.useMemo(
-    () => new Map(snapshots.map((snapshot) => [snapshot.scenarioId, snapshot.total])),
+    () =>
+      new Map(
+        snapshots.map((snapshot) => [snapshot.scenarioId, snapshot.total]),
+      ),
     [snapshots],
   );
   const cellByCoordinate = React.useMemo(
@@ -216,10 +224,15 @@ export function OccupancyHexLayoutEditor({
           const scenario = cell.scenarioId
             ? scenarioById.get(cell.scenarioId)
             : undefined;
-          const total = scenario
-            ? totalByScenario.get(scenario.id) ?? null
-            : null;
-          const state = editorCellState(cell, scenario, total);
+          const snapshot = scenario
+            ? snapshotByScenario.get(scenario.id)
+            : undefined;
+          const total = snapshot?.total ?? null;
+          const state = editorCellState(
+            cell,
+            scenario,
+            snapshot?.occupied ?? null,
+          );
           return {
             capacity: scenario
               ? normalizeOccupancyCapacity(
@@ -233,7 +246,7 @@ export function OccupancyHexLayoutEditor({
           };
         }),
       ),
-    [draft.cells, draftCapacities, scenarioById, totalByScenario],
+    [draft.cells, draftCapacities, scenarioById, snapshotByScenario],
   );
   const visualEntryByCellId = React.useMemo(
     () => new Map(visualScale.entries.map((entry) => [entry.cellId, entry])),
@@ -907,9 +920,14 @@ export function OccupancyHexLayoutEditor({
                           scenario={cell.scenarioId ? scenarioById.get(cell.scenarioId) : undefined}
                           scale={canvasScale}
                           showDetails={canvasScale >= 0.5}
+                          occupied={
+                            cell.scenarioId && scenarioById.has(cell.scenarioId)
+                              ? snapshotByScenario.get(cell.scenarioId)?.occupied ?? null
+                              : null
+                          }
                           total={
                             cell.scenarioId && scenarioById.has(cell.scenarioId)
-                              ? totalByScenario.get(cell.scenarioId) ?? null
+                              ? snapshotByScenario.get(cell.scenarioId)?.total ?? null
                               : null
                           }
                           visual={visualEntryByCellId.get(cell.id)}
@@ -965,7 +983,7 @@ export function OccupancyHexLayoutEditor({
                   </>
                 ) : (
                   <span>
-                    Leitura binária: ocupado &gt; 0 ou desocupado = 0
+                    Estado ocupado ou desocupado informado pela leitura atual
                   </span>
                 )}
               </div>
@@ -1012,7 +1030,7 @@ export function OccupancyHexLayoutEditor({
                     total={
                       selectedCell.scenarioId &&
                       scenarioById.has(selectedCell.scenarioId)
-                        ? totalByScenario.get(selectedCell.scenarioId) ?? null
+                        ? snapshotByScenario.get(selectedCell.scenarioId)?.total ?? null
                         : null
                     }
                   />
@@ -1133,6 +1151,7 @@ function HexEditorCell({
   onNavigate,
   onMove,
   onSelect,
+  occupied,
   palette,
   scale,
   scenario,
@@ -1149,6 +1168,7 @@ function HexEditorCell({
   ) => void;
   onMove: (cellId: string, column: number, row: number) => void;
   onSelect: (cellId: string) => void;
+  occupied: boolean | null;
   palette: OccupancyHexPalette;
   scale: number;
   scenario?: OccupancyScenario;
@@ -1157,7 +1177,7 @@ function HexEditorCell({
   total: number | null;
   visual?: OccupancyHexVisualEntry;
 }) {
-  const state = editorCellState(cell, scenario, total);
+  const state = editorCellState(cell, scenario, occupied);
   const label =
     cell.label ||
     scenario?.name ||
@@ -1885,11 +1905,11 @@ function EditorCapacityInput({ id, value, onCommit }: { id: string; value: numbe
 function editorCellState(
   cell: OccupancyHexLayoutCell,
   scenario: OccupancyScenario | undefined,
-  total: number | null,
+  occupied: boolean | null,
 ): OccupancyHexVisualState {
   if (!cell.scenarioId) return "unlinked";
   if (!scenario) return "unavailable";
-  return classifyOccupancyTotal(total);
+  return classifyOccupancySnapshot({ occupied });
 }
 
 function editorCellStatus(

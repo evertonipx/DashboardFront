@@ -69,6 +69,7 @@ test("snapshot consolidado valida linhas sem exigir que todo o tenant pertença 
         current_value: 3,
         min: 1,
         object_class: "person",
+        occupied: true,
         peak: 4,
       },
       {
@@ -79,6 +80,7 @@ test("snapshot consolidado valida linhas sem exigir que todo o tenant pertença 
         current_value: 1,
         min: 0,
         object_class: "person",
+        occupied: true,
         peak: 2,
       },
     ],
@@ -103,46 +105,60 @@ test("snapshot consolidado valida linhas sem exigir que todo o tenant pertença 
   );
 });
 
-test("snapshot atual certifica somente a leitura bruta das áreas solicitadas", () => {
+test("snapshot atual certifica o contrato completo das áreas solicitadas", () => {
   const rows = validation.requireOccupancyCurrentSnapshotRows(
     {
       data: [
         {
           area: "region-a",
-          avg: "estatística não usada",
+          avg: 6,
           camera_id: "camera-a",
           current_at: "2026-09-11T08:00:00Z",
           current_value: 9,
-          min: 30,
+          min: 2,
           object_class: "person",
-          peak: 4,
+          occupied: true,
+          peak: 10,
         },
       ],
     },
     {
-      expectedAreas: [{ area_id: "region-a", camera_id: "camera-a" }],
-      expectedObjectClass: "person",
+      expectedAreas: [
+        {
+          area_id: "region-a",
+          camera_id: "camera-a",
+          object_class: "person",
+        },
+      ],
     },
   );
 
   assert.deepEqual(
     rows.map((row: RuntimeFixture) => ({
       area: row.area,
+      avg: row.avg,
       camera_id: row.camera_id,
       current_at: row.current_at,
       current_value: row.current_value,
+      min: row.min,
       object_class: row.object_class,
+      occupied: row.occupied,
+      peak: row.peak,
     })),
     [
       {
         area: "region-a",
+        avg: 6,
         camera_id: "camera-a",
         current_at: "2026-09-11T08:00:00Z",
         current_value: 9,
+        min: 2,
         object_class: "person",
+        occupied: true,
+        peak: 10,
       },
     ],
-    "a leitura atual não pertence ao intervalo estatístico nem ao domínio min/peak",
+    "current_* e occupied descrevem a leitura atual; min/avg/peak certificam o intervalo",
   );
 });
 
@@ -159,16 +175,25 @@ test("linhas não solicitadas não invalidam o lote atual", () => {
         },
         {
           area: "region-a",
+          avg: 0,
           camera_id: "camera-a",
           current_at: "2026-09-11T10:00:00Z",
           current_value: 0,
+          min: 0,
           object_class: "person",
+          occupied: false,
+          peak: 0,
         },
       ],
     },
     {
-      expectedAreas: [{ area_id: "region-a", camera_id: "camera-a" }],
-      expectedObjectClass: "person",
+      expectedAreas: [
+        {
+          area_id: "region-a",
+          camera_id: "camera-a",
+          object_class: "person",
+        },
+      ],
     },
   );
 
@@ -178,22 +203,45 @@ test("linhas não solicitadas não invalidam o lote atual", () => {
 
 test("área solicitada mantém validação estrita de identidade, classe e leitura", () => {
   const scope = {
-    expectedAreas: [{ area_id: "region-a", camera_id: "camera-a" }],
-    expectedObjectClass: "person",
+    expectedAreas: [
+      {
+        area_id: "region-a",
+        camera_id: "camera-a",
+        object_class: "person",
+      },
+    ],
   };
   const valid = {
     area: "region-a",
+    avg: 3,
     camera_id: "camera-a",
     current_at: "2026-09-11T10:00:00Z",
     current_value: 3,
+    min: 1,
     object_class: "person",
+    occupied: true,
+    peak: 5,
   };
+
+  assert.equal(
+    validation.requireOccupancyCurrentSnapshotRows(
+      { data: [{ ...valid, avg: 3.5 }] },
+      scope,
+    )[0].avg,
+    3.5,
+    "avg continua aceitando a média fracionária documentada",
+  );
 
   for (const [patch, message] of [
     [{ currentValue: 3 }, /aliases não certificados/],
-    [{ object_class: "vehicle" }, /ao consultar "person"/],
     [{ current_value: -1 }, /current_value/],
+    [{ current_value: 1.5 }, /current_value.*inválido/],
     [{ current_at: "ontem" }, /current_at/],
+    [{ occupied: null }, /occupied.*inválido/],
+    [{ occupied: "true" }, /occupied.*inválido/],
+    [{ isOccupied: true }, /aliases não certificados/],
+    [{ avg: undefined }, /avg.*inválido/],
+    [{ min: 4 }, /métricas inconsistentes/],
   ] as const) {
     assert.throws(
       () =>
@@ -215,15 +263,104 @@ test("área solicitada mantém validação estrita de identidade, classe e leitu
   );
 });
 
+test("snapshot atual exige occupied explícito em todas as linhas", () => {
+  const scope = {
+    expectedAreas: [
+      {
+        area_id: "region-a",
+        camera_id: "camera-a",
+        object_class: "person",
+      },
+      {
+        area_id: "region-b",
+        camera_id: "camera-b",
+        object_class: "person",
+      },
+    ],
+  };
+  const rowWithoutState = (cameraId: string, area: string, currentValue: number) => ({
+    area,
+    avg: currentValue,
+    camera_id: cameraId,
+    current_at: "2026-09-11T10:00:00Z",
+    current_value: currentValue,
+    min: currentValue,
+    object_class: "person",
+    peak: currentValue,
+  });
+
+  assert.throws(
+    () =>
+      validation.requireOccupancyCurrentSnapshotRows(
+        {
+          data: [
+            rowWithoutState("camera-a", "region-a", 0),
+            rowWithoutState("camera-b", "region-b", 2),
+          ],
+        },
+        scope,
+      ),
+    /occupied.*inválido/,
+    "o frontend não pode rederivar o estado omitido pela API",
+  );
+
+  assert.throws(
+    () =>
+      validation.requireOccupancyCurrentSnapshotRows(
+        {
+          data: [
+            { ...rowWithoutState("camera-a", "region-a", 0), occupied: false },
+            rowWithoutState("camera-b", "region-b", 2),
+          ],
+        },
+        scope,
+      ),
+    /occupied.*inválido/,
+  );
+  assert.throws(
+    () =>
+      validation.requireOccupancyCurrentSnapshotRows(
+        {
+          data: [
+            { ...rowWithoutState("camera-a", "region-a", 0), occupied: true },
+            { ...rowWithoutState("camera-b", "region-b", 2), occupied: true },
+          ],
+        },
+        scope,
+      ),
+    /occupied divergente de current_value/,
+  );
+  assert.throws(
+    () =>
+      validation.requireOccupancyCurrentSnapshotRows(
+        {
+          data: [
+            { ...rowWithoutState("camera-a", "region-a", 0), occupied: false },
+            { ...rowWithoutState("camera-b", "region-b", 2), occupied: false },
+          ],
+        },
+        scope,
+      ),
+    /occupied divergente de current_value/,
+  );
+});
+
 test("snapshot atual preserva ausência por área sem inventar zero", () => {
   const rows = validation.requireOccupancyCurrentSnapshotRows(
     { data: [] },
     {
       expectedAreas: [
-        { area_id: "region-a", camera_id: "camera-a" },
-        { area_id: "region-b", camera_id: "camera-b" },
+        {
+          area_id: "region-a",
+          camera_id: "camera-a",
+          object_class: "person",
+        },
+        {
+          area_id: "region-b",
+          camera_id: "camera-b",
+          object_class: "person",
+        },
       ],
-      expectedObjectClass: "person",
     },
   );
   assert.deepEqual(rows, []);
@@ -232,8 +369,13 @@ test("snapshot atual preserva ausência por área sem inventar zero", () => {
       validation.requireOccupancyCurrentSnapshotRows(
         { data: [], rows: [] },
         {
-          expectedAreas: [{ area_id: "region-a", camera_id: "camera-a" }],
-          expectedObjectClass: "person",
+          expectedAreas: [
+            {
+              area_id: "region-a",
+              camera_id: "camera-a",
+              object_class: "person",
+            },
+          ],
         },
       ),
     /envelope ambíguo/,
@@ -375,7 +517,7 @@ test("caller deriva a permissão explícita do usuário autenticado e mantém es
 });
 
 test("fallback 404 separa snapshots mistos pela relação explícita câmera/empresa apenas para Master", async () => {
-  const row = { camera_id: "camera-a", area: "region-a", current_value: 0, avg: 0, min: 0, peak: 0, current_at: "2026-09-11T10:00:00Z" };
+  const row = { camera_id: "camera-a", area: "region-a", current_value: 0, avg: 0, min: 0, occupied: false, peak: 0, current_at: "2026-09-11T10:00:00Z" };
   const calls: RuntimeFixture[] = [];
   const request = async (path: string) => {
     calls.push(path);
@@ -393,7 +535,7 @@ test("fallback 404 separa snapshots mistos pela relação explícita câmera/emp
 });
 
 test("fallback Master não aceita câmera desconhecida, relação ambígua, ID ausente ou empresa contraditória", async () => {
-  const row = { camera_id: "camera-a", area: "region-a", current_value: 0, avg: 0, min: 0, peak: 0, current_at: "2026-09-11T10:00:00Z" };
+  const row = { camera_id: "camera-a", area: "region-a", current_value: 0, avg: 0, min: 0, occupied: false, peak: 0, current_at: "2026-09-11T10:00:00Z" };
   for (const [cameras, snapshots, pattern] of [
     [[camera()], [{ ...row, camera_id: "unknown" }], /desconhecida/],
     [[camera()], [{ ...row, camera_id: undefined }], /camera_id/],

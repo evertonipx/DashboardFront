@@ -176,15 +176,6 @@ function validateOccupancyHexVisualSource(
     );
   }
 
-  if (source.state === "occupied" && (source.total === null || source.total === 0)) {
-    throw new RangeError(`A célula ocupada ${source.cellId} deve ter total positivo.`);
-  }
-  if (source.state === "unoccupied" && source.total !== 0) {
-    throw new RangeError(`A célula desocupada ${source.cellId} deve ter total zero.`);
-  }
-  if (source.state === "unknown" && source.total !== null) {
-    throw new RangeError(`A célula sem dados ${source.cellId} não pode ter total.`);
-  }
   if (
     source.state === "unavailable" &&
     (source.total !== null || source.capacity !== null)

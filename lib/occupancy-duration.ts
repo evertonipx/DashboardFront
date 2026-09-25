@@ -8,6 +8,7 @@ import {
 const MINUTE_MS = 60_000;
 const MINUTE_SECONDS = 60;
 const MAX_CIVIL_DAY_MINUTES = 26 * 60;
+const MAX_HISTORICAL_DURATION_MINUTES = 32 * 25 * 60;
 
 export type OccupancyDurationState =
   | "occupied"
@@ -128,6 +129,72 @@ export function buildOccupancyClosedDayMinuteRange(
     requestedAt,
     timeZone: canonicalTimeZone,
     to,
+  };
+}
+
+/**
+ * Lists the exact closed-minute axis of an explicitly applied historical
+ * interval. Both boundaries are absolute instants and `to` is exclusive.
+ *
+ * Historical duration widgets deliberately accept at most the same 32 civil
+ * days used by the duration-insight analysis. The extra hour per day keeps
+ * the guard valid across repeated DST hours without silently truncating the
+ * selected interval.
+ */
+export function buildOccupancyHistoricalMinuteRange(
+  period: {
+    dateKeys?: readonly string[];
+    from: Date;
+    timeZone?: string;
+    to: Date;
+  },
+  timeZone: string,
+): OccupancyDurationMinuteRange {
+  const from = requireMinuteBoundary(period.from, "início do período");
+  const to = requireMinuteBoundary(period.to, "fim do período");
+  const canonicalTimeZone = requireCompanyTimeZone(timeZone);
+  if (
+    period.timeZone &&
+    requireCompanyTimeZone(period.timeZone) !== canonicalTimeZone
+  ) {
+    throw new RangeError(
+      "O fuso do período histórico diverge do fuso da empresa.",
+    );
+  }
+  if (
+    period.dateKeys &&
+    (period.dateKeys.length < 1 || period.dateKeys.length > 32)
+  ) {
+    throw new RangeError(
+      "O período histórico de ocupação deve conter de 1 a 32 dias civis.",
+    );
+  }
+  if (from >= to) {
+    throw new RangeError("O período histórico de ocupação é inválido.");
+  }
+
+  const minuteCount = (to.getTime() - from.getTime()) / MINUTE_MS;
+  if (
+    !Number.isSafeInteger(minuteCount) ||
+    minuteCount < 1 ||
+    minuteCount > MAX_HISTORICAL_DURATION_MINUTES
+  ) {
+    throw new RangeError(
+      "O período histórico de ocupação deve conter no máximo 32 dias civis.",
+    );
+  }
+
+  const buckets = Array.from(
+    { length: minuteCount },
+    (_, index) => new Date(from.getTime() + index * MINUTE_MS),
+  );
+  return {
+    buckets,
+    dayEnd: new Date(to),
+    from: new Date(from),
+    requestedAt: new Date(to),
+    timeZone: canonicalTimeZone,
+    to: new Date(to),
   };
 }
 
@@ -639,6 +706,14 @@ function requireValidDate(value: Date, label: string) {
     throw new RangeError(`O ${label} é inválido.`);
   }
   return new Date(value);
+}
+
+function requireMinuteBoundary(value: Date, label: string) {
+  const date = requireValidDate(value, label);
+  if (date.getTime() % MINUTE_MS !== 0) {
+    throw new RangeError(`O ${label} precisa iniciar em um minuto fechado.`);
+  }
+  return date;
 }
 
 function requireNonNegativeFinite(value: number, label: string) {
