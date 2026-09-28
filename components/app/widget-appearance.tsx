@@ -8,6 +8,8 @@ import { cn } from "@/lib/utils";
 type WidgetAppearance = {
   chartType: CardChartType;
   color: string | null;
+  paletteColors: readonly string[] | null;
+  paletteId: string | null;
   title: string | null;
   zoom: CardZoom;
 };
@@ -15,6 +17,8 @@ type WidgetAppearance = {
 const WidgetAppearanceContext = React.createContext<WidgetAppearance>({
   chartType: "bar",
   color: null,
+  paletteColors: null,
+  paletteId: null,
   title: null,
   zoom: 100,
 });
@@ -23,12 +27,16 @@ export function WidgetAppearanceProvider({
   children,
   chartType = "bar",
   color,
+  paletteColors,
+  paletteId,
   title,
   zoom = 100,
 }: {
   children: React.ReactNode;
   chartType?: CardChartType;
   color?: string;
+  paletteColors?: readonly string[] | null;
+  paletteId?: string | null;
   title?: string;
   zoom?: CardZoom;
 }) {
@@ -37,6 +45,8 @@ export function WidgetAppearanceProvider({
       value={{
         chartType,
         color: color || null,
+        paletteColors: paletteColors?.length ? paletteColors : null,
+        paletteId: paletteId || null,
         title: title?.trim() || null,
         zoom,
       }}
@@ -52,6 +62,14 @@ export function useWidgetColor(fallback = "#1267C4") {
 
 export function useWidgetColorOverride() {
   return React.useContext(WidgetAppearanceContext).color;
+}
+
+export function useWidgetPalette() {
+  return React.useContext(WidgetAppearanceContext).paletteColors;
+}
+
+export function useWidgetPaletteId() {
+  return React.useContext(WidgetAppearanceContext).paletteId;
 }
 
 export function useWidgetChartType() {

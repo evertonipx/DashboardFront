@@ -42,14 +42,16 @@ test("botões nativos do editor têm foco interno e contraste nos estados seleci
   assert.doesNotMatch(layout, /-translate-y-1\/2 cursor-grab/);
 });
 
-test("a cor personalizada conserva indicação de foco visível e dimensão limitada", () => {
+test("a paleta da visão conserva foco visível e dimensão limitada", () => {
   const layout = source("components/app/card-layout.tsx");
-  const picker = layout.slice(layout.indexOf("function WidgetColorPicker("), layout.indexOf("function widgetColorPreviewStyle("));
-  assert.match(picker, /focus-within:ring-2 focus-within:ring-inset/);
-  assert.match(picker, /focus-within-contained/);
-  assert.match(picker, /pointer-events-none absolute inset-\[2px\]/);
-  assert.match(picker, /absolute inset-0 h-full min-w-0 w-full cursor-pointer opacity-0/);
-  assert.match(picker, /aria-label="Escolher cor personalizada"/);
+  const picker = layout.slice(layout.indexOf("function ViewPalettePicker("), layout.indexOf("function PaletteSwatches("));
+  const select = source("components/ui/select.tsx");
+  assert.match(picker, /Paleta de cores desta visão/);
+  assert.match(picker, /className="h-8 w-full min-w-0 bg-background text-xs sm:w-64"/);
+  assert.match(picker, /<SelectContent className="max-h-\[360px\] sm:min-w-\[320px\]"/);
+  assert.match(select, /focus-contained flex h-auto min-h-10 min-w-0 max-w-full/);
+  assert.match(select, /focus:ring-2 focus:ring-inset focus:ring-ring focus:ring-offset-0/);
+  assert.doesNotMatch(layout, /function WidgetColorPicker\(/);
 });
 
 test("status de cenário Ocupação usa foco interno sem ampliar o controle", () => {

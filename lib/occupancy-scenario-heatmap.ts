@@ -16,7 +16,10 @@ import {
   type OccupancyScenarioHourlySeries,
 } from "@/lib/occupancy-comparison";
 import { occupancyAggregateBucketKey } from "@/lib/occupancy-aggregate-validation";
-import { shiftOccupancyCalendarDate } from "@/lib/occupancy-calendar";
+import {
+  occupancyCalendarBoundaryInstant,
+  shiftOccupancyCalendarDate,
+} from "@/lib/occupancy-calendar";
 
 export type OccupancyScenarioHeatmapGranularity =
   | "minute"
@@ -42,6 +45,7 @@ type OccupancyScenarioHeatmapAttemptOptions = {
 };
 
 type OccupancyScenarioPeriodHeatmapOptions = {
+  axisBuckets?: readonly Date[];
   buckets: readonly Date[];
   dateKey?: string;
   granularity: OccupancyScenarioHeatmapGranularity;
@@ -89,24 +93,76 @@ export function occupancyScenarioHeatmapGranularityLabel(
 
 export function occupancyScenarioHeatmapPeriodDescription(
   granularity: OccupancyScenarioHeatmapGranularity,
-  dayCount: 7 | 14 | 30,
+  _dayCount: 7 | 14 | 30,
   dateKey?: string,
 ) {
-  if (granularity === "minute") return "últimos 60 minutos";
+  if (granularity === "minute") return "minutos do dia, de 00h a 24h";
   if (granularity === "hour") {
     return dateKey && /^\d{4}-\d{2}-\d{2}$/.test(dateKey)
       ? `horários de ${dateKey.slice(8, 10)}/${dateKey.slice(5, 7)}/${dateKey.slice(0, 4)}`
       : "horários da data selecionada";
   }
-  if (granularity === "day") return `últimos ${dayCount} dias`;
-  if (granularity === "week") return "últimas 8 semanas";
-  if (granularity === "month") return "últimos 12 meses";
+  if (granularity === "day") return "dias do mês";
+  if (granularity === "week") return "semanas do ano";
+  if (granularity === "month") return "meses do ano";
+  return assertNever(granularity);
+}
+
+/** Fixed civil axis; future positions are presentation-only, never queried. */
+export function buildOccupancyScenarioHeatmapAxisBuckets(
+  referenceAt: Date,
+  granularity: OccupancyScenarioHeatmapGranularity,
+  timeZone: string,
+) {
+  requireValidDate(referenceAt, "instante do eixo por cenário");
+  requireCompanyTimeZone(timeZone);
+  const day = companyCalendarDate(referenceAt, timeZone, "day");
+
+  if (granularity === "minute") {
+    const from = occupancyCalendarBoundaryInstant(day, timeZone);
+    const to = occupancyCalendarBoundaryInstant(
+      shiftOccupancyCalendarDate(day, 1),
+      timeZone,
+    );
+    return Array.from(
+      { length: (to.getTime() - from.getTime()) / MINUTE_MS },
+      (_, index) => new Date(from.getTime() + index * MINUTE_MS),
+    );
+  }
+  if (granularity === "hour") {
+    return buildOccupancyHourlyRange(referenceAt, 1, timeZone).buckets;
+  }
+  if (granularity === "day") {
+    const month = companyCalendarDate(referenceAt, timeZone, "month");
+    const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+    return listCivilBuckets(month, days, "day");
+  }
+
+  const year = companyCalendarDate(referenceAt, timeZone, "year");
+  if (granularity === "month") return listCivilBuckets(year, 12, "month");
+  if (granularity === "week") {
+    const firstMonday = shiftOccupancyCalendarDate(
+      year,
+      -((year.getDay() + 6) % 7),
+    );
+    const nextYear = shiftOccupancyCalendarDate(year, 0, 0, 1);
+    const weeks: Date[] = [];
+    for (
+      let cursor = firstMonday;
+      cursor < nextYear;
+      cursor = shiftOccupancyCalendarDate(cursor, 7)
+    ) {
+      weeks.push(cursor);
+    }
+    return weeks;
+  }
   return assertNever(granularity);
 }
 
 /**
- * Builds the same compact rolling windows used by Occupancy's live charts.
- * Minute/hour buckets are real instants; calendar buckets deliberately remain
+ * Builds only the elapsed buckets of the current civil day, month or year.
+ * Hour retains its selectable day source. Minute/hour buckets are real instants;
+ * calendar buckets deliberately remain
  * floating civil dates so the API query layer can resolve them in the
  * company's IANA timezone without borrowing the browser timezone.
  */
@@ -128,58 +184,30 @@ export function buildOccupancyScenarioHeatmapRange(
     return buildOccupancyHourlyRange(now, dayCount, timeZone);
   }
 
-  if (granularity === "minute") {
-    const currentMinute = startOfAggregateBucket(now, "minute");
-    const to = new Date(currentMinute.getTime() + MINUTE_MS);
-    const from = new Date(to.getTime() - 60 * MINUTE_MS);
-    return {
-      buckets: Array.from(
-        { length: 60 },
-        (_, index) => new Date(from.getTime() + index * MINUTE_MS),
-      ),
-      from,
-      to,
-    };
-  }
-
-  const companyDay = companyCalendarDate(now, timeZone, "day");
-  if (granularity === "day") {
-    const from = shiftOccupancyCalendarDate(companyDay, -(dayCount - 1));
-    const to = shiftOccupancyCalendarDate(companyDay, 1);
-    return {
-      buckets: listCivilBuckets(from, dayCount, "day"),
-      from,
-      to,
-    };
-  }
-
-  if (granularity === "week") {
-    const daysSinceMonday = (companyDay.getDay() + 6) % 7;
-    const currentWeek = shiftOccupancyCalendarDate(
-      companyDay,
-      -daysSinceMonday,
-    );
-    const from = shiftOccupancyCalendarDate(currentWeek, -7 * 7);
-    const to = shiftOccupancyCalendarDate(currentWeek, 7);
-    return {
-      buckets: listCivilBuckets(from, 8, "week"),
-      from,
-      to,
-    };
-  }
-
-  if (granularity === "month") {
-    const currentMonth = companyCalendarDate(now, timeZone, "month");
-    const from = shiftOccupancyCalendarDate(currentMonth, 0, -11);
-    const to = shiftOccupancyCalendarDate(currentMonth, 0, 1);
-    return {
-      buckets: listCivilBuckets(from, 12, "month"),
-      from,
-      to,
-    };
-  }
-
-  return assertNever(granularity);
+  const axisBuckets = buildOccupancyScenarioHeatmapAxisBuckets(
+    now,
+    granularity,
+    timeZone,
+  );
+  const openBucket = granularity === "minute"
+    ? startOfAggregateBucket(now, "minute")
+    : granularity === "day"
+      ? companyCalendarDate(now, timeZone, "day")
+      : granularity === "week"
+        ? axisBuckets.findLast((bucket) =>
+            bucket <= companyCalendarDate(now, timeZone, "day"),
+          )!
+        : companyCalendarDate(now, timeZone, "month");
+  const buckets = axisBuckets.filter((bucket) => bucket <= openBucket);
+  const from = buckets[0];
+  const to = granularity === "minute"
+    ? new Date(openBucket.getTime() + MINUTE_MS)
+    : shiftOccupancyCalendarDate(
+        openBucket,
+        granularity === "day" ? 1 : granularity === "week" ? 7 : 0,
+        granularity === "month" ? 1 : 0,
+      );
+  return { buckets, from, to };
 }
 
 /**
@@ -258,6 +286,7 @@ export function updateOccupancyScenarioHeatmapAttemptedBuckets({
  * average or peak already returned by the aggregate API.
  */
 export function buildOccupancyScenarioPeriodHeatmap({
+  axisBuckets,
   buckets,
   dateKey,
   granularity,
@@ -272,6 +301,9 @@ export function buildOccupancyScenarioPeriodHeatmap({
   requireCompanyTimeZone(timeZone);
   buckets.forEach((bucket) =>
     requireValidDate(bucket, "bucket do mapa de calor por cenário"),
+  );
+  axisBuckets?.forEach((bucket) =>
+    requireValidDate(bucket, "bucket do eixo por cenário"),
   );
 
   if (granularity === "hour") {
@@ -291,20 +323,30 @@ export function buildOccupancyScenarioPeriodHeatmap({
     };
   }
 
-  const labels = buildPeriodLabels(buckets, granularity, timeZone);
+  const presentedBuckets = axisBuckets ?? buckets;
+  const requestedBucketKeys = axisBuckets
+    ? new Set(buckets.map((bucket) =>
+        occupancyAggregateBucketKey(bucket, granularity),
+      ))
+    : null;
+  const labels = buildPeriodLabels(presentedBuckets, granularity, timeZone);
   const cells = series.flatMap((scenario, scenarioIndex) =>
-    buckets.map((bucket, bucketIndex): OccupancyHeatmapCell => ({
-      bucket: new Date(bucket),
-      scenarioId: scenario.scenarioId,
-      value: occupancyMetricValue(
-        scenario.metrics.get(
-          occupancyAggregateBucketKey(bucket, granularity),
-        ),
-        metric,
-      ),
-      x: scenarioIndex,
-      y: bucketIndex,
-    })),
+    presentedBuckets.flatMap((bucket, bucketIndex): OccupancyHeatmapCell[] =>
+      requestedBucketKeys &&
+      !requestedBucketKeys.has(occupancyAggregateBucketKey(bucket, granularity))
+        ? []
+        : [{
+            bucket: new Date(bucket),
+            scenarioId: scenario.scenarioId,
+            value: occupancyMetricValue(
+              scenario.metrics.get(
+                occupancyAggregateBucketKey(bucket, granularity),
+              ),
+              metric,
+            ),
+            x: scenarioIndex,
+            y: bucketIndex,
+          }]),
   );
 
   return {

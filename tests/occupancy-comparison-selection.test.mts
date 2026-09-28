@@ -465,8 +465,8 @@ test("mapa por cenários consulta somente a granularidade visível e não refaz 
   );
   assert.match(
     source,
-    /const scenarioHeatmapRangeDayCount =[\s\S]*?settings\.scenarioHeatmapGranularity === "hour"[\s\S]*?settings\.scenarioHeatmapGranularity === "day"[\s\S]*?\? settings\.dayCount\s*: 7;[\s\S]*?scenarioHeatmapScopeKey = `\$\{companyScopeId\}\|\$\{timeZone\}\|\$\{comparisonWindowKey\}\|\$\{settings\.scenarioHeatmapGranularity\}\|\$\{scenarioHeatmapRangeDayCount\}\|\$\{scenarioHeatmapSelectionKey\}`/,
-    "minute/week/month devem manter uma chave estável por janela quando outro widget altera dayCount",
+    /const scenarioHeatmapRangeDayCount =[\s\S]*?settings\.scenarioHeatmapGranularity === "hour" \? settings\.dayCount : 7;[\s\S]*?scenarioHeatmapScopeKey = `\$\{companyScopeId\}\|\$\{timeZone\}\|\$\{comparisonWindowKey\}\|\$\{settings\.scenarioHeatmapGranularity\}\|\$\{scenarioHeatmapRangeDayCount\}\|\$\{scenarioHeatmapSelectionKey\}`/,
+    "minuto/dia/semana/mês devem manter a chave estável quando outro widget altera dayCount",
   );
   assert.doesNotMatch(effect, /settings\.(?:metric|colorPaletteId)/);
 });

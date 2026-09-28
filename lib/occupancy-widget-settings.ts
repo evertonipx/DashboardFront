@@ -191,6 +191,21 @@ export function occupancyStatusColorsForPreset(
   return { ...resolved.colors, preset: resolved.id };
 }
 
+/** Occupied/free are two distinct shades from the view-wide palette. */
+export function occupancyStatusColorsFromPalette(
+  colors: readonly string[],
+): OccupancyStatusColors {
+  const occupied = normalizeColor(colors[0]);
+  const unoccupied = colors
+    .map(normalizeColor)
+    .find((color) =>
+      occupied && color && occupancyStatusColorsAreDistinct({ occupied, unoccupied: color }),
+    );
+  return occupied && unoccupied
+    ? { occupied, unoccupied, preset: "custom" }
+    : { ...DEFAULT_OCCUPANCY_STATUS_COLORS };
+}
+
 export function normalizeOccupancyStatusColors(
   value: unknown,
 ): OccupancyStatusColors {

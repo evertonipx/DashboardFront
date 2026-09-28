@@ -33,6 +33,7 @@ import {
   type OccupancyLoiteringTemporalCardId,
 } from "@/components/app/occupancy-loitering-temporal-widgets";
 import { startOfCompanyTimeZoneDay } from "@/lib/company-time-zone";
+import { getOccupancyColorPalette } from "@/lib/occupancy-color-palettes";
 import {
   buildOccupancyLoiteringSummaryModel,
   selectOccupancyLoiteringSessions,
@@ -196,6 +197,11 @@ export function useOccupancyLoitering({
     () => new Map(preferences.map((candidate) => [candidate.id, candidate])),
     [preferences],
   );
+  const viewPaletteId = preferences.find((candidate) => candidate.viewPaletteId)
+    ?.viewPaletteId;
+  const viewColors = viewPaletteId
+    ? getOccupancyColorPalette(viewPaletteId).colors
+    : null;
   const individualPreference = preferenceById.get(
     OCCUPANCY_LOITERING_CARD_ID,
   );
@@ -1183,6 +1189,7 @@ export function useOccupancyLoitering({
           sessionDataContextLabel,
           presentationTimeZone,
           individualPreference?.color,
+          viewColors,
         );
         if (chart) {
           assets.push({
@@ -1252,6 +1259,7 @@ export function useOccupancyLoitering({
           sessionsSlicedByDay: sessionReportDataset.slicedByDay,
           timeZone: presentationTimeZone,
           widgetColor: cardPreference?.color,
+          viewColors,
         });
         if (chart) {
           assets.push({
@@ -1270,6 +1278,7 @@ export function useOccupancyLoitering({
       preferenceById,
       presentationTimeZone,
       scopedScenarios,
+      viewColors,
     ],
   );
   const getReportAssets = React.useCallback(

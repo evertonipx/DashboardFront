@@ -221,7 +221,18 @@ test("exportação acompanha minuto, dia, semana e mês configurados no widget",
           candidate.cardId === "occupancy_scenario_hour_heatmap",
       ).chart;
       assert.equal(report.title, fixture.title);
-      assert.deepEqual(report.option.xAxis.data, [fixture.label]);
+      assert.equal(
+        report.option.xAxis.data.length,
+        fixture.granularity === "minute"
+          ? 1_440
+          : fixture.granularity === "day"
+            ? 30
+            : fixture.granularity === "month"
+              ? 12
+              : 53,
+        `${fixture.granularity}: o eixo civil completo deve permanecer fixo`,
+      );
+      assert.ok(report.option.xAxis.data.includes(fixture.label));
       assert.equal(report.table.rows[0].period, fixture.label);
       assert.equal(report.table.rows[0].scenario, "Entrada");
       assert.equal(
@@ -247,7 +258,7 @@ test("callbacks passam explicitamente o fuso aos intervalos, exportação e redu
   assert.doesNotMatch(source, /requireRuntimeCompanyTimeZone/);
   assert.match(source, /buildOccupancyHourlyRange\(\s*requestedAt,\s*hourlyAggregateDayCount,\s*timeZone/);
   assert.match(source, /buildOccupancyMaximumTrendRanges\(requestedAt, timeZone\)/);
-  assert.match(source, /buildOccupancyComparisonReportAssets\(\{\s*timeZone,/);
+  assert.match(source, /buildOccupancyComparisonReportAssets\(\{\s*viewPaletteId:[^\n]*\n\s*timeZone,/);
   assert.match(source, /fetchOccupancyCivilAggregate\(\{[\s\S]*?granularity: "month"[\s\S]*?fetchResponse: \(path\) => scheduleQuery/);
   assert.match(source, /const nextMonthlyBoundary = occupancyCalendarBoundaryInstant\(ranges.monthlySource.to, timeZone\)/);
   assert.doesNotMatch(source, /scheduleNext\(ranges.monthlySource.to\)/);

@@ -8,13 +8,12 @@ import {
   BarChart3,
   CheckCircle2,
   ChartPie,
-  ChartSpline,
+  ChartArea,
   Eye,
   EyeOff,
   GripVertical,
   LayoutTemplate,
   LayoutGrid,
-  Palette,
   RotateCcw,
   Settings2,
   ZoomIn,
@@ -32,6 +31,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from "@/components/ui/select";
 import { useAuth } from "@/components/app/auth-provider";
 import type {
   ScenarioPickerOption,
@@ -43,9 +48,16 @@ import type { WidgetViewPresetsDialogProps } from "@/components/app/widget-view-
 import { WidgetAppearanceProvider } from "@/components/app/widget-appearance";
 import { hasVisualAdminAccess } from "@/lib/access";
 import {
-  PASTEL_BAR_COLORS,
-  monochromeHeatmapPalette,
-} from "@/lib/chart-palette";
+  DEMOGRAPHICS_PALETTES,
+  type DemographicPaletteId,
+} from "@/lib/demographics-presentation";
+import {
+  OCCUPANCY_COLOR_PALETTES,
+} from "@/lib/occupancy-color-palettes";
+import {
+  loadOccupancyWidgetSettings,
+  saveOccupancyWidgetSettings,
+} from "@/lib/occupancy-widget-settings";
 import { useEffectiveCompanyScopeId } from "@/lib/master-company-scope";
 import { flushUserGridSync } from "@/lib/user-grid";
 import { cn, formatNumber } from "@/lib/utils";
@@ -300,6 +312,12 @@ export function CardLayout({
     userId: user?.id,
     viewId: preferenceScopeId,
   });
+  const viewPaletteId = preferences.find((preference) => preference.viewPaletteId)
+    ?.viewPaletteId;
+  const viewPaletteColors = viewPaletteId
+    ? (menuKey === "demographics" ? DEMOGRAPHICS_PALETTES : OCCUPANCY_COLOR_PALETTES)
+        .find((palette) => palette.id === viewPaletteId)?.colors ?? null
+    : null;
   const canEditLayout = hasVisualAdminAccess(user) && !monitorMode;
   const orderedCards = React.useMemo(
     () => orderByCardPreferences(cards, preferences),
@@ -510,7 +528,7 @@ export function CardLayout({
   }
 
   function restoreDefaultOrder() {
-    persistPreferences(cardIds.map((id) => ({ id, visible: true })));
+    persistPreferences(cardIds.map((id) => ({ id, visible: true, viewPaletteId })));
     flashSaved();
   }
 
@@ -570,14 +588,21 @@ export function CardLayout({
     flashSaved();
   }
 
-  function setCardColor(cardId: string, color?: string) {
+  function setViewPalette(viewPaletteId: DemographicPaletteId) {
     persistPreferences(
       preferences.map((preference) =>
-        preference.id === cardId
-          ? { ...preference, color }
-          : preference,
+        ({ ...preference, viewPaletteId }),
       ),
     );
+    if (menuKey === "occupancy" && viewPaletteId !== "pink-blue") {
+      const settings = loadOccupancyWidgetSettings(companyId, user?.id, preferenceScopeId);
+      saveOccupancyWidgetSettings(
+        { ...settings, colorPaletteId: viewPaletteId, hexColorPaletteId: viewPaletteId },
+        companyId,
+        user?.id,
+        preferenceScopeId,
+      );
+    }
     flashSaved();
   }
 
@@ -710,7 +735,7 @@ export function CardLayout({
           }}
           onOpenChange={setOrganizerOpen}
           onSelectedCardIdChange={setOrganizerSelectedCardId}
-          onColorChange={setCardColor}
+          onViewPaletteChange={setViewPalette}
           onChartTypeChange={setCardChartType}
           onHeightChange={resizeCardHeight}
           onResize={resizeCard}
@@ -722,6 +747,8 @@ export function CardLayout({
           open={organizerOpen}
           overId={organizerOverId}
           preferences={preferences}
+          menuKey={menuKey}
+          viewPaletteId={viewPaletteId}
           scenarios={scenarios}
           selectedCardId={organizerSelectedCardId}
           saved={saved}
@@ -790,6 +817,8 @@ export function CardLayout({
             demandScopeKey={cardDemandScopeKey}
             overId={screenOverId}
             preference={preferences.find((preference) => preference.id === card.id)}
+            paletteColors={viewPaletteColors}
+            paletteId={viewPaletteId}
             configureEnabled={showCardConfigurationActions && canEditLayout}
             placements={placements}
             onConfigure={() => {
@@ -856,6 +885,8 @@ function CardLayoutItem({
   overId,
   placements,
   preference,
+  paletteColors,
+  paletteId,
   reorderEnabled,
 }: {
   card: LayoutCard;
@@ -874,6 +905,8 @@ function CardLayoutItem({
   overId: string | null;
   placements: CardLayoutPlacementSet;
   preference?: CardPreference;
+  paletteColors: readonly string[] | null;
+  paletteId?: string;
   reorderEnabled: boolean;
 }) {
   const cardRootRef = React.useRef<HTMLDivElement | null>(null);
@@ -1059,6 +1092,8 @@ function CardLayoutItem({
       <WidgetAppearanceProvider
         chartType={resolveCardChartType(preference?.chartType, chartTypes)}
         color={preference?.color}
+        paletteColors={paletteColors}
+        paletteId={paletteId}
         title={preference?.title}
         zoom={preference?.zoom}
       >
@@ -1091,7 +1126,7 @@ function WidgetOrganizerDialog({
   onManageSavedViews,
   onOpenChange,
   onSelectedCardIdChange,
-  onColorChange,
+  onViewPaletteChange,
   onChartTypeChange,
   onHeightChange,
   onResize,
@@ -1103,6 +1138,8 @@ function WidgetOrganizerDialog({
   open,
   overId,
   preferences,
+  menuKey,
+  viewPaletteId,
   scenarios,
   selectedCardId,
   saved,
@@ -1121,7 +1158,7 @@ function WidgetOrganizerDialog({
   onManageSavedViews: () => void;
   onOpenChange: (open: boolean) => void;
   onSelectedCardIdChange: (cardId: string | null) => void;
-  onColorChange: (cardId: string, color?: string) => void;
+  onViewPaletteChange: (value: DemographicPaletteId) => void;
   onChartTypeChange: (cardId: string, chartType: CardChartType) => void;
   onHeightChange: (cardId: string, height: CardLayoutLevel) => void;
   onResize: (cardId: string, size: CardLayoutLevel) => void;
@@ -1136,6 +1173,8 @@ function WidgetOrganizerDialog({
   open: boolean;
   overId: string | null;
   preferences: CardPreference[];
+  menuKey: CardMenuKey;
+  viewPaletteId?: DemographicPaletteId;
   scenarios: ScenarioPickerOption[];
   selectedCardId: string | null;
   saved: boolean;
@@ -1147,6 +1186,10 @@ function WidgetOrganizerDialog({
     (card) => getPreference(preferences, card.id)?.visible === false,
   );
   const inspectorId = React.useId();
+  const viewPaletteColors = viewPaletteId
+    ? (menuKey === "demographics" ? DEMOGRAPHICS_PALETTES : OCCUPANCY_COLOR_PALETTES)
+        .find((palette) => palette.id === viewPaletteId)?.colors
+    : undefined;
 
   React.useEffect(() => {
     if (!open) return;
@@ -1211,13 +1254,30 @@ function WidgetOrganizerDialog({
       (chartTypes.length
         ? resolveCardChartType(preference?.chartType, chartTypes)
         : undefined);
-    const configuredColor = preference?.color ?? card.previewColor;
+    // Multi-series and semantic charts publish their real color sequence in
+    // previewColors; a single card accent must not flatten that preview.
+    const configuredColor = card.colorEditable === false && card.previewColors?.length
+      ? undefined
+      : preference?.color ?? viewPaletteColors?.[0] ?? card.previewColor;
+    const configuredPaletteColors = viewPaletteColors && configuredColor
+      ? (() => {
+          const start = viewPaletteColors.findIndex(
+            (color) => color.toLowerCase() === configuredColor.toLowerCase(),
+          );
+          return start < 0
+            ? viewPaletteColors
+            : [
+                ...viewPaletteColors.slice(start),
+                ...viewPaletteColors.slice(0, start),
+              ];
+        })()
+      : undefined;
 
     return {
       chartType,
       columnSpan: dimensions.columnSpan,
       color: configuredColor ?? card.previewColors?.[0],
-      colors: configuredColor ? undefined : card.previewColors,
+      colors: configuredPaletteColors ?? (configuredColor ? undefined : card.previewColors),
       condensed: Boolean(card.condensed),
       dimensionLabel: `${Math.round(dimensions.widthRatio * 100)}% · ${dimensions.pixelHeight}px`,
       dragging: draggingId === card.id,
@@ -1250,7 +1310,7 @@ function WidgetOrganizerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="grid max-h-[94dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-6xl">
+      <DialogContent className="grid max-h-[94dvh] grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-6xl">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <DialogHeader className="min-w-0">
             <DialogTitle>Configurar widgets</DialogTitle>
@@ -1276,6 +1336,12 @@ function WidgetOrganizerDialog({
             ) : null}
           </div>
         </div>
+
+        <ViewPalettePicker
+          menuKey={menuKey}
+          onChange={onViewPaletteChange}
+          value={viewPaletteId}
+        />
 
         <div className="min-h-0 min-w-0 max-w-full space-y-4 overflow-y-auto lg:grid lg:grid-cols-[minmax(0,1.35fr)_minmax(20rem,0.65fr)] lg:gap-4 lg:space-y-0 lg:overflow-hidden">
           <div className="min-w-0 max-w-full space-y-4 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
@@ -1534,14 +1600,6 @@ function WidgetOrganizerDialog({
                       cardId={selectedCard.id}
                       onChange={onZoomChange}
                       zoom={selectedPreference?.zoom ?? 100}
-                    />
-                  ) : null}
-                  {selectedCard.colorEditable !== false ? (
-                    <WidgetColorPicker
-                      cardId={selectedCard.id}
-                      color={selectedPreference?.color}
-                      gradient={selectedCard.colorPreview === "gradient"}
-                      onChange={onColorChange}
                     />
                   ) : null}
                 </div>
@@ -2246,9 +2304,9 @@ const WIDGET_CHART_TYPE_OPTIONS = {
     label: "Barras",
   },
   line: {
-    ariaLabel: "Exibir como linha",
-    icon: ChartSpline,
-    label: "Linha",
+    ariaLabel: "Exibir como área",
+    icon: ChartArea,
+    label: "Área",
   },
   rose: {
     ariaLabel: "Exibir como gráfico de rosa",
@@ -2269,81 +2327,61 @@ const WIDGET_CHART_TYPE_OPTIONS = {
   }
 >;
 
-function WidgetColorPicker({
-  cardId,
-  color,
-  gradient = false,
+function ViewPalettePicker({
+  menuKey,
   onChange,
+  value,
 }: {
-  cardId: string;
-  color?: string;
-  gradient?: boolean;
-  onChange: (cardId: string, color?: string) => void;
+  menuKey: CardMenuKey;
+  onChange: (value: DemographicPaletteId) => void;
+  value?: DemographicPaletteId;
 }) {
+  const options = menuKey === "demographics"
+    ? DEMOGRAPHICS_PALETTES
+    : OCCUPANCY_COLOR_PALETTES;
+  const selected = options.find((option) => option.id === value);
   return (
-    <div
-      className="inline-flex h-8 items-center gap-1 rounded-md border bg-background px-1.5"
-      aria-label={gradient ? "Gradiente do mapa de calor" : "Cor do widget"}
-      role="group"
-    >
-      <Palette className="h-3.5 w-3.5 text-muted-foreground" />
-      {PASTEL_BAR_COLORS.slice(0, 4).map((swatch) => (
-        <button
-          key={swatch}
-          type="button"
-          className={cn(
-            "focus-contained h-4 w-4 rounded-sm border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0",
-            color === swatch && "ring-2 ring-primary ring-offset-1",
-          )}
-          style={widgetColorPreviewStyle(swatch, gradient)}
-          onClick={() => onChange(cardId, swatch)}
-          aria-label={`${gradient ? "Usar gradiente" : "Usar cor"} ${swatch}`}
-          title={swatch}
-        />
-      ))}
-      <label
-        className="focus-within-contained relative h-4 w-4 cursor-pointer overflow-hidden rounded-sm border focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring focus-within:ring-offset-0"
-        title="Cor personalizada"
-      >
-        <span
-          className="pointer-events-none absolute inset-[2px] rounded-[1px]"
-          style={widgetColorPreviewStyle(
-            color ?? "#1267C4",
-            gradient,
-          )}
-        />
-        <input
-          type="color"
-          value={color ?? "#1267C4"}
-          onChange={(event) => onChange(cardId, event.target.value)}
-          className="absolute inset-0 h-full min-w-0 w-full cursor-pointer opacity-0"
-          aria-label="Escolher cor personalizada"
-        />
-      </label>
-      {color ? (
-        <button
-          type="button"
-          className="focus-contained flex h-4 w-4 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0"
-          onClick={() => onChange(cardId, undefined)}
-          aria-label="Restaurar cor padrão"
-          title="Cor padrão"
+    <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-3 py-2">
+      <span className="shrink-0 text-xs font-medium">Paleta de cores desta visão</span>
+      <Select value={selected?.id} onValueChange={(next) => onChange(next as DemographicPaletteId)}>
+        <SelectTrigger
+          aria-label={`Paleta de cores desta visão: ${selected?.label ?? "cores antigas"}`}
+          className="h-8 w-full min-w-0 bg-background text-xs sm:w-64"
         >
-          <RotateCcw className="h-3 w-3" />
-        </button>
-      ) : null}
+          <span className="flex min-w-0 items-center gap-2">
+            {selected ? <PaletteSwatches colors={selected.colors} /> : null}
+            <span className="truncate">{selected?.label ?? "Cores antigas — selecione"}</span>
+          </span>
+        </SelectTrigger>
+        <SelectContent className="max-h-[360px] sm:min-w-[320px]">
+          {options.map((option) => (
+            <SelectItem key={option.id} value={option.id} textValue={option.label}>
+              <span className="flex min-w-0 items-center gap-2">
+                <PaletteSwatches colors={option.colors} />
+                <span className="min-w-0">
+                  <span className="block text-xs font-medium">{option.label}</span>
+                  <span className="block truncate text-[10px] text-muted-foreground">{option.description}</span>
+                </span>
+              </span>
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <span className="text-[11px] text-muted-foreground">
+        Aplicada a todos os widgets desta tela, inclusive personalizados.
+      </span>
     </div>
   );
 }
 
-function widgetColorPreviewStyle(
-  color: string,
-  usesGradient: boolean,
-): React.CSSProperties {
-  if (!usesGradient) return { backgroundColor: color };
-
-  return {
-    backgroundImage: `linear-gradient(90deg, ${monochromeHeatmapPalette(color).join(", ")})`,
-  };
+function PaletteSwatches({ colors }: { colors: readonly string[] }) {
+  return (
+    <span className="inline-flex shrink-0 overflow-hidden rounded-sm border" aria-hidden="true">
+      {colors.slice(0, 5).map((color, index) => (
+        <span key={`${color}-${index}`} className="h-3 w-2.5" style={{ backgroundColor: color }} />
+      ))}
+    </span>
+  );
 }
 
 const CARTESIAN_CHART_TYPES = ["bar", "line"] as const;

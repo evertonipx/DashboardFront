@@ -39,8 +39,10 @@ import {
 import {
   EChart,
   type EnterpriseChartOption,
-} from "@/components/app/deferred-echart";
+} from "@/components/app/counting-palette-chart";
 import { applyChartTypePreference } from "@/lib/chart-type-preference";
+import { applyCountingViewPalette } from "@/lib/counting-view-palette";
+import { OCCUPANCY_COLOR_PALETTES } from "@/lib/occupancy-color-palettes";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
 import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
@@ -918,10 +920,35 @@ export function RealtimeDashboard({
   const operationalMonthHourState = chartData[OPERATIONAL_MONTH_HOURS_ID];
   const operationalMonthHourRows =
     operationalMonthHourState?.rows ?? EMPTY_AGGREGATE_ROWS;
-  const getAnnualComparisonDayRows = createRenderLazyValue(() => [
-    ...currentMonthDayRows,
-    ...lastYearMonthDayRows,
-  ]);
+  const getAnnualComparisonDayRows = createRenderLazyValue(() => {
+    const currentMonth = buildCurrentMonthDaysDefinition(
+      clock,
+      companyTimeZone,
+    );
+    const lastYearMonth = buildOperationalBaselineMonthDefinition(
+      clock,
+      "last_year",
+      companyTimeZone,
+    );
+    return [
+      ...currentMonthDayRows.filter((row) =>
+        aggregateBucketInRange(
+          row.bucket,
+          "day",
+          currentMonth.from,
+          currentMonth.to,
+        ),
+      ),
+      ...lastYearMonthDayRows.filter((row) =>
+        aggregateBucketInRange(
+          row.bucket,
+          "day",
+          lastYearMonth.from,
+          lastYearMonth.to,
+        ),
+      ),
+    ];
+  });
   const liveComparisonHourlySource =
     React.useMemo<ScenarioComparisonHourlySource | undefined>(() => {
       if (
@@ -3810,6 +3837,11 @@ export function RealtimeDashboard({
       ),
     [livePreferences],
   );
+  const liveViewPaletteColors = OCCUPANCY_COLOR_PALETTES.find(
+    (palette) =>
+      palette.id === livePreferences.find((preference) => preference.viewPaletteId)
+        ?.viewPaletteId,
+  )?.colors ?? null;
   const liveChartTypeByCardId = React.useMemo(
     () =>
       new Map(
@@ -4498,9 +4530,13 @@ export function RealtimeDashboard({
         renameReportChart(
           {
             ...chart,
-            option: applyChartTypePreference(
-              chart.option,
-              liveChartTypeByCardId.get(cardId),
+            option: applyCountingViewPalette(
+              applyChartTypePreference(
+                chart.option,
+                liveChartTypeByCardId.get(cardId),
+              ),
+              liveViewPaletteColors,
+              liveColorByCardId.get(cardId) ?? liveViewPaletteColors?.[0] ?? "",
             ),
           },
           resolveLiveTitle(cardId, chart.title),
@@ -4639,9 +4675,13 @@ export function RealtimeDashboard({
             });
             chartByCardId.set(cardId, {
               ...reportChart,
-              option: applyChartTypePreference(
-                reportChart.option,
-                liveChartTypeByCardId.get(cardId),
+              option: applyCountingViewPalette(
+                applyChartTypePreference(
+                  reportChart.option,
+                  liveChartTypeByCardId.get(cardId),
+                ),
+                liveViewPaletteColors,
+                liveColorByCardId.get(cardId) ?? liveViewPaletteColors?.[0] ?? "",
               ),
             });
           } catch (error) {
@@ -8703,6 +8743,7 @@ function hydrateRealtimeOpenBuckets(
           range.from,
           range.to,
           timeZone,
+          { from: definition.from, to: definition.to },
         );
       });
     });

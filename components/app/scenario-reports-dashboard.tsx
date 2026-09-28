@@ -24,7 +24,7 @@ import { CountingReportPeriodControl } from "@/components/app/counting-report-pe
 import {
   EChart,
   type EnterpriseChartOption,
-} from "@/components/app/deferred-echart";
+} from "@/components/app/counting-palette-chart";
 import {
   MonitorModeButton,
   MonitorModeExitHint,
@@ -41,6 +41,8 @@ import {
   type ScenarioComparisonSettings,
 } from "@/components/app/scenario-comparison-card";
 import { applyChartTypePreference } from "@/lib/chart-type-preference";
+import { applyCountingViewPalette } from "@/lib/counting-view-palette";
+import { OCCUPANCY_COLOR_PALETTES } from "@/lib/occupancy-color-palettes";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
 import {
   WidgetTitleText,
@@ -2302,6 +2304,11 @@ export function ScenarioReportsDashboard({
       ),
     [reportPreferences],
   );
+  const reportViewPaletteColors = OCCUPANCY_COLOR_PALETTES.find(
+    (palette) =>
+      palette.id === reportPreferences.find((preference) => preference.viewPaletteId)
+        ?.viewPaletteId,
+  )?.colors ?? null;
   const reportChartTypeByCardId = React.useMemo(
     () =>
       new Map(
@@ -2335,9 +2342,13 @@ export function ScenarioReportsDashboard({
       return {
         ...chart,
         title,
-        option: applyChartTypePreference(
-          chart.option,
-          reportChartTypeByCardId.get(cardId),
+        option: applyCountingViewPalette(
+          applyChartTypePreference(
+            chart.option,
+            reportChartTypeByCardId.get(cardId),
+          ),
+          reportViewPaletteColors,
+          reportColorByCardId.get(cardId) ?? reportViewPaletteColors?.[0] ?? "",
         ),
         table: {
           ...chart.table,
@@ -2346,7 +2357,7 @@ export function ScenarioReportsDashboard({
         },
       };
     },
-    [reportChartTypeByCardId, resolveReportTitle],
+    [reportChartTypeByCardId, reportColorByCardId, reportViewPaletteColors, resolveReportTitle],
   );
   function buildConfiguredCountingIntelligenceAssets(): ReturnType<
     typeof buildCountingIntelligenceReportAssets

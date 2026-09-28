@@ -153,7 +153,11 @@ function timelineOption(
   // category instead of placing unrelated line markers at the same x point.
   const singlePoint = points.length === 1;
   const bar = settings.chartType === "bar" || singlePoint;
-  const stacked = !singlePoint && (settings.chartType === "area" || (bar && settings.metric === "percentage"));
+  const stacked = !singlePoint && (
+    settings.chartType === "area" ||
+    settings.chartType === "line" ||
+    (bar && settings.metric === "percentage")
+  );
   const solidGenderArea = settings.dimension === "gender" && settings.chartType === "area" && !singlePoint;
   return {
     ...baseOption(theme, description),
@@ -169,7 +173,9 @@ function timelineOption(
         name: category.label,
         type: bar ? "bar" : "line",
         ...(stacked ? { stack: "demographic-share" } : {}),
-        ...(settings.chartType === "area" && !singlePoint ? { areaStyle: { color, opacity: settings.dimension === "gender" ? 1 : 0.32 } } : {}),
+        ...((settings.chartType === "area" || settings.chartType === "line") && !singlePoint
+          ? { areaStyle: { color, opacity: settings.chartType === "line" ? 0.22 : settings.dimension === "gender" ? 1 : 0.32 } }
+          : {}),
         data: datums[index],
         connectNulls: false,
         showSymbol: points.length <= 48,
@@ -275,8 +281,8 @@ function comparisonModel(
   }));
   const datums = cachedView?.datums ?? categoryDatums(points, categories, settings);
   const heatmap = settings.chartType === "heatmap";
-  // Here the legend represents periods, not gender. Neutral period colors
-  // avoid giving all current-period categories (including Man) a pink fill.
+  // The legend represents periods, not gender. Use the view palette; symbols
+  // and line styles keep the periods distinguishable independently of hue.
   const periodColors = demographicComparisonColors(settings.palette, settings.dimension, theme);
   const participation = settings.dimension === "gender" ? "Participação entre gêneros identificados" : "Participação";
   const table: ReportTable = cachedView?.table ?? {

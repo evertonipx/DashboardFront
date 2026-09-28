@@ -2,9 +2,20 @@
 
 import { normalizeCardLayoutLevel } from "@/lib/card-layout-sizing";
 import {
+  DEMOGRAPHICS_PALETTES,
+  demographicDimensionForCard,
+  normalizeDemographicPresentation,
+  type DemographicPaletteId,
+} from "@/lib/demographics-presentation";
+import {
+  isDemographicTemporalWidgetId,
+  normalizeDemographicTemporalSettings,
+} from "@/lib/demographics-temporal-preferences";
+import {
   getUserViewScopedStorageKey,
   readUserViewScopedStorageEntry,
 } from "@/lib/master-company-scope";
+import { OCCUPANCY_COLOR_PALETTES } from "@/lib/occupancy-color-palettes";
 import { requestUserGridSync } from "@/lib/user-grid";
 import {
   removeUserGridPreference,
@@ -30,6 +41,7 @@ export type WidgetViewPresetNamespace =
 export type WidgetViewSnapshot = {
   cardIds: string[];
   capturedAt: string;
+  dependentScopes?: Array<"occupancy-scenario" | "demographics-surface">;
   menuKey: CardMenuKey;
   preferences: CardPreference[];
   sourceScope: WidgetViewScope | null;
@@ -48,7 +60,21 @@ export type WidgetViewPreset = {
 
 export type WidgetViewStorageEntry = {
   baseKey: string;
+  scope?: "occupancy-scenario" | "demographics-surface";
   value: string;
+};
+
+export type WidgetViewBackup = {
+  companyId: string;
+  exportedAt: string;
+  format: "ipxdata-widget-view-backup";
+  menuKey: CardMenuKey;
+  presetNamespace: WidgetViewPresetNamespace;
+  version: 1;
+  view: {
+    name: string;
+    snapshot: WidgetViewSnapshot;
+  };
 };
 
 type CaptureWidgetViewSnapshotInput = {
@@ -72,6 +98,13 @@ export const WIDGET_VIEW_PRESETS_UPDATED_EVENT =
 
 const PRESETS_STORAGE_KEY = "ipxdata.widget-view-presets.v1";
 const APPLIED_PRESET_STORAGE_KEY = "ipxdata.widget-view-preset-applied.v1";
+const BACKUP_FORMAT = "ipxdata-widget-view-backup";
+const BACKUP_MAX_LENGTH = 10_000_000;
+const OCCUPANCY_SCENARIO_DEPENDENCY_KEYS = [
+  "ipxdata.occupancy-custom-widgets.v1",
+  "ipxdata.occupancy-widget-settings.v1",
+] as const;
+const DEMOGRAPHICS_SURFACE_DEPENDENCY_KEY = "ipxdata.demographics-range.v1";
 
 const menuStorageMatchers: Record<CardMenuKey, RegExp[]> = {
   analysis: [
@@ -258,6 +291,102 @@ export function setDefaultWidgetViewPreset(
   );
 }
 
+/** A portable backup contains one saved view, never the user's entire grid. */
+export function serializeWidgetViewBackup(
+  preset: WidgetViewPreset,
+  {
+    companyId,
+    presetNamespace = preset.snapshot.menuKey,
+  }: {
+    companyId?: string | null;
+    presetNamespace?: WidgetViewPresetNamespace;
+  },
+) {
+  const cleanCompanyId = companyId?.trim();
+  const menuKey = preset.snapshot.menuKey;
+  const namespace = resolvePresetNamespace(menuKey, presetNamespace);
+  const normalized = normalizePreset(preset, menuKey);
+  if (!cleanCompanyId || namespace !== presetNamespace || !normalized) {
+    throw new Error("Não foi possível exportar esta visão salva.");
+  }
+  assertCompleteCustomWidgetDependency(normalized.snapshot, namespace);
+  assertBackupSnapshot(preset.snapshot, normalized.snapshot, menuKey, namespace);
+
+  const backup: WidgetViewBackup = {
+    companyId: cleanCompanyId,
+    exportedAt: new Date().toISOString(),
+    format: BACKUP_FORMAT,
+    menuKey,
+    presetNamespace: namespace,
+    version: 1,
+    view: { name: normalized.name, snapshot: normalized.snapshot },
+  };
+  const serialized = JSON.stringify(backup, null, 2);
+  if (serialized.length > BACKUP_MAX_LENGTH) {
+    throw new Error("O backup da visão excede o tamanho permitido.");
+  }
+  return serialized;
+}
+
+/** Validates tenant and surface before the caller may save or apply the view. */
+export function parseWidgetViewBackup(
+  raw: string,
+  {
+    companyId,
+    menuKey,
+    presetNamespace = menuKey,
+  }: {
+    companyId?: string | null;
+    menuKey: CardMenuKey;
+    presetNamespace?: WidgetViewPresetNamespace;
+  },
+): Pick<WidgetViewBackup["view"], "name" | "snapshot"> {
+  if (typeof raw !== "string" || !raw.trim() || raw.length > BACKUP_MAX_LENGTH) {
+    throw new Error("Arquivo de backup vazio ou grande demais.");
+  }
+  const cleanCompanyId = companyId?.trim();
+  if (!cleanCompanyId) {
+    throw new Error("Selecione uma empresa antes de importar a visão.");
+  }
+  const namespace = resolvePresetNamespace(menuKey, presetNamespace);
+  if (namespace !== presetNamespace) {
+    throw new Error("Esta visão não pertence à tela atual.");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error("O arquivo não contém um backup JSON válido.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Formato de backup inválido.");
+  }
+  const backup = parsed as Record<string, unknown>;
+  if (backup.format !== BACKUP_FORMAT || backup.version !== 1) {
+    throw new Error("Formato ou versão de backup não suportado.");
+  }
+  if (backup.companyId !== cleanCompanyId) {
+    throw new Error("Este backup pertence a outra empresa.");
+  }
+  if (backup.menuKey !== menuKey || backup.presetNamespace !== namespace) {
+    throw new Error("Este backup pertence a outra tela.");
+  }
+  const view = backup.view;
+  if (!view || typeof view !== "object" || Array.isArray(view)) {
+    throw new Error("A visão do backup é inválida.");
+  }
+  const record = view as Record<string, unknown>;
+  const name = typeof record.name === "string" ? record.name.trim() : "";
+  const snapshot = normalizeSnapshot(record.snapshot, menuKey);
+  if (!name || !snapshot) {
+    throw new Error("A visão do backup é inválida.");
+  }
+  assertCompleteCustomWidgetDependency(snapshot, namespace);
+  assertBackupSnapshot(record.snapshot, snapshot, menuKey, namespace);
+  return { name, snapshot };
+}
+
 export function captureWidgetViewSnapshot({
   cardIds,
   companyId,
@@ -267,16 +396,41 @@ export function captureWidgetViewSnapshot({
   userId,
 }: CaptureWidgetViewSnapshotInput): WidgetViewSnapshot {
   const viewId = sourceScope?.id;
+  const occupancyScenarioId =
+    menuKey === "occupancy" ? occupancyAnalysisScenarioId(viewId) : null;
+  const demographicsSurfaceId =
+    menuKey === "demographics" ? demographicSurfaceId(viewId) : null;
+  const dependentScopes: WidgetViewSnapshot["dependentScopes"] = [
+    ...(occupancyScenarioId ? ["occupancy-scenario" as const] : []),
+    ...(demographicsSurfaceId ? ["demographics-surface" as const] : []),
+  ];
 
   return {
     cardIds: uniqueStrings(cardIds),
     capturedAt: new Date().toISOString(),
+    ...(dependentScopes.length ? { dependentScopes } : {}),
     menuKey,
     preferences:
       preferences ??
       loadScopedCardPreferences(menuKey, cardIds, companyId, userId, viewId),
     sourceScope,
-    storage: captureMenuStorage(menuKey, companyId, userId, viewId),
+    storage: [
+      ...captureMenuStorage(menuKey, companyId, userId, viewId),
+      ...(occupancyScenarioId
+        ? captureOccupancyScenarioDependency(
+            companyId,
+            userId,
+            occupancyScenarioId,
+          )
+        : []),
+      ...(demographicsSurfaceId
+        ? captureDemographicsSurfaceDependency(
+            companyId,
+            userId,
+            demographicsSurfaceId,
+          )
+        : []),
+    ],
     version: 1,
   };
 }
@@ -293,12 +447,65 @@ export function applyWidgetViewPreset(
   if (typeof window === "undefined") return false;
   const { snapshot } = preset;
   const targetViewId = targetScope?.id;
+  const hasOccupancyScenarioDependency = snapshot.dependentScopes?.includes(
+    "occupancy-scenario",
+  );
+  const targetScenarioId = hasOccupancyScenarioDependency
+    ? occupancyAnalysisScenarioId(targetViewId)
+    : null;
+  const hasDemographicsSurfaceDependency = snapshot.dependentScopes?.includes(
+    "demographics-surface",
+  );
+  const targetDemographicsSurfaceId = hasDemographicsSurfaceDependency
+    ? demographicSurfaceId(targetViewId)
+    : null;
+  if (
+    (hasOccupancyScenarioDependency && !targetScenarioId) ||
+    (hasDemographicsSurfaceDependency && !targetDemographicsSurfaceId) ||
+    (snapshot.storage.some((entry) => entry.scope === "occupancy-scenario") &&
+      !targetScenarioId) ||
+    (snapshot.storage.some((entry) => entry.scope === "demographics-surface") &&
+      !targetDemographicsSurfaceId)
+  ) return false;
 
   clearMenuStorage(snapshot.menuKey, companyId, userId, targetViewId);
+  if (targetScenarioId) {
+    OCCUPANCY_SCENARIO_DEPENDENCY_KEYS.forEach((baseKey) => {
+      removeUserGridPreference(
+        scopedStorageKey(baseKey, companyId, userId, targetScenarioId),
+      );
+    });
+  }
+  if (targetDemographicsSurfaceId) {
+    removeUserGridPreference(
+      scopedStorageKey(
+        DEMOGRAPHICS_SURFACE_DEPENDENCY_KEY,
+        companyId,
+        userId,
+        targetDemographicsSurfaceId,
+      ),
+    );
+  }
   snapshot.storage.forEach((entry) => {
+    const entryViewId = entry.scope === "occupancy-scenario"
+      ? targetScenarioId
+      : entry.scope === "demographics-surface"
+        ? targetDemographicsSurfaceId
+        : targetViewId;
+    const sourceRemapScope =
+      entry.scope === "occupancy-scenario" && snapshot.sourceScope
+        ? {
+            id: occupancyAnalysisScenarioId(snapshot.sourceScope.id) ?? "",
+            name: snapshot.sourceScope.name,
+          }
+        : snapshot.sourceScope;
+    const targetRemapScope =
+      entry.scope === "occupancy-scenario" && targetScenarioId
+        ? { id: targetScenarioId, name: targetScope?.name ?? "" }
+        : targetScope;
     writeUserGridPreference(
-      scopedStorageKey(entry.baseKey, companyId, userId, targetViewId),
-      remapSerializedValue(entry.value, snapshot.sourceScope, targetScope),
+      scopedStorageKey(entry.baseKey, companyId, userId, entryViewId),
+      remapSerializedValue(entry.value, sourceRemapScope, targetRemapScope),
     );
   });
   saveCardPreferences(
@@ -393,6 +600,56 @@ function captureMenuStorage(
   return entries.sort((left, right) =>
     left.baseKey.localeCompare(right.baseKey),
   );
+}
+
+function captureOccupancyScenarioDependency(
+  companyId: string | null | undefined,
+  userId: string | null | undefined,
+  scenarioId: string,
+): WidgetViewStorageEntry[] {
+  return OCCUPANCY_SCENARIO_DEPENDENCY_KEYS.flatMap((baseKey) => {
+    const stored = readUserViewScopedStorageEntry(
+      baseKey,
+      companyId,
+      userId,
+      scenarioId,
+    );
+    return stored
+      ? [{ baseKey, scope: "occupancy-scenario" as const, value: stored.value }]
+      : [];
+  });
+}
+
+function captureDemographicsSurfaceDependency(
+  companyId: string | null | undefined,
+  userId: string | null | undefined,
+  surfaceId: "analysis" | "reports",
+): WidgetViewStorageEntry[] {
+  const stored = readUserViewScopedStorageEntry(
+    DEMOGRAPHICS_SURFACE_DEPENDENCY_KEY,
+    companyId,
+    userId,
+    surfaceId,
+  );
+  return stored
+    ? [{
+        baseKey: DEMOGRAPHICS_SURFACE_DEPENDENCY_KEY,
+        scope: "demographics-surface",
+        value: stored.value,
+      }]
+    : [];
+}
+
+function occupancyAnalysisScenarioId(viewId?: string | null) {
+  return viewId?.startsWith("analysis:") && viewId.length > "analysis:".length
+    ? viewId.slice("analysis:".length)
+    : null;
+}
+
+function demographicSurfaceId(viewId?: string | null) {
+  if (viewId === "demographics-analysis") return "analysis";
+  if (viewId === "demographics-reports") return "reports";
+  return null;
 }
 
 function clearMenuStorage(
@@ -517,7 +774,12 @@ function remapValue(
 }
 
 function matchesMenuStorage(menuKey: CardMenuKey, baseKey: string) {
-  return menuStorageMatchers[menuKey].some((matcher) => matcher.test(baseKey));
+  return (
+    baseKey.length <= 200 &&
+    /^ipxdata\.[a-zA-Z0-9._-]+$/.test(baseKey) &&
+    !/\.(?:company|user|view)\./.test(baseKey) &&
+    menuStorageMatchers[menuKey].some((matcher) => matcher.test(baseKey))
+  );
 }
 
 function scopedStorageKey(
@@ -684,14 +946,44 @@ function normalizeSnapshot(
     typeof sourceRecord.name === "string"
       ? { id: sourceRecord.id, name: sourceRecord.name }
       : null;
+  const requestedDependentScopes = Array.isArray(record.dependentScopes)
+    ? record.dependentScopes
+    : [];
+  const dependentScopes: WidgetViewSnapshot["dependentScopes"] = [
+    ...(menuKey === "occupancy" &&
+    occupancyAnalysisScenarioId(sourceScope?.id) &&
+    requestedDependentScopes.includes("occupancy-scenario")
+      ? ["occupancy-scenario" as const]
+      : []),
+    ...(menuKey === "demographics" &&
+    demographicSurfaceId(sourceScope?.id) &&
+    requestedDependentScopes.includes("demographics-surface")
+      ? ["demographics-surface" as const]
+      : []),
+  ];
   const storage = Array.isArray(record.storage)
     ? record.storage.flatMap((entry) => {
         if (!entry || typeof entry !== "object") return [];
         const item = entry as Record<string, unknown>;
+        const scope =
+          item.scope === "occupancy-scenario" &&
+          dependentScopes.includes("occupancy-scenario") &&
+          OCCUPANCY_SCENARIO_DEPENDENCY_KEYS.includes(
+            item.baseKey as (typeof OCCUPANCY_SCENARIO_DEPENDENCY_KEYS)[number],
+          )
+            ? "occupancy-scenario" as const
+            : item.scope === "demographics-surface" &&
+                dependentScopes.includes("demographics-surface") &&
+                item.baseKey === DEMOGRAPHICS_SURFACE_DEPENDENCY_KEY
+              ? "demographics-surface" as const
+            : item.scope === undefined
+              ? undefined
+              : null;
         return typeof item.baseKey === "string" &&
           typeof item.value === "string" &&
-          matchesMenuStorage(menuKey, item.baseKey)
-          ? [{ baseKey: item.baseKey, value: item.value }]
+          matchesMenuStorage(menuKey, item.baseKey) &&
+          scope !== null
+          ? [{ baseKey: item.baseKey, ...(scope ? { scope } : {}), value: item.value }]
           : [];
       })
     : [];
@@ -700,6 +992,10 @@ function normalizeSnapshot(
         if (!value || typeof value !== "object") return [];
         const item = value as Record<string, unknown>;
         if (typeof item.id !== "string") return [];
+        const demographicDimension =
+          menuKey === "demographics"
+            ? demographicDimensionForCard(item.id)
+            : undefined;
         const scenarioSelectionMode =
           item.scenarioSelectionMode === "all" ||
           item.scenarioSelectionMode === "custom"
@@ -717,6 +1013,24 @@ function normalizeSnapshot(
                 ? item.chartType
                 : undefined,
             color: typeof item.color === "string" ? item.color : undefined,
+            ...(demographicDimension && item.demographics !== undefined
+              ? {
+                  demographics: normalizeDemographicPresentation(
+                    item.demographics,
+                    demographicDimension,
+                  ),
+                }
+              : {}),
+            ...(menuKey === "demographics" &&
+            isDemographicTemporalWidgetId(item.id) &&
+            item.demographicsTemporal !== undefined
+              ? {
+                  demographicsTemporal: normalizeDemographicTemporalSettings(
+                    item.demographicsTemporal,
+                    item.id,
+                  ),
+                }
+              : {}),
             height:
               item.height === "short" ||
               item.height === "standard" ||
@@ -742,6 +1056,9 @@ function normalizeSnapshot(
                 ? item.title.trim().slice(0, 120)
                 : undefined,
             visible: item.visible !== false,
+            ...(isAllowedViewPalette(menuKey, item.viewPaletteId)
+              ? { viewPaletteId: item.viewPaletteId }
+              : {}),
             widthLevel: normalizeCardLayoutLevel(item.widthLevel),
             zoom: CARD_ZOOM_LEVELS.find((level) => level === item.zoom),
           } satisfies CardPreference,
@@ -755,12 +1072,138 @@ function normalizeSnapshot(
       typeof record.capturedAt === "string"
         ? record.capturedAt
         : new Date().toISOString(),
+    ...(dependentScopes.length ? { dependentScopes } : {}),
     menuKey,
     preferences,
     sourceScope,
     storage,
     version: 1,
   };
+}
+
+function assertBackupSnapshot(
+  raw: unknown,
+  normalized: WidgetViewSnapshot,
+  menuKey: CardMenuKey,
+  namespace: WidgetViewPresetNamespace,
+) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("A configuração da visão no backup é inválida.");
+  }
+  const record = raw as Record<string, unknown>;
+  if (
+    record.version !== 1 ||
+    record.menuKey !== menuKey ||
+    !Array.isArray(record.cardIds) ||
+    record.cardIds.length !== normalized.cardIds.length ||
+    !Array.isArray(record.preferences) ||
+    record.preferences.length !== normalized.preferences.length ||
+    !Array.isArray(record.storage) ||
+    record.storage.length !== normalized.storage.length
+  ) {
+    throw new Error("A configuração da visão no backup é inválida.");
+  }
+  if (
+    record.sourceScope !== null &&
+    (!record.sourceScope ||
+      typeof record.sourceScope !== "object" ||
+      Array.isArray(record.sourceScope) ||
+      !normalized.sourceScope)
+  ) {
+    throw new Error("A origem da visão no backup é inválida.");
+  }
+  for (let index = 0; index < record.preferences.length; index += 1) {
+    const item = record.preferences[index];
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const rawPalette = (item as Record<string, unknown>).viewPaletteId;
+    if (
+      rawPalette !== undefined &&
+      rawPalette !== normalized.preferences[index]?.viewPaletteId
+    ) {
+      throw new Error("A paleta da visão no backup é inválida.");
+    }
+  }
+
+  const rawDependentScopes = record.dependentScopes;
+  const hasScenarioDependency = normalized.dependentScopes?.includes(
+    "occupancy-scenario",
+  );
+  const hasDemographicsSurfaceDependency = normalized.dependentScopes?.includes(
+    "demographics-surface",
+  );
+  if (
+    rawDependentScopes !== undefined &&
+    (!Array.isArray(rawDependentScopes) ||
+      rawDependentScopes.length !== normalized.dependentScopes?.length)
+  ) {
+    throw new Error("A dependência da visão no backup é inválida.");
+  }
+  if (
+    hasScenarioDependency &&
+    (menuKey !== "occupancy" ||
+      namespace !== "occupancy-analysis" ||
+      !occupancyAnalysisScenarioId(normalized.sourceScope?.id))
+  ) {
+    throw new Error("A dependência da visão não pertence a esta tela.");
+  }
+  if (
+    hasDemographicsSurfaceDependency &&
+    (menuKey !== "demographics" ||
+      namespace !== "demographics" ||
+      !demographicSurfaceId(normalized.sourceScope?.id))
+  ) {
+    throw new Error("A dependência da visão não pertence a esta tela.");
+  }
+
+  const seenStorageKeys = new Set<string>();
+  for (const entry of normalized.storage) {
+    const identity = `${entry.scope ?? "view"}:${entry.baseKey}`;
+    if (seenStorageKeys.has(identity)) {
+      throw new Error("O backup contém configurações duplicadas.");
+    }
+    seenStorageKeys.add(identity);
+    if (entry.scope === "occupancy-scenario" && !hasScenarioDependency) {
+      throw new Error("O backup contém uma dependência sem origem válida.");
+    }
+    if (
+      entry.scope === "demographics-surface" &&
+      !hasDemographicsSurfaceDependency
+    ) {
+      throw new Error("O backup contém uma dependência sem origem válida.");
+    }
+    try {
+      JSON.parse(entry.value);
+    } catch {
+      throw new Error("O backup contém uma configuração de widget inválida.");
+    }
+  }
+}
+
+function assertCompleteCustomWidgetDependency(
+  snapshot: WidgetViewSnapshot,
+  namespace: WidgetViewPresetNamespace,
+) {
+  if (
+    namespace === "occupancy-analysis" &&
+    [...snapshot.cardIds, ...snapshot.preferences.map(({ id }) => id)].some(
+      (id) => id.startsWith("occupancy_custom_"),
+    ) &&
+    !snapshot.dependentScopes?.includes("occupancy-scenario")
+  ) {
+    throw new Error(
+      "Atualize esta visão salva antes de exportar os widgets personalizados.",
+    );
+  }
+}
+
+function isAllowedViewPalette(
+  menuKey: CardMenuKey,
+  value: unknown,
+): value is DemographicPaletteId {
+  const choices = menuKey === "demographics"
+    ? DEMOGRAPHICS_PALETTES
+    : OCCUPANCY_COLOR_PALETTES;
+  return choices.some((palette) => palette.id === value);
 }
 
 function enforceSingleDefault(presets: WidgetViewPreset[]) {

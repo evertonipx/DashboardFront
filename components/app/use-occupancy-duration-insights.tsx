@@ -15,6 +15,7 @@ import {
   type OccupancyDurationInsightMonth,
   type OccupancyDurationInsightScenario,
 } from "@/lib/occupancy-duration-insights";
+import { getOccupancyColorPalette } from "@/lib/occupancy-color-palettes";
 import { occupancyDurationNextMinuteRefreshDelay } from "@/lib/occupancy-duration-refresh";
 import {
   acquireOccupancyDurationInsightQueryCache,
@@ -101,6 +102,11 @@ export function useOccupancyDurationInsights({
     () => new Map(preferences.map((preference) => [preference.id, preference])),
     [preferences],
   );
+  const viewPaletteId = preferences.find((preference) => preference.viewPaletteId)
+    ?.viewPaletteId;
+  const viewColors = viewPaletteId
+    ? getOccupancyColorPalette(viewPaletteId).colors
+    : null;
   const periodKey = React.useMemo(
     () =>
       period
@@ -562,6 +568,7 @@ export function useOccupancyDurationInsights({
           month,
           periodLabel: refreshMode === "manual" ? month.contextLabel : undefined,
           series,
+          viewColors,
           widgetColor: preference.color ?? defaultWidgetColor,
         }),
         titleSuffix: pages.length > 1 ? ` · ${index + 1}/${pages.length}` : "",
@@ -574,6 +581,7 @@ export function useOccupancyDurationInsights({
     refreshMode,
     resolveSeries,
     stablePeriod,
+    viewColors,
   ]);
   // Historical analysis builds its static report once after the explicit
   // query. The live surface keeps export models lazy so its polling cycle does

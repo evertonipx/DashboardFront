@@ -16,7 +16,7 @@ import {
   CompactMetricCard,
 } from "@/components/app/compact-metric-card";
 import type { LayoutCardRenderContext } from "@/components/app/card-layout";
-import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
+import { EChart, type EnterpriseChartOption } from "@/components/app/counting-palette-chart";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useTheme } from "@/components/app/theme-provider";
 import {

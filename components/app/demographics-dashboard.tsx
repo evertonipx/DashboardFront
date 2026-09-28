@@ -212,6 +212,8 @@ export function DemographicsDashboard({
     preferenceState?.key === preferenceIdentityKey
       ? preferenceState.value
       : scopedPreferences;
+  const viewPaletteId = preferences.find((preference) => preference.viewPaletteId)
+    ?.viewPaletteId;
   const preferencesReady = gridReadiness !== "pending" && preferenceState?.key === preferenceIdentityKey &&
     preferenceState.readiness === gridReadiness;
   const hasVisibleWidgets = preferences.some(
@@ -238,14 +240,17 @@ export function DemographicsDashboard({
     for (const id of DEMOGRAPHICS_CARD_IDS) {
       const dimension = demographicDimensionForCard(id);
       if (dimension) {
-        result[id] = normalizeDemographicPresentation(
+        const presentation = normalizeDemographicPresentation(
           preferences.find((preference) => preference.id === id)?.demographics,
           dimension,
         );
+        result[id] = viewPaletteId
+          ? { ...presentation, palette: viewPaletteId }
+          : presentation;
       }
     }
     return result;
-  }, [preferences]);
+  }, [preferences, viewPaletteId]);
   const updateWidgetPresentation = React.useCallback((id: string, value: DemographicPresentation) => {
     const dimension = demographicDimensionForCard(id);
     if (!dimension || !canEditVisual || !companyScopeId || !user?.id) return;
@@ -263,10 +268,13 @@ export function DemographicsDashboard({
     setPreferenceState({ key: preferenceIdentityKey, readiness: gridReadiness, value: updated });
   }, [canEditVisual, companyScopeId, gridReadiness, preferenceIdentityKey, preferenceScopeId, user]);
   const temporalSettings = React.useMemo(() => Object.fromEntries(
-    DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.map((id) => [id, normalizeDemographicTemporalSettings(
-      preferences.find((preference) => preference.id === id)?.demographicsTemporal, id,
-    )]),
-  ) as Record<DemographicTemporalWidgetId, DemographicTemporalSettings>, [preferences]);
+    DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.map((id) => {
+      const settings = normalizeDemographicTemporalSettings(
+        preferences.find((preference) => preference.id === id)?.demographicsTemporal, id,
+      );
+      return [id, viewPaletteId ? { ...settings, palette: viewPaletteId } : settings];
+    }),
+  ) as Record<DemographicTemporalWidgetId, DemographicTemporalSettings>, [preferences, viewPaletteId]);
   const updateTemporalSettings = React.useCallback((id: DemographicTemporalWidgetId, value: DemographicTemporalSettings) => {
     if (!isDemographicTemporalWidgetId(id) || !canEditVisual || !companyScopeId || !user?.id) return;
     const latest = loadScopedCardPreferences(DEMOGRAPHICS_MENU_KEY, [...DEMOGRAPHICS_CARD_IDS], companyScopeId, user.id, preferenceScopeId);
@@ -893,7 +901,7 @@ export function DemographicsDashboard({
         defaultWidthLevel: 6,
         id: "demographics_gender_mix",
         label: "Composição por gênero",
-        configurationContent: <DemographicsWidgetControls dimension="gender" theme={effectiveTheme} value={widgetPresentations.demographics_gender_mix} onChange={(value) => updateWidgetPresentation("demographics_gender_mix", value)} />,
+        configurationContent: <DemographicsWidgetControls dimension="gender" value={widgetPresentations.demographics_gender_mix} onChange={(value) => updateWidgetPresentation("demographics_gender_mix", value)} />,
         node: <GenderCompositionCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_gender_mix} />,
         previewColors: [...demographicPalettePreviewColors(getDemographicPalette(widgetPresentations.demographics_gender_mix?.palette).id, "gender")],
         ...demographicDistributionPreview(widgetPresentations.demographics_gender_mix, "gender"),
@@ -906,7 +914,7 @@ export function DemographicsDashboard({
         defaultWidthLevel: 3,
         id: "demographics_age_distribution",
         label: "Distribuição por faixa etária",
-        configurationContent: <DemographicsWidgetControls dimension="age" theme={effectiveTheme} value={widgetPresentations.demographics_age_distribution} onChange={(value) => updateWidgetPresentation("demographics_age_distribution", value)} />,
+        configurationContent: <DemographicsWidgetControls dimension="age" value={widgetPresentations.demographics_age_distribution} onChange={(value) => updateWidgetPresentation("demographics_age_distribution", value)} />,
         node: <AgeDistributionCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_age_distribution} />,
         previewColors: [...demographicPalettePreviewColors(getDemographicPalette(widgetPresentations.demographics_age_distribution?.palette).id, "age")],
         ...demographicDistributionPreview(widgetPresentations.demographics_age_distribution, "age"),
@@ -919,7 +927,7 @@ export function DemographicsDashboard({
         defaultWidthLevel: 3,
         id: "demographics_emotion_distribution",
         label: "Ranking de emoções",
-        configurationContent: <DemographicsWidgetControls dimension="emotion" theme={effectiveTheme} value={widgetPresentations.demographics_emotion_distribution} onChange={(value) => updateWidgetPresentation("demographics_emotion_distribution", value)} />,
+        configurationContent: <DemographicsWidgetControls dimension="emotion" value={widgetPresentations.demographics_emotion_distribution} onChange={(value) => updateWidgetPresentation("demographics_emotion_distribution", value)} />,
         node: <EmotionDistributionCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_emotion_distribution} />,
         previewColors: [...getDemographicPalette(widgetPresentations.demographics_emotion_distribution?.palette).colors],
         ...demographicDistributionPreview(widgetPresentations.demographics_emotion_distribution, "emotion"),
@@ -932,7 +940,7 @@ export function DemographicsDashboard({
         defaultWidthLevel: 3,
         id: "demographics_age_gender_pyramid",
         label: "Faixa etária por gênero",
-        configurationContent: <DemographicsWidgetControls dimension="age-gender" theme={effectiveTheme} value={widgetPresentations.demographics_age_gender_pyramid} onChange={(value) => updateWidgetPresentation("demographics_age_gender_pyramid", value)} />,
+        configurationContent: <DemographicsWidgetControls dimension="age-gender" value={widgetPresentations.demographics_age_gender_pyramid} onChange={(value) => updateWidgetPresentation("demographics_age_gender_pyramid", value)} />,
         node: <AgeGenderPyramidCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_age_gender_pyramid} />,
         previewColors: [...demographicPalettePreviewColors(getDemographicPalette(widgetPresentations.demographics_age_gender_pyramid?.palette).id, "age-gender")],
         previewKind: "heatmap",
@@ -945,7 +953,7 @@ export function DemographicsDashboard({
         defaultWidthLevel: 3,
         id: "demographics_age_emotion_heatmap",
         label: "Faixa etária × emoção",
-        configurationContent: <DemographicsWidgetControls dimension="age-emotion" theme={effectiveTheme} value={widgetPresentations.demographics_age_emotion_heatmap} onChange={(value) => updateWidgetPresentation("demographics_age_emotion_heatmap", value)} />,
+        configurationContent: <DemographicsWidgetControls dimension="age-emotion" value={widgetPresentations.demographics_age_emotion_heatmap} onChange={(value) => updateWidgetPresentation("demographics_age_emotion_heatmap", value)} />,
         node: <AgeEmotionHeatmapCard loading={loading} summary={summary} presentation={widgetPresentations.demographics_age_emotion_heatmap} />,
         previewColors: demographicHeatmapColors(getDemographicPalette(widgetPresentations.demographics_age_emotion_heatmap?.palette).id, effectiveTheme),
         previewKind: "heatmap",
@@ -2182,6 +2190,8 @@ function leadingDistributionItem<Key extends string>(
   );
 }
 
+// Retained for historical rendering fixtures; exports use the palette-aware builders above.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildGenderOption(
   summary: DemographicAggregation,
   showLegend = false,
@@ -2268,6 +2278,7 @@ function buildGenderOption(
   } as EnterpriseChartOption;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildAgeOption(
   summary: DemographicAggregation,
   color: string,
@@ -2280,6 +2291,7 @@ function buildAgeOption(
   });
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildEmotionOption(
   summary: DemographicAggregation,
   color: string,
@@ -2385,6 +2397,7 @@ function horizontalDistributionOption<Key extends string>({
 
 // Keep the historical identifier so existing widget layouts remain compatible.
 // The presentation is now a directly readable age-by-gender matrix.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildAgeGenderPyramidOption(
   summary: DemographicAggregation,
   theme: "light" | "dark" = "light",
@@ -2394,6 +2407,7 @@ function buildAgeGenderPyramidOption(
   );
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildAgeEmotionHeatmapOption(
   summary: DemographicAggregation,
   theme: "light" | "dark" = "light",
@@ -2426,44 +2440,45 @@ function buildDemographicsReport({
   // PDF fonts do not reliably support the optional emoji glyphs.
   const presentationFor = (id: string) => {
     const dimension = demographicDimensionForCard(id);
-    return dimension ? { ...normalizeDemographicPresentation(presentations?.[id], dimension), emojis: false } : undefined;
+    if (!dimension) throw new Error("Gráfico demográfico desconhecido.");
+    return { ...normalizeDemographicPresentation(presentations?.[id], dimension), emojis: false };
   };
-  const gender = presentations ? presentationFor("demographics_gender_mix") : undefined;
-  const age = presentations ? presentationFor("demographics_age_distribution") : undefined;
-  const emotion = presentations ? presentationFor("demographics_emotion_distribution") : undefined;
-  const ageGender = presentations ? presentationFor("demographics_age_gender_pyramid") : undefined;
-  const ageEmotion = presentations ? presentationFor("demographics_age_emotion_heatmap") : undefined;
+  const gender = presentationFor("demographics_gender_mix");
+  const age = presentationFor("demographics_age_distribution");
+  const emotion = presentationFor("demographics_emotion_distribution");
+  const ageGender = presentationFor("demographics_age_gender_pyramid");
+  const ageEmotion = presentationFor("demographics_age_emotion_heatmap");
   const charts: ReportChart[] = [
     {
       description: "Participação entre gêneros identificados: Mulher e Homem.",
-      option: gender ? buildDemographicDistributionOption(summary.gender, gender, { dimension: "gender", showLegend: true }) : buildGenderOption(summary, true),
+      option: buildDemographicDistributionOption(summary.gender, gender, { dimension: "gender", showLegend: true }),
       fitOption: fitDemographicCompositionOption,
       table: distributionReportTable("Gênero · entre gêneros identificados", visibleGender),
       title: "Composição por gênero",
     },
     {
       description: "Participação por faixa etária no total classificado.",
-      option: age ? buildDemographicDistributionOption(summary.age, age, { dimension: "age", showLegend: true }) : buildAgeOption(summary, "#1267C4"),
+      option: buildDemographicDistributionOption(summary.age, age, { dimension: "age", showLegend: true }),
       fitOption: fitDemographicCompositionOption,
       table: distributionReportTable("Faixas etárias", summary.age),
       title: "Distribuição por faixa etária",
     },
     {
       description: "Ranking das emoções classificadas.",
-      option: emotion ? buildDemographicDistributionOption(summary.emotion, emotion, { dimension: "emotion", showLegend: true }) : buildEmotionOption(summary, "#7C3AED"),
+      option: buildDemographicDistributionOption(summary.emotion, emotion, { dimension: "emotion", showLegend: true }),
       fitOption: fitDemographicCompositionOption,
       table: distributionReportTable("Emoções", summary.emotion),
       title: "Ranking de emoções",
     },
     {
       description: "Cruzamento entre faixa etária e gênero; percentuais entre gêneros identificados.",
-      option: ageGender ? buildDemographicCrossingOption(summary, ageGender, "age-gender", "light") : buildAgeGenderPyramidOption(summary),
+      option: buildDemographicCrossingOption(summary, ageGender, "age-gender", "light"),
       table: ageGenderReportTable(summary),
       title: "Faixa etária por gênero",
     },
     {
       description: "Cruzamento entre faixa etária e emoção.",
-      option: ageEmotion ? buildDemographicCrossingOption(summary, ageEmotion, "age-emotion", "light") : buildAgeEmotionHeatmapOption(summary),
+      option: buildDemographicCrossingOption(summary, ageEmotion, "age-emotion", "light"),
       table: ageEmotionReportTable(summary),
       title: "Faixa etária × emoção",
     },

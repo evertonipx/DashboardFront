@@ -107,6 +107,20 @@ test("apenas as três distribuições do relatório demográfico optam pelo ajus
   assert.doesNotMatch(shared, /from\s+["']@\/lib\/demographics/, "exportação genérica não depende do módulo Demográfico");
 });
 
+test("exportação demográfica usa apresentações da visão sem opções legadas de cor fixa", () => {
+  const source = sourceFile("components/app/demographics-dashboard.tsx");
+  const report = declaration(source, "buildDemographicsReport").getText(source);
+  assert.match(report, /buildDemographicDistributionOption\(summary\.gender, gender/);
+  assert.match(report, /buildDemographicDistributionOption\(summary\.age, age/);
+  assert.match(report, /buildDemographicDistributionOption\(summary\.emotion, emotion/);
+  assert.match(report, /buildDemographicCrossingOption\(summary, ageGender/);
+  assert.match(report, /buildDemographicCrossingOption\(summary, ageEmotion/);
+  assert.doesNotMatch(report, /build(?:Gender|Age|Emotion|AgeGenderPyramid|AgeEmotionHeatmap)Option\(/);
+  const dashboard = declaration(source, "DemographicsDashboard").getText(source);
+  assert.match(dashboard, /presentations:\s*widgetPresentations/);
+  assert.match(dashboard, /settings:\s*temporalSettings\[id\]/);
+});
+
 const groups = {
   gender: [["Woman", "Mulher"], ["Man", "Homem"], ["unknown", "Não identificado"]],
   age: ["0-2", "3-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70+"].map((key) => [key, key]),

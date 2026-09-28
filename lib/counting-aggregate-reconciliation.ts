@@ -5,6 +5,7 @@ import {
 import {
   countingAddCalendarDays,
   countingCalendarDate,
+  countingCalendarRangeToInstants,
 } from "@/lib/counting-time-zone";
 import type {
   AggregateEventRow,
@@ -32,14 +33,28 @@ export function reconcileCountingCalendarRows(
   from: Date,
   to: Date,
   timeZone: string,
+  targetCalendarRange?: { from: Date; to: Date },
 ) {
   requireInstantRange(from, to);
   requireAggregateRows(targetRows, targetGranularity);
   requireAggregateRows(sourceRows, sourceGranularity);
 
+  // A shared hourly query may span several disjoint civil periods. Only the
+  // part belonging to this target is authoritative for its calendar buckets.
+  const targetInstants = targetCalendarRange
+    ? countingCalendarRangeToInstants(targetCalendarRange, timeZone)
+    : null;
+  const effectiveFrom = targetInstants
+    ? new Date(Math.max(from.getTime(), targetInstants.from.getTime()))
+    : from;
+  const effectiveTo = targetInstants
+    ? new Date(Math.min(to.getTime(), targetInstants.to.getTime()))
+    : to;
+  if (effectiveFrom >= effectiveTo) return targetRows;
+
   const coveredBuckets = coveredCalendarBucketKeys(
-    from,
-    to,
+    effectiveFrom,
+    effectiveTo,
     targetGranularity,
     timeZone,
   );
@@ -53,8 +68,8 @@ export function reconcileCountingCalendarRows(
     sourceRows,
     sourceGranularity,
     targetGranularity,
-    from,
-    to,
+    effectiveFrom,
+    effectiveTo,
     timeZone,
   );
   return [...stableRows, ...replacementRows];

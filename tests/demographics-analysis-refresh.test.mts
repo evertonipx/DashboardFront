@@ -459,7 +459,7 @@ test("sem widgets visíveis não consulta e o histórico continua sem polling", 
   assert.equal(fixture.state.loading, false);
   assert.match(source, /if \(surface !== "live" \|\| !hasVisibleWidgets \|\| !preferencesReady \|\| !pageActive\) return;/);
   assert.doesNotMatch(source, /const rangeScopeKey = .*todayInput/);
-  assert.doesNotMatch(source, /\[\s*preferences,[\s\S]*?requestWindow,[\s\S]*?surface,[\s\S]*?\]\);/);
+  assert.match(source, /if \(settledRequestKeyRef\.current === requestKey\) \{/);
 });
 
 for (const [reason, paused] of [

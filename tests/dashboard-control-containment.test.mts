@@ -84,7 +84,8 @@ test("campos de widgets e filtros não impõem largura mínima aos pais", () => 
 test("replicação usa checkbox compartilhado, sem mudar callbacks nem ocultar mais texto", () => {
   const text = requiredSource("widget-view-presets");
   assert.match(text, /<Checkbox\s+checked=\{checked\}\s+onCheckedChange=\{\(\) => toggleScope\(scope.id\)\}/);
-  assert.doesNotMatch(text, /<input\b/);
+  assert.equal((text.match(/<input\b/g) ?? []).length, 1, "somente a importação de backup pode usar um input nativo");
+  assert.match(text, /<input\s+ref=\{importInputRef\}\s+type="file"\s+accept="\.json,application\/json"\s+className="sr-only"/);
   assert.match(text, /grid max-h-52 min-w-0/);
   assert.match(text, /flex min-w-0 max-w-full cursor-pointer items-center gap-2/);
   assert.match(text, /<span className="min-w-0 flex-1 truncate">/);

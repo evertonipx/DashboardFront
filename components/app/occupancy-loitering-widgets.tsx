@@ -12,11 +12,15 @@ import {
   EChart,
   type EnterpriseChartOption,
 } from "@/components/app/deferred-echart";
-import { getOccupancyChartPalette } from "@/components/app/occupancy-chart-palette";
+import {
+  getOccupancyChartPalette,
+  occupancySeriesColors,
+} from "@/components/app/occupancy-chart-palette";
 import { useTheme } from "@/components/app/theme-provider";
 import {
   WidgetTitleText,
   useWidgetColor,
+  useWidgetPalette,
 } from "@/components/app/widget-appearance";
 import { Button } from "@/components/ui/button";
 import {
@@ -225,6 +229,7 @@ export function buildOccupancyLoiteringSessionsChartOption(
   widgetColor = "#1267C4",
   timeZone = "UTC",
   dayStart?: Date,
+  viewColors: readonly string[] | null = null,
 ): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
   const dayStartMs = dayStart?.getTime();
@@ -282,7 +287,9 @@ export function buildOccupancyLoiteringSessionsChartOption(
   });
   const showLabels = ordered.length <= 16;
   const showLegend = grouped.size > 1 || trend !== null;
-  const colors = [widgetColor, ...LOITERING_SESSION_COLORS];
+  const colors = viewColors?.length
+    ? occupancySeriesColors(theme, viewColors, widgetColor)
+    : [widgetColor, ...LOITERING_SESSION_COLORS];
   const scatterSeries = Array.from(grouped.entries())
     .sort(([left], [right]) => left.localeCompare(right, "pt-BR"))
     .map(([seriesLabel, points], index) => ({
@@ -686,6 +693,7 @@ export function OccupancyLoiteringSummaryCard({
 }) {
   const { effectiveTheme } = useTheme();
   const widgetColor = useWidgetColor("#1267C4");
+  const viewColors = useWidgetPalette();
   const sourcePeriod = previewPeriod ?? period;
   const defaultDayStart = startOfCompanyTimeZoneDay(
     new Date(Math.max(sourcePeriod.from.getTime(), sourcePeriod.to.getTime() - 1)),
@@ -820,8 +828,9 @@ export function OccupancyLoiteringSummaryCard({
       widgetColor,
       timeZone,
       dayStart,
+      viewColors,
     ),
-    [dayStart, effectiveTheme, sessionEntries, timeZone, widgetColor],
+    [dayStart, effectiveTheme, sessionEntries, timeZone, viewColors, widgetColor],
   );
   const [sessionsOpen, setSessionsOpen] = React.useState(false);
   const [sessionsPeriod, setSessionsPeriod] = React.useState(period);
@@ -1717,6 +1726,7 @@ export function buildOccupancyLoiteringReport(
   contextLabel: string,
   timeZone: string,
   widgetColor?: string,
+  viewColors?: readonly string[] | null,
 ): ReportChart | null {
   const entries = occupancyLoiteringSessionEntries(model, sessions);
   if (!entries.length) return null;
@@ -1757,6 +1767,8 @@ export function buildOccupancyLoiteringReport(
       "light",
       widgetColor,
       timeZone,
+      undefined,
+      viewColors,
     ),
     table,
     title: "Permanências registradas",

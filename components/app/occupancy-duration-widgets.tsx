@@ -19,16 +19,21 @@ import {
   CompactMetricCard,
 } from "@/components/app/compact-metric-card";
 import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
-import { getOccupancyChartPalette } from "@/components/app/occupancy-chart-palette";
+import {
+  getOccupancyChartPalette,
+  occupancySeriesColors,
+} from "@/components/app/occupancy-chart-palette";
 import { useTheme } from "@/components/app/theme-provider";
 import {
   WidgetTitleText,
   useWidgetColor,
+  useWidgetPalette,
 } from "@/components/app/widget-appearance";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { resolveAccessTokenContext } from "@/lib/access-token-claims";
 import { aggregateQueryIso } from "@/lib/aggregate-time";
+import { getOccupancyColorPalette } from "@/lib/occupancy-color-palettes";
 import { getStoredSession } from "@/lib/api";
 import {
   classifyOccupancySnapshot,
@@ -1810,6 +1815,8 @@ function OccupancyDurationMetricCard({
   selectedScenarios: DurationScenario[];
   selectedSeries: OccupancyDurationScenarioSeries[];
 }) {
+  const widgetColor = useWidgetColor();
+  const viewColors = useWidgetPalette();
   const stats = summarizeSelectedSeries(selectedSeries, selectedScenarios.length);
   const definition = durationMetricDefinition(
     kind,
@@ -1866,7 +1873,7 @@ function OccupancyDurationMetricCard({
       loading={loading}
       meta={composition.shortLabel}
       metaTitle={composition.fullLabel}
-      toneColor={definition.color}
+      toneColor={viewColors?.length ? widgetColor : definition.color}
       value={definition.value}
       valueTitle={definition.value}
     />
@@ -2129,9 +2136,13 @@ function OccupancyDurationTimelineCard({
 }) {
   const { effectiveTheme } = useTheme();
   const widgetColor = useWidgetColor("#1267C4");
+  const viewColors = useWidgetPalette();
+  const freeColor = viewColors?.length
+    ? occupancySeriesColors(effectiveTheme, viewColors, widgetColor)[1]
+    : undefined;
   const visuals = React.useMemo(
-    () => durationStateVisuals(effectiveTheme, widgetColor),
-    [effectiveTheme, widgetColor],
+    () => durationStateVisuals(effectiveTheme, widgetColor, freeColor),
+    [effectiveTheme, freeColor, widgetColor],
   );
   const option = React.useMemo(
     () =>
@@ -2195,9 +2206,13 @@ function OccupancyDurationByScenarioCard({
 }) {
   const { effectiveTheme } = useTheme();
   const widgetColor = useWidgetColor("#1267C4");
+  const viewColors = useWidgetPalette();
+  const freeColor = viewColors?.length
+    ? occupancySeriesColors(effectiveTheme, viewColors, widgetColor)[1]
+    : undefined;
   const visuals = React.useMemo(
-    () => durationStateVisuals(effectiveTheme, widgetColor),
-    [effectiveTheme, widgetColor],
+    () => durationStateVisuals(effectiveTheme, widgetColor, freeColor),
+    [effectiveTheme, freeColor, widgetColor],
   );
   const option = React.useMemo(
     () =>
@@ -2257,6 +2272,7 @@ function OccupancyDurationAverageByScenarioCard({
 }) {
   const { effectiveTheme } = useTheme();
   const widgetColor = useWidgetColor("#0F766E");
+  const viewColors = useWidgetPalette();
   const entries = React.useMemo(
     () => buildOccupancyDurationAverageByScenarioEntries(selectedSeries),
     [selectedSeries],
@@ -2268,8 +2284,9 @@ function OccupancyDurationAverageByScenarioCard({
         monitorMode,
         theme: effectiveTheme,
         widgetColor,
+        viewColors,
       }),
-    [effectiveTheme, entries, monitorMode, widgetColor],
+    [effectiveTheme, entries, monitorMode, viewColors, widgetColor],
   );
   const composition = describeDurationScenarioComposition(selectedScenarios);
   const description = `${
@@ -3194,33 +3211,38 @@ function buildOccupancyDurationAverageByScenarioOption({
   monitorMode,
   theme,
   widgetColor,
+  viewColors,
 }: {
   entries: OccupancyDurationAverageByScenarioEntry[];
   interactive?: boolean;
   monitorMode: boolean;
   theme: "dark" | "light";
   widgetColor: string;
+  viewColors?: readonly string[] | null;
 }): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
+  const seriesColors = viewColors?.length
+    ? occupancySeriesColors(theme, viewColors, widgetColor)
+    : null;
   const showVerticalZoom = interactive && entries.length > 8;
   const durationSeries = [
     {
-      color: widgetColor,
+      color: seriesColors?.[0] ?? widgetColor,
       key: "averageOccupiedSeconds",
       name: "Média ocupada",
     },
     {
-      color: theme === "dark" ? "#34D399" : "#16A34A",
+      color: seriesColors?.[1] ?? (theme === "dark" ? "#34D399" : "#16A34A"),
       key: "averageFreeSeconds",
       name: "Média livre",
     },
     {
-      color: theme === "dark" ? "#60A5FA" : "#1D4ED8",
+      color: seriesColors?.[2] ?? (theme === "dark" ? "#60A5FA" : "#1D4ED8"),
       key: "longestOccupiedSeconds",
       name: "Maior ocupada",
     },
     {
-      color: theme === "dark" ? "#6EE7B7" : "#047857",
+      color: seriesColors?.[3] ?? (theme === "dark" ? "#6EE7B7" : "#047857"),
       key: "longestFreeSeconds",
       name: "Maior livre",
     },
@@ -3769,6 +3791,12 @@ function buildDurationReportAssets({
   timeZone: string;
   timeZoneWarning?: string;
 }): OccupancyDurationReportAsset[] {
+  const viewPaletteId = Array.from(preferenceByCardId.values()).find(
+    (preference) => preference.viewPaletteId,
+  )?.viewPaletteId;
+  const viewColors = viewPaletteId
+    ? getOccupancyColorPalette(viewPaletteId).colors
+    : null;
   const timelinePreference = preferenceByCardId.get(
     "occupancy_duration_timeline",
   );
@@ -3836,6 +3864,11 @@ function buildDurationReportAssets({
     const visuals = durationStateVisuals(
       "light",
       timelinePreference?.color ?? "#1267C4",
+      viewColors?.length
+        ? occupancySeriesColors(
+            "light", viewColors, timelinePreference?.color ?? "#1267C4",
+          )[1]
+        : undefined,
     );
     chunks.forEach((chunk, index) => {
       assets.push({
@@ -3881,6 +3914,11 @@ function buildDurationReportAssets({
     const visuals = durationStateVisuals(
       "light",
       comparisonPreference?.color ?? "#1267C4",
+      viewColors?.length
+        ? occupancySeriesColors(
+            "light", viewColors, comparisonPreference?.color ?? "#1267C4",
+          )[1]
+        : undefined,
     );
     chunks.forEach((chunk, index) => {
       assets.push({
@@ -3945,6 +3983,7 @@ function buildDurationReportAssets({
             theme: "light",
             widgetColor:
               averageByScenarioPreference?.color ?? "#0F766E",
+            viewColors,
           }),
           table: buildDurationAverageByScenarioReportTable(chunk),
           title: CARD_LABELS.occupancy_duration_average_by_scenario,
@@ -4450,14 +4489,15 @@ function scenarioSelectionFromPreference(
 function durationStateVisuals(
   theme: "dark" | "light",
   occupiedColor: string,
+  freeColor?: string,
 ): Record<OccupancyDurationState, DurationStateVisual> {
   if (theme === "dark") {
     return {
       free: {
-        border: "#34D399",
-        color: "#047857",
+        border: freeColor ?? "#34D399",
+        color: freeColor ?? "#047857",
         label: "Livre confirmado",
-        text: "#ECFDF5",
+        text: freeColor ? readableDurationTextColor(freeColor) : "#ECFDF5",
       },
       occupied: {
         border: "#93C5FD",
@@ -4481,10 +4521,10 @@ function durationStateVisuals(
   }
   return {
     free: {
-      border: "#15803D",
-      color: "#22C55E",
+      border: freeColor ?? "#15803D",
+      color: freeColor ?? "#22C55E",
       label: "Livre confirmado",
-      text: "#052E16",
+      text: freeColor ? readableDurationTextColor(freeColor) : "#052E16",
     },
     occupied: {
       border: "#0B4A82",

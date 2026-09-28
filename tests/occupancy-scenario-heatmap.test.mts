@@ -22,11 +22,11 @@ const now = new Date("2026-09-16T15:42:37.000Z");
 
 test("rótulos descrevem claramente cada granularidade e janela", () => {
   const expected = {
-    day: ["dias", "últimos 14 dias"],
+    day: ["dias", "dias do mês"],
     hour: ["horários", "horários de 16/09/2026"],
-    minute: ["minutos", "últimos 60 minutos"],
-    month: ["meses", "últimos 12 meses"],
-    week: ["semanas", "últimas 8 semanas"],
+    minute: ["minutos", "minutos do dia, de 00h a 24h"],
+    month: ["meses", "meses do ano"],
+    week: ["semanas", "semanas do ano"],
   } as const;
   for (const [granularity, [label, description]] of Object.entries(expected)) {
     assert.equal(
@@ -46,7 +46,7 @@ test("rótulos descrevem claramente cada granularidade e janela", () => {
   }
 });
 
-test("intervalos por granularidade preservam janelas compactas e calendário IANA", () => {
+test("intervalos por granularidade consultam só o decorrido no dia, mês e ano civis IANA", () => {
   withBrowserZone("Asia/Kolkata", () => {
     const minute = heatmap.buildOccupancyScenarioHeatmapRange(
       now,
@@ -54,9 +54,9 @@ test("intervalos por granularidade preservam janelas compactas e calendário IAN
       7,
       companyTimeZone,
     );
-    assert.equal(minute.from.toISOString(), "2026-09-16T14:43:00.000Z");
+    assert.equal(minute.from.toISOString(), "2026-09-16T03:00:00.000Z");
     assert.equal(minute.to.toISOString(), "2026-09-16T15:43:00.000Z");
-    assert.equal(minute.buckets.length, 60);
+    assert.equal(minute.buckets.length, 763);
     assert.equal(minute.buckets[0].toISOString(), minute.from.toISOString());
     assert.equal(
       minute.buckets.at(-1)?.toISOString(),
@@ -79,16 +79,11 @@ test("intervalos por granularidade preservam janelas compactas e calendário IAN
       7,
       companyTimeZone,
     );
-    assert.deepEqual(day.buckets.map(calendarKey), [
-      "2026-09-10",
-      "2026-09-11",
-      "2026-09-12",
-      "2026-09-13",
-      "2026-09-14",
-      "2026-09-15",
-      "2026-09-16",
-    ]);
-    assert.equal(calendarKey(day.from), "2026-09-10");
+    assert.deepEqual(
+      day.buckets.map(calendarKey),
+      Array.from({ length: 16 }, (_, index) => `2026-09-${String(index + 1).padStart(2, "0")}`),
+    );
+    assert.equal(calendarKey(day.from), "2026-09-01");
     assert.equal(calendarKey(day.to), "2026-09-17");
 
     const week = heatmap.buildOccupancyScenarioHeatmapRange(
@@ -97,9 +92,9 @@ test("intervalos por granularidade preservam janelas compactas e calendário IAN
       30,
       companyTimeZone,
     );
-    assert.equal(week.buckets.length, 8);
-    assert.equal(calendarKey(week.from), "2026-07-27");
+    assert.equal(calendarKey(week.from), "2025-12-29");
     assert.equal(calendarKey(week.to), "2026-09-21");
+    assert.equal(calendarKey(week.buckets.at(-1)!), "2026-09-14");
     assert.ok(
       week.buckets.every((bucket) => bucket.getDay() === 1),
       "todas as semanas civis devem iniciar na segunda-feira",
@@ -111,9 +106,89 @@ test("intervalos por granularidade preservam janelas compactas e calendário IAN
       14,
       companyTimeZone,
     );
-    assert.equal(month.buckets.length, 12);
-    assert.equal(calendarKey(month.from), "2025-10-01");
+    assert.equal(month.buckets.length, 9);
+    assert.equal(calendarKey(month.from), "2026-01-01");
     assert.equal(calendarKey(month.to), "2026-10-01");
+  });
+});
+
+test("eixos fixos mostram períodos futuros sem requisitá-los ou inventar zero", () => {
+  withBrowserZone("UTC", () => {
+    for (const [granularity, expectedAxisLength] of [
+      ["minute", 1440],
+      ["day", 30],
+      ["week", 53],
+      ["month", 12],
+    ] as const) {
+      const range = heatmap.buildOccupancyScenarioHeatmapRange(
+        now,
+        granularity,
+        7,
+        companyTimeZone,
+      );
+      const axisBuckets = heatmap.buildOccupancyScenarioHeatmapAxisBuckets(
+        now,
+        granularity,
+        companyTimeZone,
+      );
+      assert.equal(axisBuckets.length, expectedAxisLength);
+      assert.ok(range.buckets.length < axisBuckets.length);
+      const latest = range.buckets.at(-1)!;
+      const key = aggregate.occupancyAggregateBucketKey(latest, granularity);
+      const matrix = heatmap.buildOccupancyScenarioPeriodHeatmap({
+        axisBuckets,
+        buckets: range.buckets,
+        granularity,
+        metric: "peak",
+        series: [{
+          metrics: new Map([[key, { average: 3, minimum: 0, peak: 7 }]]),
+          name: "Entrada",
+          scenarioId: "scenario-a",
+        }],
+        timeZone: companyTimeZone,
+      });
+      assert.equal(matrix.labels.length, expectedAxisLength);
+      assert.equal(matrix.cells.length, range.buckets.length);
+      assert.equal(matrix.cells.at(-1)?.value, 7);
+      assert.ok(matrix.cells.every((cell) => cell.y < range.buckets.length));
+      assert.equal(matrix.cells.some((cell) => cell.y >= range.buckets.length), false);
+    }
+  });
+});
+
+test("eixo diário de minutos preserva as 23 ou 25 horas em mudanças de fuso", () => {
+  withBrowserZone("UTC", () => {
+    const timeZone = "America/New_York";
+    const spring = new Date("2026-03-08T17:00:00.000Z");
+    const fall = new Date("2026-11-01T17:00:00.000Z");
+    const springAxis = heatmap.buildOccupancyScenarioHeatmapAxisBuckets(
+      spring,
+      "minute",
+      timeZone,
+    );
+    const fallAxis = heatmap.buildOccupancyScenarioHeatmapAxisBuckets(
+      fall,
+      "minute",
+      timeZone,
+    );
+    assert.equal(springAxis.length, 1_380);
+    assert.equal(fallAxis.length, 1_500);
+    const matrix = heatmap.buildOccupancyScenarioPeriodHeatmap({
+      axisBuckets: fallAxis,
+      buckets: heatmap.buildOccupancyScenarioHeatmapRange(
+        fall,
+        "minute",
+        7,
+        timeZone,
+      ).buckets,
+      granularity: "minute",
+      metric: "peak",
+      series: [],
+      timeZone,
+    });
+    const repeated = matrix.labels.filter((label) => label.startsWith("01:30 ("));
+    assert.equal(repeated.length, 2);
+    assert.notEqual(repeated[0], repeated[1]);
   });
 });
 

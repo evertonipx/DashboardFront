@@ -353,15 +353,18 @@ test("intervalo civil não carrega 01h do avanço DST para o próximo dia", () =
 });
 
 test("configurações persistidas e controles visuais respeitam o acesso de edição", () => {
+  const layoutSource = readFileSync(
+    resolve(root, "components/app/card-layout.tsx"),
+    "utf8",
+  );
   assert.match(
     source,
     /const updateDashboardSettings[\s\S]*?if \(!canEditVisual\) return;/,
   );
   assert.match(source, /canEditVisual && operationalSettingsOpen/);
-  assert.match(
-    source,
-    /canEditVisual\s*\?\s*\(\s*<div\s+aria-label="Aparência/,
-  );
+  assert.match(source, /aria-label="Configurar widgets de ocupação"/);
+  assert.match(layoutSource, /const canEditLayout = hasVisualAdminAccess\(user\) && !monitorMode/);
+  assert.match(layoutSource, /<ViewPalettePicker\s+menuKey=\{menuKey\}/);
   assert.match(
     source,
     /masterCrossCompanyScope\s*\?\s*selectExplicitCompanyScopedRows\(\s*response,\s*companyScopeId/,

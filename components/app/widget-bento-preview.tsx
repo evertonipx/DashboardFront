@@ -698,6 +698,11 @@ function WidgetBentoMiniature({
       >
         <svg viewBox="0 0 100 32" preserveAspectRatio="none" className="h-full w-full">
           <path
+            d="M1 26 L18 18 L34 22 L50 8 L66 13 L82 5 L99 10 L99 32 L1 32 Z"
+            fill="currentColor"
+            opacity="0.22"
+          />
+          <path
             d="M1 26 L18 18 L34 22 L50 8 L66 13 L82 5 L99 10"
             fill="none"
             stroke="currentColor"

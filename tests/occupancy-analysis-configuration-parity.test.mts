@@ -142,7 +142,8 @@ test("renderer histórico aplica o contexto visual do CardLayout", () => {
 });
 
 test("paleta do Análises é editável e salva no escopo visual histórico", () => {
-  assertContains(analysisSource, /OccupancyPaletteSelect/);
+  const layoutSource = source("components/app/card-layout.tsx");
+  assert.doesNotMatch(analysisSource, /<OccupancyPaletteSelect/);
   assertContains(analysisSource, /colorPaletteId/);
   assert.ok(
     callTexts("useOccupancyWidgetSettings").some(
@@ -153,20 +154,10 @@ test("paleta do Análises é editável e salva no escopo visual histórico", () 
     ),
     "o hook visual deve ler e salvar a paleta em analysis:<cenário>",
   );
-  assertContains(analysisSource, /updateAnalysisWidgetSettings/);
-
-  const paletteControlStart = analysisSource.indexOf("<OccupancyPaletteSelect");
-  assert.notEqual(paletteControlStart, -1);
-  const paletteControl = analysisSource.slice(
-    paletteControlStart,
-    analysisSource.indexOf("/>", paletteControlStart) + 2,
-  );
-  assertContains(paletteControl, /value=\{[^}]*colorPaletteId[^}]*\}/);
-  assertContains(
-    paletteControl,
-    /onValueChange=\{\(colorPaletteId\)\s*=>[\s\S]*?updateAnalysisWidgetSettings\(\{\s*colorPaletteId\s*\}\)/,
-  );
-  assert.doesNotMatch(paletteControl, /loadCharts|apiFetch|setReportRequested/);
+  assertContains(analysisSource, /preferenceScopeId=\{reportPreferenceScopeId\}/);
+  assertContains(layoutSource, /<ViewPalettePicker[\s\S]*?onChange=\{onViewPaletteChange\}/);
+  assertContains(layoutSource, /function setViewPalette\(viewPaletteId:[\s\S]*?saveOccupancyWidgetSettings\([\s\S]*?colorPaletteId: viewPaletteId[\s\S]*?preferenceScopeId/);
+  assert.doesNotMatch(layoutSource.slice(layoutSource.indexOf("function setViewPalette("), layoutSource.indexOf("function setCardChartType(")), /loadCharts|apiFetch|setReportRequested/);
   assertContains(
     analysisSource,
     /defaultWidgetColor:\s*getOccupancyColorPalette\(\s*analysisWidgetSettings\.colorPaletteId/,

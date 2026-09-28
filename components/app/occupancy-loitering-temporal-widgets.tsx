@@ -7,11 +7,15 @@ import {
   EChart,
   type EnterpriseChartOption,
 } from "@/components/app/deferred-echart";
-import { getOccupancyChartPalette } from "@/components/app/occupancy-chart-palette";
+import {
+  getOccupancyChartPalette,
+  occupancySeriesColors,
+} from "@/components/app/occupancy-chart-palette";
 import { useTheme } from "@/components/app/theme-provider";
 import {
   WidgetTitleText,
   useWidgetColor,
+  useWidgetPalette,
 } from "@/components/app/widget-appearance";
 import {
   Card,
@@ -217,6 +221,7 @@ export function OccupancyLoiteringTemporalCard({
   const { effectiveTheme } = useTheme();
   const configuration = temporalCardConfiguration(kind);
   const widgetColor = useWidgetColor(DEFAULT_WIDGET_COLORS[kind]);
+  const viewColors = useWidgetPalette();
   const buildResult = React.useMemo(() => {
     if (suppliedTemporalModel) {
       return { model: suppliedTemporalModel, error: undefined };
@@ -252,9 +257,11 @@ export function OccupancyLoiteringTemporalCard({
             temporalModel,
             effectiveTheme === "dark" ? "dark" : "light",
             widgetColor,
+            true,
+            viewColors,
           )
         : null,
-    [effectiveTheme, kind, temporalModel, widgetColor],
+    [effectiveTheme, kind, temporalModel, viewColors, widgetColor],
   );
   const sourcePeriod = dataPeriod ?? period;
   const effectiveDataLabel = temporalDataPeriodLabel(
@@ -337,6 +344,7 @@ export function buildOccupancyLoiteringTemporalChartOption(
   theme: ChartTheme = "light",
   widgetColor = DEFAULT_WIDGET_COLORS[kind],
   interactive = true,
+  viewColors: readonly string[] | null = null,
 ): EnterpriseChartOption {
   switch (kind) {
     case OCCUPANCY_LOITERING_SESSIONS_OVER_TIME_CARD_ID:
@@ -345,6 +353,7 @@ export function buildOccupancyLoiteringTemporalChartOption(
         theme,
         widgetColor,
         interactive,
+        viewColors,
       );
     case OCCUPANCY_LOITERING_AVERAGE_OVER_TIME_CARD_ID:
       return buildOccupancyLoiteringAverageOverTimeOption(
@@ -352,6 +361,7 @@ export function buildOccupancyLoiteringTemporalChartOption(
         theme,
         widgetColor,
         interactive,
+        viewColors,
       );
     case OCCUPANCY_LOITERING_ACCUMULATED_SESSION_TIME_CARD_ID:
       return buildOccupancyLoiteringAccumulatedSessionTimeOption(
@@ -359,6 +369,7 @@ export function buildOccupancyLoiteringTemporalChartOption(
         theme,
         widgetColor,
         interactive,
+        viewColors,
       );
     case OCCUPANCY_LOITERING_PERCENTILES_BY_AREA_CARD_ID:
       return buildOccupancyLoiteringPercentilesByAreaOption(
@@ -366,6 +377,7 @@ export function buildOccupancyLoiteringTemporalChartOption(
         theme,
         widgetColor,
         interactive,
+        viewColors,
       );
     case OCCUPANCY_LOITERING_DURATION_DISTRIBUTION_CARD_ID:
       return buildOccupancyLoiteringDurationDistributionOption(
@@ -373,6 +385,7 @@ export function buildOccupancyLoiteringTemporalChartOption(
         theme,
         widgetColor,
         interactive,
+        viewColors,
       );
     case OCCUPANCY_LOITERING_AREA_PERIOD_HEATMAP_CARD_ID:
       return buildOccupancyLoiteringAreaPeriodHeatmapOption(
@@ -380,6 +393,7 @@ export function buildOccupancyLoiteringTemporalChartOption(
         theme,
         widgetColor,
         interactive,
+        viewColors,
       );
   }
 }
@@ -389,6 +403,7 @@ export function buildOccupancyLoiteringSessionsOverTimeOption(
   theme: ChartTheme = "light",
   widgetColor = "#1267C4",
   interactive = true,
+  viewColors: readonly string[] | null = null,
 ) {
   return buildTemporalLineOption({
     interactive,
@@ -396,6 +411,7 @@ export function buildOccupancyLoiteringSessionsOverTimeOption(
     model,
     theme,
     widgetColor,
+    viewColors,
   });
 }
 
@@ -404,6 +420,7 @@ export function buildOccupancyLoiteringAverageOverTimeOption(
   theme: ChartTheme = "light",
   widgetColor = "#0F766E",
   interactive = true,
+  viewColors: readonly string[] | null = null,
 ) {
   return buildTemporalLineOption({
     interactive,
@@ -411,6 +428,7 @@ export function buildOccupancyLoiteringAverageOverTimeOption(
     model,
     theme,
     widgetColor,
+    viewColors,
   });
 }
 
@@ -419,6 +437,7 @@ export function buildOccupancyLoiteringAccumulatedSessionTimeOption(
   theme: ChartTheme = "light",
   widgetColor = "#7C3AED",
   interactive = true,
+  viewColors: readonly string[] | null = null,
 ) {
   return buildTemporalLineOption({
     interactive,
@@ -426,6 +445,7 @@ export function buildOccupancyLoiteringAccumulatedSessionTimeOption(
     model,
     theme,
     widgetColor,
+    viewColors,
   });
 }
 
@@ -437,12 +457,14 @@ function buildTemporalLineOption({
   model,
   theme,
   widgetColor,
+  viewColors,
 }: {
   interactive: boolean;
   metric: TemporalLineMetric;
   model: OccupancyLoiteringTemporalModel;
   theme: ChartTheme;
   widgetColor: string;
+  viewColors: readonly string[] | null;
 }): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
   const areas = model.areas.filter((area) => area.stats.count > 0);
@@ -476,7 +498,9 @@ function buildTemporalLineOption({
         ),
       );
   const durationScale = buildDurationScale(durationValues);
-  const colors = [widgetColor, ...SERIES_COLORS.filter((color) => color !== widgetColor)];
+  const colors = viewColors?.length
+    ? occupancySeriesColors(theme, viewColors, widgetColor)
+    : [widgetColor, ...SERIES_COLORS.filter((color) => color !== widgetColor)];
   const showLabels = model.buckets.length <= 18 && areas.length <= 4;
   const showZoom = interactive && model.buckets.length > 32;
   const series = areas.map((area, areaIndex) => ({
@@ -619,6 +643,7 @@ export function buildOccupancyLoiteringPercentilesByAreaOption(
   theme: ChartTheme = "light",
   widgetColor = "#0369A1",
   interactive = true,
+  viewColors: readonly string[] | null = null,
 ): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
   const areas = model.areas.filter((area) => area.stats.count > 0);
@@ -642,7 +667,14 @@ export function buildOccupancyLoiteringPercentilesByAreaOption(
     });
   const series = [
     { color: widgetColor, data: data("median"), id: "loitering-median", name: "Mediana" },
-    { color: "#7C3AED", data: data("p90"), id: "loitering-p90", name: "P90" },
+    {
+      color: viewColors?.length
+        ? occupancySeriesColors(theme, viewColors, widgetColor)[1] ?? widgetColor
+        : "#7C3AED",
+      data: data("p90"),
+      id: "loitering-p90",
+      name: "P90",
+    },
   ].map((entry) => ({
     barMaxWidth: 18,
     data: entry.data,
@@ -753,11 +785,14 @@ export function buildOccupancyLoiteringDurationDistributionOption(
   theme: ChartTheme = "light",
   widgetColor = "#C2410C",
   interactive = true,
+  viewColors: readonly string[] | null = null,
 ): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
   const areas = model.areas.filter((area) => area.stats.count > 0);
   const labels = areaPresentationLabels(areas);
-  const colors = [widgetColor, ...SERIES_COLORS.filter((color) => color !== widgetColor)];
+  const colors = viewColors?.length
+    ? occupancySeriesColors(theme, viewColors, widgetColor)
+    : [widgetColor, ...SERIES_COLORS.filter((color) => color !== widgetColor)];
   const showLabels = areas.length <= 4;
   const showZoom = interactive && model.histogram.length > 10;
   const series = areas.map((area, areaIndex) => ({
@@ -882,10 +917,14 @@ export function buildOccupancyLoiteringAreaPeriodHeatmapOption(
   theme: ChartTheme = "light",
   widgetColor = "#1267C4",
   interactive = true,
+  viewColors: readonly string[] | null = null,
 ): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
   const stateColors = occupancyHeatmapStateColors(theme);
-  const colors = monochromeHeatmapPalette(widgetColor, theme);
+  const color = viewColors?.length
+    ? occupancySeriesColors(theme, viewColors, widgetColor)[0]
+    : widgetColor;
+  const colors = monochromeHeatmapPalette(color, theme);
   const areas = model.areas.filter((area) => area.stats.count > 0);
   const labels = areaPresentationLabels(areas);
   const areaPositionByKey = new Map(
@@ -1117,6 +1156,7 @@ export function buildOccupancyLoiteringTemporalReportChart({
   sessionsSlicedByDay = false,
   timeZone,
   widgetColor,
+  viewColors,
 }: {
   contextLabel: string;
   dataContextLabel?: string;
@@ -1125,6 +1165,7 @@ export function buildOccupancyLoiteringTemporalReportChart({
   sessionsSlicedByDay?: boolean;
   timeZone: string;
   widgetColor?: string;
+  viewColors?: readonly string[] | null;
 }): ReportChart | null {
   if (model.totals.count <= 0) return null;
   const configuration = temporalCardConfiguration(kind);
@@ -1144,6 +1185,7 @@ export function buildOccupancyLoiteringTemporalReportChart({
       "light",
       widgetColor ?? DEFAULT_WIDGET_COLORS[kind],
       false,
+      viewColors,
     ),
     table: buildTemporalReportTable(kind, model, description, timeZone),
     title: configuration.title,

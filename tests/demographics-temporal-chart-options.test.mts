@@ -54,6 +54,17 @@ const reference = demographics.aggregateDemographicBuckets([
 const input = { summary, comparisonSummary: reference, comparisonLabel: "07/09/2026 a 08/09/2026", from: "2026-09-09T03:00:00Z", to: "2026-09-11T03:00:00Z", now: "2026-09-11T03:00:00Z", timeZone: zone };
 const modelFor = (id: RuntimeFixture, changes: Record<string, RuntimeFixture> = {}, context: Record<string, RuntimeFixture> = {}) => build({ ...input, id, settings: { ...defaults(id), ...changes }, ...context });
 
+test("visualização legada linha vira área empilhada sem alterar distribuições", () => {
+  const line = modelFor("demographics_daily_evolution", { chartType: "line" });
+  const area = modelFor("demographics_daily_evolution", { chartType: "area" });
+  assert.ok(line.option.series.every((series: RuntimeFixture) => series.type === "line"));
+  assert.ok(line.option.series.every((series: RuntimeFixture) => series.stack === "demographic-share"));
+  assert.ok(line.option.series.every((series: RuntimeFixture) => series.areaStyle.opacity === 0.22));
+  assert.deepEqual(line.option.series.map((series: RuntimeFixture) => series.data), area.option.series.map((series: RuntimeFixture) => series.data));
+  const comparison = modelFor("demographics_period_comparison", { chartType: "line" });
+  assert.ok(comparison.option.series.every((series: RuntimeFixture) => series.stack === undefined));
+});
+
 test("perfil horário mantém 24 horas e pondera contagens antes de calcular o percentual", () => {
   const model = modelFor("demographics_emotion_hourly", { dimension: "gender" });
   assert.equal(model.pointCount, 24);
@@ -241,12 +252,12 @@ test("comparativo absoluto calcula deltas e evita infinito quando a referência 
   assert.ok(absent.option.series[1].data.every((datum: RuntimeFixture) => datum.value === null));
 });
 
-test("comparativo de gênero distingue períodos com tons neutros, símbolos e traçados sem trocar a semântica de gênero", () => {
+test("comparativo de gênero distingue períodos com a paleta da visão, símbolos e traçados", () => {
   for (const theme of ["light", "dark"]) {
     for (const chartType of ["bar", "line", "area"]) {
       for (const palette of ["pink-blue", "cyber"]) {
         const model = modelFor("demographics_period_comparison", { chartType, palette }, { theme });
-        const colors = theme === "dark" ? ["#CBD5E1", "#64748B"] : ["#475569", "#CBD5E1"];
+        const colors = DEMOGRAPHICS_PALETTES.find((choice: RuntimeFixture) => choice.id === palette).colors.slice(0, 2);
         assert.deepEqual(model.option.color, colors);
         assert.deepEqual(model.option.series.map((series: RuntimeFixture) => series.itemStyle.color), colors);
         assert.deepEqual(model.option.series.map((series: RuntimeFixture) => series.lineStyle.type), ["solid", "dashed"]);
@@ -255,6 +266,39 @@ test("comparativo de gênero distingue períodos com tons neutros, símbolos e t
         assert.match(model.option.aria.description, /cores distinguem os períodos/);
         assert.equal(model.table.rows.find((row: RuntimeFixture) => row.category === "Mulher").change_pp, 53.95);
       }
+    }
+  }
+});
+
+test("paleta da visão chega a comparativos, categorias, heatmaps e cartões compactos", () => {
+  for (const { id: palette, colors } of DEMOGRAPHICS_PALETTES) {
+    for (const theme of ["light", "dark"]) {
+      for (const dimension of ["gender", "age", "emotion"]) {
+        const comparison = modelFor("demographics_period_comparison", {
+          chartType: "line", dimension, palette,
+        }, { theme });
+        const expectedPeriods = colors.slice(0, 2);
+        assert.deepEqual(comparison.option.color, expectedPeriods);
+        assert.deepEqual(comparison.option.series.map((series: RuntimeFixture) => series.itemStyle.color), expectedPeriods);
+        const compact = fit(comparison, { width: 240, height: 150 });
+        assert.deepEqual(compact.color, expectedPeriods);
+        assert.deepEqual(compact.series.map((series: RuntimeFixture) => series.itemStyle.color), expectedPeriods);
+      }
+      for (const dimension of ["age", "emotion"]) {
+        const categories = modelFor("demographics_daily_evolution", {
+          chartType: "area", dimension, palette,
+        }, { theme });
+        const availableColors = demographicPalettePreviewColors(palette, dimension);
+        assert.ok(categories.option.color.length > 0);
+        assert.ok(categories.option.color.every((color: string) => availableColors.includes(color)));
+        assert.deepEqual(fit(categories, { width: 240, height: 150 }).color, categories.option.color);
+      }
+      const heatmap = modelFor("demographics_age_hourly", {
+        chartType: "heatmap", palette,
+      }, { theme });
+      const heatColors = demographicHeatmapColors(palette, theme);
+      assert.deepEqual(heatmap.option.visualMap[1].inRange.color, heatColors);
+      assert.deepEqual(fit(heatmap, { width: 240, height: 150 }).visualMap[1].inRange.color, heatColors);
     }
   }
 });

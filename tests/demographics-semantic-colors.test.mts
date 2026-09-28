@@ -241,8 +241,7 @@ test("rótulos distinguem categoria, intensidade azul e períodos sem renomear I
       assert.equal(presentation.demographicPaletteLabel(palette.id, dimension, "intensity"), palette.id === "pink-blue" ? "Azul sequencial" : palette.label);
     }
     for (const dimension of ["gender", "age", "emotion"]) {
-      const expected = palette.id !== "pink-blue" ? palette.label : dimension === "gender" ? "Neutros" : "Rosa e neutro";
-      assert.equal(presentation.demographicPaletteLabel(palette.id, dimension, "period"), expected);
+      assert.equal(presentation.demographicPaletteLabel(palette.id, dimension, "period"), palette.label);
     }
     assert.equal(presentation.getDemographicPalette(palette.id).id, palette.id);
   }
@@ -254,142 +253,87 @@ function elements(node: RuntimeFixture, predicate: RuntimeFixture): RuntimeFixtu
   return [...(predicate(node) ? [node] : []), ...elements(node.props.children, predicate)];
 }
 
-test("controles de distribuição e temporais apresentam as cores efetivas por dimensão", () => {
-  for (const dimension of ["gender", "age-gender", "age", "emotion"]) {
-    const tree = Controls({ dimension, value: { ...presentation.defaultDemographicPresentation(dimension), palette: "cyber" }, onChange: () => {} });
-    const swatches = elements(tree, (node: RuntimeFixture) => node.type?.name === "PaletteSwatches");
-    assert.ok(swatches.length > 0);
-    assert.deepEqual(swatches[0].props.colors, presentation.demographicPalettePreviewColors("cyber", dimension));
-  }
-  for (const dimension of ["gender", "age", "emotion"]) {
-    const widgetId = "demographics_gender_timeline";
-    const tree = TemporalControls({ widgetId, value: { ...defaultDemographicTemporalSettings(widgetId), dimension }, onChange: () => {} });
-    for (const { id } of presentation.DEMOGRAPHICS_PALETTES) {
-      const item = elements(tree, (node: RuntimeFixture) => node.props.value === id && typeof node.props.textValue === "string")[0];
-      const colors = elements(item, (node: RuntimeFixture) => node.props.style?.backgroundColor).map((node: RuntimeFixture) => node.props.style.backgroundColor);
-      assert.deepEqual(colors, presentation.demographicPalettePreviewColors(id, dimension).slice(0, dimension === "age" ? 9 : 5));
-    }
-  }
-});
-
-test("seleção, opções e legenda de gênero exibem o nome contextual e os dois HEX efetivos", () => {
+test("as legendas individuais refletem a paleta da visão sem oferecer seleção local", () => {
   const widgetId = "demographics_gender_timeline";
-  for (const [kind, dimension] of [["distribution", "gender"], ["distribution", "age-gender"], ["temporal", "gender"]] as const) {
-    const Component = kind === "distribution" ? Controls : TemporalControls;
-    for (const theme of ["light", "dark"]) for (const { id: palette } of presentation.DEMOGRAPHICS_PALETTES) {
-      const defaults = kind === "distribution" ? presentation.defaultDemographicPresentation(dimension) : { ...defaultDemographicTemporalSettings(widgetId), dimension, chartType: "area" };
-      const value = { ...defaults, palette };
-      const changes: RuntimeFixture[] = [];
-      const props = { dimension, widgetId, value, theme, onChange: (next: RuntimeFixture) => changes.push(next) };
-      const tree = Component(props);
-      const label = presentation.demographicPaletteLabel(palette, dimension);
-      const expected = presentation.getDemographicGenderPalette(palette);
-      const colors = [expected.Woman, expected.Man];
-      const ariaLabel = `${kind === "distribution" ? "Paleta de cores" : "Paleta temporal"}: ${label}`;
-      const trigger = elements(tree, (node: RuntimeFixture) => node.props["aria-label"] === ariaLabel)[0];
-      assert.ok(trigger, `${kind}/${dimension}/${palette}: nome contextual da seleção`);
-      assert.deepEqual(paletteItemColors(trigger), colors, "prévia selecionada usa os HEX reais sem tintas ou opacidade");
-      const selection = elements(tree, (node: RuntimeFixture) => node.props.onValueChange && elements(node, (child: RuntimeFixture) => child === trigger).length)[0];
-      assert.equal(selection.props.value, palette);
-      for (const option of presentation.DEMOGRAPHICS_PALETTES) {
-        const item = elements(selection, (node: RuntimeFixture) => node.props.value === option.id && typeof node.props.textValue === "string")[0];
-        assert.ok(item);
-        assert.equal(item.props.textValue, presentation.demographicPaletteLabel(option.id, dimension));
-        const actual = presentation.getDemographicGenderPalette(option.id);
-        assert.deepEqual(paletteItemColors(item), [actual.Woman, actual.Man]);
-      }
-      selection.props.onValueChange(palette);
-      assert.equal(changes.at(-1).palette, palette, "o nome contextual não substitui o ID persistido");
+  for (const { id: palette } of presentation.DEMOGRAPHICS_PALETTES) {
+    const expected = presentation.getDemographicGenderPalette(palette);
+    for (const dimension of ["gender", "age-gender"]) {
+      const value = { ...presentation.defaultDemographicPresentation(dimension), palette };
+      const tree = Controls({ dimension, value, onChange: () => {} });
       const legend = elements(tree, (node: RuntimeFixture) => node.props["aria-label"] === "Cores por gênero")[0];
       assert.ok(legend);
-      assert.deepEqual(paletteItemColors(legend), colors);
-      const legendHtml = renderToStaticMarkup(legend);
-      assert.match(legendHtml, />Mulher</);
-      assert.match(legendHtml, />Homem</);
-      assert.doesNotMatch(legendHtml, /Não identificado|opacity:/);
-      const html = renderToStaticMarkup(React.createElement(Component, props));
-      assert.ok(html.includes(ariaLabel), `${kind}: SSR mantém nome acessível da seleção`);
-      for (const color of colors) assert.ok(html.includes(`background-color:${color}`));
+      assert.deepEqual(legendColors(legend), [expected.Woman, expected.Man]);
+      assertNoLocalPaletteSelection(tree);
     }
+    const temporalValue = { ...defaultDemographicTemporalSettings(widgetId), palette, dimension: "gender", chartType: "area" };
+    const temporalTree = TemporalControls({ widgetId, value: temporalValue, onChange: () => {} });
+    const temporalLegend = elements(temporalTree, (node: RuntimeFixture) => node.props["aria-label"] === "Cores por gênero")[0];
+    assert.ok(temporalLegend);
+    assert.deepEqual(legendColors(temporalLegend), [expected.Woman, expected.Man]);
+    assertNoLocalPaletteSelection(temporalTree);
   }
 });
 
-test("controles exibem Azul sequencial para idade e mantêm o ID original nas seleções", () => {
-  for (const kind of ["distribution", "temporal"]) {
-    const changes: RuntimeFixture[] = [];
-    const widgetId = "demographics_gender_timeline";
-    const defaults = kind === "distribution" ? presentation.defaultDemographicPresentation("age") : { ...defaultDemographicTemporalSettings(widgetId), dimension: "age", chartType: "area" };
-    const Component = kind === "distribution" ? Controls : TemporalControls;
-    const props = { dimension: "age", widgetId, value: defaults, onChange: (value: RuntimeFixture) => changes.push(value) };
-    const tree = Component(props);
-    const ariaLabel = `${kind === "distribution" ? "Paleta de cores" : "Paleta temporal"}: Azul sequencial`;
-    const selection = elements(tree, (node: RuntimeFixture) => node.props.onValueChange && elements(node, (child: RuntimeFixture) => child.props["aria-label"] === ariaLabel).length)[0];
-    assert.ok(selection, `${kind}: título acessível identifica a progressão azul`);
-    assert.equal(selection.props.value, "pink-blue");
-    for (const palette of presentation.DEMOGRAPHICS_PALETTES) {
-      const option = elements(selection, (node: RuntimeFixture) => node.props.value === palette.id && node.props.textValue)[0];
-      assert.equal(option.props.textValue, presentation.demographicPaletteLabel(palette.id, "age"));
-      selection.props.onValueChange(palette.id);
-      assert.equal(changes.at(-1).palette, palette.id);
-    }
-    const html = renderToStaticMarkup(React.createElement(Component, props));
-    assert.match(html, /Azul sequencial/);
-    assert.match(html, /Mais jovens → mais velhos · claro → escuro/);
-  }
+test("editar formato, ordem ou dimensão preserva a paleta configurada para a visão", () => {
+  const distributionChanges: RuntimeFixture[] = [];
+  const distribution = Controls({
+    dimension: "age",
+    value: { ...presentation.defaultDemographicPresentation("age"), palette: "cyber" },
+    onChange: (value: RuntimeFixture) => distributionChanges.push(value),
+  });
+  const orderSelect = elements(distribution, (node: RuntimeFixture) => node.props.onValueChange &&
+    elements(node, (child: RuntimeFixture) => child.props["aria-label"] === "Ordenação por participação").length)[0];
+  orderSelect.props.onValueChange("ascending");
+  assert.equal(distributionChanges[0].palette, "cyber");
+  assert.equal(distributionChanges[0].order, "ascending");
+  assert.match(renderToStaticMarkup(distribution), /Mais jovens → mais velhos · claro → escuro/);
+  assertNoLocalPaletteSelection(distribution);
+
+  const widgetId = "demographics_gender_timeline";
+  const temporalChanges: RuntimeFixture[] = [];
+  const temporal = TemporalControls({
+    widgetId,
+    value: { ...defaultDemographicTemporalSettings(widgetId), palette: "cyber" },
+    onChange: (value: RuntimeFixture) => temporalChanges.push(value),
+  });
+  const dimensionSelect = elements(temporal, (node: RuntimeFixture) => node.props.onValueChange &&
+    elements(node, (child: RuntimeFixture) => child.props["aria-label"] === "Dimensão demográfica").length)[0];
+  dimensionSelect.props.onValueChange("age");
+  assert.equal(temporalChanges[0].palette, "cyber");
+  assert.equal(temporalChanges[0].dimension, "age");
+  assertNoLocalPaletteSelection(temporal);
 });
 
-test("prévias de heatmap usam sete níveis de intensidade reais, não cores de faixas etárias", () => {
+test("heatmaps e comparativos usam a paleta da visão sem seletor em cada widget", () => {
   const { demographicHeatmapColors } = load("lib/demographics-crossing-options.ts");
-  for (const theme of ["light", "dark"]) for (const kind of ["distribution", "temporal"]) {
-    const widgetId = "demographics_age_hourly";
-    const Component = kind === "distribution" ? Controls : TemporalControls;
-    const value = kind === "distribution" ? presentation.defaultDemographicPresentation("age-emotion") : { ...defaultDemographicTemporalSettings(widgetId), chartType: "heatmap" };
-    const tree = Component({ dimension: "age-emotion", widgetId, value, theme, onChange: () => {} });
-    const expectedAriaLabel = `${kind === "distribution" ? "Paleta de cores" : "Paleta temporal"}: Azul sequencial`;
-    assert.equal(elements(tree, (node: RuntimeFixture) => node.props["aria-label"] === expectedAriaLabel).length, 1, "matriz azul não deve anunciar Rosa e azul");
-    for (const palette of presentation.DEMOGRAPHICS_PALETTES) {
-      const option = elements(tree, (node: RuntimeFixture) => node.props.value === palette.id && typeof node.props.textValue === "string")[0];
-      assert.ok(option, `${kind}/${theme}: opção ${palette.id} disponível`);
-      assert.deepEqual(paletteItemColors(option), demographicHeatmapColors(palette.id, theme));
-      assert.equal(paletteItemColors(option).length, 7);
-      assert.equal(option.props.textValue, palette.id === "pink-blue" ? "Azul sequencial" : palette.label, "o nome representa a escala real de intensidade");
-    }
-  }
-});
-
-test("prévias de comparação identificam as duas séries de período sem aplicar nove tons etários", () => {
   const { demographicComparisonColors } = load("lib/demographics-comparison-colors.ts");
-  const widgetId = "demographics_period_comparison";
-  for (const theme of ["light", "dark"]) for (const dimension of ["age", "emotion"]) {
-    const value = { ...defaultDemographicTemporalSettings(widgetId), dimension, chartType: "bar" };
-    const tree = TemporalControls({ widgetId, value, theme, onChange: () => {} });
-    assert.equal(elements(tree, (node: RuntimeFixture) => node.props["aria-label"] === "Paleta temporal: Rosa e neutro").length, 1);
-    for (const palette of presentation.DEMOGRAPHICS_PALETTES) {
-      const option = elements(tree, (node: RuntimeFixture) => node.props.value === palette.id && typeof node.props.textValue === "string")[0];
-      assert.ok(option);
-      assert.deepEqual(paletteItemColors(option), demographicComparisonColors(palette.id, dimension, theme));
-      assert.equal(paletteItemColors(option).length, 2);
-      assert.equal(option.props.textValue, palette.id === "pink-blue" ? "Rosa e neutro" : palette.label);
-    }
+  const heatmapId = "demographics_age_hourly";
+  const comparisonId = "demographics_period_comparison";
+  for (const theme of ["light", "dark"]) {
+    const heatmap = TemporalControls({ widgetId: heatmapId,
+      value: { ...defaultDemographicTemporalSettings(heatmapId), palette: "cyber", chartType: "heatmap" },
+      theme, onChange: () => {} });
+    assertNoLocalPaletteSelection(heatmap);
+    assert.match(renderToStaticMarkup(heatmap), /As cores representam a intensidade dos valores/);
+    assert.equal(demographicHeatmapColors("cyber", theme).length, 7);
+
+    const comparison = TemporalControls({ widgetId: comparisonId,
+      value: { ...defaultDemographicTemporalSettings(comparisonId), palette: "cyber" },
+      theme, onChange: () => {} });
+    const periodColors = elements(comparison, (node: RuntimeFixture) => node.props.style?.backgroundColor)
+      .map((node: RuntimeFixture) => node.props.style.backgroundColor);
+    assert.deepEqual(periodColors, demographicComparisonColors("cyber", "gender", theme));
+    assertNoLocalPaletteSelection(comparison);
+    assert.match(renderToStaticMarkup(comparison), /As cores distinguem os períodos comparados, não os gêneros/);
   }
 });
 
-function paletteItemColors(node: RuntimeFixture) {
-  const component = elements(node, (candidate: RuntimeFixture) => candidate.type?.name === "PaletteSwatches")[0];
-  return component ? component.props.colors : elements(node, (candidate: RuntimeFixture) => candidate.props.style?.backgroundColor).map((candidate: RuntimeFixture) => candidate.props.style.backgroundColor);
+function legendColors(node: RuntimeFixture): string[] {
+  return elements(node, (candidate: RuntimeFixture) => candidate.props.style?.backgroundColor)
+    .map((candidate: RuntimeFixture) => candidate.props.style.backgroundColor);
 }
 
-test("comparativo por gênero explica cores de período e oculta paleta sem efeito preservando escolha", () => {
-  const widgetId = "demographics_period_comparison";
-  const settings = { ...defaultDemographicTemporalSettings(widgetId), palette: "cyber" };
-  const changes: RuntimeFixture[] = [];
-  const tree = TemporalControls({ widgetId, value: settings, onChange: (value: RuntimeFixture) => changes.push(value) });
-  const html = renderToStaticMarkup(React.createElement(TemporalControls, { widgetId, value: settings, onChange: () => {} }));
-  assert.match(html, /As cores distinguem os períodos comparados, não os gêneros/);
-  assert.doesNotMatch(html, /Paleta temporal:/);
-  const dimensionSelect = elements(tree, (node: RuntimeFixture) => node.props.onValueChange && elements(node, (child: RuntimeFixture) => child.props["aria-label"] === "Dimensão demográfica").length)[0];
-  dimensionSelect.props.onValueChange("age");
-  assert.equal(changes[0].palette, "cyber");
-  const changed = renderToStaticMarkup(React.createElement(TemporalControls, { widgetId, value: changes[0], onChange: () => {} }));
-  assert.match(changed, /Paleta temporal: Cyber/);
-});
+function assertNoLocalPaletteSelection(node: RuntimeFixture): void {
+  assert.equal(elements(node, (candidate: RuntimeFixture) =>
+    typeof candidate.props["aria-label"] === "string" && /paleta/i.test(candidate.props["aria-label"])).length, 0);
+}

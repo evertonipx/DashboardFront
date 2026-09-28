@@ -5,8 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { demographicComparisonColors } from "@/lib/demographics-comparison-colors";
-import { demographicHeatmapColors } from "@/lib/demographics-crossing-options";
-import { DEMOGRAPHICS_PALETTES, demographicPaletteLabel, demographicPalettePreviewColors, getDemographicGenderPalette, getDemographicPalette, type DemographicPaletteId } from "@/lib/demographics-presentation";
+import { getDemographicGenderPalette, getDemographicPalette } from "@/lib/demographics-presentation";
 import {
   defaultDemographicTemporalSettings,
   demographicTemporalCategories,
@@ -33,16 +32,6 @@ export function DemographicsTemporalControls({ widgetId, value, onChange, disabl
   const categoricalAge = settings.dimension === "age" && !comparison && !heatmap;
   const genderColors = settings.dimension === "gender" && !comparison && !heatmap
     ? getDemographicGenderPalette(palette.id) : null;
-  const paletteColors = (id: DemographicPaletteId) => heatmap
-    ? demographicHeatmapColors(id, theme)
-    : comparison ? demographicComparisonColors(id, settings.dimension, theme)
-      : demographicPalettePreviewColors(id, settings.dimension);
-  const paletteLabel = (id: DemographicPaletteId) =>
-    demographicPaletteLabel(id, settings.dimension, heatmap ? "intensity" : comparison ? "period" : "category");
-  const swatches = (id: DemographicPaletteId) => {
-    const colors = paletteColors(id);
-    return <span aria-hidden="true" className="inline-flex shrink-0 overflow-hidden rounded-sm">{(categoricalAge || heatmap ? colors : colors.slice(0, 5)).map((color, index) => <span key={`${color}-${index}`} className="h-3 w-2" style={{ backgroundColor: color }} />)}</span>;
-  };
   const update = (patch: Partial<DemographicTemporalSettings>) => {
     if (!disabled) onChange(normalizeDemographicTemporalSettings({ ...settings, ...patch }, widgetId));
   };
@@ -70,7 +59,7 @@ export function DemographicsTemporalControls({ widgetId, value, onChange, disabl
         <Control label="Visualização">
           <Select disabled={disabled} value={settings.chartType} onValueChange={(chartType) => update({ chartType: chartType as DemographicTemporalSettings["chartType"] })}>
             <SelectTrigger aria-label="Visualização do gráfico temporal" className="h-9 w-full min-w-0 text-xs"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="bar">Barras</SelectItem><SelectItem value="area">Área</SelectItem><SelectItem value="line">Linhas</SelectItem><SelectItem value="heatmap">Mapa de calor</SelectItem></SelectContent>
+            <SelectContent><SelectItem value="bar">Barras</SelectItem><SelectItem value="area">{comparison ? "Áreas comparativas" : "Áreas empilhadas"}</SelectItem><SelectItem value="line">Área suave</SelectItem><SelectItem value="heatmap">Mapa de calor</SelectItem></SelectContent>
           </Select>
         </Control>
         {!hourly && !comparison ? <Control label="Agrupamento">
@@ -108,16 +97,7 @@ export function DemographicsTemporalControls({ widgetId, value, onChange, disabl
             <span key={index} className="flex min-w-0 items-center gap-2 text-xs"><span aria-hidden="true" className="h-3 w-3 shrink-0 rounded-sm" style={{ backgroundColor: color }} />{index === 0 ? "Período analisado" : "Período de comparação"}</span>
           ))}
         </div>
-      ) : <Control label="Paleta de cores">
-        <Select disabled={disabled} value={palette.id} onValueChange={(next) => update({ palette: getDemographicPalette(next).id })}>
-          <SelectTrigger aria-label={`Paleta temporal: ${paletteLabel(palette.id)}`} className="h-9 w-full min-w-0 text-xs"><span className="flex min-w-0 items-center gap-2">{swatches(palette.id)}<span className="truncate">{paletteLabel(palette.id)}</span></span></SelectTrigger>
-          <SelectContent className="max-h-72">
-            {DEMOGRAPHICS_PALETTES.map((option) => <SelectItem key={option.id} value={option.id} textValue={paletteLabel(option.id)}>
-              <span className="flex min-w-0 items-center gap-2">{swatches(option.id)}<span className="min-w-0 [overflow-wrap:anywhere]">{paletteLabel(option.id)}</span></span>
-            </SelectItem>)}
-          </SelectContent>
-        </Select>
-      </Control>}
+      ) : null}
       {categoricalAge ? <p className="text-xs leading-5 text-muted-foreground">Mais jovens → mais velhos · claro → escuro</p> : null}
       {genderColors ? <div className="flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground" aria-label="Cores por gênero">
         <span className="inline-flex items-center gap-1.5"><span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: genderColors.Woman }} />Mulher</span>
@@ -125,7 +105,7 @@ export function DemographicsTemporalControls({ widgetId, value, onChange, disabl
       </div> : null}
       {heatmap ? <p className="text-xs leading-5 text-muted-foreground">As cores representam a intensidade dos valores, não as categorias.</p> : null}
       {comparison && !heatmap && settings.dimension !== "gender" ? <p className="text-xs leading-5 text-muted-foreground">As cores distinguem os períodos comparados; as categorias aparecem no eixo.</p> : null}
-      <Button type="button" variant="ghost" size="sm" disabled={disabled} className="h-8 justify-self-start px-0 text-xs text-muted-foreground" onClick={() => { if (!disabled) onChange(defaultDemographicTemporalSettings(widgetId)); }}>
+      <Button type="button" variant="ghost" size="sm" disabled={disabled} className="h-8 justify-self-start px-0 text-xs text-muted-foreground" onClick={() => { if (!disabled) onChange(normalizeDemographicTemporalSettings({ ...defaultDemographicTemporalSettings(widgetId), palette: settings.palette }, widgetId)); }}>
         <RotateCcw className="h-3.5 w-3.5" />Restaurar configuração padrão
       </Button>
     </div>

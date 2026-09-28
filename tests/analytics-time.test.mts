@@ -3788,70 +3788,37 @@ test("catálogo de paletas de ocupação oferece variações persistíveis e seg
   );
 });
 
-test("paleta dos comparativos da visão fica centralizada na barra superior", () => {
+test("paleta dos comparativos da visão fica centralizada em Configurar widgets", () => {
   const dashboardSource = readFileSync(
     resolve(projectRoot, "components/app/occupancy-scenario-dashboard.tsx"),
+    "utf8",
+  );
+  const layoutSource = readFileSync(
+    resolve(projectRoot, "components/app/card-layout.tsx"),
     "utf8",
   );
   const comparisonSource = readFileSync(
     resolve(projectRoot, "components/app/occupancy-comparison-widgets.tsx"),
     "utf8",
   );
-  const paletteSelectSource = readFileSync(
-    resolve(projectRoot, "components/app/occupancy-palette-select.tsx"),
-    "utf8",
-  );
   assert.equal(
     (dashboardSource.match(/<OccupancyPaletteSelect/g) ?? []).length,
-    1,
-    "a paleta desta visão deve aparecer uma única vez na barra superior",
+    0,
+    "a paleta dos widgets não deve ocupar a barra superior",
   );
   assert.match(
-    dashboardSource,
-    /aria-label="Aparência dos comparativos desta visão"[\s\S]*?<OccupancyPaletteSelect/,
+    layoutSource,
+    /<ViewPalettePicker\s+menuKey=\{menuKey\}\s+onChange=\{onViewPaletteChange\}\s+value=\{viewPaletteId\}/,
   );
+  assert.match(layoutSource, /if \(menuKey === "occupancy" && viewPaletteId !== "pink-blue"\)[\s\S]*?saveOccupancyWidgetSettings\(/);
   assert.match(
-    paletteSelectSource,
-    /ariaLabel = "Paleta dos comparativos desta visão"/,
+    comparisonSource,
+    /preferences\.find\(\(preference\) => preference\.viewPaletteId\)\?\.viewPaletteId \?\?\s*settings\.colorPaletteId/,
   );
-  assert.match(
-    paletteSelectSource,
-    /aria-label=\{`\$\{ariaLabel\}: \$\{palette\.label\}`\}/,
-  );
-  assert.match(
-    paletteSelectSource,
-    /fluid \? "w-full min-w-0" : "w-\[64px\] @sm:w-\[116px\]"/,
-  );
-  assert.match(
-    dashboardSource,
-    /<OccupancyPaletteSelect[\s\S]*?compact[\s\S]*?fluid/,
-  );
-  assert.match(
-    paletteSelectSource,
-    /<PaletteSwatches colors=\{palette\.colors\} compact=\{compact\} selected \/>/,
-  );
-  assert.doesNotMatch(paletteSelectSource, /<SelectValue/);
-  assert.match(paletteSelectSource, /selected && !compact \? 10 : 5/);
-  assert.match(
-    paletteSelectSource,
-    /style=\{\{ display: "inline-flex" \}\}/,
-    "a régua selecionada deve preservar flex mesmo sob o line-clamp do SelectTrigger",
-  );
-  assert.match(
-    paletteSelectSource,
-    /"block h-3\.5 w-1\.5 shrink-0"/,
-    "cada amostra escolhida precisa manter dimensões próprias no trigger fechado",
-  );
-  assert.match(
-    paletteSelectSource,
-    /<SelectContent[\s\S]*?option\.label[\s\S]*?option\.description/,
-    "o menu aberto deve preservar nome e descrição das paletas",
-  );
-  assert.match(
-    paletteSelectSource,
-    /title=\{`\$\{palette\.label\} — \$\{palette\.description\}`\}/,
-    "os nomes devem permanecer acessíveis sem comprimir os swatches",
-  );
+  assert.match(comparisonSource, /viewPaletteColors=\{selectedColorPalette\.colors\}/);
+  assert.match(layoutSource, /<SelectContent className="max-h-\[360px\] sm:min-w-\[320px\]"/);
+  assert.match(layoutSource, /<PaletteSwatches colors=\{option\.colors\} \/>/);
+  assert.match(layoutSource, /option\.label[\s\S]*?option\.description/);
   assert.doesNotMatch(
     dashboardSource.slice(dashboardSource.indexOf("{canEditVisual && operationalSettingsOpen ? (")),
     /<OccupancyPaletteSelect|<OccupancyStatusColorsDialog/,
@@ -3924,29 +3891,11 @@ test("paleta dos comparativos da visão fica centralizada na barra superior", ()
     /return \{[\s\S]*?cards,[\s\S]*?getReportAssets,[\s\S]*?refresh,[\s\S]*?settings,[\s\S]*?snapshots: certifiedSnapshots,[\s\S]*?updateSettings,[\s\S]*?\};/,
     "o painel superior precisa atualizar a mesma preferência persistida dos widgets",
   );
-  assert.equal(
-    (comparisonSource.match(/<OccupancyPaletteSelect/g) ?? []).length,
-    1,
-    "somente o simulador hexagonal deve manter seletor de paleta local",
-  );
-  assert.match(
-    comparisonSource,
-    /ariaLabel="Paleta de cores do simulador hexagonal"[\s\S]*?value=\{settings\.hexColorPaletteId\}[\s\S]*?onChange\(\{ hexColorPaletteId \}\)/,
-  );
-  assert.equal(
-    (comparisonSource.match(/<OccupancyStatusColorsDialog/g) ?? []).length,
-    1,
-    "somente o simulador hexagonal deve manter cores semânticas locais",
-  );
-  assert.match(
-    comparisonSource,
-    /buttonLabel="Cores do hex"[\s\S]*?colors=\{settings\.hexStatusColors\}[\s\S]*?onChange\(\{ hexStatusColors \}\)/,
-  );
-  assert.match(
-    comparisonSource,
-    /const persisted = onChange\(draft\);[\s\S]*?if \(persisted === false\) return;[\s\S]*?toast\.success\(successMessage\)/,
-    "o diálogo não deve confirmar uma preferência que falhou ao persistir",
-  );
+  assert.doesNotMatch(comparisonSource, /<OccupancyPaletteSelect/);
+  assert.doesNotMatch(comparisonSource, /<OccupancyStatusColorsDialog/);
+  assert.match(comparisonSource, /viewPaletteColors=\{selectedColorPalette\.colors\}/);
+  assert.match(comparisonSource, /const colors = viewPaletteColors \?\?\s*getOccupancyColorPalette\(settings\.colorPaletteId\)\.colors/);
+  assert.match(comparisonSource, /semanticColors=\{statusColors\}/);
   assert.match(
     comparisonSource,
     /displayStatusColors\.unoccupied[\s\S]*?Todos desocupados/,
@@ -11845,7 +11794,8 @@ test("miniatura Bento representa a configuração visual efetiva de cada widget"
 
   for (const configuredField of [
     "chartType",
-    "const configuredColor = preference?.color",
+    "const configuredColor = card.colorEditable === false && card.previewColors?.length",
+    "colors: configuredPaletteColors ?? (configuredColor ? undefined : card.previewColors)",
     "gradient: card.colorPreview",
     "previewKind: resolveWidgetBentoPreviewKind",
     "zoom: card.zoomEnabled",
@@ -15654,6 +15604,29 @@ test("comparativo anual substitui somente o mês aberto pelas horas fechadas", (
   );
 });
 
+test("Ao Vivo restringe as horas reconciliadas à janela diária de cada comparativo", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  const hydration = source.slice(
+    source.indexOf("function hydrateRealtimeOpenBuckets"),
+    source.indexOf("function realtimeFullyCoveredCivilDayRanges"),
+  );
+  const annualDayRows = source.slice(
+    source.indexOf("  const getAnnualComparisonDayRows ="),
+    source.indexOf("  const liveComparisonHourlySource ="),
+  );
+
+  assert.match(
+    hydration,
+    /reconcileCountingCalendarRows\([\s\S]*?\{ from: definition\.from, to: definition\.to \},/,
+    "cada série diária precisa reconciliar somente o próprio intervalo civil",
+  );
+  assert.match(annualDayRows, /currentMonthDayRows\.filter/);
+  assert.match(annualDayRows, /lastYearMonthDayRows\.filter/);
+});
+
 test("histórico anual ao vivo só consulta cards visíveis, uma vez por dia e em meses completos", () => {
   const source = readFileSync(
     resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
@@ -17923,7 +17896,12 @@ test("réguas principais preservam controles compactos sem forçar overflow em t
     occupancyToolbar,
     /flex-\[1_1_14rem\]/,
   );
-  assert.match(occupancyToolbar, /<OccupancyPaletteSelect[\s\S]*?compact[\s\S]*?fluid/);
+  assert.doesNotMatch(occupancyToolbar, /<OccupancyPaletteSelect/);
+  assert.match(
+    readFileSync(resolve(projectRoot, "components/app/card-layout.tsx"), "utf8"),
+    /<ViewPalettePicker\s+menuKey=\{menuKey\}/,
+    "a paleta da visão deve permanecer no organizador dos widgets",
+  );
   assert.match(
     occupancyToolbar,
     /aria-label="Ações da visão de ocupação"[\s\S]*?ml-auto flex min-w-0 flex-wrap/,

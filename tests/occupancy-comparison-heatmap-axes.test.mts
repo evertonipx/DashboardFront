@@ -17,10 +17,15 @@ const sourcePath = "components/app/occupancy-comparison-widgets.tsx";
 const source = readFileSync(resolve(root, sourcePath), "utf8");
 const hours = Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, "0")}h`);
 const modules = new Map();
+const chartPalette = load("lib/chart-palette.ts");
+const formatChartNumber = standalone("formatChartNumber");
 const buildHeatmap = standalone("buildHeatmapOption", {
   ...load("lib/occupancy-heatmap-visual.ts"),
+  ...chartPalette,
   ...load("components/app/occupancy-chart-palette.ts"),
-  ...Object.fromEntries(["escapeTooltip", "formatChartNumber", "metricLabel", "truncateLabel"].map((name) => [name, standalone(name)])),
+  ...Object.fromEntries(["escapeTooltip", "metricLabel", "truncateLabel"].map((name) => [name, standalone(name)])),
+  formatChartNumber,
+  formatHeatmapCellValue: standalone("formatHeatmapCellValue", { formatChartNumber }),
 });
 
 for (const rowKind of ["dias", "cenários"]) {
@@ -125,6 +130,100 @@ test("eixo responsivo se adapta a qualquer quantidade de períodos sem assumir 2
   assert.doesNotMatch(optionSource, /index\s*===\s*23/);
 });
 
+for (const theme of ["light", "dark"]) {
+  test(`cenários estáticos exibem valores certificados com contraste em ${theme}`, () => {
+    for (const granularity of ["hour", "day", "week", "month"]) {
+      const columns = granularity === "week" ? 45 : 24;
+      const xLabels = Array.from({ length: columns }, (_, index) => `Período ${index + 1}`);
+      const rows = Array.from({ length: 30 }, (_, index) => `Cenário ${index + 1}`);
+      const option = build(rows, theme, {
+        cells: [
+          { x: 0, y: 0, value: 17 },
+          { x: 0, y: 1, value: 0 },
+          { x: 0, y: 2, value: null },
+          { x: 1, y: columns - 1, value: 1_200 },
+        ],
+        granularity,
+        maximum: 1_200,
+        scenarioHeatmap: true,
+        xLabels,
+      });
+      assert.deepEqual(option.dataZoom, [], `${granularity}: nem linhas nem colunas têm zoom`);
+      assert.ok(option.media.every(({ option: media }: RuntimeFixture) => media.dataZoom === undefined));
+      assert.equal(option.yAxis.data.length, 30);
+      assert.deepEqual(option.series[0].data, [[2, 0, -1]]);
+      assert.equal(option.series[0].label, undefined, "ausência não recebe número");
+      assert.equal(option.series[1].label.show, true);
+      assert.equal(option.series[1].label.position, "inside");
+      assert.equal(option.series[1].label.formatter({ value: [0, 0, 17] }), "17");
+      assert.equal(option.series[1].label.formatter({ value: [1, 0, 0] }), "0");
+      assert.equal(option.series[1].label.formatter({ value: [columns - 1, 1, 1_200] }), "1,2k");
+      assert.equal(option.series[1].label.formatter({ value: [2, 0, null] }), "");
+      const colorScale = chartPalette.monochromeHeatmapPalette("#1267C4", theme);
+      assert.equal(option.series[1].data[0].label.color, chartPalette.heatmapLabelColor(colorScale, 17 / 1_200));
+      assert.equal(option.series[1].data[2].label.color, chartPalette.heatmapLabelColor(colorScale, 1));
+      assert.deepEqual(option.series[1].data[0].value, [0, 0, 17]);
+      assert.deepEqual(option.series[1].data[2].value, [columns - 1, 1, 1_200]);
+    }
+  });
+}
+
+test("SVG do cenário mantém valores positivos dentro das células e omite ausência e zero conforme a regra global", () => {
+  const option = build(["Entrada"], "light", {
+    cells: [
+      { x: 0, y: 0, value: 17 },
+      { x: 0, y: 1, value: 0 },
+      { x: 0, y: 2, value: null },
+      { x: 0, y: 3, value: 1_200 },
+    ],
+    maximum: 1_200,
+    scenarioHeatmap: true,
+  });
+  const { suppressZeroChartLabels } = load("lib/chart-zero-labels.ts");
+  const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 960, height: 300 });
+  try {
+    chart.setOption(suppressZeroChartLabels(option), { notMerge: true, lazyUpdate: false });
+    const svg = chart.renderToSVGString();
+    assert.match(svg, />17<\/text>/);
+    assert.match(svg, />1,2k<\/text>/);
+    assert.doesNotMatch(svg, />0<\/text>/);
+    assert.doesNotMatch(svg, />Sem dados<\/text>/);
+  } finally {
+    chart.dispose();
+  }
+});
+
+test("minuto diário mantém 1.440 células sem números, zoom ou rótulos em cada minuto", () => {
+  const xLabels = Array.from({ length: 1_440 }, (_, index) =>
+    `${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}`,
+  );
+  const option = build(["Entrada"], "light", {
+    cells: [
+      { x: 0, y: 0, value: 1 },
+      { x: 0, y: 719, value: 2 },
+      { x: 0, y: 1_439, value: null },
+    ],
+    granularity: "minute",
+    scenarioHeatmap: true,
+    xLabels,
+  });
+  assert.deepEqual(option.dataZoom, []);
+  assert.equal(option.series[1].label, undefined);
+  assert.deepEqual(option.series[1].data, [[0, 0, 1], [719, 0, 2]]);
+  assert.equal(option.xAxis.data.length, 1_440);
+  assert.equal(option.xAxis.axisLabel.interval(0), true);
+  assert.equal(option.xAxis.axisLabel.interval(59), false);
+  assert.equal(option.xAxis.axisLabel.interval(60), true);
+  assert.equal(option.xAxis.axisLabel.interval(1_439), true);
+  assert.equal(option.xAxis.axisLabel.formatter("00:00", 0), "00h");
+  assert.equal(option.xAxis.axisLabel.formatter("12:00", 720), "12h");
+  assert.equal(option.xAxis.axisLabel.formatter("23:59", 1_439), "24h");
+  assert.equal(option.media[0].option.xAxis.axisLabel.interval(60), false);
+  assert.equal(option.media[0].option.xAxis.axisLabel.interval(180), true);
+  assert.equal(option.media[0].option.xAxis.axisLabel.interval(1_439), true);
+  assert.match(option.tooltip.formatter({ seriesName: "Pico por minuto", value: [719, 0, 2] }), /Entrada · 11:59/);
+});
+
 test("configurador e relatório preservam o ID legado nas cinco granularidades", () => {
   const optionsSource = source.slice(
     source.indexOf("function OccupancyComparisonOptions"),
@@ -195,7 +294,12 @@ test("tela e exportação usam o mesmo mapeamento, sem alterar os índices semâ
       .length,
     2,
   );
-  assert.equal((source.match(/interactive: false,/g) ?? []).length, 2);
+  assert.equal(
+    (source.match(/scenarioHeatmap: true,/g) ?? []).length,
+    2,
+    "tela e exportação devem usar a mesma apresentação estática com valores",
+  );
+  assert.equal((source.match(/interactive: false,/g) ?? []).length, 3);
   assert.match(source, /hour: OCCUPANCY_FIXED_HOUR_LABELS\[cell\.y\]/);
   assert.match(source, /period: scenarioPeriodMatrix\.labels\[cell\.y\]/);
   assert.match(source, /scenario: scenarioPeriodMatrix\.scenarioNames\[cell\.x\]/);

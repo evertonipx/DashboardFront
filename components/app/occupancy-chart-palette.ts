@@ -89,13 +89,28 @@ export function resolveOccupancyChartPalette(
   colorPaletteId: OccupancyColorPaletteId,
   primaryOverride?: string | null,
 ): OccupancyChartPalette {
-  const base = getOccupancyChartPalette(theme);
   const colors = getOccupancyColorPalette(colorPaletteId).colors;
+  return resolveOccupancyChartPaletteFromColors(theme, colors, primaryOverride);
+}
+
+/** Maps every data-series role to the current view palette, not fixed defaults. */
+export function resolveOccupancyChartPaletteFromColors(
+  theme: OccupancyChartTheme,
+  colors: readonly string[] | null,
+  primaryOverride?: string | null,
+): OccupancyChartPalette {
+  const base = getOccupancyChartPalette(theme);
+  const configuredColors = colors?.filter((color) => normalizeHexColor(color)) ?? [];
   const seriesColor = (index: number) =>
-    ensureGraphicContrast(colors[index % colors.length], base.surface);
+    ensureGraphicContrast(
+      configuredColors[index % configuredColors.length] ??
+        [base.current, base.average, base.rangeStart, base.rangeEnd,
+          base.rangeEmphasis, base.minimumLimit, base.maximumLimit][index % 7],
+      base.surface,
+    );
   const normalizedOverride = normalizeHexColor(primaryOverride);
   const current = ensureGraphicContrast(
-    normalizedOverride ?? colors[0],
+    normalizedOverride ?? seriesColor(0),
     base.surface,
   );
 
@@ -110,6 +125,20 @@ export function resolveOccupancyChartPalette(
     rangeStart: seriesColor(2),
     shadow: colorWithAlpha(current, theme === "dark" ? 0.12 : 0.07),
   };
+}
+
+/** Distinct series shades in the view palette, readable on the chart surface. */
+export function occupancySeriesColors(
+  theme: OccupancyChartTheme,
+  colors: readonly string[] | null,
+  firstColor: string,
+): string[] {
+  const surface = getOccupancyChartPalette(theme).surface;
+  const ordered = [
+    firstColor,
+    ...(colors ?? []).filter((color) => color.toUpperCase() !== firstColor.toUpperCase()),
+  ];
+  return ordered.map((color) => ensureGraphicContrast(color, surface));
 }
 
 /** @deprecated Use {@link resolveOccupancyChartPalette}. */

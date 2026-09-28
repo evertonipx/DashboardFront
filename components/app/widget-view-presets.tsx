@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   Check,
   Copy,
+  Download,
   LayoutTemplate,
   Play,
   RefreshCw,
@@ -11,6 +12,7 @@ import {
   Search,
   Star,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -39,7 +41,9 @@ import {
   captureWidgetViewSnapshot,
   deleteWidgetViewPreset,
   loadWidgetViewPresets,
+  parseWidgetViewBackup,
   saveWidgetViewPresets,
+  serializeWidgetViewBackup,
   setDefaultWidgetViewPreset,
   upsertWidgetViewPreset,
   WIDGET_VIEW_PRESETS_UPDATED_EVENT,
@@ -133,6 +137,8 @@ export function WidgetViewPresetsDialog({
   const [replicateId, setReplicateId] = React.useState<string | null>(null);
   const [selectedScopeIds, setSelectedScopeIds] = React.useState<string[]>([]);
   const [scopeFilter, setScopeFilter] = React.useState("");
+  const importInputRef = React.useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = React.useState(false);
   const currentScopeId = currentScope?.id ?? "";
   const currentScopeName = currentScope?.name ?? "";
   const sourceMenuKeysValue = sourceMenuKeys.join("|");
@@ -369,6 +375,96 @@ export function WidgetViewPresetsDialog({
     toast.success("Visão salva com todas as configurações dos widgets.");
   }
 
+  function exportPreset(preset: WidgetViewPreset) {
+    const scope = requireCertifiedPresetScope();
+    if (!scope) return;
+    const certifiedPreset = requirePresetForScope(preset, scope);
+    if (!certifiedPreset) return;
+    try {
+      const content = serializeWidgetViewBackup(certifiedPreset, {
+        companyId: scope.companyId,
+        presetNamespace: scope.presetNamespace,
+      });
+      const url = URL.createObjectURL(
+        new Blob([content], { type: "application/json;charset=utf-8" }),
+      );
+      const link = document.createElement("a");
+      const safeName = certifiedPreset.name
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 60);
+      link.href = url;
+      link.download = `visao-${safeName || "widgets"}-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      toast.success("Backup da visão exportado.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível exportar a visão.");
+    }
+  }
+
+  async function importBackup(file: File) {
+    const scope = requireCertifiedPresetScope();
+    if (!scope) return;
+    if (file.size > 10_000_000) {
+      toast.error("O backup excede o limite de 10 MB.");
+      return;
+    }
+    setImporting(true);
+    try {
+      const backup = parseWidgetViewBackup(await file.text(), {
+        companyId: scope.companyId,
+        menuKey: scope.menuKey,
+        presetNamespace: scope.presetNamespace,
+      });
+      if (currentPresetScopeKeyRef.current !== scope.key) return;
+      const existingNames = new Set(
+        storedPresets.map((preset) => preset.name.trim().toLocaleLowerCase("pt-BR")),
+      );
+      let importedName = backup.name.trim();
+      if (existingNames.has(importedName.toLocaleLowerCase("pt-BR"))) {
+        const baseName = `${importedName} (backup)`;
+        importedName = baseName;
+        for (let suffix = 2; existingNames.has(importedName.toLocaleLowerCase("pt-BR")); suffix += 1) {
+          importedName = `${baseName} ${suffix}`;
+        }
+      }
+      const next = upsertWidgetViewPreset({
+        companyId: scope.companyId,
+        menuKey: scope.menuKey,
+        name: importedName,
+        presetNamespace: scope.presetNamespace,
+        snapshot: backup.snapshot,
+        userId: scope.userId,
+      });
+      if (currentPresetScopeKeyRef.current !== scope.key) return;
+      setStoredPresets(next);
+      const importedPreset = next.find((preset) => preset.name === importedName);
+      if (!importedPreset) throw new Error("Não foi possível salvar a visão importada.");
+      const applied = applyWidgetViewPreset(importedPreset, {
+        companyId: scope.companyId,
+        presetNamespace: scope.presetNamespace,
+        targetScope: scope.currentScope,
+        userId: scope.userId,
+      });
+      if (!applied) {
+        throw new Error("O backup foi salvo, mas selecione uma tela compatível para aplicá-lo.");
+      }
+      requestUserGridSync();
+      toast.success("Backup importado e aplicado nesta tela.");
+      await scheduleReload(scope);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível importar o backup.");
+    } finally {
+      setImporting(false);
+    }
+  }
+
   function updatePreset(preset: WidgetViewPreset) {
     const scope = requireCertifiedPresetScope();
     if (!scope) return;
@@ -407,12 +503,16 @@ export function WidgetViewPresetsDialog({
     if (!scope) return;
     const certifiedPreset = requirePresetForScope(preset, scope);
     if (!certifiedPreset) return;
-    applyWidgetViewPreset(certifiedPreset, {
+    const applied = applyWidgetViewPreset(certifiedPreset, {
       companyId: scope.companyId,
       presetNamespace: scope.presetNamespace,
       targetScope: scope.currentScope,
       userId: scope.userId,
     });
+    if (!applied) {
+      toast.error("Selecione uma tela compatível para aplicar esta visão.");
+      return;
+    }
     toast.success("Visão aplicada nesta tela.");
     void scheduleReload(scope);
   }
@@ -684,6 +784,34 @@ export function WidgetViewPresetsDialog({
             </Button>
           </section>
 
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2.5">
+            <p className="min-w-0 text-xs text-muted-foreground">
+              Exporte uma visão salva. Ao importar um backup da mesma empresa e tela, ele será salvo como nova visão e aplicado aqui.
+            </p>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="sr-only"
+              aria-label="Selecionar backup de visão em JSON"
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                event.currentTarget.value = "";
+                if (file) void importBackup(file);
+              }}
+            />
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={!presetCatalogCertified || importing}
+              onClick={() => importInputRef.current?.click()}
+            >
+              <Upload className="h-4 w-4" />
+              {importing ? "Importando..." : "Importar backup"}
+            </Button>
+          </div>
+
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <div className="text-sm font-semibold">Modelos disponíveis</div>
@@ -827,6 +955,16 @@ export function WidgetViewPresetsDialog({
                       >
                         <Play className="h-3.5 w-3.5" />
                         Aplicar
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        aria-label={`Exportar backup da visão ${preset.name}`}
+                        onClick={() => exportPreset(preset)}
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Exportar
                       </Button>
                       {normalizedScopes.length > 1 ? (
                         <IconButton

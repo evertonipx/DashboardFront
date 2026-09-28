@@ -817,9 +817,21 @@ test("dashboard consulta o endpoint bruto uma vez por dia civil, reutiliza parti
     /if \(!hasVisibleWidgets\) \{[\s\S]*?setLoading\(false\)[\s\S]*?return;/,
   );
   assert.match(source, /onPreferencesChange=\{synchronizePreferences\}/);
+  const requestEffectStart = source.indexOf(
+    "  }, [\n    companyScopeId,",
+    source.indexOf("const requestKey"),
+  );
+  assert.ok(requestEffectStart >= 0, "a consulta deve manter dependências explícitas");
+  const requestEffectDependencies = source.slice(
+    requestEffectStart,
+    source.indexOf("  ]);", requestEffectStart),
+  );
+  assert.match(requestEffectDependencies, /hasVisibleWidgets/);
+  assert.match(requestEffectDependencies, /preferencesReady/);
+  assert.match(requestEffectDependencies, /requestWindow/);
   assert.doesNotMatch(
-    source,
-    /\[\s*preferences,[\s\S]*?requestWindow,[\s\S]*?surface,[\s\S]*?\]\);/,
+    requestEffectDependencies,
+    /^\s*preferences,\s*$/m,
     "alterações de título, cor ou tamanho não devem refazer a consulta",
   );
   assert.match(source, /isAbortError\(requestError, controller\.signal\)/);

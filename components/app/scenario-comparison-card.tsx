@@ -4,7 +4,7 @@ import * as React from "react";
 import { BarChart3, Clock3, Settings2 } from "lucide-react";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
+import { EChart, type EnterpriseChartOption } from "@/components/app/counting-palette-chart";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import {
   useWidgetColor,

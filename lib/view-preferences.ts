@@ -11,10 +11,15 @@ import {
   writeUserGridPreference,
 } from "@/lib/user-grid-local";
 import {
+  DEMOGRAPHICS_PALETTES,
   demographicDimensionForCard,
   normalizeDemographicPresentation,
+  type DemographicPaletteId,
   type DemographicPresentation,
 } from "@/lib/demographics-presentation";
+import {
+  OCCUPANCY_COLOR_PALETTES,
+} from "@/lib/occupancy-color-palettes";
 import {
   isDemographicTemporalWidgetId,
   normalizeDemographicTemporalSettings,
@@ -100,6 +105,8 @@ export type CardScenarioSelection = {
 export type CardPreference = {
   chartType?: CardChartType;
   color?: string;
+  /** Shared palette for every widget in this scoped view. */
+  viewPaletteId?: DemographicPaletteId;
   demographics?: DemographicPresentation;
   demographicsTemporal?: DemographicTemporalSettings;
   height?: CardHeight;
@@ -399,7 +406,7 @@ export function normalizeCardPreferences(
       byId.set(candidate.id, candidate);
     });
   }
-  const normalized = storedOrder.map((id) => {
+  const normalized: CardPreference[] = storedOrder.map((id) => {
     const storedPreference = byId.get(id)!;
     const legacyHeight = isCardHeight(storedPreference.height)
       ? storedPreference.height
@@ -423,6 +430,7 @@ export function normalizeCardPreferences(
     const demographicDimension = menuKey === "demographics"
       ? demographicDimensionForCard(id)
       : undefined;
+    const viewPaletteId = normalizeViewPaletteId(menuKey, storedPreference.viewPaletteId);
 
     return {
       chartType: isCardChartType(storedPreference.chartType)
@@ -431,6 +439,7 @@ export function normalizeCardPreferences(
       color: isCardColor(storedPreference.color)
         ? storedPreference.color
         : undefined,
+      ...(viewPaletteId ? { viewPaletteId } : {}),
       ...(demographicDimension && storedPreference.demographics !== undefined
         ? { demographics: normalizeDemographicPresentation(storedPreference.demographics, demographicDimension) }
         : {}),
@@ -495,7 +504,35 @@ export function normalizeCardPreferences(
     normalizedIds.add(id);
   });
 
-  return merged;
+  const viewPaletteId = normalized.find((preference) => preference.viewPaletteId)
+    ?.viewPaletteId;
+  if (!viewPaletteId) return merged;
+
+  const colors = menuKey === "demographics"
+    ? DEMOGRAPHICS_PALETTES.find((palette) => palette.id === viewPaletteId)?.colors
+    : OCCUPANCY_COLOR_PALETTES.find((palette) => palette.id === viewPaletteId)?.colors;
+  if (!colors?.length) return merged;
+
+  // Keep the palette on all records so newly added/custom widgets and snapshots
+  // retain the view-level choice. A legacy per-widget color remains untouched
+  // until the user explicitly selects a shared palette for this view.
+  return merged.map((preference, index) => ({
+    ...preference,
+    color: colors[index % colors.length],
+    viewPaletteId,
+  }));
+}
+
+function normalizeViewPaletteId(
+  menuKey: CardMenuKey,
+  value: unknown,
+): DemographicPaletteId | undefined {
+  const choices = menuKey === "demographics"
+    ? DEMOGRAPHICS_PALETTES
+    : OCCUPANCY_COLOR_PALETTES;
+  return choices.some((palette) => palette.id === value)
+    ? value as DemographicPaletteId
+    : undefined;
 }
 
 export function loadCardPreferences(menuKey: CardMenuKey, cardIds?: string[]) {

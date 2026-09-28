@@ -56,13 +56,13 @@ import {
   occupancyGranularityLabel,
   type OccupancyCustomWidgetForm,
 } from "@/components/app/occupancy-custom-widget-editor";
-import { OccupancyPaletteSelect } from "@/components/app/occupancy-palette-select";
 import { useAuth } from "@/components/app/auth-provider";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
 import { useUserGridReady } from "@/components/app/use-user-grid-ready";
 import {
   useWidgetChartType,
   useWidgetColor,
+  useWidgetPalette,
   useWidgetTitle,
 } from "@/components/app/widget-appearance";
 import {
@@ -72,6 +72,7 @@ import {
 } from "@/components/app/monitor-mode";
 import {
   getOccupancyChartPalette,
+  resolveOccupancyChartPaletteFromColors,
   type OccupancyChartPalette,
 } from "@/components/app/occupancy-chart-palette";
 import { useTheme } from "@/components/app/theme-provider";
@@ -827,7 +828,6 @@ export function OccupancyScenarioDashboard() {
     settings: occupancyComparisonSettings,
     snapshots: occupancyCurrentSnapshots,
     snapshotsLoading: occupancyCurrentSnapshotsLoading,
-    updateSettings: updateOccupancyComparisonSettings,
   } = useOccupancyComparisonCards({
     aggregateRefreshMs: OCCUPANCY_COMPARISON_AGGREGATE_REFRESH_MS,
     companyScopeId,
@@ -2692,25 +2692,6 @@ export function OccupancyScenarioDashboard() {
                       </Select>
                     </div>
 
-                    {canEditVisual ? (
-                      <div
-                        aria-label="Aparência dos comparativos desta visão"
-                        className="flex w-[8.75rem] min-w-0 max-w-full items-center gap-2"
-                        role="group"
-                      >
-                        <OccupancyPaletteSelect
-                          ariaLabel="Paleta dos comparativos desta visão"
-                          compact
-                          fluid
-                          value={occupancyComparisonSettings.colorPaletteId}
-                          onValueChange={(colorPaletteId) =>
-                            updateOccupancyComparisonSettings({
-                              colorPaletteId,
-                            })
-                          }
-                        />
-                      </div>
-                    ) : null}
                   </div>
 
                   <div data-toolbar-actions>
@@ -2953,7 +2934,9 @@ function MetricCard({
     | "warning";
   value: number | string | null;
 }) {
-  const toneColor = {
+  const widgetColor = useWidgetColor();
+  const viewPalette = useWidgetPalette();
+  const toneColor = viewPalette?.length ? widgetColor : ({
     average: "#7C3AED",
     maximum: "#E11D48",
     minimum: "#D97706",
@@ -2962,7 +2945,7 @@ function MetricCard({
     indigo: "#4F46E5",
     slate: "#64748B",
     warning: "#D97706",
-  }[tone];
+  }[tone]);
   const formattedValue =
     typeof value === "string" ? value : formatOccupancyValue(value);
 
@@ -3000,14 +2983,17 @@ function OccupancyChartCard({
   const { effectiveTheme } = useTheme();
   const chartType = useWidgetChartType();
   const widgetColor = useWidgetColor();
+  const viewPalette = useWidgetPalette();
   const resolvedTitle = useWidgetTitle(definition.label);
   const palette = React.useMemo(() => {
-    const basePalette = getOccupancyChartPalette(effectiveTheme);
+    const basePalette = viewPalette?.length
+      ? resolveOccupancyChartPaletteFromColors(effectiveTheme, viewPalette, widgetColor)
+      : getOccupancyChartPalette(effectiveTheme);
     return {
       ...basePalette,
       current: ensureGraphicContrast(widgetColor, basePalette.surface),
     };
-  }, [effectiveTheme, widgetColor]);
+  }, [effectiveTheme, viewPalette, widgetColor]);
   const option = React.useMemo(
     () =>
       buildOccupancyChartOption(

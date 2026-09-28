@@ -57,9 +57,9 @@ import {
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import {
   resolveOccupancyChartPalette,
+  resolveOccupancyChartPaletteFromColors,
   type OccupancyChartPalette,
 } from "@/components/app/occupancy-chart-palette";
-import { OccupancyPaletteSelect } from "@/components/app/occupancy-palette-select";
 import { useTheme } from "@/components/app/theme-provider";
 import { useOccupancyDurationInsights } from "@/components/app/use-occupancy-duration-insights";
 import { useOccupancyLoitering } from "@/components/app/use-occupancy-loitering";
@@ -69,6 +69,7 @@ import {
   WidgetTitleText,
   useWidgetChartType,
   useWidgetColor,
+  useWidgetPalette,
 } from "@/components/app/widget-appearance";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -570,9 +571,7 @@ export function OccupancyReportsDashboard({
     ? `${analysis ? "analysis" : "reports"}:${selectedScope.id}`
     : undefined;
   const {
-    ready: analysisWidgetSettingsReady,
     settings: analysisWidgetSettings,
-    updateSettings: updateAnalysisWidgetSettings,
   } = useOccupancyWidgetSettings({
     companyScopeId,
     userId,
@@ -3084,33 +3083,6 @@ export function OccupancyReportsDashboard({
                         </SelectContent>
                       </Select>
                     </div>
-                    {analysis && canEditVisual ? (
-                      <div
-                        aria-label="Aparência dos gráficos desta análise"
-                        className="flex w-[8.75rem] min-w-0 max-w-full items-center gap-2"
-                        role="group"
-                      >
-                        {analysisWidgetSettingsReady ? (
-                          <OccupancyPaletteSelect
-                            ariaLabel="Paleta dos gráficos desta análise"
-                            compact
-                            fluid
-                            value={analysisWidgetSettings.colorPaletteId}
-                            onValueChange={(colorPaletteId) => {
-                              if (
-                                !updateAnalysisWidgetSettings({ colorPaletteId })
-                              ) {
-                                toast.error(
-                                  "Não foi possível salvar a paleta desta análise.",
-                                );
-                              }
-                            }}
-                          />
-                        ) : (
-                          <Skeleton className="h-8 w-full" />
-                        )}
-                      </div>
-                    ) : null}
                   </div>
                 </div>
                 {analysis ? (
@@ -3685,14 +3657,21 @@ function OccupancyReportChartCard({
     colorPaletteId,
   ).current;
   const widgetColor = useWidgetColor(palettePrimary);
+  const viewColors = useWidgetPalette();
   const palette = React.useMemo(
     () =>
-      resolveOccupancyChartPalette(
-        effectiveTheme,
-        colorPaletteId,
-        widgetColor,
-      ),
-    [colorPaletteId, effectiveTheme, widgetColor],
+      viewColors?.length
+        ? resolveOccupancyChartPaletteFromColors(
+            effectiveTheme,
+            viewColors,
+            widgetColor,
+          )
+        : resolveOccupancyChartPalette(
+            effectiveTheme,
+            colorPaletteId,
+            widgetColor,
+          ),
+    [colorPaletteId, effectiveTheme, viewColors, widgetColor],
   );
   const option = React.useMemo(
     () =>

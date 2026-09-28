@@ -30,7 +30,7 @@ import {
   COMPACT_METRIC_LAYOUT_DEFAULTS,
   CompactMetricCard,
 } from "@/components/app/compact-metric-card";
-import { EChart } from "@/components/app/deferred-echart";
+import { EChart } from "@/components/app/counting-palette-chart";
 import {
   MonitorModeButton,
   MonitorModeExitHint,
@@ -38,6 +38,8 @@ import {
 } from "@/components/app/monitor-mode";
 import { ReportExportActions } from "@/components/app/report-export-actions";
 import { applyChartTypePreference } from "@/lib/chart-type-preference";
+import { applyCountingViewPalette } from "@/lib/counting-view-palette";
+import { OCCUPANCY_COLOR_PALETTES } from "@/lib/occupancy-color-palettes";
 import { ScenarioPicker } from "@/components/app/scenario-picker";
 import { useTheme } from "@/components/app/theme-provider";
 import { useCardPreferences } from "@/components/app/use-card-preferences";
@@ -593,6 +595,11 @@ export function PeriodAnalysisDashboard({
       ),
     [preferences],
   );
+  const analysisViewPaletteColors = OCCUPANCY_COLOR_PALETTES.find(
+    (palette) =>
+      palette.id === preferences.find((preference) => preference.viewPaletteId)
+        ?.viewPaletteId,
+  )?.colors ?? null;
   const widgetTitleById = React.useMemo(
     () =>
       new Map(
@@ -1482,6 +1489,7 @@ export function PeriodAnalysisDashboard({
         return [
           {
             chartType: widgetChartTypeById.get(widget.id),
+            color: widgetColorById.get(widget.id),
             defaultTitle: widget.title,
             model,
             scenarioSummary: periodAnalysisScenarioSummary(
@@ -1494,6 +1502,7 @@ export function PeriodAnalysisDashboard({
         ];
       }),
       period,
+      paletteColors: analysisViewPaletteColors,
       timeZone: companyTimeZone,
     });
   }
@@ -2899,16 +2908,19 @@ function periodAnalysisScenarioSummary(
 
 function composePeriodAnalysisReport({
   models,
+  paletteColors,
   period,
   timeZone,
 }: {
   models: Array<{
     chartType?: CardChartType;
+    color?: string;
     defaultTitle: string;
     model: PeriodAnalysisWidgetModel;
     scenarioSummary: string;
     title: string;
   }>;
+  paletteColors: readonly string[] | null;
   period: PeriodAnalysisRange;
   timeZone: string;
 }): ReportPayload {
@@ -2920,12 +2932,16 @@ function composePeriodAnalysisReport({
     timeZone,
   );
   return {
-    charts: models.flatMap(({ chartType, defaultTitle, model, title }) =>
+    charts: models.flatMap(({ chartType, color, defaultTitle, model, title }) =>
       model.hasData && model.option && model.table
         ? [
             {
               description: model.description,
-              option: applyChartTypePreference(model.option, chartType),
+              option: applyCountingViewPalette(
+                applyChartTypePreference(model.option, chartType),
+                paletteColors,
+                color ?? paletteColors?.[0] ?? "",
+              ),
               table: {
                 ...model.table,
                 title:

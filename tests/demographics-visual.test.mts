@@ -389,8 +389,8 @@ test("séries temporais etárias mantêm a mesma cor por idade após ocultar cat
   }
 });
 
-test("controles reais aplicam formatos, orientação, ordem, paleta e emojis apenas na apresentação", () => {
-  const initial = presentation.defaultDemographicPresentation("gender");
+test("controles reais aplicam formatos, orientação, ordem e emojis sem alterar a paleta da visão", () => {
+  const initial = { ...presentation.defaultDemographicPresentation("gender"), palette: "cyber" };
   const { elements, changes } = renderPresentationControls("gender", initial);
   const buttons = elements.filter((element) => element.type === "button" && "aria-pressed" in element.props);
   assert.equal(buttons.length, 8, "seis formatos e duas orientações ficam acessíveis");
@@ -398,26 +398,27 @@ test("controles reais aplicam formatos, orientação, ordem, paleta e emojis ape
   assert.deepEqual(changes.slice(0, 6).map((value) => value.type), ["bar", "stacked", "pie", "donut", "half-donut", "rose"]);
   assert.deepEqual(changes.slice(6, 8).map((value) => value.orientation), ["horizontal", "vertical"]);
   const selects = elements.filter((element) => element.type === "select");
+  assert.equal(selects.length, 1, "a paleta é configurada somente para a visão");
   selects[0].props.onValueChange("ascending");
-  selects[1].props.onValueChange("cyber");
   elements.find((element) => element.type === "checkbox").props.onCheckedChange(true);
-  assert.equal(changes.at(-3).order, "ascending");
-  assert.equal(changes.at(-2).palette, "cyber");
+  assert.equal(changes.at(-2).order, "ascending");
   assert.equal(changes.at(-1).emojis, true);
-  for (const value of changes) assert.deepEqual(Object.keys(value).sort(), ["emojis", "order", "orientation", "palette", "type"]);
-  assert.deepEqual(initial, presentation.defaultDemographicPresentation("gender"));
+  for (const value of changes) {
+    assert.deepEqual(Object.keys(value).sort(), ["emojis", "order", "orientation", "palette", "type"]);
+    assert.equal(value.palette, "cyber");
+  }
+  assert.deepEqual(initial, { ...presentation.defaultDemographicPresentation("gender"), palette: "cyber" });
 });
 
 test("matrizes oferecem configurações compatíveis sem trocar indevidamente a dimensão", () => {
   for (const dimension of ["age-gender", "age-emotion"]) {
-    const { elements, changes } = renderPresentationControls(dimension, presentation.defaultDemographicPresentation(dimension));
+    const { elements, changes } = renderPresentationControls(dimension, { ...presentation.defaultDemographicPresentation(dimension), palette: "cyber" });
     assert.equal(elements.filter((element) => element.type === "button" && "aria-pressed" in element.props).length, 0);
     const selects = elements.filter((element) => element.type === "select");
-    assert.equal(selects.length, 2);
+    assert.equal(selects.length, 1, "matrizes usam a paleta da visão sem seletor próprio");
     selects[0].props.onValueChange("descending");
-    selects[1].props.onValueChange("cyber");
     assert.equal(changes[0].order, "descending");
-    assert.equal(changes[1].palette, "cyber");
+    assert.equal(changes[0].palette, "cyber");
     for (const value of changes) assert.equal(value.type, dimension === "age-gender" ? "matrix" : "heatmap");
   }
 });

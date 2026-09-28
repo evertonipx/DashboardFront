@@ -4,9 +4,9 @@ import * as React from "react";
 import { ChartNoAxesCombined, Grid3X3 } from "lucide-react";
 
 import { EChart, type EnterpriseChartOption } from "@/components/app/deferred-echart";
-import { getOccupancyChartPalette, type OccupancyChartTheme } from "@/components/app/occupancy-chart-palette";
+import { getOccupancyChartPalette, occupancySeriesColors, type OccupancyChartTheme } from "@/components/app/occupancy-chart-palette";
 import { useTheme } from "@/components/app/theme-provider";
-import { WidgetTitleText, useWidgetColor } from "@/components/app/widget-appearance";
+import { WidgetTitleText, useWidgetColor, useWidgetPalette } from "@/components/app/widget-appearance";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { monochromeHeatmapPalette } from "@/lib/chart-palette";
@@ -46,6 +46,7 @@ type InsightOptionInput = {
   month: OccupancyDurationInsightMonth;
   scenarioNames: string[];
   theme: OccupancyChartTheme;
+  viewColors?: readonly string[] | null;
   widgetColor?: string;
 };
 
@@ -81,6 +82,7 @@ export function OccupancyDurationInsightCard({
 }) {
   const { effectiveTheme } = useTheme();
   const widgetColor = useWidgetColor(defaultWidgetColor);
+  const viewColors = useWidgetPalette();
   const rootRef = React.useRef<HTMLDivElement>(null);
   const [compact, setCompact] = React.useState(false);
   React.useLayoutEffect(() => {
@@ -101,9 +103,9 @@ export function OccupancyDurationInsightCard({
   );
   const option = React.useMemo(
     () => month && model ? buildOccupancyDurationInsightOption({
-      kind, model, month, scenarioNames: series.map((item) => item.name), theme: effectiveTheme, widgetColor,
+      kind, model, month, scenarioNames: series.map((item) => item.name), theme: effectiveTheme, viewColors, widgetColor,
     }) : null,
-    [effectiveTheme, kind, model, month, series, widgetColor],
+    [effectiveTheme, kind, model, month, series, viewColors, widgetColor],
   );
   const title = OCCUPANCY_DURATION_INSIGHT_LABELS[kind];
   const description = describeInsight(kind, series.length, periodLabel);
@@ -185,12 +187,12 @@ export function buildOccupancyDurationInsightOption(input: InsightOptionInput): 
     : buildHeatmapOption(input);
 }
 
-function buildHeatmapOption({ kind, model, month, scenarioNames, theme, widgetColor = "#1267C4" }: InsightOptionInput): EnterpriseChartOption {
+function buildHeatmapOption({ kind, model, month, scenarioNames, theme, viewColors, widgetColor = "#1267C4" }: InsightOptionInput): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
   const scenarioView = kind === "occupancy_duration_scenario_heatmap";
   const weekView = kind === "occupancy_duration_week_heatmap";
   const cells = scenarioView ? model.scenarioHours : weekView ? model.weekHours : model.dayHours;
-  const colors = insightColors(theme, widgetColor);
+  const colors = insightColors(theme, widgetColor, viewColors);
   const scrollScenarios = scenarioView && scenarioNames.length > 12;
   const xLabels = scenarioView ? HOURS : weekView ? WEEKDAYS : month.dateKeys.map((date) => date.slice(-2));
   const yLabels = scenarioView ? scenarioNames : HOURS;
@@ -251,9 +253,9 @@ function buildHeatmapOption({ kind, model, month, scenarioNames, theme, widgetCo
   };
 }
 
-function buildDailyProfileOption({ model, scenarioNames, theme, widgetColor = "#1267C4" }: InsightOptionInput): EnterpriseChartOption {
+function buildDailyProfileOption({ model, scenarioNames, theme, viewColors, widgetColor = "#1267C4" }: InsightOptionInput): EnterpriseChartOption {
   const palette = getOccupancyChartPalette(theme);
-  const colors = insightColors(theme, widgetColor);
+  const colors = insightColors(theme, widgetColor, viewColors);
   const stateColors = [colors.occupied, colors.free];
   const dailyPercentages = model.days.map(dailyProfilePercentages);
   return {
@@ -304,12 +306,13 @@ function dailyProfileLabel(params: unknown, rounded = false) {
 }
 
 export function buildOccupancyDurationInsightReport({
-  kind, series, month, periodLabel, widgetColor,
+  kind, series, month, periodLabel, viewColors, widgetColor,
 }: {
   kind: OccupancyDurationInsightCardId;
   series: OccupancyDurationInsightScenario[];
   month: OccupancyDurationInsightMonth;
   periodLabel?: string;
+  viewColors?: readonly string[] | null;
   widgetColor?: string;
 }): ReportChart {
   const model = buildOccupancyDurationInsightModel(series, month);
@@ -346,7 +349,7 @@ export function buildOccupancyDurationInsightReport({
       };
     }),
   };
-  return { title, description: table.description, option: buildOccupancyDurationInsightOption({ kind, model, month, scenarioNames, theme: "light", widgetColor }), table };
+  return { title, description: table.description, option: buildOccupancyDurationInsightOption({ kind, model, month, scenarioNames, theme: "light", viewColors, widgetColor }), table };
 }
 
 function describeInsight(
@@ -406,14 +409,21 @@ function dailyProfilePercentages(duration: InsightDuration): [number | null, num
   return [occupied, Number((100 - occupied).toFixed(1))];
 }
 
-function insightColors(theme: OccupancyChartTheme, widgetColor: string) {
+function insightColors(
+  theme: OccupancyChartTheme,
+  widgetColor: string,
+  viewColors?: readonly string[] | null,
+) {
   const color = /^#[0-9a-f]{6}$/i.test(widgetColor)
     ? widgetColor
     : "#1267C4";
+  const paletteColors = viewColors?.length
+    ? occupancySeriesColors(theme, viewColors, color)
+    : null;
   const stateColors = occupancyHeatmapStateColors(theme);
   return {
-    occupied: color,
-    free: theme === "dark" ? "#256D66" : "#A7E3D0",
+    occupied: paletteColors?.[0] ?? color,
+    free: paletteColors?.[1] ?? (theme === "dark" ? "#256D66" : "#A7E3D0"),
     unknown: stateColors.noData,
     future: stateColors.future,
     outline: stateColors.outline,

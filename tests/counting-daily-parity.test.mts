@@ -192,6 +192,93 @@ test("Live recompõe dias completos como Análises, preservando lacunas e dias p
   assert.equal(zero.daily.rows.find((item: RuntimeFixture) => item.bucket === "2026-08-02").total, 500);
 });
 
+test("reconciliação diária não vaza horas entre mês atual e mesmo mês do ano anterior", () => {
+  const timeZone = "America/Sao_Paulo";
+  const lastYearWindow = {
+    from: new Date(2025, 7, 1),
+    to: new Date(2025, 8, 1),
+  };
+  const currentWindow = {
+    from: new Date(2026, 7, 1),
+    to: new Date(2026, 8, 1),
+  };
+  const dayRange = (year: number) => ({
+    from: countingTime.countingCalendarBoundaryInstant(new Date(year, 7, 21), timeZone),
+    to: countingTime.countingCalendarBoundaryInstant(new Date(year, 7, 22), timeZone),
+  });
+  const lastYearRange = dayRange(2025);
+  const currentRange = dayRange(2026);
+  const hourlyRows = [
+    row(new Date("2025-08-21T13:00:00.000Z"), "entry", 20),
+    row(new Date("2026-08-21T13:00:00.000Z"), "entry", 30),
+  ];
+  const lastYearInitial = [
+    { ...row(new Date(2025, 7, 10), "entry", 5), bucket: "2025-08-10" },
+    { ...row(new Date(2025, 7, 21), "entry", 999), bucket: "2025-08-21" },
+  ];
+  const currentInitial = [
+    { ...row(new Date(2026, 7, 10), "entry", 7), bucket: "2026-08-10" },
+    { ...row(new Date(2026, 7, 21), "entry", 888), bucket: "2026-08-21" },
+  ];
+  const reconcile = (
+    targetRows: RuntimeFixture,
+    targetCalendarRange: RuntimeFixture,
+    sourceRange: RuntimeFixture,
+  ) => countingReconciliation.reconcileCountingCalendarRows(
+    targetRows,
+    "day",
+    hourlyRows,
+    "hour",
+    sourceRange.from,
+    sourceRange.to,
+    timeZone,
+    targetCalendarRange,
+  );
+
+  assert.deepEqual(
+    reconcile(lastYearInitial, lastYearWindow, currentRange),
+    lastYearInitial,
+    "faixa sem interseção não altera o alvo",
+  );
+
+  let lastYearRows = lastYearInitial;
+  let currentRows = currentInitial;
+  for (const range of [lastYearRange, currentRange]) {
+    lastYearRows = reconcile(lastYearRows, lastYearWindow, range);
+    currentRows = reconcile(currentRows, currentWindow, range);
+  }
+
+  assert.ok(lastYearRows.every((item: RuntimeFixture) =>
+    time.aggregateBucketInRange(item.bucket, "day", lastYearWindow.from, lastYearWindow.to)));
+  assert.ok(currentRows.every((item: RuntimeFixture) =>
+    time.aggregateBucketInRange(item.bucket, "day", currentWindow.from, currentWindow.to)));
+  assert.deepEqual(
+    Object.fromEntries(lastYearRows.map((item: RuntimeFixture) => [item.bucket, item.total])),
+    { "2025-08-10": 5, "2025-08-21": 20 },
+  );
+  assert.deepEqual(
+    Object.fromEntries(currentRows.map((item: RuntimeFixture) => [item.bucket, item.total])),
+    { "2026-08-10": 7, "2026-08-21": 30 },
+  );
+  assert.doesNotThrow(() => time.requireAggregateRows([...lastYearRows, ...currentRows], "day", "count"));
+
+  const certifiedEmptyDay = countingReconciliation.reconcileCountingCalendarRows(
+    currentRows,
+    "day",
+    [],
+    "hour",
+    currentRange.from,
+    currentRange.to,
+    timeZone,
+    currentWindow,
+  );
+  assert.deepEqual(
+    certifiedEmptyDay.map((item: RuntimeFixture) => item.bucket),
+    ["2026-08-10"],
+    "um dia coberto sem linhas deve apagar somente seu bucket, sem virar zero artificial",
+  );
+});
+
 test("falha na hora em andamento não publica um total parcial como diário completo", () => {
   const from = new Date(2026, 7, 1);
   const to = new Date(2026, 7, 2);

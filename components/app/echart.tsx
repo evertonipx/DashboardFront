@@ -21,6 +21,7 @@ import {
 } from "@/lib/chart-value-labels";
 import { synchronizeLineSeriesVisualColors } from "@/lib/chart-series-colors";
 import { suppressZeroChartLabels } from "@/lib/chart-zero-labels";
+import { applyLineAreaPresentation } from "@/lib/line-area-presentation";
 import type { CardChartType } from "@/lib/view-preferences";
 import { cn } from "@/lib/utils";
 
@@ -132,8 +133,10 @@ export function EChart({
     // corresponding chart is close enough to be mounted.
     if (!renderReady) return null;
     const interactiveOption = enhanceInteractiveChartOption(
-      synchronizeLineSeriesVisualColors(
-        applyChartTypePreference(option, chartType),
+      applyLineAreaPresentation(
+        synchronizeLineSeriesVisualColors(
+          applyChartTypePreference(option, chartType),
+        ),
       ),
       effectiveTheme === "dark",
       valueLabels,
@@ -1095,7 +1098,9 @@ export async function renderEChartToDataUrl(
   try {
     const runtime = await loadEChartRuntime();
     signal?.throwIfAborted();
-    const synchronizedOption = suppressZeroChartLabels(synchronizeLineSeriesVisualColors(option));
+    const synchronizedOption = suppressZeroChartLabels(
+      applyLineAreaPresentation(synchronizeLineSeriesVisualColors(option)),
+    );
     await runtime.ensureEChartCapabilities(
       resolveEChartRuntimeCapabilities(synchronizedOption),
     );

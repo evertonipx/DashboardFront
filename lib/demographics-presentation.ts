@@ -187,9 +187,9 @@ export function demographicPaletteLabel(
   if (encoding === "category" && (dimension === "gender" || dimension === "age-gender")) {
     return GENDER_PALETTE_LABELS[palette.id];
   }
+  if (encoding === "period") return palette.label;
   if (palette.id !== "pink-blue") return palette.label;
   if (encoding === "intensity") return "Azul sequencial";
-  if (encoding === "period") return dimension === "gender" ? "Neutros" : "Rosa e neutro";
   return dimension === "age" ? "Azul sequencial" : palette.label;
 }
 
