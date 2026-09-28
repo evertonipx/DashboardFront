@@ -3575,41 +3575,59 @@ export function useOccupancyComparisonCards({
       !historicalRanges ||
       !companyScopeId.trim()
     ) {
-      setSnapshotDataset({
-        loading: false,
-        requestedAt: null,
-        scopeKey: "",
-        snapshots: [],
-      });
-      setAggregateDataset({
-        buckets: [],
-        from: null,
-        loading: false,
-        scopeKey: "",
-        series: [],
-        to: null,
-      });
-      setScenarioHeatmapDataset({
-        buckets: [],
-        from: null,
-        granularity: settings.scenarioHeatmapGranularity,
-        loading: false,
-        scopeKey: "",
-        series: [],
-        to: null,
-      });
-      setMaximumTrendDataset({
-        loading: false,
-        ranges: null,
-        scopeKey: "",
-        series: [],
-      });
-      setCurrentHourMaximumDataset({
-        bucket: null,
-        loading: false,
-        scopeKey: "",
-        series: [],
-      });
+      setSnapshotDataset((current) =>
+        !current.loading &&
+        current.requestedAt === null &&
+        current.scopeKey === "" &&
+        current.snapshots.length === 0
+          ? current
+          : { loading: false, requestedAt: null, scopeKey: "", snapshots: [] },
+      );
+      setAggregateDataset((current) =>
+        !current.loading &&
+        current.from === null &&
+        current.to === null &&
+        current.scopeKey === "" &&
+        current.buckets.length === 0 &&
+        current.series.length === 0
+          ? current
+          : { buckets: [], from: null, loading: false, scopeKey: "", series: [], to: null },
+      );
+      setScenarioHeatmapDataset((current) =>
+        !current.loading &&
+        current.from === null &&
+        current.to === null &&
+        current.scopeKey === "" &&
+        current.granularity === settings.scenarioHeatmapGranularity &&
+        current.buckets.length === 0 &&
+        current.series.length === 0
+          ? current
+          : {
+              buckets: [],
+              from: null,
+              granularity: settings.scenarioHeatmapGranularity,
+              loading: false,
+              scopeKey: "",
+              series: [],
+              to: null,
+            },
+      );
+      setMaximumTrendDataset((current) =>
+        !current.loading &&
+        current.ranges === null &&
+        current.scopeKey === "" &&
+        current.series.length === 0
+          ? current
+          : { loading: false, ranges: null, scopeKey: "", series: [] },
+      );
+      setCurrentHourMaximumDataset((current) =>
+        !current.loading &&
+        current.bucket === null &&
+        current.scopeKey === "" &&
+        current.series.length === 0
+          ? current
+          : { bucket: null, loading: false, scopeKey: "", series: [] },
+      );
       return;
     }
 

@@ -374,6 +374,7 @@ const MAX_OCCUPANCY_REPORT_BUCKETS = 500;
 const MAX_OCCUPANCY_MINUTE_REPORT_BUCKETS = 1_600;
 const EMPTY_OCCUPANCY_REPORT_DATA: Record<string, OccupancyReportState> = {};
 const EMPTY_OCCUPANCY_CUSTOM_WIDGETS: OccupancyCustomWidget[] = [];
+const EMPTY_CARD_PREFERENCES: CardPreference[] = [];
 const OCCUPANCY_LIVE_VIEW_SOURCES = [
   {
     label: "Ao Vivo",
@@ -833,7 +834,7 @@ export function OccupancyReportsDashboard({
     focusScenarioId: selectedScope?.scenario?.id ?? "",
     monitorMode,
     period: occupancyDurationAnalysisPeriod,
-    preferences: layoutPreferencesReady ? layoutPreferences : [],
+    preferences: layoutPreferencesReady ? layoutPreferences : EMPTY_CARD_PREFERENCES,
     requestedCardIds: requestedHistoricalCardIds,
     refreshMode: "manual",
     scenarios,
@@ -855,9 +856,9 @@ export function OccupancyReportsDashboard({
     monitorMode,
     period: occupancyAnalysisComparisonPeriod,
     preferenceScopeId: reportPreferenceScopeId,
-    preferences: layoutPreferencesReady ? layoutPreferences : [],
+    preferences: layoutPreferencesReady ? layoutPreferences : EMPTY_CARD_PREFERENCES,
     refreshMode: "manual",
-    reportPreferences: layoutPreferencesReady ? layoutPreferences : [],
+    reportPreferences: layoutPreferencesReady ? layoutPreferences : EMPTY_CARD_PREFERENCES,
     requestedCardIds: requestedHistoricalCardIds,
     scenarios,
     timeZone: companyTimeZone,
@@ -926,7 +927,7 @@ export function OccupancyReportsDashboard({
     focusScenarioId: selectedScope?.scenario?.id ?? "",
     monitorMode,
     period: occupancyLoiteringPeriod,
-    preferences: layoutPreferencesReady ? layoutPreferences : [],
+    preferences: layoutPreferencesReady ? layoutPreferences : EMPTY_CARD_PREFERENCES,
     refreshMode: "manual",
     requestedCardIds: requestedHistoricalCardIds,
     scenarios,
@@ -953,7 +954,7 @@ export function OccupancyReportsDashboard({
     loiteringSummaryRows: occupancyLoitering.summaryRows,
     monitorMode,
     period: occupancyDurationAnalysisPeriod,
-    preferences: layoutPreferencesReady ? layoutPreferences : [],
+    preferences: layoutPreferencesReady ? layoutPreferences : EMPTY_CARD_PREFERENCES,
     refreshMode: "manual",
     requestedCardIds: requestedHistoricalCardIds,
     scenarios,

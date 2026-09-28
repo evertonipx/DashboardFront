@@ -60,6 +60,7 @@ test("dashboard só habilita insights manuais após pedido, cenário e preferên
   const options = initializer.arguments[0].getText(dashboardAst);
   const bindings = {
     analysis: true, layoutPreferencesReady: true, reportRequested: true,
+    EMPTY_CARD_PREFERENCES: [],
     companyTimeZoneCertified: true,
     analysisWidgetSettings: { colorPaletteId: "enterprise" },
     getOccupancyColorPalette: () => ({ colors: ["#2563EB"] }),

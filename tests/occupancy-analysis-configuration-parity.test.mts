@@ -22,6 +22,26 @@ const analysisAst = ts.createSourceFile(
   ts.ScriptKind.TSX,
 );
 
+test("preferências pendentes não reiniciam os efeitos históricos a cada render", () => {
+  const comparisonSource = source("components/app/occupancy-comparison-widgets.tsx");
+
+  assertContains(analysisSource, /const EMPTY_CARD_PREFERENCES: CardPreference\[\] = \[\]/);
+  assert.equal(
+    (analysisSource.match(/layoutPreferencesReady \? layoutPreferences : EMPTY_CARD_PREFERENCES/g) ?? []).length,
+    5,
+  );
+  assert.doesNotMatch(analysisSource, /layoutPreferencesReady \? layoutPreferences : \[\]/);
+  for (const setter of [
+    "setSnapshotDataset",
+    "setAggregateDataset",
+    "setScenarioHeatmapDataset",
+    "setMaximumTrendDataset",
+    "setCurrentHourMaximumDataset",
+  ]) {
+    assert.match(comparisonSource, new RegExp(`${setter}\\(\\(current\\) =>`));
+  }
+});
+
 test("catálogo compartilhado e aparência histórica permanecem em escopos distintos", () => {
   const scopeBlock = between(
     analysisSource,
