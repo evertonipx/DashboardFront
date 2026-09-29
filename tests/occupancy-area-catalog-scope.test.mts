@@ -511,9 +511,9 @@ test("catálogo autônomo mantém isolamento JWT e escopo cross-company explíci
 test("caller deriva a permissão explícita do usuário autenticado e mantém escopo HTTP", () => {
   const source = readFileSync(resolve("components/app/occupancy-scenario-manager.tsx"), "utf8");
   assert.match(source, /const masterCrossCompanyScope = usesMasterCrossCompanyScope\(\s*user,\s*companyScopeId/);
-  assert.match(source, /fetchOccupancyAreaCatalog\(\{[\s\S]*?masterCrossCompanyScope,[\s\S]*?apiFetch<T>\(path, \{ companyScopeId \}\)/);
+  assert.match(source, /fetchOccupancyAreaCatalog\(\{[\s\S]*?masterCrossCompanyScope,[\s\S]*?apiFetch<T>\(path, \{\s*bypassReadCache: true,\s*companyScopeId: requestedCompanyId/);
   const callback = source.slice(source.indexOf("const loadAreaOptions"), source.indexOf("React.useLayoutEffect", source.indexOf("const loadAreaOptions")));
-  assert.match(callback, /\[companyScopeId, masterCrossCompanyScope\]/);
+  assert.match(callback, /\[companyScopeId, masterCrossCompanyScope, userId\]/);
 });
 
 test("fallback 404 separa snapshots mistos pela relação explícita câmera/empresa apenas para Master", async () => {

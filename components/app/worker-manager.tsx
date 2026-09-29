@@ -57,7 +57,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { apiFetch } from "@/lib/api";
 import { useEffectiveCompanyScopeId } from "@/lib/master-company-scope";
 import { canManageWorkers } from "@/lib/permissions";
-import { PROVISIONED_RESOURCE_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
+import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
 import type {
   CreateWorkerResponse,
   RotateWorkerKeyResponse,
@@ -90,6 +90,7 @@ type ApiKeyNotice = {
 type WorkerRow = WorkerScopeRow;
 
 type ResourceLoadOptions = {
+  bypassReadCache?: boolean;
   silent?: boolean;
 };
 
@@ -104,6 +105,8 @@ export function WorkerManager() {
   const [workers, setWorkers] = React.useState<Worker[]>([]);
   const [scopeWarning, setScopeWarning] = React.useState("");
   const [workerCatalogCompanyId, setWorkerCatalogCompanyId] =
+    React.useState("");
+  const [workerCatalogAccessScopeKey, setWorkerCatalogAccessScopeKey] =
     React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
@@ -160,31 +163,40 @@ export function WorkerManager() {
   const workerMutationBusy =
     saving || bulkDeleting || Boolean(deletingWorkerId);
   const effectiveCompanyId = useEffectiveCompanyScopeId(user);
+  const workerAccessScopeKey = JSON.stringify([
+    user?.id ?? "",
+    effectiveCompanyId ?? "",
+  ]);
   const canViewWorkers = Boolean(user && effectiveCompanyId);
   const workerCatalogCertified =
     Boolean(effectiveCompanyId) &&
-    workerCatalogCompanyId === effectiveCompanyId;
+    workerCatalogCompanyId === effectiveCompanyId &&
+    workerCatalogAccessScopeKey === workerAccessScopeKey;
   const workerExistingItemActionsDisabled =
     workerMutationBusy || !workerCatalogCertified;
   const effectiveCompanyIdRef = React.useRef(effectiveCompanyId);
+  const workerAccessScopeKeyRef = React.useRef(workerAccessScopeKey);
   const workerMutationSequenceRef = React.useRef(0);
   const workerLoadSequenceRef = React.useRef(0);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     effectiveCompanyIdRef.current = effectiveCompanyId;
-  }, [effectiveCompanyId]);
+    workerAccessScopeKeyRef.current = workerAccessScopeKey;
+  }, [effectiveCompanyId, workerAccessScopeKey]);
 
   const loadWorkers = React.useCallback(async (
-    { silent = false }: ResourceLoadOptions = {},
+    { bypassReadCache = false, silent = false }: ResourceLoadOptions = {},
   ) => {
     if (!canViewWorkers) {
       setWorkers([]);
       setWorkerCatalogCompanyId("");
+      setWorkerCatalogAccessScopeKey("");
       setScopeWarning("");
       setLoading(false);
       return;
     }
     const requestedCompanyId = effectiveCompanyId;
+    const requestedAccessScopeKey = workerAccessScopeKey;
     const loadSequence = ++workerLoadSequenceRef.current;
 
     if (!silent) {
@@ -192,9 +204,13 @@ export function WorkerManager() {
       setScopeWarning("");
     }
     try {
-      const rows = await fetchCompanyWorkers(requestedCompanyId);
+      const rows = await fetchCompanyWorkers(
+        requestedCompanyId,
+        bypassReadCache,
+      );
       if (
         effectiveCompanyIdRef.current !== requestedCompanyId ||
+        workerAccessScopeKeyRef.current !== requestedAccessScopeKey ||
         loadSequence !== workerLoadSequenceRef.current
       ) return;
       if (requestedCompanyId) {
@@ -210,12 +226,14 @@ export function WorkerManager() {
         );
         setWorkers(nextWorkers);
         setWorkerCatalogCompanyId(requestedCompanyId);
+        setWorkerCatalogAccessScopeKey(requestedAccessScopeKey);
         retainExistingWorkerSelection(nextWorkers, setSelectedWorkerIds);
         setScopeWarning("");
       } else {
         const nextWorkers = sortWorkersByActivity(rows);
         setWorkers(nextWorkers);
         setWorkerCatalogCompanyId("");
+        setWorkerCatalogAccessScopeKey("");
         retainExistingWorkerSelection(nextWorkers, setSelectedWorkerIds);
         setScopeWarning(
           "Selecione uma empresa para consultar seus Workers.",
@@ -225,6 +243,7 @@ export function WorkerManager() {
       if (
         !silent &&
         effectiveCompanyIdRef.current === requestedCompanyId &&
+        workerAccessScopeKeyRef.current === requestedAccessScopeKey &&
         loadSequence === workerLoadSequenceRef.current
       ) {
         toast.error("Não foi possível carregar os Workers.");
@@ -233,18 +252,20 @@ export function WorkerManager() {
       if (
         !silent &&
         effectiveCompanyIdRef.current === requestedCompanyId &&
+        workerAccessScopeKeyRef.current === requestedAccessScopeKey &&
         loadSequence === workerLoadSequenceRef.current
       ) {
         setLoading(false);
       }
     }
-  }, [canViewWorkers, effectiveCompanyId]);
+  }, [canViewWorkers, effectiveCompanyId, workerAccessScopeKey]);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     workerMutationSequenceRef.current += 1;
     workerLoadSequenceRef.current += 1;
     setWorkers([]);
     setWorkerCatalogCompanyId("");
+    setWorkerCatalogAccessScopeKey("");
     setScopeWarning("");
     setSaving(false);
     setWorkerDialog(false);
@@ -255,7 +276,7 @@ export function WorkerManager() {
     setDeletingWorkerId("");
     setWorkerSearch("");
     setWorkerStatusFilter("all");
-  }, [effectiveCompanyId]);
+  }, [workerAccessScopeKey]);
 
   React.useEffect(() => {
     void loadWorkers();
@@ -264,8 +285,15 @@ export function WorkerManager() {
   useResourceAutoRefresh(
     () => loadWorkers({ silent: true }),
     {
-      enabled: canViewWorkers && !loading && !bulkDeleting && !deletingWorkerId,
-      intervalMs: PROVISIONED_RESOURCE_REFRESH_INTERVAL_MS,
+      enabled:
+        canViewWorkers &&
+        !loading &&
+        !saving &&
+        !bulkDeleting &&
+        !deletingWorkerId &&
+        !workerDialog &&
+        !keyNotice,
+      intervalMs: RESOURCE_METADATA_REFRESH_INTERVAL_MS,
     },
   );
 
@@ -545,7 +573,8 @@ export function WorkerManager() {
   ) {
     return (
       mutationSequence === workerMutationSequenceRef.current &&
-      effectiveCompanyIdRef.current === companyId
+      effectiveCompanyIdRef.current === companyId &&
+      workerAccessScopeKeyRef.current === workerAccessScopeKey
     );
   }
 
@@ -616,7 +645,7 @@ export function WorkerManager() {
               type="button"
               variant="outline"
               className="w-full sm:w-auto"
-              onClick={() => void loadWorkers()}
+              onClick={() => void loadWorkers({ bypassReadCache: true })}
               disabled={loading || workerMutationBusy}
             >
               <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
@@ -990,8 +1019,11 @@ function WorkerScopeBadge({
   );
 }
 
-async function fetchCompanyWorkers(companyScopeId: string) {
-  return apiFetch<unknown>("/workers", { companyScopeId }).then(
+async function fetchCompanyWorkers(
+  companyScopeId: string,
+  bypassReadCache = false,
+) {
+  return apiFetch<unknown>("/workers", { bypassReadCache, companyScopeId }).then(
     normalizeWorkerRows,
   );
 }

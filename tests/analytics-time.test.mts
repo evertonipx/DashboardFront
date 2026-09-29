@@ -2199,7 +2199,7 @@ test("Ocupação Ao Vivo consulta somente as fontes exigidas pelos widgets visí
   );
   assert.match(
     source,
-    /const OCCUPANCY_ALERTS_REFRESH_MS = 30_000/,
+    /const OCCUPANCY_ALERTS_REFRESH_MS = OCCUPANCY_REFRESH_MS/,
   );
   assert.match(
     source,
@@ -12625,19 +12625,17 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
   const crossing = loadTypeScriptModule("lib/demographics-crossing-options.ts");
   const presentation = loadTypeScriptModule("lib/demographics-presentation.ts");
   const demographics = loadTypeScriptModule("lib/demographics.ts");
-  const buildAgeEmotionHeatmapOption = loadStandaloneFunction(
-    "components/app/demographics-dashboard.tsx",
-    "buildAgeEmotionHeatmapOption",
-    {
-      buildDemographicCrossingOption: crossing.buildDemographicCrossingOption,
-      normalizeDemographicPresentation: presentation.normalizeDemographicPresentation,
-    },
-  );
   const summary = demographics.aggregateDemographicBuckets([
     { emotion: "happy", count: 3 },
     { emotion: "neutral", count: 1 },
   ].map((row) => ({ bucket: "2026-09-10T13:00:00Z", camera_id: "fixture-camera", gender: "Woman", age_bucket: "20-29", ...row })));
   const snapshot = structuredClone(summary);
+  const optionForTheme = (theme: "light" | "dark" = "light") => crossing.buildDemographicCrossingOption(
+    summary,
+    presentation.normalizeDemographicPresentation(undefined, "age-emotion"),
+    "age-emotion",
+    theme,
+  );
   const luminance = (color: string) => {
     const channels = echarts.color.parse(color).slice(0, 3).map((channel: DynamicFixture) => {
       const value = channel / 255;
@@ -12659,7 +12657,7 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
   };
 
   for (const theme of ["light", "dark"] as const) {
-    const option = buildAgeEmotionHeatmapOption(summary, theme);
+    const option = optionForTheme(theme);
     const series = option.series[0];
     const heatmapColors = crossing.demographicHeatmapColors("pink-blue", theme);
 
@@ -12702,11 +12700,11 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
   assert.deepEqual(summary, snapshot);
   assert.notDeepEqual(crossing.demographicHeatmapColors("pink-blue", "dark"), crossing.demographicHeatmapColors("pink-blue", "light"), "o helper compartilhado precisa respeitar o tema recebido");
   assert.equal(
-    buildAgeEmotionHeatmapOption(summary).series[0].itemStyle.borderColor,
+    optionForTheme().series[0].itemStyle.borderColor,
     expectations.light.border,
     "sem tema explícito, o gráfico exportável deve permanecer light",
   );
-  assert.deepEqual(buildAgeEmotionHeatmapOption(summary).visualMap.inRange.color, crossing.demographicHeatmapColors("pink-blue", "light"));
+  assert.deepEqual(optionForTheme().visualMap.inRange.color, crossing.demographicHeatmapColors("pink-blue", "light"));
 
   const cardStart = source.indexOf("function AgeEmotionHeatmapCard");
   const cardEnd = source.indexOf("function DemographicChartCard", cardStart);
@@ -12729,7 +12727,6 @@ test("heatmap de Demographics usa tema da tela e light na exportação", () => {
     /buildDemographicCrossingOption\(summary, ageEmotion, "age-emotion", "light"\)/,
     "a exportação configurada deve usar explicitamente o tema light",
   );
-  assert.doesNotMatch(reportSection, /buildAgeEmotionHeatmapOption\(summary,\s*effectiveTheme/);
 });
 
 test("heatmap consolida as duas ocorrências da hora repetida em uma célula", () => {
@@ -15738,6 +15735,102 @@ test("histórico anual ao vivo só consulta cards visíveis, uma vez por dia e e
       "partições anuais devem ser contíguas e sem sobreposição",
     );
   });
+});
+
+test("fontes horárias e histórico anual seguem a virada civil IANA da empresa", async () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/realtime-dashboard.tsx"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /const annualHistoryDayKey = realtimeCompanyDayKey\(clock, companyTimeZone\)/,
+  );
+  assert.match(
+    source,
+    /const attemptDay = realtimeCompanyDayKey\(now, companyTimeZone\)/,
+  );
+
+  const formatRealtimeCivilDate = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "formatRealtimeCivilDate",
+  );
+  const companyDayKey = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "realtimeCompanyDayKey",
+    {
+      countingCalendarDate: countingTimeZone.countingCalendarDate,
+      formatRealtimeCivilDate,
+    },
+  );
+  const zone = "America/Sao_Paulo";
+  assert.equal(companyDayKey(new Date("2026-09-30T02:30:00.000Z"), zone), "2026-09-29");
+  assert.equal(companyDayKey(new Date("2026-09-30T03:30:00.000Z"), zone), "2026-09-30");
+
+  const mergeRealtimeQueryRanges = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "mergeRealtimeQueryRanges",
+  );
+  const subtractRealtimeQueryRanges = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "subtractRealtimeQueryRanges",
+    { mergeRealtimeQueryRanges },
+  );
+  let fetchCount = 0;
+  const fetchIncrementalRealtimeHourlyRanges = loadStandaloneFunction(
+    "components/app/realtime-dashboard.tsx",
+    "fetchIncrementalRealtimeHourlyRanges",
+    {
+      DEFAULT_METRIC_TYPE: "count",
+      clearRealtimeHourlyCoverageCache: () => undefined,
+      countingStartOfDayInstant: countingTimeZone.countingStartOfDayInstant,
+      countingStartOfHourInstant: countingTimeZone.countingStartOfHourInstant,
+      countingEndOfHourInstant: countingTimeZone.countingEndOfHourInstant,
+      fetchBoundedHourlyAggregateRanges: async () => { fetchCount += 1; return []; },
+      fetchCompleteAggregateRange: async () => [],
+      filterRealtimeRowsToRanges: (rows: AggregateFixtureRow[]) => rows,
+      mergeRealtimeQueryRanges,
+      subtractRealtimeQueryRanges,
+    },
+  );
+  const historicalRange = {
+    from: new Date("2026-09-27T03:00:00.000Z"),
+    to: new Date("2026-09-28T03:00:00.000Z"),
+  };
+  const beforeMidnight = new Date("2026-09-30T02:30:00.000Z");
+  const afterMidnight = new Date("2026-09-30T03:30:00.000Z");
+  const cache = {
+    cacheScope: "counting:company:sao-paulo",
+    dayRevision: countingTimeZone.countingStartOfDayInstant(beforeMidnight, zone).toISOString(),
+    hourRevision: countingTimeZone.countingStartOfHourInstant(afterMidnight, zone).toISOString(),
+    ranges: [historicalRange],
+    rows: [],
+  };
+  await fetchIncrementalRealtimeHourlyRanges({
+    cacheScope: cache.cacheScope,
+    companyScopeId: "company",
+    coverageCache: cache,
+    includeOpenHour: false,
+    now: afterMidnight,
+    queryCache: new Map(),
+    ranges: [historicalRange],
+    signal: new AbortController().signal,
+    timeZone: zone,
+  });
+  assert.equal(fetchCount, 1, "a cobertura anterior deve ser revalidada na meia-noite da empresa");
+  assert.equal(cache.dayRevision, "2026-09-30T03:00:00.000Z");
+  await fetchIncrementalRealtimeHourlyRanges({
+    cacheScope: cache.cacheScope,
+    companyScopeId: "company",
+    coverageCache: cache,
+    includeOpenHour: false,
+    now: afterMidnight,
+    queryCache: new Map(),
+    ranges: [historicalRange],
+    signal: new AbortController().signal,
+    timeZone: zone,
+  });
+  assert.equal(fetchCount, 1, "a mesma cobertura não deve disparar nova consulta");
 });
 
 test("hora atual reutiliza exclusivamente a janela móvel de minutos", () => {

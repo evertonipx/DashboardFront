@@ -258,9 +258,10 @@ test("carregamento e corte dos insights participam das travas de exportação e 
   assert.match(cutoff, /occupancyDurationInsights\.dataCompleteUntil/);
   for (const tagName of ["ReportExportActions", "AiAnalysisAction"]) {
     const disabled = jsxAttribute(dashboardJsxTag(tagName), "disabled");
-    const options = { chartsPending: false, selectedScope: {}, occupancyCertificationError: "", hasPartialOccupancyCoverage: false, reportRequested: true };
+    const options = { chartsPending: false, comparisonPending: false, selectedScope: {}, occupancyCertificationError: "", hasPartialOccupancyCoverage: false, reportRequested: true };
     assert.equal(evaluateDashboard(`return (${disabled});`, options), false, tagName);
     assert.equal(evaluateDashboard(`return (${disabled});`, { ...options, chartsPending: true }), true, tagName);
+    assert.equal(evaluateDashboard(`return (${disabled});`, { ...options, comparisonPending: true }), true, tagName);
     assert.equal(evaluateDashboard(`return (${disabled});`, { ...options, hasPartialOccupancyCoverage: true }), true, tagName);
   }
 });
@@ -449,7 +450,7 @@ test("tabela histórica exporta também a base comparativa usada pelo gráfico e
     ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "buildExportChart");
   assert.ok(buildExportChart?.initializer);
   const exportSource = buildExportChart.initializer.getText(dashboardAst);
-  assert.match(exportSource, /const tableIncludesPrevious =\s*showPreviousPeriod && previousPoints\.length > 0/);
+  assert.match(exportSource, /const tableIncludesPrevious =\s*showPreviousPeriod &&\s*\(visibility\.average \|\| visibility\.minimum \|\| visibility\.peak\) &&\s*previousPoints\.length > 0/);
   assert.match(exportSource, /series: "Período analisado"/);
   assert.match(exportSource, /previousPoints\.map\(\(point\) => \(\{[\s\S]*?series: "Base comparativa"/);
   assert.match(

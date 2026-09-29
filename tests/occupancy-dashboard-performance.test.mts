@@ -28,6 +28,10 @@ const liveDashboardSource = readFileSync(
   resolve(root, "components/app/occupancy-scenario-dashboard.tsx"),
   "utf8",
 );
+const historicalDashboardSource = readFileSync(
+  resolve(root, "components/app/occupancy-reports-dashboard.tsx"),
+  "utf8",
+);
 const query: typeof import("../lib/occupancy-dashboard-query.ts") = loadModule("lib/occupancy-dashboard-query.ts");
 const scenarioSnapshots: typeof import("../lib/occupancy-scenario-snapshots.ts") = loadModule("lib/occupancy-scenario-snapshots.ts");
 const definitionIds = ["occupancy_report_hour", "occupancy_report_day", "occupancy_report_month"];
@@ -639,6 +643,108 @@ test("seletor de séries não oculta KPIs nem remove sua única fonte diária", 
     currentSnapshot: false,
     definitionIds: "occupancy_report_day",
   });
+});
+
+test("gráfico sem séries comparativas não solicita agregado do período anterior", () => {
+  const plan = query.buildOccupancyReportResourcePlan({
+    definitionIds,
+    hasScenario: true,
+    metricVisibility: { average: false, minimum: false, peak: false },
+    preferences: preferencesFor("occupancy_report_hour", "occupancy_report_day"),
+  });
+  assert.deepEqual(plan, {
+    comparisonDefinitionIds: "",
+    currentSnapshot: false,
+    definitionIds: "occupancy_report_day|occupancy_report_hour",
+  });
+  assert.equal(
+    plan.comparisonDefinitionIds.split("|").filter(Boolean).length,
+    0,
+    "nenhuma definição anterior deve chegar ao executor de consultas",
+  );
+  assert.deepEqual(
+    plan.definitionIds.split("|").filter(Boolean),
+    ["occupancy_report_day", "occupancy_report_hour"],
+    "as duas consultas do período atual continuam necessárias",
+  );
+
+  const averageOnly = query.buildOccupancyReportResourcePlan({
+    definitionIds,
+    hasScenario: true,
+    metricVisibility: { average: true, minimum: false, peak: false },
+    preferences: preferencesFor("occupancy_report_hour"),
+  });
+  assert.equal(averageOnly.comparisonDefinitionIds, "occupancy_report_hour");
+});
+
+test("alternar comparativo reutiliza a fonte atual e só consulta a base faltante", async () => {
+  const currentDefinitions = [{ id: "occupancy_report_day" }, { id: "occupancy_report_hour" }];
+  const previousDefinitions = [{ id: "occupancy_report_day__previous" }];
+  const calls: string[] = [];
+  const loadState = async (definition: { id: string }): Promise<{
+    error?: string;
+    points: string[];
+  }> => {
+    calls.push(definition.id);
+    return { points: [definition.id] };
+  };
+  const input = {
+    currentDefinitions,
+    loadState,
+    primaryScopeKey: "company|user|scenario|range|sources",
+    primaryWindowKey: "day-and-hour-window",
+  };
+  const initial = await query.loadOccupancyReportDefinitionStates({
+    ...input,
+    previousDefinitions: [],
+  });
+  assert.deepEqual(calls, ["occupancy_report_day", "occupancy_report_hour"]);
+  const primaryCache = {
+    scopeKey: input.primaryScopeKey,
+    states: Object.fromEntries(initial),
+    windowKey: input.primaryWindowKey,
+  };
+
+  calls.length = 0;
+  await query.loadOccupancyReportDefinitionStates({
+    ...input,
+    previousDefinitions,
+    primaryCache,
+  });
+  assert.deepEqual(calls, ["occupancy_report_day__previous"],
+    "off→on: zero GETs do período aplicado e apenas a base anterior necessária");
+
+  calls.length = 0;
+  await query.loadOccupancyReportDefinitionStates({
+    ...input,
+    previousDefinitions: [],
+    primaryCache,
+  });
+  assert.deepEqual(calls, [], "on→off: nenhum GET adicional");
+
+  for (const invalidation of [
+    { primaryCache: null, reason: "Atualizar explícito" },
+    { primaryCache, primaryScopeKey: "outro cenário", reason: "troca de escopo" },
+    { primaryCache, primaryWindowKey: "outra janela", reason: "virada de janela" },
+  ]) {
+    calls.length = 0;
+    await query.loadOccupancyReportDefinitionStates({
+      ...input,
+      ...invalidation,
+      previousDefinitions: [],
+    });
+    assert.deepEqual(calls, ["occupancy_report_day", "occupancy_report_hour"],
+      invalidation.reason);
+  }
+  assert.match(historicalDashboardSource,
+    /if \(forceClosedRefresh\) \{[\s\S]*?primaryChartCacheRef\.current = null/,
+    "Atualizar explícito deve invalidar a cópia antes do loader");
+  assert.match(historicalDashboardSource,
+    /const chartDataIsCurrent = Boolean\(selectedScope\) && \([\s\S]*?chartDataPrimaryKey === primaryChartRenderKey/,
+    "a leitura atual deve permanecer visível enquanto a base comparativa carrega");
+  assert.match(historicalDashboardSource,
+    /const hasComparisonSeries = Boolean\([\s\S]*?previousState && !previousState\.error && !previousState\.incomplete/,
+    "o cabeçalho comparativo exige uma série anterior efetivamente carregada");
 });
 
 test("fonte sem cenário conserva leitura derivada diária e configuração visual não altera consultas", () => {

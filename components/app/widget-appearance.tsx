@@ -60,10 +60,6 @@ export function useWidgetColor(fallback = "#1267C4") {
   return React.useContext(WidgetAppearanceContext).color || fallback;
 }
 
-export function useWidgetColorOverride() {
-  return React.useContext(WidgetAppearanceContext).color;
-}
-
 export function useWidgetPalette() {
   return React.useContext(WidgetAppearanceContext).paletteColors;
 }

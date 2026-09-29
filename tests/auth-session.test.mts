@@ -4405,7 +4405,7 @@ test("gestores operacionais encaminham explicitamente a empresa efetiva", () => 
 
   assert.match(
     workerSource,
-    /fetchCompanyWorkers\(requestedCompanyId\)[\s\S]*?apiFetch<unknown>\("\/workers", \{ companyScopeId \}\)/,
+    /fetchCompanyWorkers\(\s*requestedCompanyId,\s*bypassReadCache,\s*\)[\s\S]*?apiFetch<unknown>\("\/workers", \{ bypassReadCache, companyScopeId \}\)/,
   );
   assert.match(
     workerSource,
@@ -4417,7 +4417,7 @@ test("gestores operacionais encaminham explicitamente a empresa efetiva", () => 
   );
   assert.match(
     infrastructureSource,
-    /apiFetch<unknown>\("\/workers", \{ companyScopeId \}\)/,
+    /apiFetch<unknown>\("\/workers", \{\s*bypassReadCache,\s*companyScopeId,\s*\}\)/,
   );
   assert.match(
     superAdminSource,
@@ -4476,7 +4476,7 @@ test("Central Master carrega cada recurso somente quando sua seção é solicita
   );
   const companiesLoader = source.slice(companiesStart, companiesEnd);
   assert.ok(companiesStart >= 0 && companiesEnd > companiesStart);
-  assert.match(companiesLoader, /apiFetch<Company\[]>\("\/companies"\)/);
+  assert.match(companiesLoader, /apiFetch<Company\[]>\("\/companies",\s*\{\s*bypassReadCache: force/);
   assert.doesNotMatch(
     companiesLoader,
     /"\/(?:modules|permissions|workers|locations|cameras|scenarios|occupancy\/scenarios)"/,

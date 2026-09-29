@@ -5,7 +5,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
-  ListChecks,
 } from "lucide-react";
 
 import {
@@ -30,30 +29,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import {
   shiftOccupancyCompanyDay,
 } from "@/lib/occupancy-calendar";
@@ -69,8 +45,6 @@ import {
 } from "@/lib/occupancy-loitering";
 import {
   fetchOccupancyLoiteringSessions,
-  initialOccupancyLoiteringSessionDay,
-  occupancyLoiteringSessionsQueryRange,
 } from "@/lib/occupancy-loitering-query";
 import { abortRequest, isAbortError } from "@/lib/request-cancellation";
 import type { ReportChart, ReportTable } from "@/lib/report-export";
@@ -146,6 +120,8 @@ type DurationScale = {
 };
 
 const MAX_LOITERING_REPORT_SESSION_CHART_POINTS = 240;
+const LOITERING_SESSION_CHART_CAPABILITIES = ["line", "scatter"] as const;
+const LOITERING_SESSION_CHART_REPLACE_MERGE = ["legend", "series"] as const;
 const LOITERING_SESSION_COLORS = [
   "#0F766E",
   "#7C3AED",
@@ -301,7 +277,7 @@ export function buildOccupancyLoiteringSessionsChartOption(
         value: [timestamp, durationScale.toAxis(entry.durationSeconds)],
       })),
       emphasis: { focus: "series", scale: 1.35 },
-      id: `loitering-session-${index}`,
+      id: JSON.stringify(["loitering-session", seriesLabel]),
       itemStyle: {
         borderWidth: 0,
         color: colors[index % colors.length],
@@ -727,13 +703,20 @@ export function OccupancyLoiteringSummaryCard({
     previewPeriod !== null &&
     previewPeriod.from.getTime() <= dayFrom.getTime() &&
     previewPeriod.to.getTime() >= dayTo.getTime();
+  // The summary model is rebuilt on unrelated dashboard updates. Keep the
+  // selected day's request identity stable while its areas stay the same.
+  const expectedAreaKey = JSON.stringify(model.areas.map((area) => ({
+    area: area.area,
+    cameraId: area.cameraId,
+    objectClass: area.objectClass,
+  })));
   const expectedAreas = React.useMemo(
-    () => model.areas.map((area) => ({
-      area: area.area,
-      cameraId: area.cameraId,
-      objectClass: area.objectClass,
-    })),
-    [model.areas],
+    () => JSON.parse(expectedAreaKey) as Array<{
+      area: string;
+      cameraId: string;
+      objectClass: string;
+    }>,
+    [expectedAreaKey],
   );
   const dayScopeKey = JSON.stringify([
     companyScopeId,
@@ -832,8 +815,6 @@ export function OccupancyLoiteringSummaryCard({
     ),
     [dayStart, effectiveTheme, sessionEntries, timeZone, viewColors, widgetColor],
   );
-  const [sessionsOpen, setSessionsOpen] = React.useState(false);
-  const [sessionsPeriod, setSessionsPeriod] = React.useState(period);
   const hasConfiguredAreas = model.areas.length > 0;
   const previewContext = formatCivilDay(dayStart, timeZone);
   const previousDay = shiftOccupancyCompanyDay(dayStart, -1, timeZone);
@@ -843,48 +824,27 @@ export function OccupancyLoiteringSummaryCard({
   const canGoNextDay = dayEnd.getTime() < period.to.getTime();
 
   return (
-    <>
       <Card
         className="@container flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
         data-occupancy-loitering-sessions
         data-occupancy-loitering-summary
       >
         <CardHeader className="min-w-0 gap-1 p-3 pb-1">
-          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
-            <div className="min-w-0">
-              <CardTitle className="flex min-w-0 items-start gap-2">
-                <Clock3
-                  aria-hidden="true"
-                  className="mt-0.5 h-4 w-4 shrink-0"
-                  style={{ color: widgetColor }}
-                />
-                <WidgetTitleText fallback="Permanências registradas" />
-              </CardTitle>
-              <CardDescription
-                className="mt-0.5 line-clamp-2 text-xs leading-4"
-                title={`Registros de permanência concluídos em ${previewContext}.`}
-              >
-                Duração, saída e tendência linear · {previewContext}
-              </CardDescription>
-            </div>
-            {!monitorMode ? (
-              <Button
-                aria-label="Consultar registros individuais de permanência"
-                className="h-8 shrink-0 px-2.5"
-                disabled={!hasConfiguredAreas}
-                onClick={() => {
-                  setSessionsPeriod(period);
-                  setSessionsOpen(true);
-                }}
-                size="sm"
-                title="Ver todos os registros individuais"
-                type="button"
-                variant="outline"
-              >
-                <ListChecks className="h-3.5 w-3.5" />
-                <span className="whitespace-nowrap text-[11px]">Ver todas</span>
-              </Button>
-            ) : null}
+          <div className="min-w-0">
+            <CardTitle className="flex min-w-0 items-start gap-2">
+              <Clock3
+                aria-hidden="true"
+                className="mt-0.5 h-4 w-4 shrink-0"
+                style={{ color: widgetColor }}
+              />
+              <WidgetTitleText fallback="Permanências registradas" />
+            </CardTitle>
+            <CardDescription
+              className="mt-0.5 line-clamp-2 text-xs leading-4"
+              title={`Registros de permanência concluídos em ${previewContext}.`}
+            >
+              Duração, saída e tendência linear · {previewContext}
+            </CardDescription>
           </div>
         </CardHeader>
         <CardContent className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 p-3 pt-1">
@@ -970,7 +930,10 @@ export function OccupancyLoiteringSummaryCard({
                 ariaDescription="Cada ponto representa uma permanência concluída no horário exato da saída. Quando há horários distintos, a linha tracejada mostra a tendência linear das durações do dia."
                 ariaLabel="Permanências registradas ao longo do tempo"
                 className="h-full min-h-0 w-full"
+                mergeUpdates
                 option={chartOption}
+                preloadCapabilities={LOITERING_SESSION_CHART_CAPABILITIES}
+                replaceMergeOnUpdate={LOITERING_SESSION_CHART_REPLACE_MERGE}
                 themeMode="explicit"
                 valueLabels="none"
               />
@@ -988,320 +951,6 @@ export function OccupancyLoiteringSummaryCard({
           ) : null}
         </CardContent>
       </Card>
-
-      <OccupancyLoiteringSessionsDialog
-        companyScopeId={companyScopeId}
-        model={model}
-        onOpenChange={setSessionsOpen}
-        open={sessionsOpen}
-        period={sessionsPeriod}
-        timeZone={timeZone}
-      />
-    </>
-  );
-}
-
-function OccupancyLoiteringSessionsDialog({
-  companyScopeId,
-  model,
-  onOpenChange,
-  open,
-  period,
-  timeZone,
-}: {
-  companyScopeId: string;
-  model: OccupancyLoiteringSummaryModel;
-  onOpenChange: (open: boolean) => void;
-  open: boolean;
-  period: OccupancyLoiteringPeriod;
-  timeZone: string;
-}) {
-  const areas = model.areas;
-  const expectedAreas = React.useMemo(
-    () =>
-      areas.map((area) => ({
-        area: area.area,
-        cameraId: area.cameraId,
-        objectClass: area.objectClass,
-      })),
-    [areas],
-  );
-  const [areaIndex, setAreaIndex] = React.useState(0);
-  const [dayStart, setDayStart] = React.useState(() =>
-    initialOccupancyLoiteringSessionDay({
-      from: period.from,
-      timeZone,
-      to: period.to,
-    }),
-  );
-  const [page, setPage] = React.useState(0);
-  const [state, setState] = React.useState<{
-    error?: string;
-    loading: boolean;
-    rows: OccupancyLoiteringSessionRow[];
-    scopeKey: string;
-  }>({ loading: false, rows: [], scopeKey: "" });
-  const selectedArea = areas[Math.min(areaIndex, Math.max(0, areas.length - 1))];
-  const selectedAreaKey = selectedArea?.key ?? "";
-  const sessionQueryRange = React.useMemo(
-    () =>
-      occupancyLoiteringSessionsQueryRange({
-        dayStart,
-        from: period.from,
-        timeZone,
-        to: period.to,
-      }),
-    [dayStart, period, timeZone],
-  );
-  const scopeKey = sessionQueryRange
-    ? JSON.stringify([
-        companyScopeId,
-        sessionQueryRange.from.getTime(),
-        sessionQueryRange.to.getTime(),
-        timeZone,
-      ])
-    : "";
-
-  React.useEffect(() => {
-    if (!open) return;
-    setAreaIndex((current) => Math.min(current, Math.max(0, areas.length - 1)));
-    setDayStart(
-      initialOccupancyLoiteringSessionDay({
-        from: period.from,
-        timeZone,
-        to: period.to,
-      }),
-    );
-    setPage(0);
-  }, [areas.length, open, period, timeZone]);
-
-  React.useEffect(() => {
-    if (
-      !open ||
-      !sessionQueryRange ||
-      !scopeKey
-    ) {
-      return;
-    }
-    const controller = new AbortController();
-    setState((current) =>
-      current.scopeKey === scopeKey
-        ? { ...current, error: undefined, loading: true }
-        : { loading: true, rows: [], scopeKey },
-    );
-    void fetchOccupancyLoiteringSessions({
-      companyScopeId,
-      expectedAreas,
-      from: sessionQueryRange.from,
-      signal: controller.signal,
-      timeZone,
-      to: sessionQueryRange.to,
-    })
-      .then((rows) => {
-        if (controller.signal.aborted) return;
-        setState({
-          loading: false,
-          rows,
-          scopeKey,
-        });
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error, controller.signal)) return;
-        setState({
-          error: "Não foi possível carregar as sessões deste dia.",
-          loading: false,
-          rows: [],
-          scopeKey,
-        });
-      });
-    return () => abortRequest(controller);
-  }, [
-    companyScopeId,
-    expectedAreas,
-    open,
-    sessionQueryRange,
-    scopeKey,
-    timeZone,
-  ]);
-
-  const current = state.scopeKey === scopeKey
-    ? state
-    : { loading: true, rows: [], scopeKey };
-  const selectedRows = React.useMemo(
-    () =>
-      selectedAreaKey
-        ? current.rows.filter(
-            (row) =>
-              occupancyLoiteringKey(
-                row.camera_id,
-                row.area,
-                row.object_class,
-              ) === selectedAreaKey,
-          )
-        : [],
-    [current.rows, selectedAreaKey],
-  );
-  const pageSize = 50;
-  const pageCount = Math.max(1, Math.ceil(selectedRows.length / pageSize));
-  const safePage = Math.min(page, pageCount - 1);
-  const visibleRows = selectedRows.slice(
-    safePage * pageSize,
-    (safePage + 1) * pageSize,
-  );
-  const canGoPreviousDay = Boolean(
-    sessionQueryRange?.slicedByDay &&
-      sessionQueryRange.from.getTime() > period.from.getTime(),
-  );
-  const canGoNextDay = Boolean(
-    sessionQueryRange?.slicedByDay &&
-      sessionQueryRange.to.getTime() < period.to.getTime(),
-  );
-
-  return (
-    <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="grid max-h-[92dvh] grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-4xl">
-        <DialogHeader>
-          <DialogTitle>Permanências individuais</DialogTitle>
-          <DialogDescription>
-            Uma linha por permanência concluída. Registros com o mesmo horário são
-            preservados e podem representar saídas simultâneas.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-          <div className="min-w-0">
-            <div className="mb-1 text-xs font-medium text-muted-foreground">Área</div>
-            <Select
-              disabled={!areas.length}
-              onValueChange={(value) => {
-                setAreaIndex(Number(value));
-                setPage(0);
-              }}
-              value={areas.length ? String(Math.min(areaIndex, areas.length - 1)) : undefined}
-            >
-              <SelectTrigger className="min-w-0 w-full">
-                <SelectValue placeholder="Nenhuma área disponível" />
-              </SelectTrigger>
-              <SelectContent>
-                {areas.map((area, index) => (
-                  <SelectItem key={area.key} value={String(index)}>
-                    {area.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          {sessionQueryRange?.slicedByDay ? (
-            <div className="flex min-w-0 items-center justify-between gap-1 rounded-md border p-1 sm:justify-end">
-              <Button
-                aria-label="Dia anterior"
-                disabled={!canGoPreviousDay}
-                onClick={() => {
-                  setDayStart((currentDay) =>
-                    shiftOccupancyCompanyDay(currentDay, -1, timeZone),
-                  );
-                  setPage(0);
-                }}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              <span className="min-w-28 text-center text-xs font-semibold tabular-nums">
-                {formatCivilDay(sessionQueryRange.from, timeZone)}
-              </span>
-              <Button
-                aria-label="Próximo dia"
-                disabled={!canGoNextDay}
-                onClick={() => {
-                  setDayStart((currentDay) =>
-                    shiftOccupancyCompanyDay(currentDay, 1, timeZone),
-                  );
-                  setPage(0);
-                }}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </div>
-          ) : (
-            <div className="flex h-10 min-w-0 items-center justify-center rounded-md border px-3 text-xs font-medium text-muted-foreground">
-              Período selecionado
-            </div>
-          )}
-        </div>
-
-        <div className="min-h-0 overflow-auto rounded-md border">
-          {current.loading ? (
-            <div className="space-y-2 p-3">
-              {Array.from({ length: 6 }, (_, index) => (
-                <Skeleton className="h-9 w-full" key={index} />
-              ))}
-            </div>
-          ) : current.error ? (
-            <div className="flex min-h-40 items-center justify-center px-4 text-center text-sm text-muted-foreground" role="status">
-              {current.error}
-            </div>
-          ) : !selectedRows.length ? (
-            <div className="flex min-h-40 items-center justify-center px-4 text-center text-sm text-muted-foreground">
-              Nenhuma permanência concluída nesta área e neste período.
-            </div>
-          ) : (
-            <Table scrollRegionLabel="Permanências do período">
-              <TableHeader className="sticky top-0 z-10 bg-card">
-                <TableRow>
-                  <TableHead>Encerrada em</TableHead>
-                  <TableHead className="text-right">Duração</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {visibleRows.map((row, index) => (
-                  <TableRow
-                    key={`${row.ended_at}|${row.duration_seconds}|${safePage * pageSize + index}`}
-                  >
-                    <TableCell className="tabular-nums">
-                      {formatDateTime(row.ended_at, timeZone)}
-                    </TableCell>
-                    <TableCell className="text-right font-semibold tabular-nums">
-                      {formatAuditableDuration(row.duration_seconds)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </div>
-
-        <DialogFooter className="items-center sm:justify-between">
-          <span className="text-xs tabular-nums text-muted-foreground">
-            Página {safePage + 1} de {pageCount}
-          </span>
-          <div className="flex items-center justify-end gap-2">
-            <Button
-              disabled={safePage === 0}
-              onClick={() => setPage((value) => Math.max(0, value - 1))}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              Anterior
-            </Button>
-            <Button
-              disabled={safePage >= pageCount - 1}
-              onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              Próxima
-            </Button>
-          </div>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -1705,21 +1354,6 @@ export function buildOccupancyLoiteringSummaryMetricChartOption(
   };
 }
 
-export function buildOccupancyLoiteringAverageChartOption(
-  entries: readonly LoiteringChartEntry[],
-  theme: "dark" | "light",
-  widgetColor = "#0F766E",
-  interactive = true,
-): EnterpriseChartOption {
-  return buildOccupancyLoiteringSummaryMetricChartOption(
-    entries,
-    theme,
-    "average",
-    widgetColor,
-    interactive,
-  );
-}
-
 export function buildOccupancyLoiteringReport(
   model: OccupancyLoiteringSummaryModel,
   sessions: readonly OccupancyLoiteringSessionRow[],
@@ -1848,45 +1482,6 @@ export function buildOccupancyLoiteringSummaryMetricReport(
     table,
     title: configuration.title,
   };
-}
-
-export function buildOccupancyLoiteringSessionCountReport(
-  model: OccupancyLoiteringSummaryModel,
-  contextLabel: string,
-  widgetColor?: string,
-) {
-  return buildOccupancyLoiteringSummaryMetricReport(
-    model,
-    contextLabel,
-    "sessions",
-    widgetColor,
-  );
-}
-
-export function buildOccupancyLoiteringMinimumReport(
-  model: OccupancyLoiteringSummaryModel,
-  contextLabel: string,
-  widgetColor?: string,
-) {
-  return buildOccupancyLoiteringSummaryMetricReport(
-    model,
-    contextLabel,
-    "minimum",
-    widgetColor,
-  );
-}
-
-export function buildOccupancyLoiteringMaximumReport(
-  model: OccupancyLoiteringSummaryModel,
-  contextLabel: string,
-  widgetColor?: string,
-) {
-  return buildOccupancyLoiteringSummaryMetricReport(
-    model,
-    contextLabel,
-    "maximum",
-    widgetColor,
-  );
 }
 
 export function buildOccupancyLoiteringRangeReport(

@@ -51,21 +51,6 @@ export function orderWidgetScenarioIds(
   return ordered;
 }
 
-export function widgetScenarioSelectionKey(
-  selection: CardScenarioSelection,
-  inheritedScenarios: WidgetScenarioOption[] = [],
-) {
-  const ids =
-    selection.mode === "inherit"
-      ? inheritedScenarios.map((scenario) => scenario.id)
-      : selection.mode === "all"
-        ? ["*"]
-        : selection.scenarioIds;
-  // This key identifies the data composition, not its presentation. A manual
-  // reorder must never invalidate or repeat the underlying requests.
-  return `${selection.mode}:${uniqueIds(ids).sort().join(",")}`;
-}
-
 export function widgetScenarioSelectionLabel(
   selectedScenarios: WidgetScenarioOption[],
   selection: CardScenarioSelection,

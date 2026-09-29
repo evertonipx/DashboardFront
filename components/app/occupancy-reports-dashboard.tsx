@@ -208,6 +208,7 @@ import { occupancyComparisonBucketStarts } from "@/lib/occupancy-report-comparis
 import {
   buildOccupancyReportResourcePlan,
   createOccupancyQueryScheduler,
+  loadOccupancyReportDefinitionStates,
   occupancyLiveSnapshotQuery,
   type OccupancyQueryScheduler,
 } from "@/lib/occupancy-dashboard-query";
@@ -418,6 +419,7 @@ export function OccupancyReportsDashboard({
     Record<string, OccupancyReportState>
   >({});
   const [chartDataScopeKey, setChartDataScopeKey] = React.useState("");
+  const [chartDataPrimaryKey, setChartDataPrimaryKey] = React.useState("");
   const [showPreviousPeriod, setShowPreviousPeriod] = React.useState(
     () =>
       loadLiveDashboardSettings(companyScopeId, liveSettingsScope)
@@ -492,6 +494,13 @@ export function OccupancyReportsDashboard({
   const closedSegmentCacheRef = React.useRef(
     new Map<string, OccupancyReportState>(),
   );
+  const primaryChartCacheRef = React.useRef<{
+    scopeKey: string;
+    windowKey: string;
+    states: Record<string, OccupancyReportState>;
+    snapshot: CertifiedCurrentSnapshot | null;
+    snapshotError: string;
+  } | null>(null);
   const configurationScopeKey = [
     analysis ? "analysis" : "reports",
     companyScopeId ?? "",
@@ -1008,6 +1017,25 @@ export function OccupancyReportsDashboard({
   const queriedDefinitions = definitions.filter((definition) =>
     requestedDefinitionIdSet.has(definition.id),
   );
+  const primaryChartScopeKey = `${occupancyAnalysisDatasetKey({
+    analysis,
+    companyScopeId,
+    endDateInput: analysisRangeInput.endInput,
+    intradayComparison,
+    scopeId: selectedScope?.id,
+    showPreviousPeriod: false,
+    startDateInput: analysisRangeInput.startInput,
+    timeZone: companyTimeZone,
+  })}|primary:${requestedDefinitionIdsKey}|snapshot:${
+    currentSnapshotRequested ? "1" : "0"
+  }|user:${userId ?? ""}`;
+  const primaryChartWindowKey = occupancyReportDefinitionsWindowKey(
+    queriedDefinitions,
+  );
+  const primaryChartRenderKey = JSON.stringify([
+    primaryChartScopeKey,
+    primaryChartWindowKey,
+  ]);
   const comparisonDefinitionIdSet = new Set(
     comparisonDefinitionIdsKey.split("|").filter(Boolean),
   );
@@ -1045,8 +1073,11 @@ export function OccupancyReportsDashboard({
     activeChartRequestKeyRef.current = "";
     completedChartRequestKeyRef.current = "";
   }, [requestedChartScopeKey]);
-  const chartDataIsCurrent =
-    Boolean(selectedScope) && chartDataScopeKey === requestedChartScopeKey;
+  const comparisonDataIsCurrent =
+    chartDataScopeKey === requestedChartScopeKey;
+  const chartDataIsCurrent = Boolean(selectedScope) && (
+    comparisonDataIsCurrent || chartDataPrimaryKey === primaryChartRenderKey
+  );
   const visibleChartData = chartDataIsCurrent
     ? chartData
     : EMPTY_OCCUPANCY_REPORT_DATA;
@@ -1062,6 +1093,9 @@ export function OccupancyReportsDashboard({
     occupancyDurationInsights.loading ||
     occupancyLoitering.loading ||
     Boolean(reportRequested && selectedScope && !chartDataIsCurrent);
+  const comparisonPending = Boolean(
+    showPreviousPeriod && comparisonDefinitionIdsKey && !comparisonDataIsCurrent,
+  );
   const rangeMetric = React.useMemo(
     () =>
       summarizeOccupancyRangeMetrics(
@@ -1081,7 +1115,7 @@ export function OccupancyReportsDashboard({
     (currentSnapshotRequested && visibleCurrentSnapshotError) ||
       queriedDefinitions.some((definition) => {
         const state = visibleChartData[definition.id];
-        const previous = showPreviousPeriod && comparisonDefinitionIdSet.has(definition.id)
+        const previous = showPreviousPeriod && comparisonDataIsCurrent && comparisonDefinitionIdSet.has(definition.id)
           ? visibleChartData[previousId(definition.id)] : undefined;
         return state?.error || state?.incomplete || previous?.error || previous?.incomplete;
       }),
@@ -1179,6 +1213,8 @@ export function OccupancyReportsDashboard({
       setScenarios([]);
       setSelectedId("");
       setChartData({});
+      setChartDataPrimaryKey("");
+      primaryChartCacheRef.current = null;
       setChartDataScopeKey("");
       setCurrentSnapshot(null);
       setCurrentSnapshotError("");
@@ -1235,12 +1271,19 @@ export function OccupancyReportsDashboard({
 
       if (forceClosedRefresh) {
         closedSegmentCacheRef.current.clear();
+        primaryChartCacheRef.current = null;
         completedChartRequestKeyRef.current = "";
       }
       activeChartRequestKeyRef.current = requestScopeKey;
 
-      if (silent) setRefreshing(true);
-      else setLoadingCharts(true);
+      if (
+        silent ||
+        primaryChartCacheRef.current?.scopeKey === primaryChartScopeKey
+      ) {
+        setRefreshing(true);
+      } else {
+        setLoadingCharts(true);
+      }
 
       const execute = async (windowRetry: number): Promise<void> => {
         const requestSequence = ++chartRequestSequenceRef.current;
@@ -1275,6 +1318,12 @@ export function OccupancyReportsDashboard({
         const definitionsWindowKey = occupancyReportDefinitionsWindowKey(
           currentDefinitions,
         );
+        const reusablePrimary =
+          !forceClosedRefresh &&
+          primaryChartCacheRef.current?.scopeKey === primaryChartScopeKey &&
+          primaryChartCacheRef.current.windowKey === definitionsWindowKey
+            ? primaryChartCacheRef.current
+            : null;
         const previousDefinitions = showPreviousPeriod
           ? currentDefinitions
               .filter((definition) =>
@@ -1291,40 +1340,44 @@ export function OccupancyReportsDashboard({
           );
           const snapshotScenario = scope.scenario;
           const [entries, currentSnapshotResult] = await Promise.all([
-            Promise.all(
-              [...currentDefinitions, ...previousDefinitions].map(
-                async (definition) => {
-                  try {
-                    const state = await loadOccupancyReportState(
-                      definition,
-                      scope,
-                      companyScopeId,
-                      companyTimeZone,
-                      now,
-                      undefined,
-                      controller.signal,
-                      closedSegmentCacheRef.current,
-                      scheduleQuery,
-                      civilAggregateCapabilities,
-                    );
-                    return [definition.id, state] as const;
-                  } catch (error) {
-                    return [
-                      definition.id,
-                      {
-                        points: buildEmptyPoints(definition),
-                        error: occupancyReportErrorMessage(
-                          error,
-                          "Não foi possível carregar este período.",
-                        ),
-                      },
-                    ] as const;
-                  }
-                },
-              ),
-            ),
+            loadOccupancyReportDefinitionStates({
+              currentDefinitions,
+              previousDefinitions,
+              primaryCache: reusablePrimary,
+              primaryScopeKey: primaryChartScopeKey,
+              primaryWindowKey: definitionsWindowKey,
+              loadState: async (definition): Promise<OccupancyReportState> => {
+                try {
+                  return await loadOccupancyReportState(
+                    definition,
+                    scope,
+                    companyScopeId,
+                    companyTimeZone,
+                    now,
+                    undefined,
+                    controller.signal,
+                    closedSegmentCacheRef.current,
+                    scheduleQuery,
+                    civilAggregateCapabilities,
+                  );
+                } catch (error) {
+                  return {
+                    points: buildEmptyPoints(definition),
+                    error: occupancyReportErrorMessage(
+                      error,
+                      "Não foi possível carregar este período.",
+                    ),
+                  };
+                }
+              },
+            }),
             currentSnapshotRequested && snapshotScenario
-              ? captureOccupancyLoad(
+              ? reusablePrimary
+                ? Promise.resolve({
+                    data: reusablePrimary.snapshot,
+                    error: reusablePrimary.snapshotError,
+                  })
+                : captureOccupancyLoad(
                   usesLiveDay
                     ? loadOccupancyReportCurrentSnapshot({
                         companyScopeId,
@@ -1415,6 +1468,18 @@ export function OccupancyReportsDashboard({
             string,
             OccupancyReportState
           >;
+          primaryChartCacheRef.current = {
+            scopeKey: primaryChartScopeKey,
+            windowKey: definitionsWindowKey,
+            states: Object.fromEntries(
+              currentDefinitions.flatMap((definition) => {
+                const state = nextChartData[definition.id];
+                return state ? [[definition.id, state]] : [];
+              }),
+            ),
+            snapshot: currentSnapshotResult.data,
+            snapshotError: currentSnapshotResult.error,
+          };
           alignMinuteComparisonPoints(nextChartData, currentDefinitions);
           if (usesLiveDay) {
             maskOpenBucketComparisons(
@@ -1428,6 +1493,10 @@ export function OccupancyReportsDashboard({
             Object.values(nextChartData).some((state) => !state.error);
           setChartData(nextChartData);
           setChartDataScopeKey(requestScopeKey);
+          setChartDataPrimaryKey(JSON.stringify([
+            primaryChartScopeKey,
+            definitionsWindowKey,
+          ]));
           setCurrentSnapshot(currentSnapshotResult.data);
           setCurrentSnapshotError(currentSnapshotResult.error);
           setChartLoadError("");
@@ -1448,7 +1517,9 @@ export function OccupancyReportsDashboard({
             error,
             "Não foi possível carregar os relatórios de ocupação.",
           );
+          primaryChartCacheRef.current = null;
           setChartData({});
+          setChartDataPrimaryKey("");
           setChartDataScopeKey(requestScopeKey);
           setChartLoadError(message);
           setCurrentSnapshot(null);
@@ -1481,6 +1552,7 @@ export function OccupancyReportsDashboard({
       comparisonDefinitionIdsKey,
       currentSnapshotRequested,
       intradayComparison,
+      primaryChartScopeKey,
       requestPlanKey,
       requestedDefinitionIdsKey,
       showPreviousPeriod,
@@ -1553,6 +1625,7 @@ export function OccupancyReportsDashboard({
     activeChartRequestKeyRef.current = "";
     completedChartRequestKeyRef.current = "";
     closedSegmentCacheRef.current.clear();
+    primaryChartCacheRef.current = null;
     const settings = loadLiveDashboardSettings(companyScopeId, {
       userId: user?.id,
       viewId: settingsViewId,
@@ -1566,6 +1639,7 @@ export function OccupancyReportsDashboard({
     setShowPreviousPeriod(settings.showPreviousPeriod);
     setIntradayComparison(settings.intradayComparison);
     setChartData({});
+    setChartDataPrimaryKey("");
     setChartDataScopeKey("");
     setCurrentSnapshot(null);
     setCurrentSnapshotError("");
@@ -1665,6 +1739,8 @@ export function OccupancyReportsDashboard({
       chartAbortControllerRef.current = null;
       setChartLoadError("");
       setChartData({});
+      setChartDataPrimaryKey("");
+      primaryChartCacheRef.current = null;
       setChartDataScopeKey("");
       setCurrentSnapshot(null);
       setCurrentSnapshotError("");
@@ -1691,7 +1767,9 @@ export function OccupancyReportsDashboard({
     chartRequestSequenceRef.current += 1;
     chartAbortControllerRef.current?.abort();
     chartAbortControllerRef.current = null;
+    primaryChartCacheRef.current = null;
     setChartData({});
+    setChartDataPrimaryKey("");
     setChartDataScopeKey("");
     setChartLoadError("");
     setCurrentSnapshot(null);
@@ -1737,7 +1815,6 @@ export function OccupancyReportsDashboard({
 
   function updateShowPreviousPeriod(value: boolean) {
     if (value === showPreviousPeriod) return;
-    invalidateChartDataset();
     setShowPreviousPeriod(value);
     saveLiveDashboardSettings({
       intradayComparison,
@@ -1747,7 +1824,6 @@ export function OccupancyReportsDashboard({
 
   function updateIntradayComparison(value: IntradayComparisonMode) {
     if (value === intradayComparison) return;
-    invalidateChartDataset();
     setIntradayComparison(value);
     saveLiveDashboardSettings({
       intradayComparison: value,
@@ -2052,9 +2128,13 @@ export function OccupancyReportsDashboard({
             buildEmptyPoints(definition)
           }
           previousPoints={
-            visibleChartData[previousId(definition.id)]?.points ?? []
+            comparisonDataIsCurrent
+              ? visibleChartData[previousId(definition.id)]?.points ?? []
+              : []
           }
-          previousState={visibleChartData[previousId(definition.id)]}
+          previousState={comparisonDataIsCurrent
+            ? visibleChartData[previousId(definition.id)]
+            : undefined}
           showPreviousPeriod={showPreviousPeriod}
           state={visibleChartData[definition.id]}
           intradayComparison={intradayComparison}
@@ -2134,10 +2214,14 @@ export function OccupancyReportsDashboard({
               buildEmptyPoints(sourceDefinition)
             }
             previousPoints={
-              visibleChartData[previousId(sourceDefinition.id)]?.points ?? []
+              comparisonDataIsCurrent
+                ? visibleChartData[previousId(sourceDefinition.id)]?.points ?? []
+                : []
             }
             previousState={
-              visibleChartData[previousId(sourceDefinition.id)]
+              comparisonDataIsCurrent
+                ? visibleChartData[previousId(sourceDefinition.id)]
+                : undefined
             }
             showPreviousPeriod={showPreviousPeriod}
             state={visibleChartData[sourceDefinition.id]}
@@ -2307,6 +2391,7 @@ export function OccupancyReportsDashboard({
       ];
       if (
         showPreviousPeriod &&
+        comparisonDataIsCurrent &&
         comparisonDefinitionIdSet.has(definition.id)
       ) {
         sources.push(
@@ -2382,9 +2467,13 @@ export function OccupancyReportsDashboard({
         visibleChartData[sourceDefinition.id]?.points ??
         buildEmptyPoints(sourceDefinition);
       const previousPoints =
-        visibleChartData[previousId(sourceDefinition.id)]?.points ?? [];
+        comparisonDataIsCurrent
+          ? visibleChartData[previousId(sourceDefinition.id)]?.points ?? []
+          : [];
       const tableIncludesPrevious =
-        showPreviousPeriod && previousPoints.length > 0;
+        showPreviousPeriod &&
+        (visibility.average || visibility.minimum || visibility.peak) &&
+        previousPoints.length > 0;
       const table: ReportTable = {
         columns: [
           ...(tableIncludesPrevious
@@ -2428,14 +2517,14 @@ export function OccupancyReportsDashboard({
         title: `Dados - ${title}`,
       };
       return {
-        comparison: showPreviousPeriod
+        comparison: tableIncludesPrevious
           ? comparisonDescription(definition, intradayComparison)
           : undefined,
         description: definition.description,
         option: buildOccupancyReportChartOption(
           definition,
           points,
-          showPreviousPeriod ? previousPoints : [],
+          tableIncludesPrevious ? previousPoints : [],
           visibility,
           {
             maximum: selectedScope?.scenario?.max_total ?? undefined,
@@ -2803,6 +2892,7 @@ export function OccupancyReportsDashboard({
         compact
         disabled={
           chartsPending ||
+          comparisonPending ||
           !selectedScope ||
           Boolean(occupancyCertificationError) ||
           hasPartialOccupancyCoverage || !reportRequested
@@ -2812,6 +2902,7 @@ export function OccupancyReportsDashboard({
       <AiAnalysisAction
         disabled={
           chartsPending ||
+          comparisonPending ||
           !selectedScope ||
           Boolean(occupancyCertificationError) ||
           hasPartialOccupancyCoverage || !reportRequested
@@ -3659,6 +3750,11 @@ function OccupancyReportChartCard({
   ).current;
   const widgetColor = useWidgetColor(palettePrimary);
   const viewColors = useWidgetPalette();
+  const hasComparisonSeries = Boolean(
+    showPreviousPeriod &&
+      (metricVisibility.average || metricVisibility.minimum || metricVisibility.peak) &&
+      previousState && !previousState.error && !previousState.incomplete,
+  );
   const palette = React.useMemo(
     () =>
       viewColors?.length
@@ -3679,7 +3775,7 @@ function OccupancyReportChartCard({
       buildOccupancyReportChartOption(
         definition,
         points,
-        showPreviousPeriod ? previousPoints : [],
+        hasComparisonSeries ? previousPoints : [],
         metricVisibility,
         {
           maximum: scope?.scenario?.max_total ?? undefined,
@@ -3697,7 +3793,7 @@ function OccupancyReportChartCard({
       previousPoints,
       scope?.scenario?.max_total,
       scope?.scenario?.min_total,
-      showPreviousPeriod,
+      hasComparisonSeries,
     ],
   );
   const hasReferenceLimit = Boolean(
@@ -3714,7 +3810,7 @@ function OccupancyReportChartCard({
         point.minimum !== null ||
         point.peak !== null,
     ) ||
-    (showPreviousPeriod &&
+    (hasComparisonSeries &&
       previousPoints.some(
         (point) =>
           point.average !== null ||
@@ -3748,7 +3844,7 @@ function OccupancyReportChartCard({
             </Badge>
           </div>
         </div>
-        {showPreviousPeriod && !previousState?.error && !previousState?.incomplete ? (
+        {hasComparisonSeries ? (
           <div className="rounded-md border border-primary/20 bg-primary/10 px-3 py-2 text-xs text-primary">
             {comparisonDescription(definition, intradayComparison)}
           </div>

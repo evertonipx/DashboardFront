@@ -33,10 +33,6 @@ export function requireCertifiedCountingTimeZone(
   return requireCertifiedCompanyTimeZone(resolution);
 }
 
-/** @deprecated Use requireCertifiedCountingTimeZone. */
-export const requireCertifiedCountingRuntimeTimeZone =
-  requireCertifiedCountingTimeZone;
-
 /**
  * Calendar aggregate endpoints use floating civil buckets. The returned Date
  * carries the company's Y-M-D in the runtime calendar; it is not an instant

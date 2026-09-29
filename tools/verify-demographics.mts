@@ -250,6 +250,11 @@ function Fixture() {
   const temporalModels = React.useMemo(() => Object.fromEntries(DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.map(id => [id, buildDemographicTemporalModel({id,summary,comparisonSummary:summary,comparisonLabel:"Período anterior (simulado)",settings:temporalSettings[id],from:temporalFrom,to:temporalTo,timeZone:"America/Sao_Paulo",now:temporalNow,theme:query.get("theme")})])), [temporalSettings]);
   const comparisonLoading = false;
   const comparisonError = undefined;
+  // The isolated allCards callback reads the same completed comparison state
+  // as the dashboard so its temporal widget receives a valid snapshot scope.
+  const comparisonCacheScopeKey = "visual-fixture|America/Sao_Paulo|selected-range";
+  const comparisonKey = "visual-fixture|comparison-complete";
+  const comparisonState = { key: comparisonKey, scopeKey: comparisonCacheScopeKey, summary };
   const [configurationCardId, setConfigurationCardId] = React.useState(null);
   const cards = (${parts.cards})();
   const allCards = temporal ? (${parts.temporalCards ?? "() => cards"})() : cards;
@@ -471,7 +476,23 @@ async function main() {
               check(control.x >= controlBounds.x - 1 && control.right <= controlBounds.right + 1, `${id} setting ${control.label} exceeds the dialog`);
             }
             controlBounds.menus = [];
-            for (let menuIndex = 0; menuIndex < 2; menuIndex++) {
+            // Palettes are configured at view level. Inspect the selects that
+            // this widget actually renders instead of assuming two controls.
+            const menuCount = await evaluate<number>("document.querySelectorAll('[data-fixture-controls] [role=\"combobox\"]').length");
+            check(menuCount > 0, `${id} settings expose at least one selection`);
+            // Inspect later controls first: closing an advanced temporal
+            // control can collapse it, while the base selector remains.
+            for (let menuIndex = menuCount - 1; menuIndex >= 0; menuIndex--) {
+              // Escape may close the parent Radix dialog together with the
+              // listbox. Reopen the same card before inspecting its next select.
+              if (!await evaluate<boolean>("Boolean(document.querySelector('[data-fixture-controls]'))")) {
+                await evaluate(`document.querySelector('[data-fixture-widget="${id}"] [data-layout-card-configure]').click()`);
+                await waitFor(() => evaluate("Boolean(document.querySelector('[data-fixture-controls]'))"), `${label} ${id} reopening settings`);
+              }
+              const availableMenus = await evaluate<number>("document.querySelectorAll('[data-fixture-controls] [role=\"combobox\"]').length");
+              // A presentation control can be conditional after the prior
+              // popup closes. Its trigger bounds were already checked above.
+              if (menuIndex >= availableMenus) continue;
               await evaluate(`(() => {const trigger=document.querySelectorAll('[data-fixture-controls] [role="combobox"]')[${menuIndex}];trigger.focus();trigger.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));})()`);
               await waitFor(() => evaluate("Boolean(document.querySelector('[role=\"listbox\"]'))"), `${label} ${id} select ${menuIndex}`);
               await delay(100);
@@ -483,8 +504,10 @@ async function main() {
               await waitFor(() => evaluate("!document.querySelector('[role=\"listbox\"]')"), `${label} ${id} closing select ${menuIndex}`);
             }
             measurement.controls.push({ id, ...controlBounds });
-            await evaluate("[...document.querySelectorAll('[data-fixture-controls] button')].find(e=>e.textContent==='Fechar').click()");
-            await waitFor(() => evaluate("!document.querySelector('[data-fixture-controls]')"), `${label} closing settings`);
+            if (await evaluate<boolean>("Boolean(document.querySelector('[data-fixture-controls]'))")) {
+              await evaluate("[...document.querySelectorAll('[data-fixture-controls] button')].find(e=>e.textContent==='Fechar').click()");
+              await waitFor(() => evaluate("!document.querySelector('[data-fixture-controls]')"), `${label} closing settings`);
+            }
           }
           measurement.browserErrors = await evaluate<string[]>("window.__fixtureBrowserErrors");
           check(!measurement.browserErrors.length, `browser errors after configuring widgets: ${measurement.browserErrors.join("; ")}`);

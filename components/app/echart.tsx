@@ -37,6 +37,8 @@ export type EChartProps = {
   ariaLabel?: string;
   className?: string;
   mergeUpdates?: boolean;
+  preloadCapabilities?: readonly ("line" | "scatter")[];
+  replaceMergeOnUpdate?: readonly ("legend" | "series")[];
   themeMode?: "auto" | "explicit";
   valueLabels?: "auto" | "always" | "none";
 };
@@ -49,6 +51,8 @@ type ChartMountTask = {
 type EChartRuntime = typeof import("@/components/app/echarts-runtime/core");
 
 let echartRuntimePromise: Promise<EChartRuntime> | null = null;
+const EMPTY_PRELOAD_CAPABILITIES: readonly ("line" | "scatter")[] = [];
+const EMPTY_REPLACE_MERGE: readonly ("legend" | "series")[] = [];
 
 function loadEChartRuntime() {
   echartRuntimePromise ??= import("@/components/app/echarts-runtime/core").catch(
@@ -108,6 +112,8 @@ export function EChart({
   ariaLabel,
   className,
   mergeUpdates = false,
+  preloadCapabilities = EMPTY_PRELOAD_CAPABILITIES,
+  replaceMergeOnUpdate = EMPTY_REPLACE_MERGE,
   themeMode = "auto",
   // Business charts must expose their values without requiring a pointer.
   // Exceptionally dense minute series opt out explicitly with `none`.
@@ -161,8 +167,11 @@ export function EChart({
     [ariaDescription, ariaLabel, option],
   );
   const runtimeCapabilities = React.useMemo(
-    () => resolveEChartRuntimeCapabilities(themedOption),
-    [themedOption],
+    () => Array.from(new Set([
+      ...resolveEChartRuntimeCapabilities(themedOption),
+      ...preloadCapabilities,
+    ])).sort(),
+    [preloadCapabilities, themedOption],
   );
   const runtimeCapabilityKey = runtimeCapabilities.join("|");
   const chartKey = `${chartType ?? "default"}:${prefersReducedMotion ? "reduced" : "motion"}:${runtimeCapabilityKey}`;
@@ -257,6 +266,9 @@ export function EChart({
           // only the paint itself is synchronous once the chart is mounted.
           lazyUpdate: false,
           notMerge: !mergeUpdates,
+          ...(mergeUpdates && replaceMergeOnUpdate.length
+            ? { replaceMerge: [...replaceMergeOnUpdate] }
+            : {}),
         });
         setPaintedChartKey(chartKey);
       });
@@ -268,6 +280,7 @@ export function EChart({
     chartMounted,
     chartKey,
     mergeUpdates,
+    replaceMergeOnUpdate,
     renderReady,
     runtimeCapabilityKey,
     themedOption,

@@ -59,10 +59,39 @@ test("visualização legada linha vira área empilhada sem alterar distribuiçõ
   const area = modelFor("demographics_daily_evolution", { chartType: "area" });
   assert.ok(line.option.series.every((series: RuntimeFixture) => series.type === "line"));
   assert.ok(line.option.series.every((series: RuntimeFixture) => series.stack === "demographic-share"));
-  assert.ok(line.option.series.every((series: RuntimeFixture) => series.areaStyle.opacity === 0.22));
+  assert.ok(line.option.series.every((series: RuntimeFixture) => series.areaStyle.opacity === 1));
   assert.deepEqual(line.option.series.map((series: RuntimeFixture) => series.data), area.option.series.map((series: RuntimeFixture) => series.data));
   const comparison = modelFor("demographics_period_comparison", { chartType: "line" });
   assert.ok(comparison.option.series.every((series: RuntimeFixture) => series.stack === undefined));
+});
+
+test("evolução diária de gênero mantém cores inteiras e rótulos contrastantes no modo linha", () => {
+  for (const theme of ["light", "dark"]) {
+    const model = modelFor("demographics_daily_evolution", { chartType: "line", dimension: "gender" }, { theme });
+    const expectedBackground = theme === "dark" ? "#18181B" : "#FFFFFF";
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 640, height: 300 });
+    try {
+      chart.setOption({ ...model.option, animation: false });
+      chart.renderToSVGString();
+      for (const [index, series] of model.option.series.entries()) {
+        assert.equal(series.areaStyle.opacity, 1);
+        assert.equal(series.label.backgroundColor, expectedBackground);
+        assert.ok(colorContrast(series.label.color, series.label.backgroundColor) >= 4.5);
+        const polygons: RuntimeFixture[] = [];
+        const labels: RuntimeFixture[] = [];
+        chart.getViewOfSeriesModel(chart.getModel().getSeriesByIndex(index)).group.traverse((element: RuntimeFixture) => {
+          if (element.type === "ec-polygon") polygons.push(element);
+          const text = element.getTextContent?.();
+          if (typeof text?.style?.text === "string" && text.style.text.endsWith("%")) labels.push(text);
+        });
+        assert.ok(polygons.length > 0);
+        assert.ok(polygons.every((polygon) => polygon.style.opacity === 1));
+        assert.ok(labels.length > 0);
+        assert.ok(labels.every((label) => label.childrenRef().some((child: RuntimeFixture) =>
+          child.type === "rect" && child.style.fill === expectedBackground && (child.style.opacity ?? 1) === 1)));
+      }
+    } finally { chart.dispose(); }
+  }
 });
 
 test("perfil horário mantém 24 horas e pondera contagens antes de calcular o percentual", () => {

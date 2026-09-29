@@ -48,7 +48,7 @@ import {
   summarizeAuditBusinessData,
   type AuditBusinessPresentation,
   type AuditLogEntry,
-  type PaginatedAuditResponse,
+  type NormalizedAuditPage,
 } from "@/lib/audit";
 import { ApiError, apiFetch } from "@/lib/api";
 import {
@@ -65,7 +65,7 @@ type AuditPageEnvelope = {
   companyId: string;
   limit: number;
   page: number;
-  response: PaginatedAuditResponse;
+  response: NormalizedAuditPage;
 };
 
 export function AuditManager() {
@@ -274,9 +274,17 @@ export function AuditManager() {
     <section className="min-w-0 space-y-4">
       <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <AuditSummary
-          label="Histórico"
-          value={currentResponse ? formatNumber(currentResponse.total) : "—"}
-          detail="Registros da empresa"
+          label={masterCrossCompanyScope ? "Nesta página" : "Histórico"}
+          value={currentResponse
+            ? formatNumber(
+                masterCrossCompanyScope
+                  ? currentResponse.data.length
+                  : currentResponse.total,
+              )
+            : "—"}
+          detail={masterCrossCompanyScope
+            ? "Registros da empresa nesta página"
+            : "Registros da empresa"}
         />
         <AuditSummary
           label="Alterações"
@@ -381,13 +389,15 @@ export function AuditManager() {
               </TableBody>
             </Table>
           ) : error ? null : (
-            <EmptyAuditState />
+            <EmptyAuditState scopeFiltered={masterCrossCompanyScope} />
           )}
 
           {currentResponse ? (
             <div className="flex min-w-0 flex-col gap-3 border-t pt-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-xs text-muted-foreground" aria-live="polite">
-                {currentResponse.data.length
+                {masterCrossCompanyScope
+                  ? `${formatNumber(currentResponse.data.length)} registro(s) da empresa nesta página`
+                  : currentResponse.data.length
                   ? `${formatNumber(firstVisible)}–${formatNumber(lastVisible)} de ${formatNumber(currentResponse.total)}`
                   : "Nenhum registro nesta página"}
               </div>
@@ -635,15 +645,19 @@ function AuditError({ message, onRetry }: { message: string; onRetry: () => void
   );
 }
 
-function EmptyAuditState() {
+function EmptyAuditState({ scopeFiltered = false }: { scopeFiltered?: boolean }) {
   return (
     <div className="rounded-md border border-dashed bg-muted/20 px-4 py-10 text-center">
       <ScrollText className="mx-auto h-6 w-6 text-muted-foreground" />
       <div className="mt-3 text-sm font-medium text-foreground">
-        Nenhum registro de auditoria
+        {scopeFiltered
+          ? "Nenhum registro desta empresa nesta página"
+          : "Nenhum registro de auditoria"}
       </div>
       <div className="mt-1 text-xs text-muted-foreground">
-        Não há atividades registradas para esta empresa.
+        {scopeFiltered
+          ? "Consulte as outras páginas para verificar atividades da empresa."
+          : "Não há atividades registradas para esta empresa."}
       </div>
     </div>
   );

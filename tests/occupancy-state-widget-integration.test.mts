@@ -370,6 +370,24 @@ test("resumo médio deixa médias e maiores períodos visíveis sem criar outra 
   );
 });
 
+test("lista de Ocupação e permanência não bloqueia a rolagem da página", () => {
+  const componentSource = widgetSource.slice(
+    widgetSource.indexOf("function OccupancyDurationAverageSummaryCard"),
+    widgetSource.indexOf("function OccupancyDurationTimelineCard"),
+  );
+  const scrollContainer = componentSource.match(
+    /aria-label="Comparação entre detecção, estado das áreas e permanências individuais concluídas"\s+className="([^"]+)"/,
+  )?.[1];
+
+  assert.ok(scrollContainer, "a lista de cenários precisa permanecer acessível");
+  assert.match(scrollContainer, /\boverflow-y-auto\b/);
+  assert.doesNotMatch(
+    scrollContainer,
+    /\boverscroll-(?:contain|y-contain)\b/,
+    "ao chegar ao fim da lista, a rolagem deve continuar na página",
+  );
+});
+
 test("resumo médio compara o consolidado global com cada cenário selecionado", () => {
   const { buildDurationAverageComparisonRows } =
     loadDurationAverageComparisonBuilder();

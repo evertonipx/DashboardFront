@@ -914,6 +914,10 @@ test("dashboard preserva os nove widgets originais e integra cinco widgets tempo
     resolve(projectRoot, "lib/view-preferences.ts"),
     "utf8",
   );
+  const chartOptions = readFileSync(
+    resolve(projectRoot, "lib/demographics-chart-options.ts"),
+    "utf8",
+  );
   const userGrid = readFileSync(
     resolve(projectRoot, "lib/user-grid.ts"),
     "utf8",
@@ -950,7 +954,8 @@ test("dashboard preserva os nove widgets originais e integra cinco widgets tempo
   assert.match(dashboard, /preferenceScopeId=\{preferenceScopeId\}/);
   assert.match(dashboard, /\{surface !== "live" \? \([\s\S]*?<ReportExportActions/);
   assert.match(dashboard, /valueLabels="always"/);
-  assert.match(dashboard, /max: 100/);
+  assert.match(dashboard, /buildDemographicDistributionOption\(summary\.gender/);
+  assert.match(chartOptions, /max: 100/);
   assert.doesNotMatch(dashboard, /Não identificado/);
   assert.match(dashboard, /visibleDemographicDistribution/);
   assert.match(

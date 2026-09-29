@@ -171,24 +171,23 @@ test("Demographics aplica a escala compartilhada por tema e escolhe rótulos pel
   const crossing = load("lib/demographics-crossing-options.ts");
   const presentation = load("lib/demographics-presentation.ts");
   const demographics = load("lib/demographics.ts");
-  const builder = standalone(filename, "buildAgeEmotionHeatmapOption", {
-    buildDemographicCrossingOption: crossing.buildDemographicCrossingOption,
-    normalizeDemographicPresentation: presentation.normalizeDemographicPresentation,
-  });
   const summary = demographics.aggregateDemographicBuckets([
     { emotion: "happy", count: 250 },
     { emotion: "neutral", count: 2250 },
   ].map((row) => ({ bucket: "2026-09-10T13:00:00Z", camera_id: "fixture-camera", gender: "Woman", age_bucket: "20-29", ...row })));
   const snapshot = structuredClone(summary);
-  assert.match(source, /buildDemographicCrossingOption\(\s*summary, normalizeDemographicPresentation\(undefined, "age-emotion"\), "age-emotion", theme,?\s*\)/);
+  assert.match(source, /buildDemographicCrossingOption\(summary, normalizeDemographicPresentation\(presentation, "age-emotion"\), "age-emotion", effectiveTheme\)/);
+  assert.match(source, /option: buildDemographicCrossingOption\(summary, ageEmotion, "age-emotion", "light"\)/);
   for (const paletteId of ["pink-blue", ...OCCUPANCY_COLOR_PALETTES.map((entry: RuntimeFixture) => entry.id)]) {
     for (const theme of ["light", "dark"]) {
       const settings = presentation.normalizeDemographicPresentation({ palette: paletteId }, "age-emotion");
       const option = crossing.buildDemographicCrossingOption(summary, settings, "age-emotion", theme);
       const scale = crossing.demographicHeatmapColors(paletteId, theme);
       if (paletteId === "pink-blue") {
-        assert.deepEqual(builder(summary, theme).series[0].data, option.series[0].data);
-        assert.deepEqual(builder(summary, theme).visualMap.inRange.color, scale);
+        const defaults = presentation.normalizeDemographicPresentation(undefined, "age-emotion");
+        const defaultOption = crossing.buildDemographicCrossingOption(summary, defaults, "age-emotion", theme);
+        assert.deepEqual(defaultOption.series[0].data, option.series[0].data);
+        assert.deepEqual(defaultOption.visualMap.inRange.color, scale);
       }
       assert.deepEqual(option.visualMap.inRange.color, scale);
       assert.equal(option.visualMap.dimension, 2, "a intensidade representa a porcentagem, não a quantidade bruta na quarta posição");
@@ -231,7 +230,13 @@ test("Demographics aplica a escala compartilhada por tema e escolhe rótulos pel
     }
   }
   assert.deepEqual(summary, snapshot, "renderizar os dois temas não modifica os dados da exportação");
-  assert.deepEqual(builder(summary).visualMap.inRange.color, crossing.demographicHeatmapColors("pink-blue", "light"), "o builder exportável sem tema explícito permanece light");
+  const exportOption = crossing.buildDemographicCrossingOption(
+    summary,
+    presentation.normalizeDemographicPresentation(undefined, "age-emotion"),
+    "age-emotion",
+    "light",
+  );
+  assert.deepEqual(exportOption.visualMap.inRange.color, crossing.demographicHeatmapColors("pink-blue", "light"), "o builder exportável usa o tema light");
 });
 
 test("o tema automático do EChart preserva intensidade e rótulos, mas adapta superfícies e outros gráficos", () => {

@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  Bell,
   Check,
   Edit,
   MapPinned,
@@ -15,7 +16,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
+import { OccupancyScenarioAlertsDialog } from "@/components/app/occupancy-scenario-alerts-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -57,6 +58,7 @@ import {
   filterScopedApiRows,
   usesMasterCrossCompanyScope,
   useEffectiveCompanyScopeId,
+  useEffectiveCompanyTimeZoneResolution,
 } from "@/lib/master-company-scope";
 import {
   buildOccupancyAreaKey,
@@ -75,7 +77,6 @@ import {
 } from "@/lib/occupancy-scenario-object-class";
 import { requireOccupancyScenarioRows } from "@/lib/occupancy-validation";
 import { canManageOccupancy } from "@/lib/permissions";
-import { RESOURCE_METADATA_REFRESH_INTERVAL_MS } from "@/lib/resource-auto-refresh";
 import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type {
   OccupancyScenario,
@@ -107,8 +108,10 @@ const HOUR_MS = 60 * MINUTE_MS;
 
 export function OccupancyScenarioManager() {
   const { user } = useAuth();
+  const userId = user?.id ?? "";
   const canEdit = canManageOccupancy(user);
   const companyScopeId = useEffectiveCompanyScopeId(user);
+  const companyTimeZone = useEffectiveCompanyTimeZoneResolution(user).timeZone;
   const masterCrossCompanyScope = usesMasterCrossCompanyScope(
     user,
     companyScopeId,
@@ -116,17 +119,18 @@ export function OccupancyScenarioManager() {
   const [scenarios, setScenarios] = React.useState<OccupancyScenario[]>([]);
   const [areaOptions, setAreaOptions] = React.useState<AreaOption[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const [loadingAreas, setLoadingAreas] = React.useState(true);
+  const [loadingAreas, setLoadingAreas] = React.useState(false);
   const [scenarioCatalogError, setScenarioCatalogError] = React.useState("");
   const [areaCatalogError, setAreaCatalogError] = React.useState("");
-  const [areaCatalogWarning, setAreaCatalogWarning] = React.useState("");
   const [areaCatalogAuthoritative, setAreaCatalogAuthoritative] =
     React.useState(false);
   const [scenarioCatalogReady, setScenarioCatalogReady] = React.useState(false);
   const [areaCatalogReady, setAreaCatalogReady] = React.useState(false);
   const [scenarioCatalogCompanyId, setScenarioCatalogCompanyId] =
     React.useState("");
+  const [scenarioCatalogUserId, setScenarioCatalogUserId] = React.useState("");
   const [areaCatalogCompanyId, setAreaCatalogCompanyId] = React.useState("");
+  const [areaCatalogUserId, setAreaCatalogUserId] = React.useState("");
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [bulkDeleteDialogOpen, setBulkDeleteDialogOpen] = React.useState(false);
   const [bulkDeleting, setBulkDeleting] = React.useState(false);
@@ -144,19 +148,22 @@ export function OccupancyScenarioManager() {
   >([]);
   const [editingScenario, setEditingScenario] =
     React.useState<OccupancyScenario | null>(null);
+  const [alertScenario, setAlertScenario] =
+    React.useState<OccupancyScenario | null>(null);
   const scenarioRequestSequenceRef = React.useRef(0);
   const areaRequestSequenceRef = React.useRef(0);
   const companyScopeIdRef = React.useRef(companyScopeId);
+  const userIdRef = React.useRef(userId);
   const scenarioCatalogCertified =
     Boolean(companyScopeId) &&
     scenarioCatalogReady &&
-    scenarioCatalogCompanyId === companyScopeId;
+    scenarioCatalogCompanyId === companyScopeId &&
+    scenarioCatalogUserId === userId;
   const areaCatalogCertified =
     Boolean(companyScopeId) &&
     areaCatalogReady &&
-    areaCatalogCompanyId === companyScopeId;
-  const catalogsReady =
-    scenarioCatalogCertified && areaCatalogCertified;
+    areaCatalogCompanyId === companyScopeId &&
+    areaCatalogUserId === userId;
   const selectedScenarioIdSet = React.useMemo(
     () => new Set(selectedScenarioIds),
     [selectedScenarioIds],
@@ -198,13 +205,16 @@ export function OccupancyScenarioManager() {
   ) => {
     const requestSequence = ++scenarioRequestSequenceRef.current;
     const requestedCompanyId = companyScopeId;
+    const requestedUserId = userId;
     const isCurrentRequest = () =>
       requestSequence === scenarioRequestSequenceRef.current &&
-      companyScopeIdRef.current === requestedCompanyId;
+      companyScopeIdRef.current === requestedCompanyId &&
+      userIdRef.current === requestedUserId;
     if (!silent) {
       setLoading(true);
       setScenarioCatalogReady(false);
       setScenarioCatalogCompanyId("");
+      setScenarioCatalogUserId("");
       setScenarioCatalogError("");
     }
     try {
@@ -214,6 +224,7 @@ export function OccupancyScenarioManager() {
         );
       }
       const response = await apiFetch<unknown>("/occupancy/scenarios", {
+        bypassReadCache: true,
         companyScopeId: requestedCompanyId,
       });
       const payload = masterCrossCompanyScope
@@ -236,6 +247,7 @@ export function OccupancyScenarioManager() {
       );
       setScenarioCatalogError("");
       setScenarioCatalogCompanyId(requestedCompanyId);
+      setScenarioCatalogUserId(requestedUserId);
       setScenarioCatalogReady(true);
     } catch {
       if (!isCurrentRequest()) return;
@@ -243,6 +255,7 @@ export function OccupancyScenarioManager() {
       if (!silent) {
         setScenarios([]);
         setScenarioCatalogCompanyId("");
+        setScenarioCatalogUserId("");
         setScenarioCatalogError(message);
         setScenarioCatalogReady(false);
         toast.error(message);
@@ -252,74 +265,92 @@ export function OccupancyScenarioManager() {
         setLoading(false);
       }
     }
-  }, [companyScopeId, masterCrossCompanyScope]);
+  }, [companyScopeId, masterCrossCompanyScope, userId]);
 
   const loadAreaOptions = React.useCallback(async (
     { silent = false }: { silent?: boolean } = {},
   ) => {
     const requestSequence = ++areaRequestSequenceRef.current;
+    const requestedCompanyId = companyScopeId;
+    const requestedUserId = userId;
+    const isCurrentRequest = () =>
+      requestSequence === areaRequestSequenceRef.current &&
+      companyScopeIdRef.current === requestedCompanyId &&
+      userIdRef.current === requestedUserId;
     const now = new Date();
     if (!silent) {
       setLoadingAreas(true);
       setAreaOptions([]);
       setAreaCatalogReady(false);
       setAreaCatalogCompanyId("");
+      setAreaCatalogUserId("");
       setAreaCatalogError("");
-      setAreaCatalogWarning("");
       setAreaCatalogAuthoritative(false);
     }
     try {
-      if (!companyScopeId) {
+      if (!requestedCompanyId) {
         throw new Error(
           "Empresa ativa não definida para descobrir áreas de ocupação.",
         );
       }
       const catalog = await fetchOccupancyAreaCatalog({
-        companyId: companyScopeId,
+        companyId: requestedCompanyId,
         from: new Date(now.getTime() - 4 * HOUR_MS),
         masterCrossCompanyScope,
         request: <T,>(path: string) =>
-          apiFetch<T>(path, { companyScopeId }),
+          apiFetch<T>(path, {
+            bypassReadCache: true,
+            companyScopeId: requestedCompanyId,
+          }),
         to: now,
       });
-      if (requestSequence !== areaRequestSequenceRef.current) return;
+      if (!isCurrentRequest()) return;
       setAreaOptions(catalog.options);
       setAreaCatalogError("");
       setAreaCatalogAuthoritative(catalog.authoritative);
-      setAreaCatalogWarning(
-        catalog.authoritative
-          ? ""
-          : "A lista de áreas está sendo atualizada e pode não mostrar todas as opções neste momento.",
-      );
-      setAreaCatalogCompanyId(companyScopeId);
+      setAreaCatalogCompanyId(requestedCompanyId);
+      setAreaCatalogUserId(requestedUserId);
       setAreaCatalogReady(true);
     } catch {
-      if (requestSequence !== areaRequestSequenceRef.current) return;
+      if (!isCurrentRequest()) return;
       const message = "Não foi possível carregar as áreas de ocupação.";
       if (!silent) {
         setAreaOptions([]);
         setAreaCatalogCompanyId("");
+        setAreaCatalogUserId("");
         setAreaCatalogError(message);
-        setAreaCatalogWarning("");
         setAreaCatalogAuthoritative(false);
         setAreaCatalogReady(false);
         toast.error(message);
       }
     } finally {
-      if (!silent && requestSequence === areaRequestSequenceRef.current) {
+      if (!silent && isCurrentRequest()) {
         setLoadingAreas(false);
       }
     }
-  }, [companyScopeId, masterCrossCompanyScope]);
+  }, [companyScopeId, masterCrossCompanyScope, userId]);
 
   React.useLayoutEffect(() => {
     companyScopeIdRef.current = companyScopeId;
   }, [companyScopeId]);
 
+  React.useLayoutEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
+
   React.useEffect(() => {
+    areaRequestSequenceRef.current += 1;
     setScenarios([]);
+    setAreaOptions([]);
+    setLoadingAreas(false);
+    setAreaCatalogError("");
+    setAreaCatalogAuthoritative(false);
+    setAreaCatalogReady(false);
+    setAreaCatalogCompanyId("");
+    setAreaCatalogUserId("");
     setScenarioCatalogReady(false);
     setScenarioCatalogCompanyId("");
+    setScenarioCatalogUserId("");
     setDialogOpen(false);
     setBulkDeleteDialogOpen(false);
     setBulkDeactivateDialogOpen(false);
@@ -327,40 +358,25 @@ export function OccupancyScenarioManager() {
     setScenarioSearch("");
     setScenarioStatus("all");
     setEditingScenario(null);
+    setAlertScenario(null);
     void loadScenarios();
-    void loadAreaOptions();
-  }, [loadAreaOptions, loadScenarios]);
-
-  useResourceAutoRefresh(
-    async () => {
-      await Promise.all([
-        loadScenarios({ silent: true }),
-        loadAreaOptions({ silent: true }),
-      ]);
-    },
-    {
-      enabled:
-        Boolean(companyScopeId) && !loading && !loadingAreas && !bulkMutating,
-      intervalMs: RESOURCE_METADATA_REFRESH_INTERVAL_MS,
-    },
-  );
+  }, [loadScenarios]);
 
   function openCreateDialog() {
     if (!canEdit) {
       toast.error("Seu usuário não pode alterar cenários de ocupação.");
       return;
     }
-    if (!catalogsReady) {
+    if (!scenarioCatalogCertified) {
       toast.error(
-        areaCatalogError ||
-          scenarioCatalogError ||
-          "As opções de ocupação ainda estão sendo carregadas.",
+        scenarioCatalogError || "Os cenários de ocupação ainda estão sendo carregados.",
       );
       return;
     }
 
     setEditingScenario(null);
     setDialogOpen(true);
+    if (!areaCatalogCertified && !loadingAreas) void loadAreaOptions();
   }
 
   function openEditDialog(scenario: OccupancyScenario) {
@@ -368,11 +384,9 @@ export function OccupancyScenarioManager() {
       toast.error("Seu usuário não pode alterar cenários de ocupação.");
       return;
     }
-    if (!catalogsReady) {
+    if (!scenarioCatalogCertified) {
       toast.error(
-        areaCatalogError ||
-          scenarioCatalogError ||
-          "As opções de ocupação ainda estão sendo carregadas.",
+        scenarioCatalogError || "Os cenários de ocupação ainda estão sendo carregados.",
       );
       return;
     }
@@ -383,6 +397,7 @@ export function OccupancyScenarioManager() {
 
     setEditingScenario(scenario);
     setDialogOpen(true);
+    if (!areaCatalogCertified && !loadingAreas) void loadAreaOptions();
   }
 
   async function deleteScenario(scenario: OccupancyScenario) {
@@ -587,7 +602,7 @@ export function OccupancyScenarioManager() {
   async function handleSaved(savedCompanyId: string) {
     if (savedCompanyId !== companyScopeIdRef.current) return;
     setDialogOpen(false);
-    await Promise.all([loadScenarios(), loadAreaOptions()]);
+    await loadScenarios();
   }
 
   return (
@@ -610,7 +625,9 @@ export function OccupancyScenarioManager() {
               className="w-full sm:w-auto"
               onClick={() => {
                 void loadScenarios();
-                void loadAreaOptions();
+                if (areaCatalogCertified || areaCatalogError) {
+                  void loadAreaOptions();
+                }
               }}
               disabled={loading || loadingAreas || bulkMutating}
             >
@@ -627,7 +644,7 @@ export function OccupancyScenarioManager() {
                 type="button"
                 className="w-full sm:w-auto"
                 onClick={openCreateDialog}
-                disabled={!catalogsReady || bulkMutating}
+                disabled={!scenarioCatalogCertified || bulkMutating}
               >
                 <Plus className="h-4 w-4" />
                 Novo cenário
@@ -636,20 +653,7 @@ export function OccupancyScenarioManager() {
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          {areaCatalogError ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-              Áreas indisponíveis: {areaCatalogError}
-            </div>
-          ) : loadingAreas ? (
-            <div className="rounded-md border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
-              Carregando câmeras e áreas de ocupação...
-            </div>
-          ) : areaCatalogWarning ? (
-            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
-              {areaCatalogWarning}
-            </div>
-          ) : null}
-          {loading ? (
+          {loading || !scenarioCatalogCertified ? (
             <TableSkeleton />
           ) : scenarioCatalogError ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-8 text-center text-sm text-destructive">
@@ -721,7 +725,7 @@ export function OccupancyScenarioManager() {
                         variant="outline"
                         size="sm"
                         onClick={() => openEditDialog(selectedScenarios[0])}
-                        disabled={bulkMutating || !catalogsReady}
+                        disabled={bulkMutating || !scenarioCatalogCertified}
                       >
                         <Edit className="h-3.5 w-3.5" />
                         Editar
@@ -816,7 +820,25 @@ export function OccupancyScenarioManager() {
                           {occupancyObjectLabel(scenario.object_class)}
                         </TableCell>
                         <TableCell className="text-muted-foreground">
-                          {thresholdSummary(scenario)}
+                          <div className="flex min-w-0 flex-col items-start gap-1">
+                            <span>{thresholdSummary(scenario)}</span>
+                            <Button
+                              type="button"
+                              variant="link"
+                              size="sm"
+                              className="h-auto min-h-6 p-0"
+                              onClick={() => {
+                                if (scenario.company_id === companyScopeId) {
+                                  setAlertScenario(scenario);
+                                }
+                              }}
+                              disabled={bulkMutating || !scenarioCatalogCertified}
+                              aria-label={`Ver alertas de ${scenario.name}`}
+                            >
+                              <Bell className="h-3.5 w-3.5" />
+                              Ver alertas
+                            </Button>
+                          </div>
                         </TableCell>
                         <TableCell>
                           <StatusBadge active={scenario.active} />
@@ -834,7 +856,7 @@ export function OccupancyScenarioManager() {
                                 variant="outline"
                                 size="sm"
                                 onClick={() => openEditDialog(scenario)}
-                                disabled={bulkMutating || !catalogsReady}
+                                disabled={bulkMutating || !scenarioCatalogCertified}
                               >
                                 <Edit className="h-3.5 w-3.5" />
                                 Editar
@@ -878,7 +900,7 @@ export function OccupancyScenarioManager() {
                   <Button
                     type="button"
                     onClick={openCreateDialog}
-                    disabled={!catalogsReady}
+                    disabled={!scenarioCatalogCertified}
                   >
                     <Plus className="h-4 w-4" />
                     Criar primeiro cenário
@@ -894,16 +916,27 @@ export function OccupancyScenarioManager() {
         areaCatalogAuthoritative={areaCatalogAuthoritative}
         areaCatalogError={areaCatalogError}
         areaCatalogReady={areaCatalogCertified}
+        loadingAreas={loadingAreas}
         areaOptions={areaOptions}
         canEdit={canEdit}
         companyId={companyScopeId}
         onOpenChange={setDialogOpen}
+        onRetryAreaCatalog={() => void loadAreaOptions()}
         onSaved={handleSaved}
-        open={dialogOpen}
+        open={dialogOpen && scenarioCatalogCertified}
         scenario={editingScenario}
       />
+      {scenarioCatalogCertified && alertScenario && alertScenario.company_id === companyScopeId ? (
+        <OccupancyScenarioAlertsDialog
+          key={`${companyScopeId}:${alertScenario.id}`}
+          companyId={companyScopeId}
+          onClose={() => setAlertScenario(null)}
+          scenario={alertScenario}
+          timeZone={companyTimeZone}
+        />
+      ) : null}
       <Dialog
-        open={bulkDeactivateDialogOpen}
+        open={bulkDeactivateDialogOpen && scenarioCatalogCertified}
         onOpenChange={(open) => {
           if (!bulkMutating) setBulkDeactivateDialogOpen(open);
         }}
@@ -949,7 +982,7 @@ export function OccupancyScenarioManager() {
         </DialogContent>
       </Dialog>
       <Dialog
-        open={bulkDeleteDialogOpen}
+        open={bulkDeleteDialogOpen && scenarioCatalogCertified}
         onOpenChange={(open) => {
           if (!bulkMutating) setBulkDeleteDialogOpen(open);
         }}
@@ -1002,10 +1035,12 @@ function OccupancyScenarioDialog({
   areaCatalogAuthoritative,
   areaCatalogError,
   areaCatalogReady,
+  loadingAreas,
   areaOptions,
   canEdit,
   companyId,
   onOpenChange,
+  onRetryAreaCatalog,
   onSaved,
   open,
   scenario,
@@ -1013,10 +1048,12 @@ function OccupancyScenarioDialog({
   areaCatalogAuthoritative: boolean;
   areaCatalogError: string;
   areaCatalogReady: boolean;
+  loadingAreas: boolean;
   areaOptions: AreaOption[];
   canEdit: boolean;
   companyId: string;
   onOpenChange: (open: boolean) => void;
+  onRetryAreaCatalog: () => void;
   onSaved: (companyId: string) => Promise<void>;
   open: boolean;
   scenario: OccupancyScenario | null;
@@ -1024,6 +1061,7 @@ function OccupancyScenarioDialog({
   const [draft, setDraft] = React.useState<Draft>(() => createEmptyDraft());
   const [saving, setSaving] = React.useState(false);
   const companyIdRef = React.useRef(companyId);
+  const draftContextRef = React.useRef("");
   const compatibleAreaOptions = React.useMemo(() => {
     const objectClass = draft.object_class.trim();
     return areaOptions.filter(
@@ -1050,13 +1088,26 @@ function OccupancyScenarioDialog({
   }, [companyId]);
 
   React.useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      draftContextRef.current = "";
+      return;
+    }
+    const contextKey = `${companyId}:${scenario?.id ?? "new"}`;
+    if (draftContextRef.current === contextKey) return;
+    draftContextRef.current = contextKey;
     setDraft(
       scenario
         ? scenarioToDraft(scenario)
         : createEmptyDraft(initialObjectClass),
     );
-  }, [initialObjectClass, open, scenario]);
+  }, [companyId, initialObjectClass, open, scenario]);
+
+  React.useEffect(() => {
+    if (!open || scenario || !areaCatalogReady || !initialObjectClass) return;
+    setDraft((current) => current.object_class
+      ? current
+      : { ...current, object_class: initialObjectClass });
+  }, [areaCatalogReady, initialObjectClass, open, scenario]);
 
   function updateArea(index: number, patch: Partial<OccupancyScenarioArea>) {
     setDraft((current) => ({
@@ -1194,10 +1245,18 @@ function OccupancyScenarioDialog({
 
         <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto pr-1">
           {!areaCatalogReady ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-              Salvamento indisponível:{" "}
-              {areaCatalogError ||
-                "as áreas ainda estão sendo carregadas."}
+            <div className={cn(
+              "flex flex-wrap items-center justify-between gap-2 rounded-md border px-4 py-3 text-sm",
+              areaCatalogError
+                ? "border-destructive/40 bg-destructive/5 text-destructive"
+                : "bg-muted/20 text-muted-foreground",
+            )}>
+              <span>{areaCatalogError || "Carregando áreas disponíveis para este cenário..."}</span>
+              {areaCatalogError && !loadingAreas ? (
+                <Button type="button" size="sm" variant="outline" onClick={onRetryAreaCatalog}>
+                  Tentar novamente
+                </Button>
+              ) : null}
             </div>
           ) : null}
           <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_150px_150px_150px]">

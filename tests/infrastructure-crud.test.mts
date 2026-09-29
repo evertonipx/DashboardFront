@@ -107,7 +107,7 @@ test("falhas parciais permanecem selecionadas e há uma única recarga por lote"
 test("catálogos só habilitam CRUD depois de certificados para empresa e pai atuais", () => {
   assert.match(
     source,
-    /const baseCatalogCertified =\s*Boolean\(companyScopeId\) && baseCatalogCompanyId === companyScopeId/,
+    /const baseCatalogCertified =\s*Boolean\(companyScopeId\) &&\s*baseCatalogCompanyId === companyScopeId &&\s*baseCatalogIdentity === infrastructureCacheScope/,
   );
   assert.match(
     source,
@@ -153,7 +153,7 @@ test("respostas filhas obsoletas não são publicadas após trocar empresa ou pa
   );
   assert.match(
     subLocationLoader,
-    /companyScopeIdRef\.current !== requestedCompanyScopeId \|\|\s*selectedLocationIdRef\.current !== requestedLocationId/,
+    /companyScopeIdRef\.current !== requestedCompanyScopeId \|\|\s*infrastructureCacheScopeRef\.current !== requestedResourceScope \|\|\s*selectedLocationIdRef\.current !== requestedLocationId/,
   );
   assert.match(
     subLocationLoader,
@@ -166,7 +166,7 @@ test("respostas filhas obsoletas não são publicadas após trocar empresa ou pa
   );
   assert.match(
     lineLoader,
-    /companyScopeIdRef\.current !== requestedCompanyScopeId \|\|\s*selectedCameraIdRef\.current !== requestedCameraId/,
+    /companyScopeIdRef\.current !== requestedCompanyScopeId \|\|\s*infrastructureCacheScopeRef\.current !== requestedResourceScope \|\|\s*selectedCameraIdRef\.current !== requestedCameraId/,
   );
   assert.match(
     lineLoader,

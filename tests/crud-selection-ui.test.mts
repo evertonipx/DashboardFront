@@ -67,8 +67,8 @@ test("Visões isola catálogos, seleções e widgets por empresa sem recarregar 
   assert.doesNotMatch(source, /workspaceTab !== "view-builder"/);
   assert.match(
     source,
-    /\}, \[companyScopeId, masterCrossCompanyScope\]\);/,
-    "o catálogo deve carregar uma vez por escopo, não a cada troca de aba",
+    /\}, \[canAccessViews, companyScopeId, masterCrossCompanyScope\]\);/,
+    "o catálogo deve carregar uma vez por escopo/permissão, não a cada troca de aba",
   );
 });
 

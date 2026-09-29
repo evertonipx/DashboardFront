@@ -97,7 +97,7 @@ import {
   type ReportTable,
 } from "@/lib/report-export";
 import { abortRequest, isAbortError } from "@/lib/request-cancellation";
-import type { DemographicBucketRow, DemographicGender } from "@/lib/types";
+import type { DemographicBucketRow } from "@/lib/types";
 import { USER_GRID_HYDRATED_EVENT, type UserGridReadiness } from "@/lib/user-grid";
 import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import { cn, formatNumber } from "@/lib/utils";
@@ -133,12 +133,6 @@ const LIVE_TAIL_MINUTES = 5;
 const LIVE_FULL_REFRESH_MS = 6 * 60 * 60 * 1_000;
 const MINUTE_MS = 60_000;
 const MAX_DEMOGRAPHIC_PARTITION_CACHE_ENTRIES = 400;
-const GENDER_COLORS: Record<DemographicGender, string> = {
-  Woman: "#DB2777",
-  Man: "#2563EB",
-  unknown: "#8A99AF",
-};
-
 type DashboardDataState = {
   key: string;
   refreshVersion: number;
@@ -672,10 +666,21 @@ export function DemographicsDashboard({
   }), [displayEndInput, displayStartInput, timeZone]);
   const comparisonVisible = preferences.some((preference) => preference.id === "demographics_period_comparison" && preference.visible !== false);
   const comparisonMode = temporalSettings.demographics_period_comparison.comparison ?? "previous-period";
-  const comparisonWindow = React.useMemo(() => buildDemographicComparisonWindow({
-    startInput: displayStartInput, endInput: displayEndInput, mode: comparisonMode, timeZone, cutoff: requestWindow.to,
-  }), [comparisonMode, displayEndInput, displayStartInput, requestWindow.to, timeZone]);
-  const comparisonKey = `${dataScopeKey}|${comparisonMode}|${comparisonWindow.from.toISOString()}|${comparisonWindow.to.toISOString()}|${refreshVersion}`;
+  const comparisonReady = dataState?.key === dataScopeKey && dataState.refreshVersion === refreshVersion &&
+    dataState.through === requestWindow.to.getTime() && summary.hasData && !loading && !refreshing && !error;
+  // Resolving a partial civil comparison can inspect every minute of its day
+  // around DST. Keep the last visible chart's window during a source refresh;
+  // a temporary loading state must not erase its comparison identity.
+  const comparisonWindow = React.useMemo(() =>
+    comparisonVisible && summary.hasData && pageActive && companyTimeZoneReady && preferencesReady && queryRequested && rangeReady && companyScopeId
+      ? buildDemographicComparisonWindow({
+          startInput: displayStartInput, endInput: displayEndInput, mode: comparisonMode, timeZone, cutoff: requestWindow.to,
+        })
+      : null,
+  [companyScopeId, companyTimeZoneReady, comparisonMode, comparisonVisible, displayEndInput, displayStartInput, pageActive, preferencesReady, queryRequested, rangeReady, requestWindow.to, summary.hasData, timeZone]);
+  const comparisonKey = comparisonWindow
+    ? `${dataScopeKey}|${comparisonMode}|${comparisonWindow.from.toISOString()}|${comparisonWindow.to.toISOString()}|${refreshVersion}`
+    : "";
   const comparisonCacheScopeKey = `${requestCacheIdentityKey}|${comparisonMode}|${displayStartInput}|${displayEndInput}`;
   const [comparisonState, setComparisonState] = React.useState<{
     key: string; scopeKey: string; summary?: DemographicAggregation; error?: string;
@@ -684,10 +689,8 @@ export function DemographicsDashboard({
     // A newly chosen comparison must not inherit another period's retry delay.
     comparisonRetryRef.current = null;
   }, [comparisonCacheScopeKey]);
-  const comparisonReady = dataState?.key === dataScopeKey && dataState.refreshVersion === refreshVersion &&
-    dataState.through === requestWindow.to.getTime() && summary.hasData && !loading && !refreshing && !error;
   React.useEffect(() => {
-    if (!companyTimeZoneReady || !pageActive || !preferencesReady || !comparisonVisible || !queryRequested || !rangeReady || !comparisonReady || !companyScopeId || comparisonState?.key === comparisonKey) return;
+    if (!companyTimeZoneReady || !pageActive || !preferencesReady || !comparisonVisible || !queryRequested || !rangeReady || !comparisonReady || !companyScopeId || !comparisonWindow || comparisonState?.key === comparisonKey) return;
     if (surface === "live" && Date.now() < (comparisonRetryRef.current?.retryAt ?? 0)) return;
     const controller = new AbortController();
     comparisonRequestRef.current = controller;
@@ -740,11 +743,11 @@ export function DemographicsDashboard({
   const comparisonError = error || (comparisonState?.scopeKey === comparisonCacheScopeKey ? comparisonState.error : undefined);
   const comparisonLoading = queryRequested && comparisonVisible && summary.hasData && !comparisonError && comparisonState?.key !== comparisonKey;
   const temporalModels = React.useMemo(() => Object.fromEntries(DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.map((id) => [id,
-    buildDemographicTemporalModel({ id, summary, comparisonSummary, comparisonLabel: comparisonWindow.label,
+    buildDemographicTemporalModel({ id, summary, comparisonSummary, comparisonLabel: comparisonWindow?.label,
       settings: temporalSettings[id], ...temporalBounds, timeZone, now: requestWindow.to, theme: effectiveTheme,
       enabled: queryRequested && preferencesReady && summary.hasData && preferences.some((preference) => preference.id === id && preference.visible !== false) }),
   ])) as Record<DemographicTemporalWidgetId, ReturnType<typeof buildDemographicTemporalModel>>,
-  [comparisonSummary, comparisonWindow.label, effectiveTheme, preferences, preferencesReady, queryRequested, requestWindow.to, summary, temporalBounds, temporalSettings, timeZone]);
+  [comparisonSummary, comparisonWindow?.label, effectiveTheme, preferences, preferencesReady, queryRequested, requestWindow.to, summary, temporalBounds, temporalSettings, timeZone]);
   const genderLeader = React.useMemo(
     () => leadingDistributionItem(visibleDemographicDistribution(summary.gender, "gender")), [summary],
   );
@@ -764,7 +767,7 @@ export function DemographicsDashboard({
       presentations: widgetPresentations,
     });
     const temporalCharts = DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.filter((id) => preferences.some((preference) => preference.id === id && preference.visible !== false))
-      .map((id) => buildDemographicTemporalModel({ id, summary, comparisonSummary, comparisonLabel: comparisonWindow.label,
+      .map((id) => buildDemographicTemporalModel({ id, summary, comparisonSummary, comparisonLabel: comparisonWindow?.label,
         settings: temporalSettings[id], ...temporalBounds, timeZone, now: requestWindow.to, theme: "light" }))
       .filter((model) => model.hasData)
       .map((model) => ({ title: model.title, description: model.description, option: model.option, table: model.table }));
@@ -980,8 +983,15 @@ export function DemographicsDashboard({
         ? demographicComparisonColors(temporalSettings[id].palette, temporalSettings[id].dimension, effectiveTheme)
         : [...demographicPalettePreviewColors(temporalSettings[id].palette, temporalSettings[id].dimension)],
     configurationContent: <DemographicsTemporalControls widgetId={id} theme={effectiveTheme} value={temporalSettings[id]} onChange={(value) => updateTemporalSettings(id, value)} />,
-    node: <DemographicsTemporalWidget model={temporalModels[id]} loading={loading || (id === "demographics_period_comparison" && comparisonLoading)} error={id === "demographics_period_comparison" ? comparisonError : undefined} />,
-  }))], [cards, comparisonError, comparisonLoading, effectiveTheme, loading, temporalModels, temporalSettings, updateTemporalSettings]);
+    node: <DemographicsTemporalWidget
+      model={temporalModels[id]}
+      loading={loading || (id === "demographics_period_comparison" && comparisonLoading)}
+      error={id === "demographics_period_comparison" ? comparisonError : undefined}
+      settled={id === "demographics_period_comparison" && Boolean(comparisonState?.key === comparisonKey && comparisonState.summary)}
+      snapshotScopeKey={id === "demographics_period_comparison"
+        ? `${comparisonCacheScopeKey}|${effectiveTheme}|${JSON.stringify(temporalSettings[id])}` : undefined}
+    />,
+  }))], [cards, comparisonCacheScopeKey, comparisonError, comparisonKey, comparisonLoading, comparisonState, effectiveTheme, loading, temporalModels, temporalSettings, updateTemporalSettings]);
 
   function applyRange(value: OccupancyAnalysisDateRangeInput) {
     if (surface === "live" || !companyTimeZoneReady) return;
@@ -2190,233 +2200,6 @@ function leadingDistributionItem<Key extends string>(
   );
 }
 
-// Retained for historical rendering fixtures; exports use the palette-aware builders above.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function buildGenderOption(
-  summary: DemographicAggregation,
-  showLegend = false,
-): EnterpriseChartOption {
-  const gender = visibleDemographicDistribution(summary.gender, "gender");
-  const visibleIndexes = gender.flatMap((item, index) =>
-    (item.percentage ?? 0) > 0 ? [index] : [],
-  );
-  const firstVisibleIndex = visibleIndexes[0];
-  const lastVisibleIndex = visibleIndexes[visibleIndexes.length - 1];
-  return {
-    animationDuration: 350,
-    aria: {
-      enabled: true,
-      decal: { show: false },
-      description:
-        "Barra de cem por cento com a participação entre gêneros identificados: Mulher e Homem.",
-    },
-    grid: {
-      bottom: 4,
-      containLabel: false,
-      left: 0,
-      right: 0,
-      top: showLegend ? 36 : 4,
-    },
-    legend: {
-      data: gender.map((item) => item.label),
-      formatter: (name: string) => {
-        const item = gender.find((candidate) => candidate.label === name);
-        return item ? `${name} · ${formatPercentage(item.percentage)}` : name;
-      },
-      icon: "roundRect",
-      itemGap: 18,
-      itemHeight: 10,
-      itemWidth: 10,
-      show: showLegend,
-      textStyle: { color: "#526477", fontSize: 12 },
-      top: 0,
-    },
-    tooltip: { formatter: genderTooltip, trigger: "item" },
-    xAxis: {
-      max: 100,
-      min: 0,
-      show: false,
-      splitLine: { show: false },
-      type: "value",
-    },
-    yAxis: { data: ["Detecções"], show: false, type: "category" },
-    series: gender.map((item, index) => ({
-      barMaxWidth: 32,
-      data: [
-        {
-          count: item.count,
-          label: item.label,
-          value: item.percentage,
-        },
-      ],
-      emphasis: { focus: "series" },
-      itemStyle: {
-        borderRadius: [
-          index === firstVisibleIndex ? 6 : 0,
-          index === lastVisibleIndex ? 6 : 0,
-          index === lastVisibleIndex ? 6 : 0,
-          index === firstVisibleIndex ? 6 : 0,
-        ],
-        color: GENDER_COLORS[item.key],
-      },
-      label: {
-        align: "center",
-        color: "#F9FAFB",
-        formatter: (parameters: unknown) =>
-          (chartParameterNumber(parameters) ?? 0) > 0
-            ? percentageChartLabel(parameters)
-            : "",
-        fontSize: 11,
-        fontWeight: 600,
-        position: "inside",
-        show: (item.percentage ?? 0) >= 7,
-      },
-      name: item.label,
-      stack: "gender",
-      type: "bar",
-    })),
-  } as EnterpriseChartOption;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function buildAgeOption(
-  summary: DemographicAggregation,
-  color: string,
-): EnterpriseChartOption {
-  return horizontalDistributionOption({
-    ariaDescription:
-      "Barras horizontais com a participação das nove faixas etárias em ordem crescente.",
-    color,
-    items: summary.age,
-  });
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function buildEmotionOption(
-  summary: DemographicAggregation,
-  color: string,
-): EnterpriseChartOption {
-  return horizontalDistributionOption({
-    ariaDescription:
-      "Ranking horizontal das oito emoções classificadas, da maior para a menor participação.",
-    color,
-    items: [...summary.emotion].sort(
-      (left, right) =>
-        right.count - left.count || left.label.localeCompare(right.label),
-    ),
-  });
-}
-
-function horizontalDistributionOption<Key extends string>({
-  ariaDescription,
-  color,
-  items,
-}: {
-  ariaDescription: string;
-  color: string;
-  items: readonly DemographicDistributionItem<Key>[];
-}): EnterpriseChartOption {
-  const largestPercentage = Math.max(
-    0,
-    ...items.map((item) => item.percentage ?? 0),
-  );
-  const maximum = Math.min(
-    100,
-    Math.max(10, Math.ceil((largestPercentage * 1.15) / 10) * 10),
-  );
-  return {
-    animationDuration: 350,
-    aria: {
-      enabled: true,
-      decal: { show: false },
-      description: ariaDescription,
-    },
-    grid: { bottom: 12, containLabel: true, left: 0, right: 48, top: 8 },
-    tooltip: {
-      axisPointer: { type: "none" },
-      formatter: distributionTooltip,
-      trigger: "axis",
-    },
-    xAxis: {
-      axisLabel: {
-        color: "#526477",
-        fontSize: 10,
-        formatter: "{value}%",
-        hideOverlap: true,
-        showMaxLabel: true,
-        showMinLabel: true,
-      },
-      axisLine: { show: false },
-      axisTick: { show: false },
-      max: maximum,
-      min: 0,
-      splitLine: { lineStyle: { opacity: 0.1, type: "dashed" } },
-      splitNumber: 4,
-      type: "value",
-    },
-    yAxis: {
-      axisLabel: {
-        color: "#526477",
-        fontSize: 11,
-        interval: 0,
-        margin: 10,
-        overflow: "truncate",
-        width: 100,
-      },
-      axisLine: { show: false },
-      axisTick: { show: false },
-      data: items.map((item) => item.label),
-      inverse: true,
-      type: "category",
-    },
-    series: [
-      {
-        barMaxWidth: 20,
-        data: items.map((item) => ({
-          count: item.count,
-          value: item.percentage ?? 0,
-        })),
-        itemStyle: { borderRadius: [0, 4, 4, 0], color },
-        label: {
-          distance: 8,
-          formatter: (parameters: unknown) =>
-            (chartParameterNumber(parameters) ?? 0) > 0
-              ? percentageChartLabel(parameters)
-              : "",
-          fontSize: 11,
-          fontWeight: 600,
-          position: "right",
-          show: true,
-        },
-        name: "Participação",
-        type: "bar",
-      },
-    ],
-  } as EnterpriseChartOption;
-}
-
-// Keep the historical identifier so existing widget layouts remain compatible.
-// The presentation is now a directly readable age-by-gender matrix.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function buildAgeGenderPyramidOption(
-  summary: DemographicAggregation,
-  theme: "light" | "dark" = "light",
-): EnterpriseChartOption {
-  return buildDemographicCrossingOption(
-    summary, normalizeDemographicPresentation(undefined, "age-gender"), "age-gender", theme,
-  );
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function buildAgeEmotionHeatmapOption(
-  summary: DemographicAggregation,
-  theme: "light" | "dark" = "light",
-): EnterpriseChartOption {
-  return buildDemographicCrossingOption(
-    summary, normalizeDemographicPresentation(undefined, "age-emotion"), "age-emotion", theme,
-  );
-}
-
 function buildDemographicsReport({
   audience,
   rangeLabel,
@@ -2587,82 +2370,6 @@ function leaderReportMetric(
       ? `${item.label} · ${formatPercentage(item.percentage)}`
       : "Sem predominância",
   };
-}
-
-function genderTooltip(parameters: unknown) {
-  const parameter = firstTooltipParameter(parameters);
-  const data = parameter && isRecord(parameter.data) ? parameter.data : null;
-  const label = typeof data?.label === "string" ? data.label : "Gênero";
-  return tooltipBlock(
-    label,
-    chartDataNumber(data, "value"),
-    chartDataNumber(data, "count"),
-    "Participação entre gêneros identificados",
-  );
-}
-
-function distributionTooltip(parameters: unknown) {
-  const parameter = firstTooltipParameter(parameters);
-  const data = parameter && isRecord(parameter.data) ? parameter.data : null;
-  const label =
-    parameter && typeof parameter.axisValueLabel === "string"
-      ? parameter.axisValueLabel
-      : "Categoria";
-  return tooltipBlock(
-    label,
-    chartDataNumber(data, "value"),
-    chartDataNumber(data, "count"),
-  );
-}
-
-
-
-function tooltipBlock(
-  label: string,
-  percentage: number | null,
-  count: number | null,
-  percentageLabel = "Participação",
-) {
-  return [
-    `<strong>${escapeTooltipHtml(label)}</strong>`,
-    `${percentageLabel}: ${percentage === null ? "—" : `${formatDecimal(Math.abs(percentage))}%`}`,
-    `Detecções: ${count === null ? "—" : formatNumber(count)}`,
-  ].join("<br/>");
-}
-
-function firstTooltipParameter(parameters: unknown) {
-  const candidate = Array.isArray(parameters) ? parameters[0] : parameters;
-  return isRecord(candidate) ? candidate : null;
-}
-
-function chartDataNumber(data: Record<string, unknown> | null, key: string) {
-  if (data?.[key] === null || data?.[key] === undefined) return null;
-  const value = Number(data?.[key]);
-  return Number.isFinite(value) ? value : null;
-}
-
-function escapeTooltipHtml(value: string) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function percentageChartLabel(parameters: unknown) {
-  const value = chartParameterNumber(parameters);
-  return value === null ? "—" : `${formatDecimal(value)}%`;
-}
-
-
-function chartParameterNumber(parameters: unknown) {
-  if (!isRecord(parameters)) return null;
-  const raw = isRecord(parameters.value)
-    ? parameters.value.value
-    : parameters.value;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : null;
 }
 
 function demographicTextAlternative(title: string) {

@@ -13,7 +13,7 @@ test("cenários congelam a empresa e descartam publicação tardia", () => {
   assert.match(source, /scenarioRequestSequenceRef/);
   assert.match(
     source,
-    /apiFetch<unknown>\("\/scenarios", \{\s*companyScopeId: requestedCompanyScopeId/,
+    /apiFetch<unknown>\("\/scenarios", \{\s*bypassReadCache: forceResults,\s*companyScopeId: requestedCompanyScopeId/,
   );
   assert.match(
     source,
@@ -21,7 +21,7 @@ test("cenários congelam a empresa e descartam publicação tardia", () => {
   );
   assert.match(
     source,
-    /`\/scenarios\/\$\{scenario\.id\}\/result`,\s*\{[\s\S]*?companyScopeId: requestedCompanyScopeId,[\s\S]*?signal: controller\.signal/,
+    /`\/scenarios\/\$\{scenarioId\}\/result`,\s*\{[\s\S]*?companyScopeId: requestedCompanyScopeId,[\s\S]*?signal: controller\.signal/,
   );
   assert.match(
     source,

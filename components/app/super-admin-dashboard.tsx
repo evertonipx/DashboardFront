@@ -345,6 +345,8 @@ export function SuperAdminDashboard() {
   const [masterUsers, setMasterUsers] = React.useState<ManagedUser[]>([]);
   const [masterUsersLoaded, setMasterUsersLoaded] = React.useState(false);
   const [loadingMasterUsers, setLoadingMasterUsers] = React.useState(false);
+  const [masterUsersUnavailableCompanies, setMasterUsersUnavailableCompanies] =
+    React.useState(0);
   const [workers, setWorkers] = React.useState<Worker[]>([]);
   const [modules, setModules] = React.useState<IpxModule[]>([]);
   const [companyModules, setCompanyModules] = React.useState<CompanyModule[]>([]);
@@ -762,10 +764,14 @@ export function SuperAdminDashboard() {
       additiveAdminPromotionContext?.userId === editingUser.id,
   );
 
-  const loadCompanies = React.useCallback(async () => {
+  const loadCompanies = React.useCallback(async (
+    { force = false }: { force?: boolean } = {},
+  ) => {
     setLoading(true);
     try {
-      const companyPayload = await apiFetch<Company[]>("/companies");
+      const companyPayload = await apiFetch<Company[]>("/companies", {
+        bypassReadCache: force,
+      });
       if (!dashboardMountedRef.current) return;
       const companyRows = companyPayload.map(normalizeCompanyRecord);
 
@@ -809,7 +815,7 @@ export function SuperAdminDashboard() {
 
     setLoadingModuleCatalog(true);
     setModuleCatalogError("");
-    const request = apiFetch<IpxModule[]>("/modules")
+    const request = apiFetch<IpxModule[]>("/modules", { bypassReadCache: force })
       .then((rows) => {
         if (!dashboardMountedRef.current) return rows;
         modulesRef.current = rows;
@@ -848,7 +854,7 @@ export function SuperAdminDashboard() {
 
     setLoadingPermissionCatalog(true);
     setPermissionCatalogError("");
-    const request = apiFetch<Permission[]>("/permissions")
+    const request = apiFetch<Permission[]>("/permissions", { bypassReadCache: force })
       .then((rows) => {
         if (!dashboardMountedRef.current) return rows;
         setPermissionCatalog(rows);
@@ -884,36 +890,50 @@ export function SuperAdminDashboard() {
     const requestSequence = ++masterUsersRequestSequenceRef.current;
     const companyRows = companies;
     setLoadingMasterUsers(true);
+    setMasterUsersUnavailableCompanies(0);
     try {
       const companyUserRows = await mapWithConcurrency(
         companyRows,
         MASTER_USER_DISCOVERY_CONCURRENCY,
         async (company) => {
           if (requestSequence !== masterUsersRequestSequenceRef.current) {
-            return [];
+            return { rows: [] as ManagedUser[], unavailable: false };
           }
           const cached = companyUsersCacheRef.current.get(company.id);
-          if (!force && cached) return cached;
+          if (!force && cached) return { rows: cached, unavailable: false };
 
-          const rows = await apiFetch<ManagedUser[]>(
-            `/companies/${company.id}/users`,
-            { companyScopeId: company.id },
-          ).catch(() => []);
-          const scopedRows = rows.flatMap((user) => {
-            const returnedCompanyId = getScopedRowCompanyId(user);
-            if (returnedCompanyId && returnedCompanyId !== company.id) {
-              return [];
+          try {
+            const rows = await apiFetch<ManagedUser[]>(
+              `/companies/${company.id}/users`,
+              { companyScopeId: company.id },
+            );
+            const scopedRows = rows.flatMap((user) => {
+              const returnedCompanyId = getScopedRowCompanyId(user);
+              if (returnedCompanyId && returnedCompanyId !== company.id) {
+                return [];
+              }
+              return [{ ...user, company_id: company.id }];
+            });
+            if (requestSequence === masterUsersRequestSequenceRef.current) {
+              companyUsersCacheRef.current.set(company.id, scopedRows);
             }
-            return [{ ...user, company_id: company.id }];
-          });
-          companyUsersCacheRef.current.set(company.id, scopedRows);
-          return scopedRows;
+            return { rows: scopedRows, unavailable: false };
+          } catch {
+            // A transient or forbidden tenant read is not an empty user list.
+            // Keep it uncached so the next explicit refresh can retry it.
+            return { rows: cached ?? [], unavailable: true };
+          }
         },
       );
       if (requestSequence !== masterUsersRequestSequenceRef.current) return;
 
       setMasterUsers(
-        uniqueRowsById(companyUserRows.flat()).filter((user) => user.is_master),
+        uniqueRowsById(companyUserRows.flatMap((result) => result.rows)).filter(
+          (user) => user.is_master,
+        ),
+      );
+      setMasterUsersUnavailableCompanies(
+        companyUserRows.filter((result) => result.unavailable).length,
       );
       setMasterUsersLoaded(true);
     } finally {
@@ -928,7 +948,12 @@ export function SuperAdminDashboard() {
     {
       force = false,
       includeOperational = false,
-    }: { force?: boolean; includeOperational?: boolean } = {},
+      refreshModules = force,
+    }: {
+      force?: boolean;
+      includeOperational?: boolean;
+      refreshModules?: boolean;
+    } = {},
   ) => {
     const companyId = expectedCompanyId.trim();
     if (selectedCompanyIdRef.current !== companyId) return;
@@ -980,14 +1005,18 @@ export function SuperAdminDashboard() {
     let certifiedModuleRows: CompanyModule[] = [];
     try {
       const [userRows, moduleRows] = await Promise.all([
-        apiFetch<ManagedUser[]>(`/companies/${companyId}/users`, {
-          companyScopeId: companyId,
-          signal: controller.signal,
-        }),
-        apiFetch<CompanyModule[]>(
-          `/companies/${companyId}/modules`,
-          { companyScopeId: companyId, signal: controller.signal },
-        ),
+        !force && cachedUsers
+          ? Promise.resolve(cachedUsers)
+          : apiFetch<ManagedUser[]>(`/companies/${companyId}/users`, {
+              companyScopeId: companyId,
+              signal: controller.signal,
+            }),
+        !refreshModules && cachedModules
+          ? Promise.resolve(cachedModules)
+          : apiFetch<CompanyModule[]>(`/companies/${companyId}/modules`, {
+              companyScopeId: companyId,
+              signal: controller.signal,
+            }),
       ]);
       const companyScopeIds = uniqueScopeIds(companyId);
       const scopedModuleRows = selectExplicitCompanyScopedRows(
@@ -1256,7 +1285,11 @@ export function SuperAdminDashboard() {
     try {
       const moduleRows = await apiFetch<CompanyModule[]>(
         `/companies/${companyId}/modules`,
-        { companyScopeId: companyId, signal: controller.signal },
+        {
+          bypassReadCache: force,
+          companyScopeId: companyId,
+          signal: controller.signal,
+        },
       );
       const scopedRows = selectExplicitCompanyScopedRows(
         moduleRows,
@@ -1993,6 +2026,14 @@ export function SuperAdminDashboard() {
           companyModulesCacheRef.current.delete(companyId);
           companyWorkersCacheRef.current.delete(companyId);
         });
+        masterUsersRequestSequenceRef.current += 1;
+        setLoadingMasterUsers(false);
+        setMasterUsers((current) =>
+          current.filter((managedUser) =>
+            !deletedIds.has(getScopedRowCompanyId(managedUser) ?? ""),
+          ),
+        );
+        setMasterUsersLoaded(false);
         const storedScope = getStoredMasterCompanyScope();
         if (storedScope && deletedIds.has(storedScope.id)) {
           clearStoredMasterCompanyScope();
@@ -2409,6 +2450,18 @@ export function SuperAdminDashboard() {
         setLoadedCompanyId("");
       }
 
+      companyUsersCacheRef.current.delete(company.id);
+      companyModulesCacheRef.current.delete(company.id);
+      companyWorkersCacheRef.current.delete(company.id);
+      masterUsersRequestSequenceRef.current += 1;
+      setLoadingMasterUsers(false);
+      setMasterUsers((current) =>
+        current.filter(
+          (managedUser) => getScopedRowCompanyId(managedUser) !== company.id,
+        ),
+      );
+      setMasterUsersLoaded(false);
+
       await loadCompanies();
     } catch (error) {
       toast.error(companyDeleteErrorMessage(error, company.name));
@@ -2498,7 +2551,7 @@ export function SuperAdminDashboard() {
           "Perfil de Administrador da empresa aplicado com sucesso.",
         );
         closeUserDialog();
-        await loadCompanyDetails(companyId, { force: true });
+        await loadCompanyDetails(companyId, { force: true, refreshModules: false });
         return;
       }
 
@@ -2531,7 +2584,7 @@ export function SuperAdminDashboard() {
         setMasterUsersLoaded(false);
         setMasterUsers([]);
         await loadCompanies();
-        await loadCompanyDetails(companyId, { force: true });
+        await loadCompanyDetails(companyId, { force: true, refreshModules: false });
         return;
       }
 
@@ -2628,14 +2681,14 @@ export function SuperAdminDashboard() {
         );
         if (editingUser) return;
         closeUserDialog();
-        await loadCompanyDetails(companyId, { force: true });
+        await loadCompanyDetails(companyId, { force: true, refreshModules: false });
         return;
       }
 
       if (profileUpdateWarning) {
         toast.warning(profileUpdateWarning);
         closeUserDialog();
-        await loadCompanyDetails(companyId, { force: true });
+        await loadCompanyDetails(companyId, { force: true, refreshModules: false });
         return;
       }
 
@@ -2649,7 +2702,7 @@ export function SuperAdminDashboard() {
             : "Usuário criado.",
       );
       closeUserDialog();
-      await loadCompanyDetails(companyId, { force: true });
+      await loadCompanyDetails(companyId, { force: true, refreshModules: false });
     } catch (error) {
       toast.error(
         userForm.isMaster
@@ -2745,7 +2798,7 @@ export function SuperAdminDashboard() {
             updatedIds.forEach((userId) => next.delete(userId));
             return next;
           });
-          await loadCompanyDetails(companyId, { force: true });
+          await loadCompanyDetails(companyId, { force: true, refreshModules: false });
         }
       }
 
@@ -2823,7 +2876,7 @@ export function SuperAdminDashboard() {
             deletedIds.forEach((userId) => next.delete(userId));
             return next;
           });
-          await loadCompanyDetails(companyId, { force: true });
+          await loadCompanyDetails(companyId, { force: true, refreshModules: false });
         }
       }
 
@@ -2856,7 +2909,7 @@ export function SuperAdminDashboard() {
       if (editingUser?.id === user.id) {
         closeUserDialog();
       }
-      await loadCompanyDetails(companyId, { force: true });
+      await loadCompanyDetails(companyId, { force: true, refreshModules: false });
     } catch (error) {
       if (selectedCompanyIdRef.current !== companyId) return;
       toast.error(
@@ -3504,7 +3557,7 @@ export function SuperAdminDashboard() {
                       variant="outline"
                       size="sm"
                       className="w-full sm:w-auto"
-                      onClick={() => void loadCompanies()}
+                      onClick={() => void loadCompanies({ force: true })}
                       disabled={loading}
                     >
                       <RefreshCw
@@ -4041,6 +4094,11 @@ export function SuperAdminDashboard() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  {masterUsersUnavailableCompanies > 0 ? (
+                    <div className="rounded-md border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300" role="status">
+                      A lista pode estar incompleta: não foi possível consultar {formatNumber(masterUsersUnavailableCompanies)} empresa(s). Use Atualizar para tentar novamente.
+                    </div>
+                  ) : null}
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <Input
                       value={masterUserQuery}
@@ -4220,7 +4278,13 @@ export function SuperAdminDashboard() {
                       </TableBody>
                     </Table>
                   ) : (
-                    <EmptyState text="Nenhum super-admin disponível." />
+                    <EmptyState
+                      text={
+                        masterUsersUnavailableCompanies
+                          ? "Nenhum super-admin confirmado nas empresas consultadas."
+                          : "Nenhum super-admin disponível."
+                      }
+                    />
                   )}
                 </CardContent>
               </section>

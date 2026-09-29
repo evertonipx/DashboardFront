@@ -84,9 +84,23 @@ type CachedScenarioResult = {
 };
 
 const SCENARIO_RESULT_CACHE_TTL_MS = 30_000;
-const SCENARIO_RESULT_BATCH_SIZE = 4;
+const SCENARIO_RESULT_MAX_CONCURRENT = 4;
 const SCENARIO_RESULT_CACHE_MAX_ENTRIES = 256;
 const scenarioResultCache = new Map<string, CachedScenarioResult>();
+
+function drainScenarioResultQueue(
+  queue: Array<() => Promise<void>>,
+  active: { current: number },
+) {
+  while (active.current < SCENARIO_RESULT_MAX_CONCURRENT && queue.length) {
+    const task = queue.shift()!;
+    active.current += 1;
+    void task().finally(() => {
+      active.current -= 1;
+      drainScenarioResultQueue(queue, active);
+    });
+  }
+}
 
 function trimScenarioResultCache() {
   while (scenarioResultCache.size > SCENARIO_RESULT_CACHE_MAX_ENTRIES) {
@@ -143,11 +157,18 @@ export function ScenarioManager() {
   );
   const [scenarioCatalogCompanyId, setScenarioCatalogCompanyId] =
     React.useState("");
+  const [scenarioCatalogUserId, setScenarioCatalogUserId] =
+    React.useState("");
   const companyScopeIdRef = React.useRef(companyScopeId);
+  const userId = user?.id ?? "";
+  const userIdRef = React.useRef(userId);
   const scenarioRequestSequenceRef = React.useRef(0);
   const scenarioRequestControllerRef = React.useRef<AbortController | null>(
     null,
   );
+  const resultRequestsRef = React.useRef(new Set<string>());
+  const resultQueueRef = React.useRef<Array<() => Promise<void>>>([]);
+  const activeResultRequestsRef = React.useRef(0);
   const resolvedActiveTab =
     (activeTab === "flow" && canEditScenarios) ||
     (activeTab === "occupancy" && canEditOccupancy)
@@ -189,7 +210,8 @@ export function ScenarioManager() {
   const bulkMutating = bulkDeleting || bulkUpdatingStatus !== null;
   const scenarioCatalogCertified =
     Boolean(companyScopeId.trim()) &&
-    scenarioCatalogCompanyId === companyScopeId.trim();
+    scenarioCatalogCompanyId === companyScopeId.trim() &&
+    scenarioCatalogUserId === userId;
   const activeSelectedScenarioCount = selectedScenarios.filter(
     (scenario) => scenario.active,
   ).length;
@@ -200,10 +222,12 @@ export function ScenarioManager() {
     { forceResults = false }: { forceResults?: boolean } = {},
   ) => {
     const requestedCompanyScopeId = companyScopeId.trim();
+    const requestedUserId = userId;
     const requestSequence = ++scenarioRequestSequenceRef.current;
     const isCurrentRequest = () =>
       requestSequence === scenarioRequestSequenceRef.current &&
-      companyScopeIdRef.current.trim() === requestedCompanyScopeId;
+      companyScopeIdRef.current.trim() === requestedCompanyScopeId &&
+      userIdRef.current === requestedUserId;
 
     if (!canEditScenarios || !requestedCompanyScopeId) {
       scenarioRequestControllerRef.current?.abort(
@@ -213,6 +237,7 @@ export function ScenarioManager() {
       setScenarios([]);
       setResults({});
       setScenarioCatalogCompanyId("");
+      setScenarioCatalogUserId("");
       setLoading(false);
       return;
     }
@@ -225,6 +250,7 @@ export function ScenarioManager() {
     setLoading(true);
     try {
       const response = await apiFetch<unknown>("/scenarios", {
+        bypassReadCache: forceResults,
         companyScopeId: requestedCompanyScopeId,
         signal: controller.signal,
       });
@@ -245,6 +271,7 @@ export function ScenarioManager() {
 
       setScenarios(scopedScenarios);
       setScenarioCatalogCompanyId(requestedCompanyScopeId);
+      setScenarioCatalogUserId(requestedUserId);
       const availableScenarioIds = new Set(
         scopedScenarios.map((scenario) => scenario.id),
       );
@@ -255,84 +282,91 @@ export function ScenarioManager() {
 
       const now = Date.now();
       const cachedEntries: Array<readonly [string, ScenarioResult | null]> = [];
-      const scenariosToHydrate: Scenario[] = [];
       scopedScenarios.forEach((scenario) => {
-        const cacheKey = `${requestedCompanyScopeId}:${scenario.id}`;
+        const cacheKey = `${requestedUserId}:${requestedCompanyScopeId}:${scenario.id}`;
         const cached = scenarioResultCache.get(cacheKey);
-        if (cached) {
+        if (forceResults) {
+          scenarioResultCache.delete(cacheKey);
+        } else if (cached && cached.expiresAt > now) {
           cachedEntries.push([scenario.id, cached.value] as const);
-        }
-        if (forceResults || !cached || cached.expiresAt <= now) {
-          scenariosToHydrate.push(scenario);
         }
       });
       setResults(Object.fromEntries(cachedEntries));
-
-      // The list itself is useful immediately. Totals are intentionally
-      // hydrated in small batches so dozens of scenarios do not block the
-      // table or saturate the browser connection pool.
-      void (async () => {
-        for (
-          let index = 0;
-          index < scenariosToHydrate.length;
-          index += SCENARIO_RESULT_BATCH_SIZE
-        ) {
-          if (!isCurrentRequest()) return;
-          const batch = scenariosToHydrate.slice(
-            index,
-            index + SCENARIO_RESULT_BATCH_SIZE,
-          );
-          const entries = await Promise.all(
-            batch.map(async (scenario) => {
-              try {
-                const result = await apiFetch<ScenarioResult>(
-                  `/scenarios/${scenario.id}/result`,
-                  {
-                    companyScopeId: requestedCompanyScopeId,
-                    signal: controller.signal,
-                  },
-                );
-                return [scenario.id, result] as const;
-              } catch {
-                return [scenario.id, null] as const;
-              }
-            }),
-          );
-          if (!isCurrentRequest()) return;
-
-          const expiresAt = Date.now() + SCENARIO_RESULT_CACHE_TTL_MS;
-          entries.forEach(([scenarioId, result]) => {
-            scenarioResultCache.set(
-              `${requestedCompanyScopeId}:${scenarioId}`,
-              { expiresAt, value: result },
-            );
-          });
-          trimScenarioResultCache();
-          setResults((current) => ({
-            ...current,
-            ...Object.fromEntries(entries),
-          }));
-        }
-      })();
     } catch {
       if (!isCurrentRequest()) return;
       setScenarios([]);
       setResults({});
       setScenarioCatalogCompanyId("");
+      setScenarioCatalogUserId("");
       toast.error("Não foi possível carregar os cenários.");
     } finally {
       if (isCurrentRequest()) setLoading(false);
     }
-  }, [canEditScenarios, companyScopeId, masterCrossCompanyScope]);
+  }, [canEditScenarios, companyScopeId, masterCrossCompanyScope, userId]);
+
+  const loadVisibleScenarioResult = React.useCallback((scenarioId: string) => {
+    const requestedCompanyScopeId = companyScopeId.trim();
+    const requestedUserId = userId;
+    if (!canEditScenarios || !requestedCompanyScopeId || !scenarioCatalogCertified) return;
+    const cacheKey = `${requestedUserId}:${requestedCompanyScopeId}:${scenarioId}`;
+    const cached = scenarioResultCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      setResults((current) => scenarioId in current ? current : {
+        ...current, [scenarioId]: cached.value,
+      });
+      return;
+    }
+    const controller = scenarioRequestControllerRef.current;
+    if (!controller || controller.signal.aborted) return;
+    const requestSequence = scenarioRequestSequenceRef.current;
+    const pendingKey = `${requestSequence}:${cacheKey}`;
+    if (resultRequestsRef.current.has(pendingKey)) return;
+    resultRequestsRef.current.add(pendingKey);
+    resultQueueRef.current.push(async () => {
+      try {
+        if (controller.signal.aborted ||
+          scenarioRequestSequenceRef.current !== requestSequence) return;
+        const result = await apiFetch<ScenarioResult>(`/scenarios/${scenarioId}/result`, {
+          bypassReadCache: true,
+          companyScopeId: requestedCompanyScopeId,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted ||
+          scenarioRequestSequenceRef.current !== requestSequence ||
+          companyScopeIdRef.current.trim() !== requestedCompanyScopeId ||
+          userIdRef.current !== requestedUserId) return;
+        scenarioResultCache.set(cacheKey, {
+          expiresAt: Date.now() + SCENARIO_RESULT_CACHE_TTL_MS,
+          value: result,
+        });
+        trimScenarioResultCache();
+        setResults((current) => ({ ...current, [scenarioId]: result }));
+      } catch {
+        if (controller.signal.aborted ||
+          scenarioRequestSequenceRef.current !== requestSequence ||
+          companyScopeIdRef.current.trim() !== requestedCompanyScopeId ||
+          userIdRef.current !== requestedUserId) return;
+        setResults((current) => ({ ...current, [scenarioId]: null }));
+      } finally {
+        resultRequestsRef.current.delete(pendingKey);
+      }
+    });
+    drainScenarioResultQueue(resultQueueRef.current, activeResultRequestsRef);
+  }, [canEditScenarios, companyScopeId, scenarioCatalogCertified, userId]);
 
   React.useLayoutEffect(() => {
     companyScopeIdRef.current = companyScopeId;
   }, [companyScopeId]);
 
+  React.useLayoutEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
+
   React.useEffect(() => {
     setScenarios([]);
     setResults({});
     setScenarioCatalogCompanyId("");
+    setScenarioCatalogUserId("");
     setDialogOpen(false);
     setBulkDialogOpen(false);
     setBulkDeleteDialogOpen(false);
@@ -341,7 +375,7 @@ export function ScenarioManager() {
     setScenarioSearch("");
     setScenarioStatus("all");
     setEditingScenario(null);
-  }, [companyScopeId]);
+  }, [companyScopeId, userId]);
 
   React.useEffect(() => {
     if (activeTab === "flow" && !canEditScenarios && canEditOccupancy) {
@@ -365,6 +399,14 @@ export function ScenarioManager() {
   }, [activeTab, canEditOccupancy, canEditScenarios]);
 
   React.useEffect(() => {
+    if (resolvedActiveTab !== "flow" || !canEditScenarios) {
+      scenarioRequestControllerRef.current?.abort(
+        new DOMException("A aba de Contagem foi fechada.", "AbortError"),
+      );
+      scenarioRequestControllerRef.current = null;
+      scenarioRequestSequenceRef.current += 1;
+      return;
+    }
     void loadScenarios();
     return () => {
       scenarioRequestControllerRef.current?.abort(
@@ -373,7 +415,7 @@ export function ScenarioManager() {
       scenarioRequestControllerRef.current = null;
       scenarioRequestSequenceRef.current += 1;
     };
-  }, [loadScenarios]);
+  }, [canEditScenarios, loadScenarios, resolvedActiveTab]);
 
   function openCreateDialog() {
     if (!canEditScenarios) {
@@ -433,7 +475,7 @@ export function ScenarioManager() {
 
       toast.success("Cenário excluído");
       scenarioResultCache.delete(
-        `${requestedCompanyScopeId}:${scenario.id}`,
+        `${userId}:${requestedCompanyScopeId}:${scenario.id}`,
       );
       await loadScenarios({ forceResults: true });
     } catch {
@@ -566,7 +608,7 @@ export function ScenarioManager() {
           });
           deletedIds.push(scenario.id);
           scenarioResultCache.delete(
-            `${requestedCompanyScopeId}:${scenario.id}`,
+            `${userId}:${requestedCompanyScopeId}:${scenario.id}`,
           );
         } catch {
           failedIds.push(scenario.id);
@@ -685,7 +727,7 @@ export function ScenarioManager() {
               </div>
             </CardHeader>
             <CardContent className="space-y-3">
-              {loading ? (
+              {loading || !scenarioCatalogCertified ? (
                 <div className="space-y-2">
                   {Array.from({ length: 4 }).map((_, index) => (
                     <Skeleton key={index} className="h-14 w-full" />
@@ -854,13 +896,11 @@ export function ScenarioManager() {
                           </Badge>
                         </TableCell>
                         <TableCell>
-                          {results[scenario.id] ? (
-                            <div className="font-medium">
-                              {formatNumber(results[scenario.id]?.result)}
-                            </div>
-                          ) : (
-                            <span className="text-muted-foreground">-</span>
-                          )}
+                          <ScenarioResultCell
+                            onVisible={loadVisibleScenarioResult}
+                            result={results[scenario.id]}
+                            scenarioId={scenario.id}
+                          />
                         </TableCell>
                         <TableCell className="text-muted-foreground">
                           {formatDateTime(scenario.updated_at ?? scenario.created_at)}
@@ -927,7 +967,7 @@ export function ScenarioManager() {
         <>
           <ScenarioDialog
             canEdit={canEditScenarios}
-            open={dialogOpen}
+            open={dialogOpen && scenarioCatalogCertified}
             scenario={editingScenario}
             companyScopeId={companyScopeId}
             requireExplicitCompanyId={masterCrossCompanyScope}
@@ -940,11 +980,11 @@ export function ScenarioManager() {
             requireExplicitCompanyId={masterCrossCompanyScope}
             onOpenChange={setBulkDialogOpen}
             onSaved={() => loadScenarios({ forceResults: true })}
-            open={bulkDialogOpen}
+            open={bulkDialogOpen && scenarioCatalogCertified}
             scenarios={scenarios}
           />
           <Dialog
-            open={bulkDeactivateDialogOpen}
+            open={bulkDeactivateDialogOpen && scenarioCatalogCertified}
             onOpenChange={(open) => {
               if (!bulkMutating) setBulkDeactivateDialogOpen(open);
             }}
@@ -990,7 +1030,7 @@ export function ScenarioManager() {
             </DialogContent>
           </Dialog>
           <Dialog
-            open={bulkDeleteDialogOpen}
+            open={bulkDeleteDialogOpen && scenarioCatalogCertified}
             onOpenChange={(open) => {
               if (!bulkMutating) setBulkDeleteDialogOpen(open);
             }}
@@ -1039,6 +1079,39 @@ export function ScenarioManager() {
       ) : null}
     </section>
   );
+}
+
+function ScenarioResultCell({
+  onVisible,
+  result,
+  scenarioId,
+}: {
+  onVisible: (scenarioId: string) => void;
+  result: ScenarioResult | null | undefined;
+  scenarioId: string;
+}) {
+  const elementRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (result !== undefined) return;
+    const element = elementRef.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      onVisible(scenarioId);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        observer.disconnect();
+        onVisible(scenarioId);
+      }
+    }, { rootMargin: "120px" });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [onVisible, result, scenarioId]);
+
+  return <div ref={elementRef} className={result ? "font-medium" : "text-muted-foreground"}>
+    {result ? formatNumber(result.result) : "—"}
+  </div>;
 }
 
 function ScenarioDialog({

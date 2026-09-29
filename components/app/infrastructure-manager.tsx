@@ -15,7 +15,6 @@ import {
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/app/auth-provider";
-import { useResourceAutoRefresh } from "@/components/app/use-resource-auto-refresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -116,6 +115,7 @@ type LineCountFormState = {
 
 type ResourceLoadOptions = {
   preferCache?: boolean;
+  resources?: "all" | "cameras";
   silent?: boolean;
 };
 
@@ -143,7 +143,6 @@ type ResourceListFilter = {
 };
 
 const INFRASTRUCTURE_CACHE_TTL_MS = 45_000;
-const INFRASTRUCTURE_REFRESH_INTERVAL_MS = 60_000;
 
 type InfrastructureCacheEntry = {
   expiresAt: number;
@@ -205,7 +204,7 @@ const emptyLocationForm: LocationFormState = {
   name: "",
   description: "",
   active: "true",
-  worker_id: "",
+  worker_id: "none",
 };
 
 const emptySubLocationForm: SubLocationFormState = {
@@ -319,6 +318,7 @@ export function InfrastructureManager({
   const [bulkDeleting, setBulkDeleting] = React.useState(false);
   const [bulkUpdating, setBulkUpdating] = React.useState(false);
   const [baseCatalogCompanyId, setBaseCatalogCompanyId] = React.useState("");
+  const [baseCatalogIdentity, setBaseCatalogIdentity] = React.useState("");
   const [subLocationCatalogScope, setSubLocationCatalogScope] = React.useState({
     companyId: "",
     parentId: "",
@@ -337,9 +337,13 @@ export function InfrastructureManager({
   const [lineFilter, setLineFilter] = React.useState<ResourceListFilter>(
     emptyResourceListFilter,
   );
+  const infrastructureCacheScope = `${user?.id ?? "anonymous"}:${companyScopeId ?? "none"}`;
+  const infrastructureCacheScopeRef = React.useRef(infrastructureCacheScope);
   const bulkMutationRunning = saving || bulkDeleting || bulkUpdating;
   const baseCatalogCertified =
-    Boolean(companyScopeId) && baseCatalogCompanyId === companyScopeId;
+    Boolean(companyScopeId) &&
+    baseCatalogCompanyId === companyScopeId &&
+    baseCatalogIdentity === infrastructureCacheScope;
   const subLocationCatalogCertified =
     baseCatalogCertified &&
     Boolean(selectedLocationId) &&
@@ -360,16 +364,7 @@ export function InfrastructureManager({
     view === "cameras" || (view === "all" && activeTab === "cameras");
   const needsWorkerCatalog =
     locationsTabActive &&
-    (canEditLocations || Object.keys(workerLocationAssignments).length > 0);
-  const infrastructureCacheScope = `${user?.id ?? "anonymous"}:${companyScopeId ?? "none"}`;
-  const editingDialogOpen =
-    locationDialog ||
-    subLocationDialog ||
-    cameraGroupDialog ||
-    cameraDialog ||
-    lineDialog ||
-    Boolean(bulkDeleteRequest) ||
-    bulkUpdating;
+    (locationDialog || Object.keys(workerLocationAssignments).length > 0);
   const workersById = React.useMemo(
     () => new Map(workers.map((worker) => [worker.id, worker])),
     [workers],
@@ -378,6 +373,10 @@ export function InfrastructureManager({
   React.useLayoutEffect(() => {
     companyScopeIdRef.current = companyScopeId;
   }, [companyScopeId]);
+
+  React.useLayoutEffect(() => {
+    infrastructureCacheScopeRef.current = infrastructureCacheScope;
+  }, [infrastructureCacheScope]);
 
   React.useLayoutEffect(() => {
     selectedLocationIdRef.current = selectedLocationId;
@@ -547,6 +546,7 @@ export function InfrastructureManager({
     setBulkDeleting(false);
     setBulkUpdating(false);
     setBaseCatalogCompanyId("");
+    setBaseCatalogIdentity("");
     setSubLocationCatalogScope({ companyId: "", parentId: "" });
     setLineCatalogScope({ companyId: "", parentId: "" });
     setLocationFilter(emptyResourceListFilter);
@@ -560,11 +560,12 @@ export function InfrastructureManager({
     setCameraGroupDialog(false);
     setCameraDialog(false);
     setLineDialog(false);
-  }, [companyScopeId]);
+  }, [infrastructureCacheScope]);
 
   const loadBase = React.useCallback(
     async ({
       preferCache = false,
+      resources = "all",
       silent = false,
     }: ResourceLoadOptions = {}) => {
       const requestSequence = ++baseRequestSequenceRef.current;
@@ -572,13 +573,16 @@ export function InfrastructureManager({
         setLocations([]);
         setCameras([]);
         setBaseCatalogCompanyId("");
+        setBaseCatalogIdentity("");
         setLoading(false);
         return;
       }
       const requestedCompanyScopeId = companyScopeId;
+      const requestedResourceScope = infrastructureCacheScope;
+      const camerasOnly = resources === "cameras";
       const locationsCacheKey = `${infrastructureCacheScope}:locations`;
       const camerasCacheKey = `${infrastructureCacheScope}:cameras`;
-      const cachedLocations = preferCache
+      const cachedLocations = preferCache && !camerasOnly
         ? readCachedInfrastructureResource<Location[]>(locationsCacheKey)
         : undefined;
       const cachedCameras = preferCache
@@ -586,60 +590,72 @@ export function InfrastructureManager({
         : undefined;
       if (!silent) {
         setLoading(
-          cachedLocations === undefined || cachedCameras === undefined,
+          (!camerasOnly && cachedLocations === undefined) ||
+            cachedCameras === undefined,
         );
       }
       try {
         const [locationsResult, camerasResult] = await Promise.allSettled([
-          fetchCachedInfrastructureResource({
-            force: !preferCache && !silent,
-            key: locationsCacheKey,
-            preferCache,
-            request: () =>
-              apiFetch<Location[]>("/locations", {
-                companyScopeId: requestedCompanyScopeId,
+          camerasOnly
+            ? Promise.resolve(null)
+            : fetchCachedInfrastructureResource({
+                force: !preferCache && !silent,
+                key: locationsCacheKey,
+                preferCache,
+                request: () =>
+                  apiFetch<Location[]>("/locations", {
+                    bypassReadCache: !preferCache && !silent,
+                    companyScopeId: requestedCompanyScopeId,
+                  }),
               }),
-          }),
           fetchCachedInfrastructureResource({
             force: !preferCache && !silent,
             key: camerasCacheKey,
             preferCache,
             request: () =>
               apiFetch<Camera[]>("/cameras", {
+                bypassReadCache: !preferCache && !silent,
                 companyScopeId: requestedCompanyScopeId,
               }),
           }),
         ]);
         if (
           requestSequence !== baseRequestSequenceRef.current ||
-          companyScopeIdRef.current !== requestedCompanyScopeId
+          companyScopeIdRef.current !== requestedCompanyScopeId ||
+          infrastructureCacheScopeRef.current !== requestedResourceScope
         )
           return;
-        if (locationsResult.status === "rejected") throw locationsResult.reason;
+        if (!camerasOnly && locationsResult.status === "rejected") {
+          throw locationsResult.reason;
+        }
         if (camerasResult.status === "rejected") throw camerasResult.reason;
-        const locationRows = locationsResult.value;
+        const locationRows =
+          locationsResult.status === "fulfilled" ? locationsResult.value : null;
         const cameraRows = camerasResult.value;
-        const scopedLocations = filterScopedApiRows(
-          locationRows,
-          requestedCompanyScopeId,
-        );
         const scopedCameras = filterScopedApiRows(
           cameraRows,
           requestedCompanyScopeId,
         );
-        setLocations(scopedLocations);
+        if (!camerasOnly && locationRows) {
+          const scopedLocations = filterScopedApiRows(
+            locationRows,
+            requestedCompanyScopeId,
+          );
+          setLocations(scopedLocations);
+          setCheckedLocationIds((current) =>
+            retainAvailableSelection(current, scopedLocations),
+          );
+          setSelectedLocationId((current) =>
+            current && scopedLocations.some((row) => row.id === current)
+              ? current
+              : (scopedLocations[0]?.id ?? ""),
+          );
+        }
         setCameras(scopedCameras);
         setBaseCatalogCompanyId(requestedCompanyScopeId);
-        setCheckedLocationIds((current) =>
-          retainAvailableSelection(current, scopedLocations),
-        );
+        setBaseCatalogIdentity(infrastructureCacheScope);
         setCheckedCameraIds((current) =>
           retainAvailableSelection(current, scopedCameras),
-        );
-        setSelectedLocationId((current) =>
-          current && scopedLocations.some((row) => row.id === current)
-            ? current
-            : (scopedLocations[0]?.id ?? ""),
         );
         setSelectedCameraId((current) =>
           current && scopedCameras.some((row) => row.id === current)
@@ -650,15 +666,21 @@ export function InfrastructureManager({
         if (
           !silent &&
           requestSequence === baseRequestSequenceRef.current &&
-          companyScopeIdRef.current === requestedCompanyScopeId
+          companyScopeIdRef.current === requestedCompanyScopeId &&
+          infrastructureCacheScopeRef.current === requestedResourceScope
         ) {
-          toast.error("Não foi possível carregar os locais e câmeras.");
+          toast.error(
+            camerasOnly
+              ? "Não foi possível carregar as câmeras."
+              : "Não foi possível carregar os locais e câmeras.",
+          );
         }
       } finally {
         if (
           !silent &&
           requestSequence === baseRequestSequenceRef.current &&
-          companyScopeIdRef.current === requestedCompanyScopeId
+          companyScopeIdRef.current === requestedCompanyScopeId &&
+          infrastructureCacheScopeRef.current === requestedResourceScope
         ) {
           setLoading(false);
         }
@@ -679,16 +701,22 @@ export function InfrastructureManager({
       }
 
       const requestedCompanyScopeId = companyScopeId;
+      const requestedResourceScope = infrastructureCacheScope;
       try {
         const rows = await fetchCachedInfrastructureResource({
           force: !preferCache && !silent,
           key: `${infrastructureCacheScope}:workers`,
           preferCache,
-          request: () => fetchInfrastructureWorkers(requestedCompanyScopeId),
+          request: () =>
+            fetchInfrastructureWorkers(
+              requestedCompanyScopeId,
+              !preferCache && !silent,
+            ),
         });
         if (
           requestSequence !== workerRequestSequenceRef.current ||
-          companyScopeIdRef.current !== requestedCompanyScopeId
+          companyScopeIdRef.current !== requestedCompanyScopeId ||
+          infrastructureCacheScopeRef.current !== requestedResourceScope
         )
           return;
         setWorkers(rows);
@@ -696,7 +724,8 @@ export function InfrastructureManager({
         if (
           !silent &&
           requestSequence === workerRequestSequenceRef.current &&
-          companyScopeIdRef.current === requestedCompanyScopeId
+          companyScopeIdRef.current === requestedCompanyScopeId &&
+          infrastructureCacheScopeRef.current === requestedResourceScope
         ) {
           toast.warning("Os Workers estão temporariamente indisponíveis.");
         }
@@ -724,6 +753,7 @@ export function InfrastructureManager({
       }
 
       const requestedCompanyScopeId = companyScopeId;
+      const requestedResourceScope = infrastructureCacheScope;
       const requestedLocationId = selectedLocationId;
       const cacheKey = `${infrastructureCacheScope}:location:${requestedLocationId}:sub-locations`;
       const cachedRows = preferCache
@@ -741,12 +771,16 @@ export function InfrastructureManager({
           request: () =>
             apiFetch<SubLocation[]>(
               `/locations/${selectedLocationId}/sub-locations`,
-              { companyScopeId: requestedCompanyScopeId },
+              {
+                bypassReadCache: !preferCache && !silent,
+                companyScopeId: requestedCompanyScopeId,
+              },
             ),
         });
         if (
           requestSequence !== subLocationRequestSequenceRef.current ||
           companyScopeIdRef.current !== requestedCompanyScopeId ||
+          infrastructureCacheScopeRef.current !== requestedResourceScope ||
           selectedLocationIdRef.current !== requestedLocationId
         )
           return;
@@ -767,6 +801,7 @@ export function InfrastructureManager({
       } catch {
         if (
           companyScopeIdRef.current !== requestedCompanyScopeId ||
+          infrastructureCacheScopeRef.current !== requestedResourceScope ||
           selectedLocationIdRef.current !== requestedLocationId
         )
           return;
@@ -778,6 +813,7 @@ export function InfrastructureManager({
           !silent &&
           requestSequence === subLocationRequestSequenceRef.current &&
           companyScopeIdRef.current === requestedCompanyScopeId &&
+          infrastructureCacheScopeRef.current === requestedResourceScope &&
           selectedLocationIdRef.current === requestedLocationId
         ) {
           setLoadingSubLocations(false);
@@ -810,6 +846,7 @@ export function InfrastructureManager({
       }
 
       const requestedCompanyScopeId = companyScopeId;
+      const requestedResourceScope = infrastructureCacheScope;
       const requestedCameraId = selectedCameraId;
       const cacheKey = `${infrastructureCacheScope}:camera:${requestedCameraId}:line-counts`;
       const cachedRows = preferCache
@@ -827,12 +864,16 @@ export function InfrastructureManager({
           request: () =>
             apiFetch<CameraLineCount[]>(
               `/cameras/${selectedCameraId}/line-counts`,
-              { companyScopeId: requestedCompanyScopeId },
+              {
+                bypassReadCache: !preferCache && !silent,
+                companyScopeId: requestedCompanyScopeId,
+              },
             ),
         });
         if (
           requestSequence !== lineCountRequestSequenceRef.current ||
           companyScopeIdRef.current !== requestedCompanyScopeId ||
+          infrastructureCacheScopeRef.current !== requestedResourceScope ||
           selectedCameraIdRef.current !== requestedCameraId
         )
           return;
@@ -849,6 +890,7 @@ export function InfrastructureManager({
         if (
           !silent &&
           companyScopeIdRef.current === requestedCompanyScopeId &&
+          infrastructureCacheScopeRef.current === requestedResourceScope &&
           selectedCameraIdRef.current === requestedCameraId
         ) {
           toast.error("Não foi possível carregar as linhas desta câmera.");
@@ -858,6 +900,7 @@ export function InfrastructureManager({
           !silent &&
           requestSequence === lineCountRequestSequenceRef.current &&
           companyScopeIdRef.current === requestedCompanyScopeId &&
+          infrastructureCacheScopeRef.current === requestedResourceScope &&
           selectedCameraIdRef.current === requestedCameraId
         ) {
           setLoadingLineCounts(false);
@@ -887,29 +930,6 @@ export function InfrastructureManager({
   React.useEffect(() => {
     void loadLineCounts({ preferCache: true });
   }, [loadLineCounts]);
-
-  useResourceAutoRefresh(
-    async () => {
-      const refreshes: Promise<void>[] = [loadBase({ silent: true })];
-      if (needsWorkerCatalog) {
-        refreshes.push(loadWorkers({ silent: true }));
-      }
-      if (camerasTabActive) {
-        refreshes.push(loadLineCounts({ silent: true }));
-      }
-      await Promise.all(refreshes);
-    },
-    {
-      enabled:
-        Boolean(companyScopeId) &&
-        !loading &&
-        !loadingSubLocations &&
-        !loadingLineCounts &&
-        !saving &&
-        !editingDialogOpen,
-      intervalMs: INFRASTRUCTURE_REFRESH_INTERVAL_MS,
-    },
-  );
 
   React.useEffect(() => {
     if (view !== "all") {
@@ -1042,13 +1062,9 @@ export function InfrastructureManager({
             name: location.name,
             description: location.description ?? "",
             active: String(location.active),
-            worker_id:
-              workerLocationAssignments[location.id] ?? workers[0]?.id ?? "",
+            worker_id: workerLocationAssignments[location.id] || "none",
           }
-        : {
-            ...emptyLocationForm,
-            worker_id: workers[0]?.id ?? "",
-          },
+        : emptyLocationForm,
     );
     setLocationDialog(true);
   }
@@ -1183,15 +1199,6 @@ export function InfrastructureManager({
       toast.error("Nome obrigatório");
       return;
     }
-    if (!workers.length) {
-      toast.error("Cadastre um Worker antes de salvar um local.");
-      return;
-    }
-    if (!locationForm.worker_id) {
-      toast.error("Selecione o Worker responsável por este local.");
-      return;
-    }
-
     setSaving(true);
     try {
       const body = {
@@ -1230,10 +1237,10 @@ export function InfrastructureManager({
           setWorkerLocationAssignment(
             cameraGroupScopeId,
             savedLocationId,
-            locationForm.worker_id,
+            locationForm.worker_id === "none" ? "" : locationForm.worker_id,
           ),
         );
-      } else {
+      } else if (locationForm.worker_id !== "none") {
         toast.warning(
           "O local foi salvo, mas o vínculo com o Worker não pôde ser concluído.",
         );
@@ -1373,7 +1380,7 @@ export function InfrastructureManager({
       }
 
       setCameraDialog(false);
-      await loadBase();
+      await loadBase({ resources: "cameras" });
     } catch {
       toast.error("Não foi possível salvar a câmera.");
     } finally {
@@ -1472,7 +1479,11 @@ export function InfrastructureManager({
     if (!requireCertifiedCatalog("cameras")) return;
 
     if (!window.confirm(`Excluir a câmera "${camera.name}"?`)) return;
-    await removeResource(`/cameras/${camera.id}`, "Câmera excluída", loadBase);
+    await removeResource(
+      `/cameras/${camera.id}`,
+      "Câmera excluída",
+      () => loadBase({ resources: "cameras" }),
+    );
   }
 
   async function removeLine(line: CameraLineCount) {
@@ -1609,7 +1620,8 @@ export function InfrastructureManager({
     });
 
     try {
-      if (kind === "locations" || kind === "cameras") await loadBase();
+      if (kind === "locations") await loadBase();
+      else if (kind === "cameras") await loadBase({ resources: "cameras" });
       else if (kind === "subLocations") await loadSubLocations();
       else await loadLineCounts();
     } finally {
@@ -1698,8 +1710,10 @@ export function InfrastructureManager({
     });
 
     try {
-      if (request.kind === "locations" || request.kind === "cameras") {
+      if (request.kind === "locations") {
         await loadBase();
+      } else if (request.kind === "cameras") {
+        await loadBase({ resources: "cameras" });
       } else if (request.kind === "subLocations") {
         await loadSubLocations();
       } else {
@@ -2630,7 +2644,7 @@ export function InfrastructureManager({
       </Tabs>
 
       <Dialog
-        open={Boolean(bulkDeleteRequest)}
+        open={Boolean(bulkDeleteRequest) && baseCatalogCertified}
         onOpenChange={(open) => {
           if (!open && !bulkDeleting) setBulkDeleteRequest(null);
         }}
@@ -2699,7 +2713,7 @@ export function InfrastructureManager({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={locationDialog} onOpenChange={setLocationDialog}>
+      <Dialog open={locationDialog && baseCatalogCertified} onOpenChange={setLocationDialog}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
@@ -2720,7 +2734,7 @@ export function InfrastructureManager({
               }
             />
           </FormField>
-          <FormField label="Worker responsável">
+          <FormField label="Worker responsável (opcional)">
             <Select
               value={locationForm.worker_id}
               onValueChange={(workerId) =>
@@ -2729,28 +2743,28 @@ export function InfrastructureManager({
                   worker_id: workerId,
                 }))
               }
-              disabled={!workers.length}
             >
               <SelectTrigger>
-                <SelectValue
-                  placeholder={
-                    workers.length
-                      ? "Selecione o Worker"
-                      : "Nenhum Worker disponível"
-                  }
-                />
+                <SelectValue placeholder="Sem Worker" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="none">Sem Worker</SelectItem>
                 {workers.map((worker) => (
                   <SelectItem key={worker.id} value={worker.id}>
                     {worker.name}
                   </SelectItem>
                 ))}
+                {locationForm.worker_id !== "none" &&
+                !workers.some((worker) => worker.id === locationForm.worker_id) ? (
+                  <SelectItem value={locationForm.worker_id} disabled>
+                    Worker atual indisponível
+                  </SelectItem>
+                ) : null}
               </SelectContent>
             </Select>
             {!workers.length ? (
               <p className="text-xs text-muted-foreground">
-                Cadastre um Worker antes de criar locais.
+                O local pode ser salvo sem vínculo com um Worker.
               </p>
             ) : null}
           </FormField>
@@ -2785,7 +2799,7 @@ export function InfrastructureManager({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={subLocationDialog} onOpenChange={setSubLocationDialog}>
+      <Dialog open={subLocationDialog && subLocationCatalogCertified} onOpenChange={setSubLocationDialog}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
@@ -2829,7 +2843,7 @@ export function InfrastructureManager({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={cameraGroupDialog} onOpenChange={setCameraGroupDialog}>
+      <Dialog open={cameraGroupDialog && subLocationCatalogCertified} onOpenChange={setCameraGroupDialog}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Câmeras do setor</DialogTitle>
@@ -2905,7 +2919,7 @@ export function InfrastructureManager({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={cameraDialog} onOpenChange={setCameraDialog}>
+      <Dialog open={cameraDialog && baseCatalogCertified} onOpenChange={setCameraDialog}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>
@@ -3020,7 +3034,7 @@ export function InfrastructureManager({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={lineDialog} onOpenChange={setLineDialog}>
+      <Dialog open={lineDialog && lineCatalogCertified} onOpenChange={setLineDialog}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
@@ -3561,10 +3575,16 @@ function setFailedBulkSelection(
   else setters.setCheckedLineIds(failedIds);
 }
 
-async function fetchInfrastructureWorkers(companyId?: string | null) {
+async function fetchInfrastructureWorkers(
+  companyId?: string | null,
+  bypassReadCache = false,
+) {
   const companyScopeId = companyId?.trim();
   if (!companyScopeId) return [];
-  const rows = await apiFetch<unknown>("/workers", { companyScopeId }).then(
+  const rows = await apiFetch<unknown>("/workers", {
+    bypassReadCache,
+    companyScopeId,
+  }).then(
     (response) => normalizeWorkerRows(response),
   );
   const partition = partitionWorkersByCompanyScope(rows, companyScopeId);

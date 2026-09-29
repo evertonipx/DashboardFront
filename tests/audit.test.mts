@@ -34,6 +34,7 @@ test("normaliza página e preserva BIGINT textual sem perder precisão", () => {
 
   assert.equal(response.data[0].id, id);
   assert.equal(response.total, 1);
+  assert.equal(response.foreignCount, 0);
   assert.throws(
     () => audit.normalizeAuditLogId(Number.MAX_SAFE_INTEGER + 1),
     /BIGINT.*segurança/,
@@ -91,6 +92,7 @@ test("Master particiona catálogo multiempresa antes de validar a auditoria", ()
 
   assert.deepEqual(selected.data.map((entry) => entry.id), ["42"]);
   assert.equal(selected.total, 3);
+  assert.equal(selected.foreignCount, 2);
 
   assert.throws(
     () =>

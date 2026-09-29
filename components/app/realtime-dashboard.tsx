@@ -1760,9 +1760,7 @@ export function RealtimeDashboard({
     annualHistoryRequestRef.current = controller;
     setLoadingAnnualHistory(true);
     const now = new Date();
-    const attemptDay = formatRealtimeCivilDate(
-      countingCalendarDate(now, companyTimeZone),
-    );
+    const attemptDay = realtimeCompanyDayKey(now, companyTimeZone);
     const range = resolveLiveAnnualComparisonRanges(now, companyTimeZone);
 
     try {
@@ -1815,11 +1813,7 @@ export function RealtimeDashboard({
     setAnnualHistoryState,
     setLoadingAnnualHistory,
   ]);
-  const annualHistoryDayKey = [
-    clock.getFullYear(),
-    clock.getMonth(),
-    clock.getDate(),
-  ].join("-");
+  const annualHistoryDayKey = realtimeCompanyDayKey(clock, companyTimeZone);
 
   React.useEffect(() => {
     // Coalesce the StrictMode setup/cleanup replay before starting network I/O.
@@ -8015,7 +8009,7 @@ async function fetchIncrementalRealtimeHourlyRanges({
   const currentHourFrom = countingStartOfHourInstant(now, timeZone);
   const currentHourTo = countingEndOfHourInstant(now, timeZone);
   const hourRevision = currentHourFrom.toISOString();
-  const dayRevision = startOfAggregateBucket(now, "day").toISOString();
+  const dayRevision = countingStartOfDayInstant(now, timeZone).toISOString();
   let validClosedRanges = coverageCache.ranges;
   let validClosedRows = coverageCache.rows;
   if (coverageCache.dayRevision !== dayRevision) {
@@ -11270,6 +11264,10 @@ function formatRealtimeCivilDate(value: Date) {
     String(value.getMonth() + 1).padStart(2, "0"),
     String(value.getDate()).padStart(2, "0"),
   ].join("-");
+}
+
+function realtimeCompanyDayKey(now: Date, timeZone: string) {
+  return formatRealtimeCivilDate(countingCalendarDate(now, timeZone));
 }
 
 function requireRealtimeAiDailyRangeWithinLimit(from: Date, to: Date) {

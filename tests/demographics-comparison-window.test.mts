@@ -96,10 +96,14 @@ const source = readFileSync(resolve(root, "components/app/demographics-dashboard
 const ast = ts.createSourceFile("dashboard.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const effects: RuntimeFixture[] = [];
 let comparisonReadyExpression: RuntimeFixture;
+let comparisonWindowExpression: RuntimeFixture;
+let comparisonKeyExpression: RuntimeFixture;
 const comparisonPresentationExpressions: Record<string, RuntimeFixture> = {};
 function visit(node: import("typescript").Node) {
   if (ts.isCallExpression(node) && node.expression.getText(ast) === "React.useEffect") effects.push(node);
   if (ts.isVariableDeclaration(node) && node.initializer && node.name.getText(ast) === "comparisonReady") comparisonReadyExpression = node.initializer.getText(ast);
+  if (ts.isVariableDeclaration(node) && node.initializer && node.name.getText(ast) === "comparisonWindow") comparisonWindowExpression = node.initializer.getText(ast);
+  if (ts.isVariableDeclaration(node) && node.initializer && node.name.getText(ast) === "comparisonKey") comparisonKeyExpression = node.initializer.getText(ast);
   if (ts.isVariableDeclaration(node) && node.initializer && ["comparisonLoading", "comparisonError"].includes(node.name.getText(ast))) comparisonPresentationExpressions[node.name.getText(ast)] = node.initializer.getText(ast);
   ts.forEachChild(node, visit);
 }
@@ -107,6 +111,8 @@ visit(ast);
 const effect = effects.find((node) => node.arguments[0].getText(ast).includes("loadDemographicComparisonAggregation"));
 assert.ok(effect, "comparison effect exists");
 assert.ok(comparisonReadyExpression, "comparison readiness guard exists");
+assert.ok(comparisonWindowExpression, "comparison window is planned in the dashboard");
+assert.ok(comparisonKeyExpression, "comparison identity is planned in the dashboard");
 const names = new Set(["buildCivilDayPartitions", "buildInstantPartitions", "civilDayStart", "shiftCivilDateKey", "parseCivilDateKey"]);
 const helpers = compile(ast.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? "")).map((node) => node.getText(ast)).join("\n") + "\nreturn {buildCivilDayPartitions,buildInstantPartitions};", { ...time, MAX_DEMOGRAPHICS_DATE_RANGE_DAYS: 366, MINUTE_MS: 60_000 });
 function harness(overrides: Record<string, RuntimeFixture> = {}) {
@@ -135,8 +141,70 @@ function harness(overrides: Record<string, RuntimeFixture> = {}) {
   return { run, flush, state, requests, states, releases, comparisonRequestRef, comparisonCacheRef, comparisonRetryRef };
 }
 
+test("janela comparativa não consome cálculo de fuso sem widget visível, fonte principal pronta ou consulta solicitada", () => {
+  const evaluateWindow = (overrides: Record<string, RuntimeFixture> = {}) => {
+    let builds = 0;
+    const window = compile(`return ${comparisonWindowExpression};`, {
+      React: { useMemo: (factory: () => RuntimeFixture) => factory() },
+      buildDemographicComparisonWindow: (options: RuntimeFixture) => {
+        builds += 1;
+        return build(options);
+      },
+      comparisonVisible: true,
+      summary: { hasData: true },
+      pageActive: true,
+      companyScopeId: "company-a",
+      companyTimeZoneReady: true,
+      preferencesReady: true,
+      queryRequested: true,
+      rangeReady: true,
+      displayStartInput: "2026-09-10",
+      displayEndInput: "2026-09-10",
+      comparisonMode: "previous-period",
+      timeZone: "America/Sao_Paulo",
+      requestWindow: { to: new Date("2026-09-10T15:17:00Z") },
+      ...overrides,
+    });
+    return { builds, window };
+  };
+  for (const guard of ["comparisonVisible", "pageActive", "companyScopeId", "companyTimeZoneReady", "preferencesReady", "queryRequested", "rangeReady"]) {
+    assert.deepEqual(evaluateWindow({ [guard]: false }), { builds: 0, window: null }, guard);
+  }
+  assert.deepEqual(evaluateWindow({ summary: { hasData: false } }), { builds: 0, window: null });
+  const active = evaluateWindow();
+  assert.equal(active.builds, 1);
+  assert.equal(active.window.from.toISOString(), "2026-09-09T03:00:00.000Z");
+  assert.equal(active.window.to.toISOString(), "2026-09-09T15:17:00.000Z");
+  const sourceRefreshing = evaluateWindow({ comparisonReady: false, refreshing: true });
+  assert.equal(sourceRefreshing.builds, 1, "revalidar a fonte não apaga a janela já visível");
+  const comparisonKey = (comparisonWindow: RuntimeFixture) => compile(`return ${comparisonKeyExpression};`, {
+    comparisonWindow, dataScopeKey: "user|company|day", comparisonMode: "previous-period", refreshVersion: 2,
+  });
+  assert.equal(comparisonKey(sourceRefreshing.window), comparisonKey(active.window));
+});
+
+test("comparativo mantém último gráfico completo durante nova consulta sem misturar empresa, período ou paleta", () => {
+  const widgetSource = readFileSync(resolve(root, "components/app/demographics-temporal-widget.tsx"), "utf8");
+  const widgetAst = ts.createSourceFile("demographics-temporal-widget.tsx", widgetSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const selector = widgetAst.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "retainedDemographicTemporalModel");
+  assert.ok(selector);
+  const retain = compile(`${selector.getText(widgetAst)}; return retainedDemographicTemporalModel;`);
+  const model = { title: "Comparação completa" };
+  const previous = { scopeKey: "tenant-a|range-a|palette-a", model };
+  assert.equal(retain(previous, previous.scopeKey, true), model);
+  assert.equal(retain(previous, previous.scopeKey, false), null);
+  assert.equal(retain(previous, "tenant-b|range-a|palette-a", true), null);
+  assert.equal(retain(previous, "tenant-a|range-b|palette-a", true), null);
+  assert.equal(retain(previous, "tenant-a|range-a|palette-b", true), null);
+  assert.equal(retain(null, previous.scopeKey, true), null);
+  assert.match(widgetSource, /!settled \|\| loading \|\| error \|\| !model\.hasData/);
+  assert.match(widgetSource, /loading && !retainedModel \? <Skeleton/);
+  assert.match(widgetSource, /<EChart ariaLabel=\{displayModel\.title\}/);
+  assert.match(source, /snapshotScopeKey=\{id === "demographics_period_comparison"[\s\S]*?comparisonCacheScopeKey[\s\S]*?JSON\.stringify\(temporalSettings\[id\]\)/);
+});
+
 test("comparativo só consulta quando visível, solicitado, com período e dados primários prontos", async () => {
-  for (const blocked of [{ companyTimeZoneReady: false }, { pageActive: false }, { preferencesReady: false }, { comparisonVisible: false }, { queryRequested: false }, { rangeReady: false }, { comparisonReady: false }, { companyScopeId: "" }, { comparisonState: { key: "comparison-a" } }]) {
+  for (const blocked of [{ companyTimeZoneReady: false }, { pageActive: false }, { preferencesReady: false }, { comparisonVisible: false }, { queryRequested: false }, { rangeReady: false }, { comparisonReady: false }, { companyScopeId: "" }, { comparisonWindow: null }, { comparisonState: { key: "comparison-a" } }]) {
     const testHarness = harness(blocked);
     testHarness.run();
     await testHarness.flush();

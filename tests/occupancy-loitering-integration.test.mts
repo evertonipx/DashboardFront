@@ -1660,7 +1660,7 @@ test("composição configurável entrega ao card somente os cenários selecionad
   }
 });
 
-test("card individual usa sessions e o diálogo mantém seu detalhamento sob demanda", () => {
+test("card individual usa sessions e não oferece listagem paralela", () => {
   assert.match(
     hookSource,
     /const fetchedRows = await fetchOccupancyLoiteringSessions\(\{[\s\S]*?from: requestFrom,[\s\S]*?to: sessionRequestRange\.to/,
@@ -1676,53 +1676,16 @@ test("card individual usa sessions e o diálogo mantém seu detalhamento sob dem
     /const resolveSummaryModel =[\s\S]*?buildOccupancyLoiteringSummaryModel\(selected, current\.rows\)/,
     "o card médio precisa permanecer vinculado ao summary",
   );
-
-  const dialogStart = widgetSource.indexOf(
-    "function OccupancyLoiteringSessionsDialog",
-  );
-  const reportStart = widgetSource.indexOf(
-    "export function occupancyLoiteringChartEntries",
-  );
-  assert.ok(dialogStart >= 0 && reportStart > dialogStart);
-  const dialogSource = widgetSource.slice(dialogStart, reportStart);
-  assert.match(dialogSource, /if \(!open\) return/);
-  assert.match(
-    dialogSource,
-    /if \(\s*!open \|\|[\s\S]*?!sessionQueryRange \|\|\s*!scopeKey\s*\) \{\s*return;/,
-  );
-  assert.match(
-    dialogSource,
-    /occupancyLoiteringSessionsQueryRange\(\{[\s\S]*?from: period\.from,[\s\S]*?to: period\.to/,
-    "o detalhamento deve preservar o período completo quando ele é seguro",
-  );
-  const sessionsCallStart = dialogSource.indexOf(
-    "fetchOccupancyLoiteringSessions({",
-  );
-  const sessionsCallEnd = dialogSource.indexOf("})\n      .then", sessionsCallStart);
-  assert.ok(sessionsCallStart >= 0 && sessionsCallEnd > sessionsCallStart);
-  const sessionsCall = dialogSource.slice(sessionsCallStart, sessionsCallEnd);
-  assert.doesNotMatch(
-    sessionsCall,
-    /\b(?:area|cameraId):/,
-    "sessions deve consultar o período tenant-wide somente com from/to",
-  );
-  assert.match(
-    dialogSource,
-    /const selectedRows = React\.useMemo\([\s\S]*?occupancyLoiteringKey\([\s\S]*?=== selectedAreaKey/,
-    "a área escolhida deve ser filtrada localmente após a única consulta do período",
-  );
-  const scopeStart = dialogSource.indexOf("const scopeKey =");
-  const scopeEnd = dialogSource.indexOf("React.useEffect", scopeStart);
-  assert.ok(scopeStart >= 0 && scopeEnd > scopeStart);
-  assert.doesNotMatch(
-    dialogSource.slice(scopeStart, scopeEnd),
-    /selectedAreaKey/,
-    "trocar a área não deve repetir a mesma consulta tenant-wide",
-  );
+  const cardStart = widgetSource.indexOf("export function OccupancyLoiteringSummaryCard");
+  const reportStart = widgetSource.indexOf("export function occupancyLoiteringChartEntries");
+  assert.ok(cardStart >= 0 && reportStart > cardStart);
+  const cardSource = widgetSource.slice(cardStart, reportStart);
+  assert.doesNotMatch(cardSource, /Ver todas|Consultar registros individuais de permanência/);
+  assert.doesNotMatch(widgetSource, /function OccupancyLoiteringSessionsDialog/);
   assert.equal(
     widgetSource.match(/fetchOccupancyLoiteringSessions\(\{/g)?.length,
-    2,
-    "a navegação do gráfico e o diálogo consultam outro dia somente sob demanda",
+    1,
+    "somente a navegação para outro dia deve consultar sessões sob demanda",
   );
 });
 
@@ -1944,6 +1907,69 @@ test("um ponto ou horários coincidentes não produzem regressão linear", () =>
         .flatMap((series: RuntimeFixture) => series.data).length,
       entries.length,
     );
+  }
+});
+
+test("Permanências registradas mantém o gráfico montado e substitui somente séries alteradas", () => {
+  const chartComponent = widgetSource.slice(
+    widgetSource.indexOf("export function OccupancyLoiteringSummaryCard"),
+    widgetSource.indexOf("export function buildOccupancyLoiteringReport"),
+  );
+  const echartSource = source("components/app/echart.tsx");
+  assert.match(chartComponent, /<EChart[\s\S]*?mergeUpdates[\s\S]*?preloadCapabilities=\{LOITERING_SESSION_CHART_CAPABILITIES\}[\s\S]*?replaceMergeOnUpdate=\{LOITERING_SESSION_CHART_REPLACE_MERGE\}/);
+  assert.match(echartSource, /replaceMerge: \[\.\.\.replaceMergeOnUpdate\]/);
+
+  const widgets = loadLoiteringWidgets();
+  const session = (scenarioLabel: string, minute: number) => ({
+    areaLabel: "Espera",
+    durationSeconds: 20 + minute,
+    endedAt: new Date(Date.parse("2026-09-16T13:00:00.000Z") + minute * 60_000).toISOString(),
+    key: `${scenarioLabel}-${minute}`,
+    scenarioLabel,
+  });
+  const first = widgets.buildOccupancyLoiteringSessionsChartOption(
+    [session("Zeta", 1), session("Zeta", 2)],
+    "light",
+  ) as RuntimeFixture;
+  const withNewGroup = widgets.buildOccupancyLoiteringSessionsChartOption(
+    [session("Alfa", 0), session("Zeta", 1), session("Zeta", 2)],
+    "light",
+  ) as RuntimeFixture;
+  const zetaId = first.series.find((series: RuntimeFixture) =>
+    series.type === "scatter" && series.name.startsWith("Zeta"))?.id;
+  assert.equal(
+    withNewGroup.series.find((series: RuntimeFixture) =>
+      series.type === "scatter" && series.name.startsWith("Zeta"))?.id,
+    zetaId,
+    "a identidade da série não pode mudar quando outra área entra na ordenação",
+  );
+
+  const chart = echarts.init(null, null, {
+    height: 260,
+    renderer: "svg",
+    ssr: true,
+    width: 600,
+  });
+  try {
+    const update = { lazyUpdate: false, notMerge: false, replaceMerge: ["series", "legend"] };
+    chart.setOption(withNewGroup, update);
+    chart.setOption(first, update);
+    const scatterNames = (chart as RuntimeFixture).getModel().getSeries()
+      .filter((series: RuntimeFixture) => series.subType === "scatter")
+      .map((series: RuntimeFixture) => series.name);
+    assert.deepEqual(scatterNames, ["Zeta · Espera"]);
+    const lonePoint = widgets.buildOccupancyLoiteringSessionsChartOption(
+      [session("Zeta", 1)],
+      "light",
+    ) as RuntimeFixture;
+    chart.setOption(lonePoint, update);
+    assert.equal(
+      (chart as RuntimeFixture).getModel().getComponent("legend"),
+      undefined,
+      "a legenda deve desaparecer quando não há mais outra série ou tendência",
+    );
+  } finally {
+    chart.dispose();
   }
 });
 
@@ -2557,18 +2583,7 @@ test("textos focam duração e horário sem contadores nem IDs técnicos", () =>
   );
   assert.doesNotMatch(widgetSource, /["'`][^"'`]*\bquem\b[^"'`]*["'`]/i);
 
-  const tableStart = widgetSource.indexOf(
-    '<Table scrollRegionLabel="Permanências do período">',
-  );
-  const tableEnd = widgetSource.indexOf("</Table>", tableStart);
-  assert.ok(tableStart >= 0 && tableEnd > tableStart);
-  const tableSource = widgetSource.slice(tableStart, tableEnd);
-  assert.doesNotMatch(
-    tableSource,
-    /camera_id|object_class|area_id|scenarioId/,
-    "a tabela mostra somente informações úteis ao cliente",
-  );
-  assert.match(widgetSource, /<SelectItem key=\{area\.key\}[\s\S]*?\{area\.label\}/);
+  assert.doesNotMatch(widgetSource, /<Table scrollRegionLabel="Permanências do período">/);
   assert.doesNotMatch(widgetSource, />\s*(?:camera_id|area_id|object_class|ID)\s*</i);
 });
 

@@ -487,7 +487,7 @@ test("Ao Vivo ativa fontes pesadas somente quando o widget se aproxima da viewpo
 test("pulso instantâneo fica em 5s e agregados respeitam sua granularidade", () => {
   assert.match(
     source,
-    /const OCCUPANCY_ALERTS_REFRESH_MS = 30_000/,
+    /const OCCUPANCY_ALERTS_REFRESH_MS = OCCUPANCY_REFRESH_MS/,
   );
   assert.match(
     source,

@@ -104,6 +104,11 @@ export type PaginatedAuditResponse = {
   total: number;
 };
 
+export type NormalizedAuditPage = PaginatedAuditResponse & {
+  /** Rows from other tenants omitted from this page of a Master response. */
+  foreignCount: number;
+};
+
 export type AuditDataFormat =
   | "base64-json"
   | "base64-text"
@@ -168,7 +173,7 @@ export function auditDetailPath(id: string | number) {
 export function normalizePaginatedAuditResponse(
   value: unknown,
   expectation: AuditPageExpectation = {},
-): PaginatedAuditResponse {
+): NormalizedAuditPage {
   const record = requireRecord(value, "resposta paginada de auditoria");
   if (!Array.isArray(record.data)) {
     throw new Error("A API retornou uma coleção de auditoria inválida.");
@@ -202,12 +207,13 @@ export function normalizePaginatedAuditResponse(
     );
   }
 
-  const scopedRows =
+  const partition =
     expectation.partitionByCompanyId && expectation.companyId
       ? selectExplicitCompanyScopedRows(record.data, expectation.companyId, {
           label: "registros de auditoria",
-        }).rows
-      : record.data;
+        })
+      : null;
+  const scopedRows = partition?.rows ?? record.data;
 
   const data = scopedRows.map((entry, index) =>
     normalizeAuditLogEntry(entry, {
@@ -216,7 +222,7 @@ export function normalizePaginatedAuditResponse(
     }),
   );
 
-  return { data, limit, page, total };
+  return { data, foreignCount: partition?.foreignCount ?? 0, limit, page, total };
 }
 
 export function normalizeAuditLogResponse(

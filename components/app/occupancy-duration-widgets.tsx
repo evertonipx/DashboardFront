@@ -2042,7 +2042,7 @@ function OccupancyDurationAverageSummaryCard({
 
         <div
           aria-label="Comparação entre detecção, estado das áreas e permanências individuais concluídas"
-          className="mt-1.5 grid min-h-0 flex-1 content-start gap-1.5 overflow-y-auto overscroll-contain pr-0.5 [scrollbar-color:hsl(var(--border))_transparent] [scrollbar-width:thin]"
+          className="mt-1.5 grid min-h-0 flex-1 content-start gap-1.5 overflow-y-auto pr-0.5 [scrollbar-color:hsl(var(--border))_transparent] [scrollbar-width:thin]"
         >
           {comparisonRows.map((row) => (
             <section

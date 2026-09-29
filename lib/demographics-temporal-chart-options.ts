@@ -142,12 +142,12 @@ function createTemporalModel(
     categoryCount: categories.length,
     option: heatmap
       ? heatmapOption(points, categories, datums, settings, theme, description)
-      : timelineOption(points, categories, datums, settings, theme, description),
+      : timelineOption(input.id, points, categories, datums, settings, theme, description),
   };
 }
 
 function timelineOption(
-  points: TemporalPoint[], categories: Category[], datums: Datum[][], settings: DemographicTemporalSettings, theme: Theme, description: string,
+  id: DemographicTemporalWidgetId, points: TemporalPoint[], categories: Category[], datums: Datum[][], settings: DemographicTemporalSettings, theme: Theme, description: string,
 ): EnterpriseChartOption {
   // A single closed day has no temporal slope: separate bars expose every
   // category instead of placing unrelated line markers at the same x point.
@@ -158,7 +158,8 @@ function timelineOption(
     settings.chartType === "line" ||
     (bar && settings.metric === "percentage")
   );
-  const solidGenderArea = settings.dimension === "gender" && settings.chartType === "area" && !singlePoint;
+  const solidGenderArea = settings.dimension === "gender" && !singlePoint &&
+    (settings.chartType === "area" || (id === "demographics_daily_evolution" && settings.chartType === "line"));
   return {
     ...baseOption(theme, description),
     color: categories.map(({ key }, index) => demographicCategoryColor(key, index, settings.palette, settings.dimension)),
@@ -174,7 +175,7 @@ function timelineOption(
         type: bar ? "bar" : "line",
         ...(stacked ? { stack: "demographic-share" } : {}),
         ...((settings.chartType === "area" || settings.chartType === "line") && !singlePoint
-          ? { areaStyle: { color, opacity: settings.chartType === "line" ? 0.22 : settings.dimension === "gender" ? 1 : 0.32 } }
+          ? { areaStyle: { color, opacity: solidGenderArea ? 1 : settings.chartType === "line" ? 0.22 : 0.32 } }
           : {}),
         data: datums[index],
         connectNulls: false,

@@ -175,6 +175,7 @@ export function occupancyLiveHistoryRequired(
 export function buildOccupancyReportResourcePlan({
   definitionIds,
   hasScenario,
+  metricVisibility,
   preferences,
   requestedCardIds,
 }: {
@@ -193,8 +194,15 @@ export function buildOccupancyReportResourcePlan({
     visible("occupancy_report_average") ||
     visible("occupancy_report_peak") ||
     visible("occupancy_report_minimum");
+  // The current reading is drawn from the primary period. The previous
+  // period contributes only average/minimum/peak series; when all three are
+  // disabled, loading its aggregate cannot change the chart or its tooltip.
+  const comparisonVisible =
+    metricVisibility.average || metricVisibility.minimum || metricVisibility.peak;
   return {
-    comparisonDefinitionIds: definitionIds.filter(visible).sort().join("|"),
+    comparisonDefinitionIds: comparisonVisible
+      ? definitionIds.filter(visible).sort().join("|")
+      : "",
     currentSnapshot:
       hasScenario &&
       (visible("occupancy_report_current") ||
@@ -203,6 +211,47 @@ export function buildOccupancyReportResourcePlan({
     definitionIds: definitionIds.filter((id) => visible(id) ||
       (id === "occupancy_report_day" && needsDailyMetrics)).sort().join("|"),
   };
+}
+
+/** Reuse the certified applied-period response when only its comparison changes. */
+export async function loadOccupancyReportDefinitionStates<
+  TDefinition extends { id: string },
+  TState extends { error?: string },
+>({
+  currentDefinitions,
+  previousDefinitions,
+  primaryCache,
+  primaryScopeKey,
+  primaryWindowKey,
+  loadState,
+}: {
+  currentDefinitions: readonly TDefinition[];
+  previousDefinitions: readonly TDefinition[];
+  primaryCache?: {
+    scopeKey: string;
+    states: Readonly<Record<string, TState>>;
+    windowKey: string;
+  } | null;
+  primaryScopeKey: string;
+  primaryWindowKey: string;
+  loadState: (definition: TDefinition) => Promise<TState>;
+}): Promise<Array<readonly [string, TState]>> {
+  const reusable = primaryCache?.scopeKey === primaryScopeKey &&
+    primaryCache.windowKey === primaryWindowKey
+    ? primaryCache.states
+    : null;
+  return Promise.all([
+    ...currentDefinitions.map(async (definition) => [
+      definition.id,
+      reusable?.[definition.id] && !reusable[definition.id].error
+        ? reusable[definition.id]
+        : await loadState(definition),
+    ] as const),
+    ...previousDefinitions.map(async (definition) => [
+      definition.id,
+      await loadState(definition),
+    ] as const),
+  ]);
 }
 
 export type OccupancyQueryScheduler = <T>(

@@ -428,7 +428,7 @@ export function ViewsManager() {
       setScenarioCatalog({ companyId: requestedCompanyScopeId, rows: [] });
       setSelectedScenarioIds([]);
       setWidgetSelectedScenarioIds([]);
-      if (!requestedCompanyScopeId) {
+      if (!canAccessViews || !requestedCompanyScopeId) {
         setLoadingScenarios(false);
         return;
       }
@@ -483,7 +483,7 @@ export function ViewsManager() {
       active = false;
       controller.abort();
     };
-  }, [companyScopeId, masterCrossCompanyScope]);
+  }, [canAccessViews, companyScopeId, masterCrossCompanyScope]);
 
   function updateViewWidgets(
     update: (current: ViewWidget[]) => ViewWidget[],

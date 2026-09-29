@@ -150,13 +150,23 @@ export function useViewLinkTarget(
   userId: string | null | undefined,
   expectedPathname: ViewLinkPathname,
 ) {
-  const [target, setTarget] = React.useState<ViewLinkTarget | null>(() =>
-    loadViewLinkTarget(reference, userId, expectedPathname),
-  );
+  const targetKey = JSON.stringify([
+    reference?.trim() ?? "",
+    userId?.trim() ?? "",
+    expectedPathname,
+  ]);
+  const [state, setState] = React.useState(() => ({
+    key: targetKey,
+    target: loadViewLinkTarget(reference, userId, expectedPathname),
+  }));
+  const target = state.key === targetKey ? state.target : null;
 
   React.useEffect(() => {
     function syncTarget() {
-      setTarget(loadViewLinkTarget(reference, userId, expectedPathname));
+      setState({
+        key: targetKey,
+        target: loadViewLinkTarget(reference, userId, expectedPathname),
+      });
     }
 
     syncTarget();
@@ -168,7 +178,7 @@ export function useViewLinkTarget(
       window.removeEventListener(VIEW_LINK_REFERENCES_UPDATED_EVENT, syncTarget);
       window.removeEventListener("storage", syncTarget);
     };
-  }, [expectedPathname, reference, userId]);
+  }, [expectedPathname, reference, targetKey, userId]);
 
   return target;
 }

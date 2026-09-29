@@ -37,7 +37,7 @@ const temporalPreferences = loadModule("lib/demographics-temporal-preferences.ts
 const temporalOptions = loadModule("lib/demographics-temporal-chart-options.ts");
 const visibleCategories = loadModule("lib/demographics-visible-categories.ts");
 const bindings: Record<string, RuntimeFixture> = { ...demographics, ...palette, ...utils, ...presentation, ...chartOptions, ...crossingOptions, ...temporalPreferences, ...visibleCategories };
-const functionNames = ["buildGenderOption", "buildAgeOption", "buildEmotionOption", "buildAgeGenderPyramidOption", "buildAgeEmotionHeatmapOption", "compactDemographicChartOption"];
+const functionNames = ["compactDemographicChartOption"];
 const output = ts.transpileModule(`${parts.declarations}\nmodule.exports = {${functionNames.join(",")}};`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
@@ -74,11 +74,11 @@ function renderPresentationControls(dimension: RuntimeFixture, value: RuntimeFix
 
 function options(summary: RuntimeFixture, theme = "light") {
   return [
-    ["gender", functions.buildGenderOption(summary)],
-    ["distribution", functions.buildAgeOption(summary, "#1267C4")],
-    ["distribution", functions.buildEmotionOption(summary, "#7C3AED")],
-    ["matrix", functions.buildAgeGenderPyramidOption(summary, theme)],
-    ["heatmap", functions.buildAgeEmotionHeatmapOption(summary, theme)],
+    ["gender", chartOptions.buildDemographicDistributionOption(summary.gender, presentation.normalizeDemographicPresentation(undefined, "gender"), { dimension: "gender", theme })],
+    ["distribution", chartOptions.buildDemographicDistributionOption(summary.age, presentation.normalizeDemographicPresentation(undefined, "age"), { dimension: "age", theme })],
+    ["distribution", chartOptions.buildDemographicDistributionOption(summary.emotion, presentation.normalizeDemographicPresentation(undefined, "emotion"), { dimension: "emotion", theme })],
+    ["matrix", crossingOptions.buildDemographicCrossingOption(summary, presentation.normalizeDemographicPresentation(undefined, "age-gender"), "age-gender", theme)],
+    ["heatmap", crossingOptions.buildDemographicCrossingOption(summary, presentation.normalizeDemographicPresentation(undefined, "age-emotion"), "age-emotion", theme)],
   ];
 }
 

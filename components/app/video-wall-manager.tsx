@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useUserGridReady } from "@/components/app/use-user-grid-ready";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,6 +39,7 @@ import {
   buildOpaqueViewUrl,
   saveViewLinkTarget,
 } from "@/lib/view-link-reference";
+import { USER_GRID_HYDRATED_EVENT } from "@/lib/user-grid";
 import {
   VIDEO_WALL_UPDATED_EVENT,
   createVideoWallOutput,
@@ -99,6 +101,7 @@ export function VideoWallManager({
   scenarios,
   userId,
 }: VideoWallManagerProps) {
+  const userGridReadiness = useUserGridReady(userId);
   const [storedSavedViews, setSavedViews] = React.useState<SavedLiveView[]>([]);
   const [storedProfiles, setProfiles] = React.useState<VideoWallProfile[]>([]);
   const [loadedConfigurationScopeKey, setLoadedConfigurationScopeKey] =
@@ -116,7 +119,11 @@ export function VideoWallManager({
   >(() => new Set());
   const wallWindowsRef = React.useRef(new Map<string, Window>());
   const configurationScopeKey = `${companyId?.trim() ?? ""}\u0000${userId?.trim() ?? ""}`;
+  const configurationCanLoad =
+    userGridReadiness !== "pending" &&
+    Boolean(companyId?.trim() && userId?.trim());
   const configurationScopeCertified =
+    configurationCanLoad &&
     loadedConfigurationScopeKey === configurationScopeKey;
   const savedViews = configurationScopeCertified
     ? storedSavedViews
@@ -160,6 +167,11 @@ export function VideoWallManager({
   }, [configurationScopeKey]);
 
   React.useEffect(() => {
+    if (!configurationCanLoad) {
+      setLoadedConfigurationScopeKey("");
+      return;
+    }
+
     function syncStoredConfiguration() {
       const nextViews = loadSavedLiveViews(companyId, userId);
       const storedProfiles = loadVideoWallProfiles(companyId, userId);
@@ -181,16 +193,18 @@ export function VideoWallManager({
     }
 
     syncStoredConfiguration();
+    window.addEventListener(USER_GRID_HYDRATED_EVENT, syncStoredConfiguration);
     window.addEventListener(VIDEO_WALL_UPDATED_EVENT, syncStoredConfiguration);
     window.addEventListener("storage", syncStoredConfiguration);
     return () => {
+      window.removeEventListener(USER_GRID_HYDRATED_EVENT, syncStoredConfiguration);
       window.removeEventListener(
         VIDEO_WALL_UPDATED_EVENT,
         syncStoredConfiguration,
       );
       window.removeEventListener("storage", syncStoredConfiguration);
     };
-  }, [companyId, configurationScopeKey, userId]);
+  }, [companyId, configurationCanLoad, configurationScopeKey, userId]);
 
   React.useEffect(() => {
     setSelectedOutputIds((current) =>
@@ -210,7 +224,9 @@ export function VideoWallManager({
   }, []);
 
   React.useEffect(() => {
-    if (!scenarios.length || !profiles.length) return;
+    // A local fallback may be readable while the remote grid is unavailable.
+    // Never migrate a default output into the outbox before the remote read.
+    if (userGridReadiness !== "ready" || !scenarios.length || !profiles.length) return;
     const missingScenario = profiles.some((profile) =>
       profile.outputs.some(
         (output) => output.source === "live_dashboard" && !output.scenarioId,
@@ -232,7 +248,7 @@ export function VideoWallManager({
         userId,
       ),
     );
-  }, [companyId, profiles, scenarios, userId]);
+  }, [companyId, profiles, scenarios, userGridReadiness, userId]);
 
   function persistProfiles(nextProfiles: VideoWallProfile[]) {
     setProfiles(

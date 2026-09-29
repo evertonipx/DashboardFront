@@ -195,6 +195,7 @@ import {
   requireOccupancyHistoryResponse,
   requireOccupancyScenarioRows,
 } from "@/lib/occupancy-validation";
+import { reconcileOccupancyAlertNotifications } from "@/lib/occupancy-alert-notifications";
 import { canManageOccupancy } from "@/lib/permissions";
 import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import type {
@@ -309,11 +310,9 @@ const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 const OCCUPANCY_REFRESH_SECONDS = 5;
 const OCCUPANCY_REFRESH_MS = OCCUPANCY_REFRESH_SECONDS * 1_000;
-// Only the camera proof and the minute edge need the five-second heartbeat.
-// Everything else is either a closed aggregate or an operational summary;
-// polling those resources at the camera cadence multiplies requests without
-// producing a visibly different answer.
-const OCCUPANCY_ALERTS_REFRESH_MS = 30_000;
+// New threshold events are operationally time-sensitive. Reuse the existing
+// live pulse, but only while an alert widget is visible and demanded.
+const OCCUPANCY_ALERTS_REFRESH_MS = OCCUPANCY_REFRESH_MS;
 // Keep a short hysteresis for scroll jitter, but release off-screen loaders
 // before the next five-second live pulse can overlap with newly visible cards.
 const OCCUPANCY_CARD_DEMAND_RELEASE_MS = 1_000;
@@ -489,6 +488,9 @@ export function OccupancyScenarioDashboard() {
     historyAt: 0,
     scopeKey: "",
   });
+  const alertNotificationSeenByScopeRef = React.useRef(
+    new Map<string, Set<number>>(),
+  );
   const metadataRequestSequenceRef = React.useRef(0);
   const metadataRequestControllerRef = React.useRef<AbortController | null>(
     null,
@@ -1468,6 +1470,35 @@ export function OccupancyScenarioDashboard() {
         }
         if (alertResult.requested) {
           if (alertResult.succeeded) {
+            const newAlerts = reconcileOccupancyAlertNotifications(
+              alertNotificationSeenByScopeRef.current,
+              `${userId ?? ""}|${requestedScopeKey}`,
+              alertResult.data,
+              Date.now(),
+            );
+            if (newAlerts.length && document.visibilityState === "visible") {
+              const latestAlert = [...newAlerts].sort(
+                (left, right) =>
+                  new Date(right.triggered_at ?? 0).getTime() -
+                  new Date(left.triggered_at ?? 0).getTime(),
+              )[0];
+              const limitLabel =
+                latestAlert.threshold_kind === "min" ? "mínimo" : "máximo";
+              toast(
+                newAlerts.length === 1
+                  ? "Novo alerta de ocupação"
+                  : `${newAlerts.length} novos alertas de ocupação`,
+                {
+                  description: (
+                    <span className="block min-w-0 [overflow-wrap:anywhere]">
+                      {scenario.name} · Limite {limitLabel} acionado: {formatOccupancyValue(latestAlert.total_value)} (limite {formatOccupancyValue(latestAlert.threshold_value)}) · {formatTime(latestAlert.triggered_at, companyTimeZone)}
+                    </span>
+                  ),
+                  duration: 6_000,
+                  icon: <Bell className="h-4 w-4 text-amber-500" />,
+                },
+              );
+            }
             setAlerts(alertResult.data);
             setAlertsLoadedScopeKey(requestedScopeKey);
           }
@@ -1593,6 +1624,7 @@ export function OccupancyScenarioDashboard() {
       civilAggregateCapabilities,
       occupancyDataPlan,
       occupancyPreferencesReady,
+      userId,
     ],
   );
 
