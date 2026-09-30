@@ -34,9 +34,14 @@ import { ReportExportActions } from "@/components/app/report-export-actions";
 import {
   ScenarioComparisonCard,
   ScenarioComparisonConfigurator,
+  buildScenarioComparisonDefinition,
+  buildScenarioComparisonReportChart,
   createDefaultScenarioComparisonSettings,
   deleteScenarioComparisonSettings,
+  fetchScenarioComparisonRows,
+  loadScenarioComparisonSettings,
   saveScenarioComparisonSettings,
+  selectScenarioComparisonScenarios,
   type ScenarioComparisonAggregateSource,
   type ScenarioComparisonSettings,
 } from "@/components/app/scenario-comparison-card";
@@ -127,7 +132,6 @@ import {
   type CountingReportViewSettings,
 } from "@/lib/counting-report-view-settings";
 import {
-  COUNTING_REPORT_HISTORY_YEARS,
   countingReportHistoryFrom,
   defaultCountingReportPeriod,
   effectiveCountingReportPeriodDates,
@@ -436,9 +440,6 @@ export function ScenarioReportsDashboard({
   const [chartData, setChartData] = React.useState<
     Record<string, ScenarioChartState>
   >({});
-  const [comparisonReportCharts, setComparisonReportCharts] = React.useState<
-    Record<string, ReportPayload["charts"][number]>
-  >({});
   const [showPreviousPeriod, setShowPreviousPeriod] = React.useState(
     () => loadLiveDashboardSettings(companyScopeId).showPreviousPeriod,
   );
@@ -501,25 +502,6 @@ export function ScenarioReportsDashboard({
       scopeMode: "scenario",
       title: "",
     });
-  const updateComparisonReportChart = React.useCallback(
-    (
-      key: string,
-      chart: ReportPayload["charts"][number] | null,
-    ) => {
-      setComparisonReportCharts((current) => {
-        if (chart) {
-          if (current[key] === chart) return current;
-          return { ...current, [key]: chart };
-        }
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-    },
-    [],
-  );
-
   const availableModes = React.useMemo(
     () =>
       buildReportScopeModes({
@@ -578,14 +560,6 @@ export function ScenarioReportsDashboard({
     () => scopeOptions.find((option) => option.id === selectedId) ?? null,
     [scopeOptions, selectedId],
   );
-  const reportContextKey = `${companyScopeId}|${selectedScope?.id ?? ""}`;
-  const latestReportContextKeyRef = React.useRef(reportContextKey);
-  React.useEffect(() => {
-    if (latestReportContextKeyRef.current !== reportContextKey) {
-      setComparisonReportCharts({});
-    }
-    latestReportContextKeyRef.current = reportContextKey;
-  }, [reportContextKey]);
   const reportReferenceDate = React.useMemo(
     () => companyCalendarDate(clock, companyTimeZone, "month"),
     [clock, companyTimeZone],
@@ -627,6 +601,11 @@ export function ScenarioReportsDashboard({
     }),
     [effectivePeriodFromTime, reportCoverageToTime, reportPeriodLabel],
   );
+  const reportContextKey = `${companyScopeId}|${selectedScope?.id ?? ""}|${companyTimeZone}|${effectivePeriodFromTime}|${reportCoverageToTime}|${comparisonRefreshRevision}`;
+  const latestReportContextKeyRef = React.useRef(reportContextKey);
+  React.useEffect(() => {
+    latestReportContextKeyRef.current = reportContextKey;
+  }, [reportContextKey]);
   const countingDirectionalDefinition = React.useMemo(
     () =>
       buildCountingHourHistoryDefinition(
@@ -1409,7 +1388,7 @@ export function ScenarioReportsDashboard({
     );
     setSettingsReadyScopeKey(reportSettingsScopeKey);
     // Reports are an intentional ready-to-read surface: restore the user's
-    // saved range (four years for a first visit) and issue exactly one
+    // saved range (all available years for a first visit) and issue exactly one
     // deduplicated query as soon as its scope is ready.
     setReportRequested(true);
   }, [
@@ -2090,10 +2069,8 @@ export function ScenarioReportsDashboard({
               description="Compare todos os cenários ou apenas os escolhidos para análise de relatório."
               disabledReason={reportComparisonDisabledReason}
               monitorMode={monitorMode}
-              onReportChartChange={updateComparisonReportChart}
               periodOverride={reportPeriodOverride}
               preferenceScopeId={selectedScope?.id}
-              reportChartKey="report_scenario_period_comparison"
               scenarios={scenarios}
               storageKey="reports"
             />
@@ -2140,10 +2117,8 @@ export function ScenarioReportsDashboard({
             deferSettingsApply
             disabledReason={reportComparisonDisabledReason}
             monitorMode={monitorMode}
-            onReportChartChange={updateComparisonReportChart}
             periodOverride={reportPeriodOverride}
             preferenceScopeId={selectedScope?.id}
-            reportChartKey={`report_custom_${widget.id}`}
             scenarios={scenarios}
             storageKey={reportScenarioComparisonStorageKey(widget.id)}
             title={widget.title}
@@ -2245,51 +2220,6 @@ export function ScenarioReportsDashboard({
     };
   });
 
-  const scenarioDetailTable: ReportTable | null = selectedScope
-    ? {
-        title: "Visão selecionada",
-        columns: [
-          { key: "label", label: "Item", width: 22 },
-          { key: "value", label: "Valor", width: 36 },
-        ],
-        rows: [
-          { label: "Nome", value: selectedScope.name },
-          {
-            label: "Descrição",
-            value: selectedScope.description || "Sem descrição",
-          },
-          {
-            label: "Tipo",
-            value: scopeModeLabel(selectedScope.mode),
-          },
-          {
-            label: selectedScope.scenario ? "Linhas" : "Câmeras",
-            value: formatNumber(
-              selectedScope.scenario
-                ? (selectedScope.scenario.lines?.length ?? 0)
-                : selectedScope.cameraIds.length,
-            ),
-          },
-        ],
-      }
-    : null;
-  const scopeListTable: ReportTable | null = selectedScope
-    ? {
-        title: "Visões disponíveis",
-        columns: [
-          { key: "name", label: "Visão", width: 34 },
-          { key: "type", label: "Tipo", width: 16 },
-          { key: "items", label: "Itens", width: 12, numeric: true },
-        ],
-        rows: scopeOptions.map((scope) => ({
-          name: scope.name,
-          type: scopeModeLabel(scope.mode),
-          items: scope.scenario
-            ? (scope.scenario.lines?.length ?? 0)
-            : scope.cameraIds.length,
-        })),
-      }
-    : null;
   const reportLayoutCards = [
     ...countingIntelligenceCards,
     ...scenarioComparisonCards,
@@ -2377,28 +2307,30 @@ export function ScenarioReportsDashboard({
       tables: [],
     };
 
-    Object.values(COUNTING_INTELLIGENCE_CARD_IDS).forEach((cardId) => {
-      const selection = reportScenarioSelectionByCardId.get(cardId) ?? {
-        mode: "inherit",
-        scenarioIds: [],
-      };
-      const model = resolveCountingIntelligenceModel(selection);
-      let assets = assetsByModel.get(model);
-      if (!assets) {
-        assets = buildCountingIntelligenceReportAssets(model, colors);
-        assetsByModel.set(model, assets);
-      }
+    Object.values(COUNTING_INTELLIGENCE_CARD_IDS)
+      .filter((cardId) => visibleReportCardIdSet.has(cardId))
+      .forEach((cardId) => {
+        const selection = reportScenarioSelectionByCardId.get(cardId) ?? {
+          mode: "inherit",
+          scenarioIds: [],
+        };
+        const model = resolveCountingIntelligenceModel(selection);
+        let assets = assetsByModel.get(model);
+        if (!assets) {
+          assets = buildCountingIntelligenceReportAssets(model, colors);
+          assetsByModel.set(model, assets);
+        }
 
-      merged.charts.push(
-        ...assets.charts.filter((asset) => asset.cardId === cardId),
-      );
-      merged.metrics.push(
-        ...assets.metrics.filter((asset) => asset.cardId === cardId),
-      );
-      merged.tables.push(
-        ...assets.tables.filter((asset) => asset.cardId === cardId),
-      );
-    });
+        merged.charts.push(
+          ...assets.charts.filter((asset) => asset.cardId === cardId),
+        );
+        merged.metrics.push(
+          ...assets.metrics.filter((asset) => asset.cardId === cardId),
+        );
+        merged.tables.push(
+          ...assets.tables.filter((asset) => asset.cardId === cardId),
+        );
+      });
 
     return merged;
   }
@@ -2414,9 +2346,6 @@ export function ScenarioReportsDashboard({
           ),
       ),
     [customWidgets, visibleReportCardIds],
-  );
-  const comparisonChartsReady = visibleComparisonCardIds.every(
-    (cardId) => Boolean(comparisonReportCharts[cardId]),
   );
   function buildScenarioReportAssets() {
   const countingIntelligenceAssets =
@@ -2438,7 +2367,9 @@ export function ScenarioReportsDashboard({
   );
   const customReportChartEntries = customWidgets
     .filter(
-      (widget): widget is ReportScopeCustomWidget => widget.kind === "scope",
+      (widget): widget is ReportScopeCustomWidget =>
+        widget.kind === "scope" &&
+        visibleReportCardIdSet.has(`report_custom_${widget.id}`),
     )
     .map(
       (widget): readonly [string, ReportPayload["charts"][number]] | null => {
@@ -2514,31 +2445,6 @@ export function ScenarioReportsDashboard({
         { ...value, title: resolveReportTitle(cardId, value.title) },
       ] as const,
     );
-  if (scenarioDetailTable) {
-    visibleTableEntries.push([
-      "report_scenario_detail",
-      {
-        ...scenarioDetailTable,
-        title: resolveReportTitle(
-          "report_scenario_detail",
-          scenarioDetailTable.title,
-        ),
-      },
-    ]);
-  }
-  if (scopeListTable) {
-    visibleTableEntries.push([
-      "report_scenario_table",
-      {
-        ...scopeListTable,
-        title: resolveReportTitle("report_scenario_table", scopeListTable.title),
-      },
-    ]);
-  }
-  const reportContextTableIds = [
-    ...(scenarioDetailTable ? ["report_scenario_detail"] : []),
-    ...(scopeListTable ? ["report_scenario_table"] : []),
-  ];
   const visibleTablesByCardId = new Map<string, ReportTable[]>();
   visibleTableEntries.forEach(([cardId, table]) => {
     const current = visibleTablesByCardId.get(cardId) ?? [];
@@ -2549,7 +2455,6 @@ export function ScenarioReportsDashboard({
   return {
     countingIntelligenceChartEntries,
     customReportChartEntries,
-    reportContextTableIds,
     reportWidgetScenarioContexts,
     visibleMetricByCardId,
     visibleTablesByCardId,
@@ -2559,20 +2464,16 @@ export function ScenarioReportsDashboard({
   function composeScenarioReportPayload({
     charts,
     metrics,
-    scenarioContexts,
     tables,
   }: {
     charts: ReportPayload["charts"];
     metrics: ReportMetric[];
-    scenarioContexts: string[];
     tables: ReportTable[];
   }): ReportPayload {
     const generatedAt = new Date();
     return {
-      title: selectedScope
-        ? `Relatório de Contagem - ${selectedScope.name}`
-        : "Relatório de Contagem",
-      subtitle: "Resultados de contagem por visão e períodos agregados.",
+      title: "Relatório IPXData - Contagem",
+      subtitle: `Período analisado: ${reportPeriodOverride.label}`,
       filename: `ipxdata-relatorio-contagem-${reportDateSlug(generatedAt)}`,
       generatedAt,
       timeZone: companyTimeZone,
@@ -2581,17 +2482,7 @@ export function ScenarioReportsDashboard({
         generatedAt,
         companyTimeZone,
       ),
-      context: [
-        selectedScope
-          ? `${scopeModeLabel(selectedScope.mode)}: ${selectedScope.name}`
-          : "",
-        showPreviousPeriod
-          ? `Comparativo: ${intradayComparison === "last_week" ? "semana passada" : "ontem"}`
-          : "Sem período anterior",
-        `Período aplicado a todo o relatório: ${reportPeriodOverride.label}`,
-        ...scenarioContexts,
-        "Impressão preservando ordem, visibilidade e cores dos widgets; dimensões adaptadas ao papel.",
-      ].filter(Boolean),
+      context: [],
       metrics,
       charts,
       tables,
@@ -2668,6 +2559,7 @@ export function ScenarioReportsDashboard({
       context: [
         `Período analisado: ${periodLabel}`,
         ...(payload.context ?? []),
+        ...buildScenarioReportAssets().reportWidgetScenarioContexts,
       ],
       tables: [
         ...(payload.tables ?? []),
@@ -2707,15 +2599,104 @@ export function ScenarioReportsDashboard({
   async function resolveConfiguredScenarioReportPayload(signal: AbortSignal) {
     signal.throwIfAborted();
     const reportAssets = buildScenarioReportAssets();
+    // Resolve every visible comparison from its saved settings on export.
+    // CardLayout may not mount distant cards, and a mounted snapshot can lag
+    // behind a settings import or a recently changed scenario selection.
+    // The aggregate loader deduplicates/caches matching ranges.
+    const configuredComparisonCharts = await Promise.all(
+      visibleComparisonCardIds
+        .map(async (cardId) => {
+          signal.throwIfAborted();
+          const companyId = companyScopeId?.trim();
+          if (!companyId || !selectedScope) {
+            throw new Error("Selecione uma empresa e uma visão para exportar o comparativo.");
+          }
+          const customWidget = customWidgets.find(
+            (widget) =>
+              widget.kind === "scenario_comparison" &&
+              `report_custom_${widget.id}` === cardId,
+          );
+          const storageKey = customWidget
+            ? reportScenarioComparisonStorageKey(customWidget.id)
+            : "reports";
+          const settings = loadScenarioComparisonSettings(
+            storageKey,
+            companyId,
+            { userId: user?.id, viewId: selectedScope.id },
+            companyTimeZone,
+          );
+          if (!selectScenarioComparisonScenarios(scenarios, settings).length) {
+            throw new Error(
+              `Selecione ao menos um cenário em “${resolveReportTitle(cardId, customWidget?.title ?? "Cenários por período")}” para exportar.`,
+            );
+          }
+          const definition = buildScenarioComparisonDefinition(
+            {
+              ...settings,
+              accumulated: false,
+              customFrom: "",
+              customTo: "",
+              granularity: settings.view === "period" ? settings.granularity : "day",
+              period: "today",
+              selectedScenarioIds: [],
+              selectionMode: "all",
+            },
+            new Date(),
+            companyTimeZone,
+            reportPeriodOverride,
+          );
+          const rows = await fetchScenarioComparisonRows(
+            definition,
+            undefined,
+            companyTimeZone,
+            companyId,
+            { aggregateSource: reportComparisonAggregateSource, signal },
+          );
+          signal.throwIfAborted();
+          const chart = buildScenarioComparisonReportChart({
+            definition: { ...definition, accumulated: settings.accumulated },
+            periodLabelOverride: reportPeriodOverride.label,
+            rows,
+            scenarios,
+            settings,
+            title: resolveReportTitle(
+              cardId,
+              customWidget?.title ?? "Cenários por período",
+            ),
+            widgetColor: reportColorByCardId.get(cardId),
+          });
+          return [cardId, chart] as const;
+        }),
+    );
+    signal.throwIfAborted();
     const chartByCardId = new Map<string, ReportPayload["charts"][number]>([
       ...reportAssets.countingIntelligenceChartEntries,
       ...reportAssets.customReportChartEntries,
-      ...Object.entries(comparisonReportCharts).map(
-        ([cardId, chart]) =>
-          [cardId, applyReportChartType(cardId, chart)] as const,
+      ...configuredComparisonCharts.map(
+        ([cardId, chart]) => [cardId, applyReportChartType(cardId, chart)] as const,
       ),
     ]);
     signal.throwIfAborted();
+
+    const missingCardId = visibleReportCardIds.find(
+      (cardId) => {
+        const card = reportLayoutCards.find((item) => item.id === cardId);
+        if (card?.chartTypeEnabled) return !chartByCardId.has(cardId);
+        return !chartByCardId.has(cardId) &&
+          !reportAssets.visibleMetricByCardId.has(cardId) &&
+          !(reportAssets.visibleTablesByCardId.get(cardId)?.length);
+      },
+    );
+    if (missingCardId) {
+      const title = resolveReportTitle(
+        missingCardId,
+        reportLayoutCards.find((card) => card.id === missingCardId)?.label ??
+          "Widget",
+      );
+      throw new Error(
+        `O widget “${title}” ainda não está pronto para exportação. Aguarde a carga dos dados ou atualize o relatório.`,
+      );
+    }
 
     return composeScenarioReportPayload({
       charts: visibleReportCardIds
@@ -2726,13 +2707,9 @@ export function ScenarioReportsDashboard({
       metrics: visibleReportCardIds
         .map((id) => reportAssets.visibleMetricByCardId.get(id))
         .filter((metric): metric is ReportMetric => Boolean(metric)),
-      scenarioContexts: reportAssets.reportWidgetScenarioContexts,
-      tables: [
-        ...new Set([
-          ...visibleReportCardIds,
-          ...reportAssets.reportContextTableIds,
-        ]),
-      ].flatMap((id) => reportAssets.visibleTablesByCardId.get(id) ?? []),
+      tables: visibleReportCardIds.flatMap(
+        (id) => reportAssets.visibleTablesByCardId.get(id) ?? [],
+      ),
     });
   }
 
@@ -2935,11 +2912,13 @@ export function ScenarioReportsDashboard({
                       }
                       disabled={
                         !reportRequested ||
+                        !visibleReportCardIds.length ||
                         countingPeriodPending ||
                         loadingCharts ||
                         loadingScenarios ||
                         !selectedScope ||
-                        !comparisonChartsReady ||
+                        (visibleComparisonCardIds.length > 0 &&
+                          reportComparisonAggregateSourcePending) ||
                         Boolean(reportComparisonDisabledReason)
                       }
                     />
@@ -2950,7 +2929,8 @@ export function ScenarioReportsDashboard({
                         loadingCharts ||
                         loadingScenarios ||
                         !selectedScope ||
-                        !comparisonChartsReady ||
+                        (visibleComparisonCardIds.length > 0 &&
+                          reportComparisonAggregateSourcePending) ||
                         Boolean(reportComparisonDisabledReason)
                       }
                       getPayload={buildAiScenarioReportPayload}
@@ -3614,9 +3594,9 @@ function buildScenarioAggregateDefinitions(
     {
       id: "report_chart_year",
       label: "Ano a ano",
-      description: `Últimos ${COUNTING_REPORT_HISTORY_YEARS} anos.`,
+      description: "Todos os anos disponíveis, incluindo o ano em andamento.",
       granularity: "year",
-      from: addYears(currentYearStart, -(COUNTING_REPORT_HISTORY_YEARS - 1)),
+      from: countingReportHistoryFrom(now, timeZone),
       to: addYears(currentYearStart, 1),
     },
   ];

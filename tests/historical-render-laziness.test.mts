@@ -120,7 +120,7 @@ test("Ocupação adia pontos vazios e a série diária exclusiva da IA", () => {
     dashboard.indexOf("const analysisDateRangeControl"),
   );
 
-  assert.match(cardsSection, /definitions\.map[\s\S]*?node: \(\) => \(/);
+  assert.match(cardsSection, /definitions\.filter[\s\S]*?\.map[\s\S]*?node: \(\) => \(/);
   assert.match(cardsSection, /buildEmptyPoints\(definition\)/);
   assert.doesNotMatch(
     dashboard.slice(0, dashboard.indexOf("const getOccupancyAiPayload")),

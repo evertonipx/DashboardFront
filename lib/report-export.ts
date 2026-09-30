@@ -7,6 +7,10 @@ import {
   chartValueLabelTopPadding,
   composeChartValueLabelLayout,
 } from "@/lib/chart-value-labels";
+import {
+  isZeroChartLabelValue,
+  resolveChartLabelValue,
+} from "@/lib/chart-label-value";
 
 async function renderEChartToDataUrl(
   option: EnterpriseChartOption,
@@ -101,7 +105,7 @@ export async function exportReportToExcel(
   workbook.properties.date1904 = false;
 
   const summary = workbook.addWorksheet("Resumo", {
-    headerFooter: excelHeaderFooter(payload.title),
+    headerFooter: excelHeaderFooter(payload),
     pageSetup: {
       fitToPage: true,
       fitToHeight: 0,
@@ -120,7 +124,7 @@ export async function exportReportToExcel(
     { key: "d", width: 18 },
     { key: "e", width: 28 },
   ];
-  const summaryContentStartRow = buildExcelHeader(summary, payload, mode, exportedAt);
+  const summaryContentStartRow = buildExcelHeader(summary, payload);
 
   if (mode !== "charts") {
     buildExcelMetrics(summary, payload.metrics, summaryContentStartRow);
@@ -132,7 +136,7 @@ export async function exportReportToExcel(
       const chartSheet = workbook.addWorksheet(
         safeSheetName(`Gráfico ${index + 1} ${chart.title}`),
         {
-          headerFooter: excelHeaderFooter(payload.title),
+          headerFooter: excelHeaderFooter(payload),
           pageSetup: {
             fitToPage: true,
             fitToHeight: 1,
@@ -155,16 +159,32 @@ export async function exportReportToExcel(
       );
       chartSheet.mergeCells(1, 1, 1, chartSheetColumnCount);
       const titleCell = chartSheet.getCell(1, 1);
-      titleCell.value = chart.title;
+      titleCell.value = canonicalReportTitle(payload);
       titleCell.font = {
         bold: true,
         color: { argb: `FF${DARK_TEXT}` },
-        size: 16,
+        size: 14,
       };
       chartSheet.getRow(1).height = 24;
 
       chartSheet.mergeCells(2, 1, 2, chartSheetColumnCount);
-      const descCell = chartSheet.getCell(2, 1);
+      const chartTitleCell = chartSheet.getCell(2, 1);
+      chartTitleCell.value = chart.title;
+      chartTitleCell.font = {
+        bold: true,
+        color: { argb: `FF${BRAND_BLUE}` },
+        size: 11,
+      };
+      chartTitleCell.alignment = { vertical: "middle", wrapText: true };
+      chartSheet.getRow(2).height = excelTextRowHeight(
+        chart.title,
+        chartSheetColumnCount * 14,
+        22,
+        60,
+      );
+
+      chartSheet.mergeCells(3, 1, 3, chartSheetColumnCount);
+      const descCell = chartSheet.getCell(3, 1);
       const chartDescription = [
         chart.description,
         chart.comparison,
@@ -175,23 +195,12 @@ export async function exportReportToExcel(
       descCell.value = chartDescription;
       descCell.font = { color: { argb: `FF${MUTED_TEXT}` }, size: 10 };
       descCell.alignment = { vertical: "top", wrapText: true };
-      chartSheet.getRow(2).height = excelTextRowHeight(
+      chartSheet.getRow(3).height = excelTextRowHeight(
         chartDescription,
         chartSheetColumnCount * 14,
         22,
         48,
       );
-
-      chartSheet.mergeCells(3, 1, 3, chartSheetColumnCount);
-      const completeCell = chartSheet.getCell(3, 1);
-      completeCell.value = `Dados gerados em ${formatReportDateTime(payload, payload.generatedAt)} · ${reportCompletenessLabel(payload)}`;
-      completeCell.font = { color: { argb: `FF${MUTED_TEXT}` }, size: 10 };
-      completeCell.alignment = { vertical: "top", wrapText: true };
-
-      chartSheet.mergeCells(4, 1, 4, chartSheetColumnCount);
-      const exportCell = chartSheet.getCell(4, 1);
-      exportCell.value = `Arquivo exportado em ${formatReportDateTime(payload, exportedAt)}`;
-      exportCell.font = { color: { argb: `FF${MUTED_TEXT}` }, size: 9 };
 
       const chartDimensions = { height: 400, signal: options.signal, width: 900 };
       const dataUrl = await renderEChartToDataUrl(
@@ -205,16 +214,16 @@ export async function exportReportToExcel(
       });
       chartSheet.addImage(imageId, {
         ext: { height: 327, width: 735 },
-        tl: { col: 0, row: 5 },
+        tl: { col: 0, row: 3 },
       });
-      chartSheet.pageSetup.printArea = "A1:H23";
+      chartSheet.pageSetup.printArea = "A1:H21";
     }
 
     if (mode !== "charts") {
       const dataSheet = workbook.addWorksheet(
         safeSheetName(`Dados ${index + 1} ${chart.table.title}`),
         {
-          headerFooter: excelHeaderFooter(payload.title),
+          headerFooter: excelHeaderFooter(payload),
           pageSetup: {
             fitToPage: false,
             fitToHeight: 0,
@@ -236,7 +245,6 @@ export async function exportReportToExcel(
         dataSheet,
         payload,
         chart.title,
-        exportedAt,
         [chart.description, chart.comparison].filter(Boolean).join(" | "),
       );
       buildExcelTable(dataSheet, chart.table, tableStartRow);
@@ -252,7 +260,7 @@ export async function exportReportToExcel(
     const sheet = workbook.addWorksheet(
       safeSheetName(`Anexo ${index + 1} ${table.title}`),
       {
-        headerFooter: excelHeaderFooter(payload.title),
+        headerFooter: excelHeaderFooter(payload),
         pageSetup: {
           fitToPage: false,
           fitToHeight: 0,
@@ -274,7 +282,6 @@ export async function exportReportToExcel(
       sheet,
       payload,
       table.title,
-      exportedAt,
     );
     buildExcelTable(sheet, table, tableStartRow);
   }
@@ -296,7 +303,6 @@ export async function exportReportToPdf(
 ) {
   const mode = options.mode ?? "complete";
   options.signal?.throwIfAborted();
-  const exportedAt = new Date();
   const { jsPDF } = await import("jspdf");
   options.signal?.throwIfAborted();
   const doc = new jsPDF({
@@ -309,10 +315,10 @@ export async function exportReportToPdf(
     creator: "IPXData",
     keywords: "IPXData, relatório executivo, inteligência operacional",
     subject: payload.subtitle ?? "Relatório executivo",
-    title: payload.title,
+    title: canonicalReportTitle(payload),
   });
 
-  drawPdfCover(doc, payload, mode, exportedAt);
+  drawPdfCover(doc, payload, mode);
   drawPdfExecutiveAppendices(doc, payload, mode);
   const annexTables = reportTablesForMode(payload.tables, mode, payload.charts);
 
@@ -322,15 +328,11 @@ export async function exportReportToPdf(
       addPdfLandscapePage(doc);
       drawPdfPageHeader(
         doc,
-        payload.title,
+        canonicalReportTitle(payload),
         chart.title,
         `GRÁFICO ${index + 1} DE ${payload.charts.length}`,
       );
-      let chartTop = drawPdfSectionMetadata(
-        doc,
-        payload,
-        chart.description,
-      );
+      let chartTop = drawPdfSectionMetadata(doc, chart.description);
       const densityNote = chartExportDensityNote(chart);
       if (densityNote) {
         chartTop += drawPdfNoteBox(doc, densityNote, 42, chartTop) + 10;
@@ -355,15 +357,11 @@ export async function exportReportToPdf(
       addPdfLandscapePage(doc);
       drawPdfPageHeader(
         doc,
-        payload.title,
+        canonicalReportTitle(payload),
         chart.table.title,
         `DADOS DO GRÁFICO ${index + 1} DE ${payload.charts.length}`,
       );
-      let tableTop = drawPdfSectionMetadata(
-        doc,
-        payload,
-        chartTableDescription(chart),
-      );
+      let tableTop = drawPdfSectionMetadata(doc, chartTableDescription(chart));
       if (chart.comparison) {
         tableTop += drawPdfNoteBox(doc, chart.comparison, 42, tableTop) + 10;
       }
@@ -376,20 +374,16 @@ export async function exportReportToPdf(
     addPdfLandscapePage(doc);
     drawPdfPageHeader(
       doc,
-      payload.title,
+      canonicalReportTitle(payload),
       table.title,
       `ANEXO ${index + 1} DE ${annexTables.length}`,
     );
-    const tableTop = drawPdfSectionMetadata(
-      doc,
-      payload,
-      table.description,
-    );
+    const tableTop = drawPdfSectionMetadata(doc, table.description);
     drawPdfTable(doc, table, tableTop, payload, true);
   }
 
   options.signal?.throwIfAborted();
-  drawPdfPageFooters(doc, payload, exportedAt);
+  drawPdfPageFooters(doc, payload);
   options.signal?.throwIfAborted();
   doc.save(`${safeFilename(`${payload.filename}-${mode}`)}.pdf`);
 }
@@ -397,11 +391,9 @@ export async function exportReportToPdf(
 function buildExcelHeader(
   sheet: import("exceljs").Worksheet,
   payload: ReportPayload,
-  mode: ReportExportMode,
-  exportedAt: Date,
 ): number {
   sheet.mergeCells("A1:E1");
-  sheet.getCell("A1").value = payload.title;
+  sheet.getCell("A1").value = canonicalReportTitle(payload);
   sheet.getCell("A1").font = {
     bold: true,
     color: { argb: `FF${DARK_TEXT}` },
@@ -414,53 +406,29 @@ function buildExcelHeader(
   sheet.getCell("A2").value = payload.subtitle ?? "Relatório IPXData";
   sheet.getCell("A2").font = { color: { argb: `FF${MUTED_TEXT}` }, size: 11 };
 
-  sheet.getCell("A4").value = "Dados gerados em";
-  sheet.getCell("B4").value = formatReportDateTime(payload, payload.generatedAt);
-  sheet.getCell("A4").font = labelFont();
-  sheet.getCell("B4").font = valueFont();
+  sheet.mergeCells("A4:E4");
+  sheet.getCell("A4").value = reportSubjectDescription(payload);
+  sheet.getCell("A4").font = { color: { argb: `FF${MUTED_TEXT}` }, size: 10 };
+  sheet.getCell("A4").alignment = { vertical: "top", wrapText: true };
+  const period = reportPeriodLabel(payload);
+  if (period) {
+    sheet.mergeCells("A5:E5");
+    sheet.getCell("A5").value = period;
+    sheet.getCell("A5").font = { color: { argb: `FF${MUTED_TEXT}` }, size: 10 };
+  }
 
-  sheet.getCell("A5").value = "Arquivo exportado em";
-  sheet.getCell("B5").value = formatReportDateTime(payload, exportedAt);
-  sheet.getCell("A5").font = labelFont();
-  sheet.getCell("B5").font = valueFont();
-
-  sheet.getCell("A6").value = "Atualizado até";
-  sheet.getCell("B6").value = reportCompletenessValue(payload);
-  sheet.getCell("A6").font = labelFont();
-  sheet.getCell("B6").font = valueFont();
-
-  sheet.getCell("A7").value = "Conteúdo";
-  sheet.getCell("B7").value = modeLabel(mode);
-  sheet.getCell("A7").font = labelFont();
-  sheet.getCell("B7").font = valueFont();
-
-  payload.context?.forEach((item, index) => {
-    const row = 8 + index;
-    sheet.getCell(row, 1).value = item;
-    sheet.mergeCells(row, 1, row, 5);
-    sheet.getCell(row, 1).font = { color: { argb: `FF${MUTED_TEXT}` }, size: 10 };
-    sheet.getCell(row, 1).alignment = { vertical: "top", wrapText: true };
-    sheet.getRow(row).height = excelTextRowHeight(
-      item,
-      excelColumnsWidth(sheet, 5),
-      22,
-      52,
-    );
-  });
-
-  return 9 + (payload.context?.length ?? 0);
+  return 7;
 }
 
 function buildExcelDataSheetHeader(
   sheet: import("exceljs").Worksheet,
   payload: ReportPayload,
   sectionTitle: string,
-  exportedAt: Date,
   description?: string,
 ): number {
   const lastColumn = Math.max(1, sheet.columnCount);
   if (lastColumn > 1) sheet.mergeCells(1, 1, 1, lastColumn);
-  sheet.getCell(1, 1).value = payload.title;
+  sheet.getCell(1, 1).value = canonicalReportTitle(payload);
   sheet.getCell(1, 1).font = {
     bold: true,
     color: { argb: `FF${DARK_TEXT}` },
@@ -476,7 +444,6 @@ function buildExcelDataSheetHeader(
     size: 11,
   };
 
-  let metadataRow = 3;
   if (description?.trim()) {
     if (lastColumn > 1) sheet.mergeCells(3, 1, 3, lastColumn);
     sheet.getCell(3, 1).value = description;
@@ -491,30 +458,9 @@ function buildExcelDataSheetHeader(
       30,
       64,
     );
-    metadataRow = 4;
   }
 
-  if (lastColumn > 1) {
-    sheet.mergeCells(metadataRow, 1, metadataRow, lastColumn);
-  }
-  const metadata = `Dados gerados em ${formatReportDateTime(payload, payload.generatedAt)} · ${reportCompletenessLabel(payload)} · Arquivo exportado em ${formatReportDateTime(payload, exportedAt)}`;
-  sheet.getCell(metadataRow, 1).value = metadata;
-  sheet.getCell(metadataRow, 1).font = {
-    color: { argb: `FF${MUTED_TEXT}` },
-    size: 9,
-  };
-  sheet.getCell(metadataRow, 1).alignment = {
-    vertical: "top",
-    wrapText: true,
-  };
-  sheet.getRow(metadataRow).height = excelTextRowHeight(
-    metadata,
-    excelColumnsWidth(sheet, lastColumn),
-    28,
-    76,
-  );
-
-  return metadataRow + 3;
+  return description?.trim() ? 5 : 4;
 }
 
 function buildExcelMetrics(
@@ -750,10 +696,57 @@ function excelPageMargins() {
   };
 }
 
-function excelHeaderFooter(reportTitle: string) {
-  const safeTitle = reportTitle.replace(/&/g, "&&").slice(0, 120);
+function reportModule(payload: ReportPayload) {
+  const identity = `${payload.filename} ${payload.title}`
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  if (/demograph|demograf/.test(identity)) return "Demografia";
+  if (/occup|ocupac/.test(identity)) return "Ocupação";
+  if (/count|contagem|analise|ao-vivo/.test(identity)) return "Contagem";
+  return null;
+}
+
+function canonicalReportTitle(payload: ReportPayload) {
+  const reportKind = reportModule(payload);
+  return reportKind ? `Relatório IPXData - ${reportKind}` : "Relatório IPXData";
+}
+
+function reportSubjectDescription(payload: ReportPayload) {
+  switch (reportModule(payload)) {
+    case "Ocupação":
+      return "Ocupação e permanência em áreas identificadas por visão computacional com IA.";
+    case "Demografia":
+      return "Distribuições estimadas de gênero, faixa etária e emoção por visão computacional com IA.";
+    case "Contagem":
+      return "Indicadores de fluxo e contagem extraídos por visão computacional com IA.";
+    default:
+      return "Indicadores operacionais obtidos por visão computacional com IA.";
+  }
+}
+
+function reportPeriodLabel(payload: ReportPayload) {
+  // The subtitle already carries the period in the current report builders.
+  // Keep the legacy context as a fallback only, never as a repeated caption.
+  if (/\b(?:19|20)\d{2}\b|\b\d{1,2}\/\d{1,2}\/\d{4}\b/.test(payload.subtitle ?? "")) {
+    return undefined;
+  }
+  const period = payload.context?.find((item) =>
+    /^(?:período(?: aplicado a todo o relatório| analisado)?|histórico mensal)\s*:/i.test(
+      item.trim(),
+    ),
+  );
+  return period?.trim().replace(/^Período aplicado a todo o relatório:/i, "Período:");
+}
+
+function excelHeaderFooter(payload: ReportPayload) {
+  const safeTitle = canonicalReportTitle(payload).replace(/&/g, "&&");
+  const completeUntil = certifiedDataCompleteUntil(payload);
+  const updated = completeUntil
+    ? `&C${`Dados atualizados até ${formatReportDateTime(payload, completeUntil)}`.replace(/&/g, "&&")}`
+    : "";
   return {
-    oddFooter: `&LIPXData · ${safeTitle}&C&P de &N&RConfidencial`,
+    oddFooter: `&L${safeTitle}${updated}&R&P de &N`,
   };
 }
 
@@ -761,82 +754,61 @@ function drawPdfCover(
   doc: import("jspdf").jsPDF,
   payload: ReportPayload,
   mode: ReportExportMode,
-  exportedAt: Date,
 ) {
   const width = doc.internal.pageSize.getWidth();
   const height = doc.internal.pageSize.getHeight();
   const contentWidth = width - 84;
   doc.setFillColor(`#${BRAND_BLUE}`);
-  doc.rect(0, 0, width, 16, "F");
+  doc.rect(0, 0, width, 12, "F");
 
-  drawPdfText(doc, "IPXData", 42, 48, 12, BRAND_BLUE, true);
+  drawPdfText(doc, "IPXDATA / RELATÓRIO EXECUTIVO", 42, 58, 10, BRAND_BLUE, true);
   drawPdfFittedText(
     doc,
-    payload.title,
+    canonicalReportTitle(payload),
     42,
-    82,
+    102,
     contentWidth,
-    24,
+    25,
     DARK_TEXT,
     true,
-    16,
+    19,
   );
   const subtitleHeight = drawPdfParagraph(
     doc,
     payload.subtitle ?? "Relatório executivo",
     42,
-    108,
+    129,
     contentWidth,
-    12,
+    11,
     MUTED_TEXT,
     false,
     2,
-    15,
+    14,
   );
-  let contentY = 108 + subtitleHeight + 10;
-  const coverContextLimit = mode === "charts" ? 3 : 2;
-  drawPdfText(
+  let contentY = 129 + subtitleHeight + 12;
+  contentY += drawPdfParagraph(
     doc,
-    `Dados gerados em ${formatReportDateTime(payload, payload.generatedAt)}`,
+    reportSubjectDescription(payload),
     42,
     contentY,
-    10,
+    contentWidth,
+    10.5,
     MUTED_TEXT,
+    false,
+    2,
+    13,
   );
-  contentY += 18;
-  drawPdfText(
-    doc,
-    `Arquivo exportado em ${formatReportDateTime(payload, exportedAt)}`,
-    42,
-    contentY,
-    10,
-    MUTED_TEXT,
-  );
-  contentY += 18;
-  drawPdfText(doc, reportCompletenessLabel(payload), 42, contentY, 10, MUTED_TEXT);
-  contentY += 18;
-  drawPdfText(doc, `Conteúdo: ${modeLabel(mode)}`, 42, contentY, 10, MUTED_TEXT);
-  contentY += 18;
-
-  payload.context?.slice(0, coverContextLimit).forEach((item) => {
-    const boxHeight = drawPdfNoteBox(doc, item, 42, contentY);
-    contentY += boxHeight + 6;
-  });
-  if ((payload.context?.length ?? 0) > coverContextLimit) {
-    drawPdfText(
-      doc,
-      `Contexto completo na próxima página · + ${(payload.context?.length ?? 0) - coverContextLimit} item(ns)`,
-      52,
-      contentY + 4,
-      8,
-      MUTED_TEXT,
+  const period = reportPeriodLabel(payload);
+  if (period) {
+    contentY += 10;
+    contentY += drawPdfParagraph(
+      doc, period, 42, contentY, contentWidth, 10, DARK_TEXT, true, 2, 13,
     );
-    contentY += 16;
   }
 
   const cardWidth = (width - 84 - 36) / 4;
   if (mode === "charts") return;
-  const metricsY = Math.max(202, contentY + 8);
+  const metricsY = Math.max(220, contentY + 18);
   const cardHeight = Math.max(
     78,
     Math.min(84, (height - metricsY - 54) / 2 - 6),
@@ -904,25 +876,15 @@ function drawPdfExecutiveAppendices(
   payload: ReportPayload,
   mode: ReportExportMode,
 ) {
-  const context = payload.context ?? [];
-  const coverContextLimit = mode === "charts" ? 3 : 2;
-  if (context.length > coverContextLimit) {
-    drawPdfContextPages(doc, payload, context);
-  }
-
   if (mode !== "charts" && payload.metrics.length > 8) {
     addPdfLandscapePage(doc);
     drawPdfPageHeader(
       doc,
-      payload.title,
+      canonicalReportTitle(payload),
       "Indicadores executivos · continuação",
       `INDICADORES 9–${payload.metrics.length}`,
     );
-    const tableTop = drawPdfSectionMetadata(
-      doc,
-      payload,
-      "Indicadores adicionais preservados integralmente após os oito destaques da capa.",
-    );
+    const tableTop = drawPdfSectionMetadata(doc);
     drawPdfTable(
       doc,
       {
@@ -947,38 +909,6 @@ function drawPdfExecutiveAppendices(
   }
 }
 
-function drawPdfContextPages(
-  doc: import("jspdf").jsPDF,
-  payload: ReportPayload,
-  context: string[],
-) {
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const boxWidth = pageWidth - 84;
-  let pageIndex = 1;
-  let y = 90;
-
-  const startPage = () => {
-    addPdfLandscapePage(doc);
-    drawPdfPageHeader(
-      doc,
-      payload.title,
-      "Contexto e critérios",
-      pageIndex === 1 ? "GOVERNANÇA DO RELATÓRIO" : "CONTINUAÇÃO",
-    );
-    y = 90;
-    pageIndex += 1;
-  };
-
-  startPage();
-  context.forEach((item, index) => {
-    const text = `${index + 1}. ${item}`;
-    const boxHeight = measurePdfNoteBoxHeight(doc, text, boxWidth, 8);
-    if (y + boxHeight > pageHeight - 54) startPage();
-    y += drawPdfNoteBox(doc, text, 42, y, boxWidth, 8) + 8;
-  });
-}
-
 function certifiedDataCompleteUntil(payload: ReportPayload) {
   const value = payload.dataCompleteUntil;
   return value instanceof Date && Number.isFinite(value.getTime())
@@ -991,17 +921,6 @@ function reportCompletenessLabel(payload: ReportPayload) {
   return value
     ? `Dados atualizados até ${formatReportDateTime(payload, value)}`
     : "Atualização dos dados não informada";
-}
-
-function reportCompletenessValue(payload: ReportPayload) {
-  const value = certifiedDataCompleteUntil(payload);
-  return value ? formatReportDateTime(payload, value) : "Não informada";
-}
-
-function modeLabel(mode: ReportExportMode) {
-  if (mode === "charts") return "Somente gráficos";
-  if (mode === "data") return "Somente dados";
-  return "Completo";
 }
 
 function reportTablesForMode(
@@ -1078,21 +997,20 @@ function chartExportDensityNote(chart: ReportChart) {
       (item as { type?: unknown }).type === "heatmap",
   );
   if (hasHeatmap) {
-    return "Mapa de calor: a cor sintetiza a intensidade; os valores exatos permanecem na tabela de dados.";
+    return "Mapa de calor: a cor sintetiza a intensidade; os valores exatos constam na exportação completa ou de dados.";
   }
-  const maximumPointCount = series.reduce((maximum, item) => {
-    if (!item || typeof item !== "object") return maximum;
+  const totalPointCount = series.reduce((total, item) => {
+    if (!item || typeof item !== "object") return total;
     const data = (item as { data?: unknown }).data;
-    return Math.max(maximum, Array.isArray(data) ? data.length : 0);
+    return total + (Array.isArray(data) ? data.length : 0);
   }, 0);
-  return maximumPointCount > 36
-    ? "Série densa: rótulos espaçados para leitura; todos os valores permanecem na tabela de dados."
+  return totalPointCount > 32
+    ? "Série densa: rótulos espaçados para leitura; todos os valores constam na exportação completa ou de dados."
     : undefined;
 }
 
 function drawPdfSectionMetadata(
   doc: import("jspdf").jsPDF,
-  payload: ReportPayload,
   description?: string,
 ) {
   const width = doc.internal.pageSize.getWidth() - 84;
@@ -1112,8 +1030,7 @@ function drawPdfSectionMetadata(
     );
     y += 5;
   }
-  drawPdfText(doc, reportCompletenessLabel(payload), 42, y, 9, MUTED_TEXT);
-  return y + 18;
+  return y + 7;
 }
 
 function drawPdfChartImage(
@@ -1185,15 +1102,11 @@ function drawPdfTable(
       addPdfLandscapePage(doc);
       drawPdfPageHeader(
         doc,
-        payload.title,
+        canonicalReportTitle(payload),
         table.title,
         band.label.toUpperCase(),
       );
-      y = drawPdfSectionMetadata(
-        doc,
-        payload,
-        [table.description, band.label].filter(Boolean).join(" · "),
-      );
+      y = drawPdfSectionMetadata(doc, [table.description, band.label].filter(Boolean).join(" · "));
     } else if (!fullPage) {
       drawPdfText(doc, table.title, margin, y - 10, 10, DARK_TEXT, true);
     }
@@ -1254,17 +1167,13 @@ function drawPdfTable(
       addPdfLandscapePage(doc);
       drawPdfPageHeader(
         doc,
-        payload.title,
+        canonicalReportTitle(payload),
         table.title,
         bands.length > 1
           ? `${band.label.toUpperCase()} · CONTINUAÇÃO`
           : "CONTINUAÇÃO",
       );
-      y = drawPdfSectionMetadata(
-        doc,
-        payload,
-        `${band.label}${table.rows.length ? ` · linhas ${rowIndex + 1}–${table.rows.length}` : ""}`,
-      );
+      y = drawPdfSectionMetadata(doc, `${band.label}${table.rows.length ? ` · linhas ${rowIndex + 1}–${table.rows.length}` : ""}`);
       drawHeader();
     }
 
@@ -1621,7 +1530,6 @@ function drawPdfParagraph(
 function drawPdfPageFooters(
   doc: import("jspdf").jsPDF,
   payload: ReportPayload,
-  exportedAt: Date,
 ) {
   const pageCount = doc.getNumberOfPages();
   for (let page = 1; page <= pageCount; page += 1) {
@@ -1632,27 +1540,29 @@ function drawPdfPageFooters(
     doc.line(42, height - 34, width - 42, height - 34);
     drawPdfFittedText(
       doc,
-      `IPXData · ${payload.title}`,
+      canonicalReportTitle(payload),
       42,
       height - 18,
-      250,
+      260,
       7.5,
       MUTED_TEXT,
       true,
       6.5,
     );
-    drawPdfFittedText(
-      doc,
-      `Arquivo exportado em ${formatReportDateTime(payload, exportedAt)}`,
-      width / 2,
-      height - 18,
-      240,
-      7.5,
-      MUTED_TEXT,
-      false,
-      6.5,
-      "center",
-    );
+    if (certifiedDataCompleteUntil(payload)) {
+      drawPdfFittedText(
+        doc,
+        reportCompletenessLabel(payload),
+        width / 2,
+        height - 18,
+        240,
+        7.5,
+        MUTED_TEXT,
+        false,
+        6.5,
+        "center",
+      );
+    }
     drawPdfFittedText(
       doc,
       `Página ${page} de ${pageCount}`,
@@ -1729,7 +1639,16 @@ function withExportBarValueLabels(
     return (
       sum +
       (Array.isArray(data)
-        ? data.filter((value) => formatBarLabelValue(value) !== "").length
+        ? data.filter((value) => formatBarLabelValue(resolveChartLabelValue(
+            {
+              data: value,
+              value: value && typeof value === "object" && !Array.isArray(value) && "value" in value
+                ? value.value
+                : value,
+            },
+            item as Record<string, unknown>,
+            option as { xAxis?: unknown; yAxis?: unknown },
+          )) !== "").length
         : 0)
     );
   }, 0);
@@ -1737,9 +1656,12 @@ function withExportBarValueLabels(
     axisType((option as { xAxis?: unknown }).xAxis) === "value" &&
     axisType((option as { yAxis?: unknown }).yAxis) === "category";
   const dense = pointCount > 24;
+  // Share the annotation budget across *all* series. Twelve points in each
+  // of six series are just as dense as one series with 72 points.
+  const labelsPerSeries = Math.max(1, Math.floor(32 / Math.max(1, valueSeries.length)));
   const labeledSeries = Array.isArray(series)
-    ? series.map((item) => addExportValueLabel(item, dense, horizontal))
-    : addExportValueLabel(series, dense, horizontal);
+    ? series.map((item) => addExportValueLabel(item, dense, horizontal, labelsPerSeries, option))
+    : addExportValueLabel(series, dense, horizontal, labelsPerSeries, option);
   const labeledSeriesList = Array.isArray(labeledSeries)
     ? labeledSeries
     : [labeledSeries];
@@ -1811,6 +1733,7 @@ function enhanceExportAxis(axis: unknown, dense: boolean): unknown {
         Number.isFinite(existingFontSize) ? existingFontSize : 0,
         dense ? 10 : 11,
       ),
+      hideOverlap: true,
     },
   };
 }
@@ -1897,6 +1820,8 @@ function addExportValueLabel(
   series: unknown,
   dense: boolean,
   horizontal: boolean,
+  labelBudget = 32,
+  option: EnterpriseChartOption = {} as EnterpriseChartOption,
 ) {
   if (!series || typeof series !== "object") return series;
 
@@ -1914,27 +1839,42 @@ function addExportValueLabel(
   const isLine = record.type === "line";
   const verticalBarLabel = record.type === "bar" && !horizontal;
   const data = Array.isArray(record.data) ? record.data : [];
-  const numericDataIndexes = data.flatMap((value, dataIndex) =>
-    formatBarLabelValue(value) ? [dataIndex] : [],
-  );
+  const numericDataIndexes = data.flatMap((value, dataIndex) => {
+    const metric = resolveChartLabelValue(
+      {
+        data: value,
+        value: value && typeof value === "object" && !Array.isArray(value) && "value" in value
+          ? value.value
+          : value,
+      },
+      record,
+      option as { xAxis?: unknown; yAxis?: unknown },
+    );
+    return formatBarLabelValue(metric) ? [dataIndex] : [];
+  });
   // High-frequency series (especially minute data) cannot carry hundreds of
   // readable labels on an A4 chart. Keep a representative, deterministic set
   // plus the closing point; the following data page retains every exact value.
-  const labelStride =
-    numericDataIndexes.length > 36
-      ? Math.ceil(numericDataIndexes.length / 32)
-      : 1;
+  const labelStride = numericDataIndexes.length > labelBudget
+    ? labelBudget === 1
+      ? numericDataIndexes.length
+      : Math.ceil((numericDataIndexes.length - 1) / (labelBudget - 1))
+    : 1;
   const visibleDataIndexes = new Set(
     numericDataIndexes.filter(
-      (_, numericIndex) => numericIndex % labelStride === 0,
+      (_, numericIndex) => labelBudget > 1 && numericIndex % labelStride === 0,
     ),
   );
   const lastNumericDataIndex = numericDataIndexes.at(-1);
   if (lastNumericDataIndex !== undefined) {
     visibleDataIndexes.add(lastNumericDataIndex);
   }
+  const originalLabel = record.label && typeof record.label === "object"
+    ? record.label as Record<string, unknown>
+    : {};
+  const originalFormatter = originalLabel.formatter;
   const label = {
-    ...(record.label && typeof record.label === "object" ? record.label : {}),
+    ...originalLabel,
     // The shared angle keeps exports consistent with the interactive charts;
     // left alignment lets the label grow upward from its data point.
     align: horizontal || verticalBarLabel || isLine ? "left" : "center",
@@ -1948,14 +1888,29 @@ function addExportValueLabel(
           : dense
             ? 3
             : 5,
-    fontSize: dense ? 9 : 11,
+    // Images are reduced from 900 px to the A4 chart width; 11/12 px keeps
+    // the final printed numerals above roughly 9 pt.
+    fontSize: dense ? 11 : 12,
     fontWeight: 600,
-    formatter: (params: { dataIndex?: number; value?: unknown }) =>
-      params.dataIndex !== undefined &&
-      labelStride > 1 &&
-      !visibleDataIndexes.has(params.dataIndex)
-        ? ""
-        : formatBarLabelValue(params.value),
+    // Preserve a widget's own units/precision (%, seconds, etc.). String
+    // templates remain ECharts templates; the renderer's zero guard wraps
+    // them later without losing its native placeholder interpolation.
+    formatter: typeof originalFormatter === "string"
+      ? originalFormatter
+      : function (this: unknown, params: { dataIndex?: number; value?: unknown }) {
+          if (params.dataIndex !== undefined && labelStride > 1 &&
+            !visibleDataIndexes.has(params.dataIndex)) return "";
+          const value = resolveChartLabelValue(
+            params,
+            record,
+            option as { xAxis?: unknown; yAxis?: unknown },
+          );
+          if (isZeroChartLabelValue(value)) return "";
+          if (typeof originalFormatter === "function") {
+            return originalFormatter.call(this, params);
+          }
+          return value === undefined ? "" : formatBarLabelValue(value);
+        },
     position: horizontal ? "right" : "top",
     rotate:
       horizontal || (!verticalBarLabel && !isLine)
@@ -1970,7 +1925,10 @@ function addExportValueLabel(
     label,
     labelLayout: composeChartValueLabelLayout(record.labelLayout, {
       angled: !horizontal && (verticalBarLabel || isLine),
-      hideOverlap: !isLine,
+      // ECharts first moves labels along their least ambiguous dimension;
+      // when no free space remains it hides the collision, not the data.
+      moveOverlap: isLine || horizontal ? "shiftY" : "shiftX",
+      hideOverlap: true,
     }),
   };
 }
@@ -2007,9 +1965,14 @@ function formatBarLabelValue(value: unknown) {
   // Zero labels do not consume the limited annotation budget of the exported
   // chart. The raw series and the separate data tables remain unchanged.
   if (!Number.isFinite(numericValue) || numericValue === 0) return "";
-  return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(
-    numericValue,
-  );
+  const magnitude = Math.abs(numericValue);
+  if (magnitude > 0 && magnitude < 0.000001) {
+    return numericValue.toExponential(2).replace(".", ",");
+  }
+  const maximumFractionDigits = magnitude > 0 && magnitude < 1
+    ? Math.min(6, Math.max(1, Math.ceil(-Math.log10(magnitude)) + 1))
+    : 1;
+  return new Intl.NumberFormat("pt-BR", { maximumFractionDigits }).format(numericValue);
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -2082,10 +2045,6 @@ function reportDeltaColor(value: string | number | null | undefined) {
 
 function labelFont() {
   return { bold: true, color: { argb: `FF${MUTED_TEXT}` }, size: 9 };
-}
-
-function valueFont() {
-  return { bold: true, color: { argb: `FF${DARK_TEXT}` }, size: 10 };
 }
 
 function softFill() {

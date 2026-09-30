@@ -410,8 +410,8 @@ test("Ao Vivo prioriza a leitura essencial e só monta relatórios sob demanda",
   );
   assert.equal(
     (source.match(/getPayload=\{getOccupancyReportPayload\}/g) ?? []).length,
-    1,
-    "a análise de IA deve receber o relatório lazy no Ao Vivo",
+    2,
+    "a IA e a exportação devem compartilhar o relatório lazy no Ao Vivo",
   );
   assert.match(
     source,

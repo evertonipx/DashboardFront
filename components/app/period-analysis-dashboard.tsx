@@ -131,7 +131,6 @@ import { selectExplicitCompanyScopedRows } from "@/lib/tenant-scope-validation";
 import {
   buildPeriodAnalysisWidgetModel,
   formatPeriodAnalysisRange,
-  isSingleDayAnalysisPeriod,
   periodAnalysisBaselineDataRange,
   periodAnalysisBaselineLabel,
   periodAnalysisBaselineRange,
@@ -1492,11 +1491,6 @@ export function PeriodAnalysisDashboard({
             color: widgetColorById.get(widget.id),
             defaultTitle: widget.title,
             model,
-            scenarioSummary: periodAnalysisScenarioSummary(
-              widget,
-              scenarios,
-              scopeOptions,
-            ),
             title: widgetTitleById.get(widget.id) ?? widget.title,
           },
         ];
@@ -1570,6 +1564,18 @@ export function PeriodAnalysisDashboard({
       context: [
         `Período analisado: ${dailyPeriod}`,
         ...(reportPayload.context ?? []),
+        ...Array.from(
+          new Set(
+            queryWidgets.map(
+              (widget) =>
+                `Composição de “${widgetTitleById.get(widget.id) ?? widget.title}”: ${periodAnalysisScenarioSummary(
+                  widget,
+                  scenarios,
+                  scopeOptions,
+                )}`,
+            ),
+          ),
+        ),
       ],
       tables: [
         ...(reportPayload.tables ?? []),
@@ -1941,7 +1947,7 @@ export function PeriodAnalysisDashboard({
                   !analysisRequested ||
                   loadingData ||
                   loadingScenarios ||
-                  !widgets.length ||
+                  !hasQueryWidgets ||
                   Boolean(analysisCertificationError)
                 }
                 getPayload={buildPeriodAnalysisReportPayload}
@@ -1951,7 +1957,7 @@ export function PeriodAnalysisDashboard({
                   !analysisRequested ||
                   loadingData ||
                   loadingScenarios ||
-                  !widgets.length ||
+                  !hasQueryWidgets ||
                   Boolean(analysisCertificationError)
                 }
                 manager={manager}
@@ -2917,14 +2923,12 @@ function composePeriodAnalysisReport({
     color?: string;
     defaultTitle: string;
     model: PeriodAnalysisWidgetModel;
-    scenarioSummary: string;
     title: string;
   }>;
   paletteColors: readonly string[] | null;
   period: PeriodAnalysisRange;
   timeZone: string;
 }): ReportPayload {
-  const singleDay = isSingleDayAnalysisPeriod(period);
   const generatedAt = new Date();
   const dataCompleteUntil = periodAnalysisDataCompleteUntil(
     period,
@@ -2954,18 +2958,7 @@ function composePeriodAnalysisReport({
           ]
         : [],
     ),
-    context: [
-      singleDay ? "Análise histórica diária" : "Período consolidado",
-      formatPeriodAnalysisRange(period),
-      ...Array.from(
-        new Set(
-          models.map(
-            ({ scenarioSummary, title }) =>
-              `Composição de “${title}”: ${scenarioSummary}`,
-          ),
-        ),
-      ),
-    ],
+    context: [],
     dataCompleteUntil,
     filename: `ipxdata-analises-${formatFileDate(period.from)}-${formatFileDate(
       dataCompleteUntil,
@@ -2980,7 +2973,7 @@ function composePeriodAnalysisReport({
           metrics.length === 1 ? title : `${title} · ${metric.label}`,
       }));
     }),
-    subtitle: formatPeriodAnalysisRange(period),
+    subtitle: `Período analisado: ${formatPeriodAnalysisRange(period)}`,
     tables: models.flatMap(({ defaultTitle, model, title }) =>
       model.option || !model.table
         ? []
@@ -2992,7 +2985,7 @@ function composePeriodAnalysisReport({
           ],
     ),
     timeZone,
-    title: singleDay ? "Análise do dia" : "Análises por período",
+    title: "Relatório IPXData - Contagem",
   };
 }
 

@@ -649,6 +649,24 @@ test("densidade adapta apenas apresentação e preserva todos os dados e tooltip
   }
 });
 
+test("encaixe no PDF/Excel conserva as margens preparadas para valores e todos os pontos", () => {
+  const size = { width: 900, height: 400 };
+  for (const id of ids) {
+    const model = modelFor(id, { chartType: id === "demographics_period_comparison" ? "bar" : "area" });
+    const prepared = {
+      ...model.option,
+      grid: { ...model.option.grid, top: 76, bottom: 48, right: 74 },
+    };
+    const original = JSON.stringify(model.option);
+    const fitted = fit({ ...model, option: prepared }, size);
+    assert.equal(fitted.grid.top, 76, `${id}: reservar cabeçalho da legenda e dos valores`);
+    assert.equal(fitted.grid.bottom, 48, `${id}: preservar espaço para as datas`);
+    assert.equal(fitted.grid.right, 74, `${id}: preservar rótulos de extremidade`);
+    assert.deepEqual(fitted.series.map((series: RuntimeFixture) => series.data), model.option.series.map((series: RuntimeFixture) => series.data));
+    assert.equal(JSON.stringify(model.option), original, `${id}: o ajuste não pode mutar a visão na tela`);
+  }
+});
+
 test("eixo diário estreito abrevia o ano sem cortar datas ou mudar tooltip e tabela", () => {
   const model = modelFor("demographics_daily_evolution");
   const option = fit(model, { width: 260, height: 120 });

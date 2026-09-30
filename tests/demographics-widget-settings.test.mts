@@ -187,7 +187,7 @@ const summary = demographic.aggregateDemographicBuckets([
   { gender: "Woman", age_bucket: "0-2", emotion: "happy", count: 5 },
   { gender: "Man", age_bucket: "20-29", emotion: "neutral", count: 7 },
 ].map((row) => ({ bucket: "2026-09-10T13:00:00Z", camera_id: "fixture-camera", ...row })));
-const reportContext = { audience: "Visão gerencial", rangeLabel: "10/09/2026", summary, surface: "analysis", timeZone: "America/Sao_Paulo" };
+const reportContext = { rangeLabel: "10/09/2026", summary, surface: "analysis", timeZone: "America/Sao_Paulo" };
 
 test("relatório usa tipos/paletas/ordem selecionados, com emojis desativados apenas na exportação", () => {
   const presentations = {
@@ -221,6 +221,90 @@ test("opções visuais do relatório não alteram tabelas, totais, métricas ou 
   assert.deepEqual(configured.context, legacy.context);
   assert.equal(configured.subtitle, legacy.subtitle);
   assert.equal(configured.timeZone, legacy.timeZone);
+});
+
+test("tabelas exportadas acompanham a ordenação configurada nos gráficos de distribuição e cruzamento", () => {
+  const presentations = {
+    demographics_gender_mix: { ...presentation.defaultDemographicPresentation("gender"), order: "ascending", type: "pie" },
+    demographics_age_distribution: { ...presentation.defaultDemographicPresentation("age"), order: "descending", type: "donut" },
+    demographics_emotion_distribution: { ...presentation.defaultDemographicPresentation("emotion"), order: "ascending", type: "bar" },
+    demographics_age_gender_pyramid: { ...presentation.defaultDemographicPresentation("age-gender"), order: "descending" },
+    demographics_age_emotion_heatmap: { ...presentation.defaultDemographicPresentation("age-emotion"), order: "descending" },
+  };
+  const report = buildReport({ ...reportContext, presentations });
+  for (const index of [0, 1]) {
+    assert.deepEqual(
+      report.charts[index].table.rows.map((row: RuntimeFixture) => row.category),
+      report.charts[index].option.series[0].data.map((datum: RuntimeFixture) => datum.categoryLabel),
+    );
+  }
+  assert.deepEqual(
+    report.charts[2].table.rows.map((row: RuntimeFixture) => row.category),
+    report.charts[2].option.yAxis.data,
+  );
+  assert.deepEqual(
+    report.charts[3].table.rows.map((row: RuntimeFixture) => row.age),
+    report.charts[3].option.yAxis.data,
+  );
+  assert.deepEqual(
+    [...new Set(report.charts[4].table.rows.map((row: RuntimeFixture) => row.age))],
+    report.charts[4].option.yAxis.data,
+  );
+  assert.deepEqual(report.metrics.map((metric: RuntimeFixture) => metric.value), buildReport(reportContext).metrics.map((metric: RuntimeFixture) => metric.value));
+});
+
+test("exportação demográfica segue widgets visíveis, ordem e títulos salvos nas três superfícies", () => {
+  const orderedCardIds = [
+    "demographics_emotion_distribution",
+    "demographics_total",
+    "demographics_gender_mix",
+  ];
+  const titleByCardId = new Map([
+    ["demographics_emotion_distribution", "Expressões observadas"],
+    ["demographics_total", "Classificações"],
+  ]);
+  for (const surface of ["live", "analysis", "reports"]) {
+    const report = buildReport({
+      ...reportContext,
+      orderedCardIds,
+      surface,
+      titleByCardId,
+    });
+    assert.deepEqual(
+      report.charts.map((chart: RuntimeFixture) => chart.title),
+      ["Expressões observadas", "Composição por gênero"],
+      surface,
+    );
+    assert.deepEqual(
+      report.charts.map((chart: RuntimeFixture) => chart.table.title),
+      ["Dados - Expressões observadas", "Gênero · entre gêneros identificados"],
+      surface,
+    );
+    assert.deepEqual(report.metrics.map((metric: RuntimeFixture) => metric.label), ["Classificações"], surface);
+  }
+  const exportSection = source.slice(
+    source.indexOf("  function buildDemographicsReportPayload()"),
+    source.indexOf("  const cards = React.useMemo", source.indexOf("  function buildDemographicsReportPayload()")),
+  );
+  assert.match(exportSection, /orderByCardPreferences\(/);
+  assert.match(exportSection, /orderedCardIds\.filter\(isDemographicTemporalWidgetId\)/);
+  assert.match(exportSection, /charts: orderedCardIds\.flatMap/);
+  assert.doesNotMatch(exportSection, /fetchDemographic|apiFetch|requestFreshData/);
+  assert.match(source, /<ReportExportActions[\s\S]*?!hasVisibleWidgets[\s\S]*?getPayload=\{buildDemographicsReportPayload\}/,
+    "a exportação não deve habilitar arquivo sem nenhum widget visível na visão");
+});
+
+test("exportação demográfica identifica explicitamente o mês corrente parcial", () => {
+  const report = buildReport({ ...reportContext, surface: "reports", partialCurrentPeriod: true, partialCurrentYear: true });
+  assert.equal(report.title, "Relatório IPXData - Demografia");
+  assert.match(report.subtitle, /Período analisado: 10\/09\/2026/);
+  assert.deepEqual(report.context, ["Percentuais sobre detecções classificadas; não representam visitantes únicos."]);
+  assert.match(report.subtitle, /ano em andamento/);
+  assert.match(report.subtitle, /mês atual parcial/);
+  const historical = buildReport({ ...reportContext, surface: "reports", partialCurrentPeriod: false, partialCurrentYear: false });
+  assert.deepEqual(historical.context, report.context);
+  assert.doesNotMatch(historical.subtitle, /ano em andamento/i);
+  assert.doesNotMatch(historical.subtitle, /mês atual parcial/i);
 });
 
 test("relatórios configurados e legados omitem gênero desconhecido sem apagar suas detecções", () => {

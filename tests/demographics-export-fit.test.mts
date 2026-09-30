@@ -95,14 +95,29 @@ for (const exporter of ["exportReportToExcel", "exportReportToPdf"]) {
 test("apenas as três distribuições do relatório demográfico optam pelo ajuste por dimensões", () => {
   const source = sourceFile("components/app/demographics-dashboard.tsx");
   const report = declaration(source, "buildDemographicsReport");
-  const charts = descendants(report).find((node) => ts.isVariableDeclaration(node) && node.name.getText(source) === "charts");
-  assert.ok(charts && ts.isArrayLiteralExpression(charts.initializer));
-  assert.equal(charts.initializer.elements.length, 5);
-  charts.initializer.elements.forEach((chart: RuntimeFixture, index: number) => {
-    const fitProperty = chart.properties.find((property: RuntimeFixture) => property.name?.getText(source) === "fitOption");
-    if (index < 3) assert.equal(fitProperty?.initializer.getText(source), "fitDemographicCompositionOption");
-    else assert.equal(fitProperty, undefined, "cruzamentos e heatmaps não recebem ajuste circular");
+  const factories = descendants(report).find((node) =>
+    ts.isVariableDeclaration(node) && node.name.getText(source) === "chartFactories");
+  assert.ok(factories && ts.isObjectLiteralExpression(factories.initializer));
+  const fittedIds = new Set([
+    "demographics_gender_mix", "demographics_age_distribution", "demographics_emotion_distribution",
+  ]);
+  const crossingIds = new Set(["demographics_age_gender_pyramid", "demographics_age_emotion_heatmap"]);
+  const actualIds = new Set<string>();
+  factories.initializer.properties.forEach((factory: RuntimeFixture) => {
+    assert.ok(ts.isPropertyAssignment(factory));
+    const id = factory.name.getText(source);
+    actualIds.add(id);
+    const fitProperties = descendants(factory).filter((property) =>
+      ts.isPropertyAssignment(property) && property.name.getText(source) === "fitOption");
+    if (fittedIds.has(id)) {
+      assert.equal(fitProperties.length, 1);
+      assert.equal(fitProperties[0].initializer.getText(source), "fitDemographicCompositionOption");
+    } else {
+      assert.ok(crossingIds.has(id), `gráfico estático inesperado: ${id}`);
+      assert.equal(fitProperties.length, 0, "cruzamentos e heatmaps não recebem ajuste circular");
+    }
   });
+  assert.deepEqual(actualIds, new Set([...fittedIds, ...crossingIds]));
   const shared = readFileSync(resolve(root, "lib/report-export.ts"), "utf8");
   assert.doesNotMatch(shared, /from\s+["']@\/lib\/demographics/, "exportação genérica não depende do módulo Demográfico");
 });
@@ -119,6 +134,8 @@ test("exportação demográfica usa apresentações da visão sem opções legad
   const dashboard = declaration(source, "DemographicsDashboard").getText(source);
   assert.match(dashboard, /presentations:\s*widgetPresentations/);
   assert.match(dashboard, /settings:\s*temporalSettings\[id\]/);
+  assert.match(dashboard, /fitOption:\s*\(option, size\)\s*=>\s*fitDemographicTemporalOption\(\{\s*\.\.\.model,\s*option\s*\},\s*size\)/,
+    "os temporais exportados devem receber a opção preparada e o tamanho real do PDF/Excel");
 });
 
 const groups = {
@@ -150,6 +167,52 @@ test("circulares ajustados para PDF/Excel preservam percentuais exatos, fatias e
       assert.equal(chart.getModel().getSeriesByIndex(0).getData().count(), visible.length);
     } finally { chart.dispose(); }
     assert.equal(JSON.stringify(option), before);
+  }
+});
+
+test("matriz, heatmap e todos os temporais configuráveis renderizam SVG de exportação sem corromper dados", () => {
+  const demographic = load("lib/demographics.ts");
+  const crossing = load("lib/demographics-crossing-options.ts");
+  const temporal = load("lib/demographics-temporal-chart-options.ts");
+  const temporalPreferences = load("lib/demographics-temporal-preferences.ts");
+  const summary = demographic.aggregateDemographicBuckets([
+    { bucket: "2026-09-09T13:00:00Z", camera_id: "camera-a", gender: "Woman", age_bucket: "20-29", emotion: "happy", count: 18 },
+    { bucket: "2026-09-09T14:00:00Z", camera_id: "camera-a", gender: "Man", age_bucket: "30-39", emotion: "neutral", count: 12 },
+    { bucket: "2026-09-10T13:00:00Z", camera_id: "camera-a", gender: "Woman", age_bucket: "20-29", emotion: "happy", count: 32 },
+  ], { timeZone: "America/Sao_Paulo" });
+  const size = { width: 900, height: 400 };
+  const charts: Array<{ name: string; option: RuntimeFixture; fitOption?: RuntimeFixture }> = [
+    ...["age-gender", "age-emotion"].map((dimension) => ({
+      name: dimension,
+      option: crossing.buildDemographicCrossingOption(summary, defaults(dimension), dimension, "light"),
+    })),
+  ];
+  for (const id of temporalPreferences.DEMOGRAPHICS_TEMPORAL_WIDGET_IDS) {
+    for (const chartType of ["bar", "line", "area", "heatmap"]) {
+      const model = temporal.buildDemographicTemporalModel({
+        id, summary, comparisonSummary: summary, comparisonLabel: "Período anterior",
+        settings: { ...temporalPreferences.defaultDemographicTemporalSettings(id), chartType, palette: "cyber" },
+        from: "2026-09-09T03:00:00Z", to: "2026-09-11T03:00:00Z", now: "2026-09-11T03:00:00Z",
+        timeZone: "America/Sao_Paulo", theme: "light",
+      });
+      assert.equal(model.hasData, true, `${id}/${chartType}: o modelo deve conter dados`);
+      charts.push({ name: `${id}/${chartType}`, option: model.option,
+        fitOption: (option: RuntimeFixture, dimensions: RuntimeFixture) => temporal.fitDemographicTemporalOption({ ...model, option }, dimensions) });
+    }
+  }
+  for (const chartPayload of charts) {
+    const before = JSON.stringify(chartPayload.option);
+    const fitted = prepare(chartPayload, size);
+    assert.ok(fitted.series.length > 0, chartPayload.name);
+    if (fitted.series.some((series: RuntimeFixture) => series.type === "heatmap")) assert.ok(fitted.visualMap, `${chartPayload.name}: heatmap precisa da escala visual`);
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, ...size });
+    try {
+      chart.setOption({ ...fitted, animation: false });
+      const svg = chart.renderToSVGString();
+      assert.match(svg, /<svg\b/, chartPayload.name);
+      assert.doesNotMatch(svg, /NaN|undefined|<pattern\b/, chartPayload.name);
+    } finally { chart.dispose(); }
+    assert.equal(JSON.stringify(chartPayload.option), before, `${chartPayload.name}: exportação não deve alterar a visão aberta`);
   }
 });
 

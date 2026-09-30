@@ -143,8 +143,16 @@ test("CardLayout recebe tempo ocupado em Análises e permanência individual tam
   const comparisonCards = [{ id: "occupancy_scenario_half_donut" }];
   const durationCards = [{ id: "occupancy_duration_coverage" }];
   const loiteringCards = [{ id: "occupancy_loitering_summary" }];
+  const annualCards = [{ id: "occupancy_annual_monthly_comparison" }];
   const bindings = {
     analysis: true,
+    analysisWidgetSettings: { colorPaletteId: "enterprise" },
+    annualHistoryState: undefined,
+    annualReport: {},
+    buildOccupancyAnnualWidgetCards: () => annualCards,
+    chartsPending: false,
+    reportRequested: true,
+    OCCUPANCY_ANNUAL_MONTH_SOURCE_ID: "occupancy_report_annual_months",
     selectedScope: null,
     metricCards: [],
     definitions: [],
@@ -161,7 +169,10 @@ test("CardLayout recebe tempo ocupado em Análises e permanência individual tam
     ...durationCards,
     ...cards,
   ]);
-  assert.deepEqual(evaluateDashboard(`return (${cardsExpression});`, { ...bindings, analysis: false }), loiteringCards);
+  assert.deepEqual(evaluateDashboard(`return (${cardsExpression});`, { ...bindings, analysis: false }), [
+    ...annualCards,
+    ...loiteringCards,
+  ]);
   const layout = dashboardJsxTag("CardLayout");
   const options = [{ id: "scenario-a", name: "Entrada", company_id: "company-a" }];
   assert.deepEqual(evaluateDashboard(`return (${jsxAttribute(layout, "scenarios")});`, { analysis: true, scenarios: options }), [{ id: "scenario-a", name: "Entrada" }]);
@@ -202,6 +213,7 @@ test("exportação ordena assets paginados junto aos cards visíveis e mantém t
     { cardId: "occupancy_duration_timeline", chart: { title: "Duração", table: { rows: ["duration"] } } },
   ];
   const result = evaluateDashboard(`${supplementalStatements}\nreturn (${charts.initializer.getText(dashboardAst)});`, {
+    analysis: true,
     comparisonReportSnapshot: { reportAssets: comparisonReportAssets },
     durationReportSnapshot: { reportAssets: durationReportAssets },
     occupancyDurationInsights: { reportAssets },
@@ -251,6 +263,30 @@ test("carregamento e corte dos insights participam das travas de exportação e 
   assert.equal(evaluateDashboard(`return (${partial});`, {
     ...coverageBindings, occupancyDurationInsights: { dataCompleteUntil: undefined },
   }), false);
+  const exportError = dashboardVariable("hasBlockingOccupancyExportError").getText(dashboardAst);
+  const exportBindings = {
+    comparisonDataIsCurrent: true,
+    currentSnapshotRequested: false,
+    queriedDefinitions: [{ id: "occupancy_report_month" }],
+    showPreviousPeriod: false,
+    visibleChartData: {
+      occupancy_report_month: { incomplete: true, points: [{ average: 4, complete: false }] },
+    },
+  };
+  assert.equal(evaluateDashboard(`return (${exportError});`, exportBindings), false,
+    "o mês aberto, explicitamente parcial, não deve esconder a exportação");
+  assert.equal(evaluateDashboard(`return (${exportError});`, {
+    ...exportBindings,
+    currentSnapshotRequested: true,
+    visibleCurrentSnapshotError: "Leitura final indisponível",
+  }), false,
+    "a falha isolada do fechamento não bloqueia as séries agregadas válidas");
+  assert.equal(evaluateDashboard(`return (${exportError});`, {
+    ...exportBindings,
+    visibleChartData: { occupancy_report_month: { error: "Falha de leitura" } },
+  }), true, "uma falha real da fonte continua bloqueando arquivo incompleto");
+  assert.match(dashboardSource, /description: visibleCurrentSnapshot\s*\?[\s\S]*?"Leitura final indisponível neste período\."/,
+    "o card de detalhe permanece explícito no arquivo quando o fechamento falha");
   const cutoff = dashboardVariable("payloadDataCompleteUntil").getText(dashboardAst);
   assert.match(cutoff, /coreReportDataCompleteUntil/);
   assert.match(cutoff, /comparisonReportSnapshot\.dataCompleteUntil/);
@@ -258,11 +294,13 @@ test("carregamento e corte dos insights participam das travas de exportação e 
   assert.match(cutoff, /occupancyDurationInsights\.dataCompleteUntil/);
   for (const tagName of ["ReportExportActions", "AiAnalysisAction"]) {
     const disabled = jsxAttribute(dashboardJsxTag(tagName), "disabled");
-    const options = { chartsPending: false, comparisonPending: false, selectedScope: {}, occupancyCertificationError: "", hasPartialOccupancyCoverage: false, reportRequested: true };
+    const options = { chartsPending: false, comparisonPending: false, orderedVisibleReportCardIds: ["occupancy_report_month"], selectedScope: {}, occupancyCertificationError: "", hasPartialOccupancyCoverage: false, hasBlockingOccupancyExportError: false, reportRequested: true };
     assert.equal(evaluateDashboard(`return (${disabled});`, options), false, tagName);
     assert.equal(evaluateDashboard(`return (${disabled});`, { ...options, chartsPending: true }), true, tagName);
     assert.equal(evaluateDashboard(`return (${disabled});`, { ...options, comparisonPending: true }), true, tagName);
-    assert.equal(evaluateDashboard(`return (${disabled});`, { ...options, hasPartialOccupancyCoverage: true }), true, tagName);
+    assert.equal(evaluateDashboard(`return (${disabled});`, { ...options, hasPartialOccupancyCoverage: true }), tagName === "AiAnalysisAction", tagName);
+    assert.equal(evaluateDashboard(`return (${disabled});`, { ...options, hasBlockingOccupancyExportError: true }), tagName === "ReportExportActions", tagName);
+    assert.equal(evaluateDashboard(`return (${disabled});`, { ...options, orderedVisibleReportCardIds: [] }), tagName === "ReportExportActions", `${tagName}: visão vazia`);
   }
 });
 
@@ -450,7 +488,7 @@ test("tabela histórica exporta também a base comparativa usada pelo gráfico e
     ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "buildExportChart");
   assert.ok(buildExportChart?.initializer);
   const exportSource = buildExportChart.initializer.getText(dashboardAst);
-  assert.match(exportSource, /const tableIncludesPrevious =\s*showPreviousPeriod &&\s*\(visibility\.average \|\| visibility\.minimum \|\| visibility\.peak\) &&\s*previousPoints\.length > 0/);
+  assert.match(exportSource, /const tableIncludesPrevious =\s*showPreviousPeriod &&\s*\(visibility\.average \|\| visibility\.minimum \|\| visibility\.peak\) &&\s*Boolean\(previousState && !previousState\.error && !previousState\.incomplete\) &&\s*previousPoints\.length > 0/);
   assert.match(exportSource, /series: "Período analisado"/);
   assert.match(exportSource, /previousPoints\.map\(\(point\) => \(\{[\s\S]*?series: "Base comparativa"/);
   assert.match(

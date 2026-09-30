@@ -163,6 +163,32 @@ test("Relatórios: intervalos de calendário e hora atual seguem a empresa em ou
   });
 });
 
+test("Relatórios: consulta todo o histórico em janelas de até quatro anos e inclui o mês aberto", () => {
+  inTimeZones(["UTC", "America/Sao_Paulo", "Asia/Tokyo"], () => {
+    const now = new Date("2026-09-11T12:00:00Z");
+    const definitions = reports.buildOccupancyReportDefinitions(
+      now, now, false, undefined, "America/Sao_Paulo",
+    );
+    const annual = definitions.find((item: RuntimeFixture) =>
+      item.id === "occupancy_report_annual_months");
+    assert.equal(annual.granularity, "month");
+    assert.equal(calendar.occupancyCalendarDateKey(annual.from), "2019-01-01");
+    assert.equal(calendar.occupancyCalendarDateKey(annual.to), "2026-10-01");
+    assert.equal(reports.listBucketStarts(annual).length, 93);
+    assert.equal(annual.querySegments.length, 3);
+    assert.equal(calendar.occupancyCalendarDateKey(annual.querySegments[0].to), "2023-01-01");
+    assert.equal(calendar.occupancyCalendarDateKey(annual.querySegments[1].to), "2026-09-01");
+    assert.equal(calendar.occupancyCalendarDateKey(annual.querySegments[2].openBucket), "2026-09-01");
+    assert.equal(annual.querySegments[2].bucketStarts.length, 1);
+    const analysisRange = windowApi.resolveOccupancyAnalysisRange(
+      now, "2026-09-10", "2026-09-10", true, "2026-09-11", "America/Sao_Paulo",
+    );
+    assert.equal(reports.buildOccupancyReportDefinitions(
+      analysisRange.reference, null, true, analysisRange, "America/Sao_Paulo",
+    ).some((item: RuntimeFixture) => item.id === "occupancy_report_annual_months"), false);
+  });
+});
+
 test("Relatórios e Análises exibem buckets civis abertos sem certificar a leitura parcial", () => {
   const aggregate = load("lib/occupancy-aggregate-validation.ts");
   inTimeZones(["UTC", "Asia/Tokyo"], () => {
@@ -307,7 +333,7 @@ test("métricas Swagger completas não dependem de final; lacunas continuam indi
   });
   const source = readFileSync(resolve(root, "components/app/occupancy-reports-dashboard.tsx"), "utf8");
   assert.doesNotMatch(source, /reportDataCompleteUntil === null/);
-  assert.match(source, /hasPartialOccupancyCoverage \|\| !reportRequested/);
+  assert.match(source, /hasBlockingOccupancyExportError \|\| !reportRequested/);
   assert.match(source, /dailyState\.error \|\| dailyState\.incomplete/);
 });
 
@@ -454,6 +480,8 @@ function loadReportFunctions(): RuntimeFixture {
     MAX_CLOSED_SEGMENT_CACHE_ENTRIES: 256,
     MAX_OCCUPANCY_MINUTE_REPORT_BUCKETS: 1_600,
     MAX_OCCUPANCY_REPORT_BUCKETS: 500,
+    OCCUPANCY_ANNUAL_MONTH_SOURCE_ID: "occupancy_report_annual_months",
+    COUNTING_HISTORY_START_YEAR: 2019,
   };
   const output = ts.transpileModule(declarations, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React }, fileName: file }).outputText;
   return new Function("exports", ...Object.keys(bindings), `${output};return {buildOccupancyReportDefinitions,listBucketStarts,buildEmptyPoints,buildComparisonDefinition,alignMinuteComparisonPoints,maskOpenBucketComparisons,buildOccupancyAiDailyTable,buildScenarioPoints,summarizeOccupancyRangeMetrics,cacheCertifiedClosedSegment,buildRowsMetric};`)({}, ...Object.values(bindings));

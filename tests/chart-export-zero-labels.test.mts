@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const echarts = createRequire(import.meta.url)("echarts");
 const loadedModules = new Map();
 const { resolveChartLabelValue, isZeroChartLabelValue } = loadModule("lib/chart-label-value.ts");
 const { formatBarLabelValue, withExportBarValueLabels } = loadModule("lib/report-export.ts", ["formatBarLabelValue", "withExportBarValueLabels"]);
@@ -90,7 +91,81 @@ test("cem zeros não consomem a amostragem e escondem os únicos valores positiv
   assert.equal(formatter({ dataIndex: 50, value: 5 }), "5");
   assert.equal(formatter({ dataIndex: 83, value: -7 }), "-7");
   assert.equal(formatter({ dataIndex: 99, value: 0 }), "");
-  assert.equal(output.series[0].label.fontSize, 11);
+  assert.equal(output.series[0].label.fontSize, 12);
+});
+
+test("exportação preserva unidades, suprime zeros da dimensão correta e divide o orçamento de rótulos entre séries", () => {
+  const percentageFormatter = ({ value }: { value: number }) => `${value}%`;
+  const percentage = withExportBarValueLabels({
+    ...vertical,
+    series: [{ type: "line", data: [0, 12.5, 12.6], label: { formatter: percentageFormatter } }],
+  });
+  assert.equal(percentage.xAxis.axisLabel.hideOverlap, true);
+  assert.equal(percentage.yAxis.axisLabel.hideOverlap, true);
+  assert.equal(percentage.series[0].label.formatter({ dataIndex: 0, value: 0 }), "");
+  assert.equal(percentage.series[0].label.formatter({ dataIndex: 1, value: 12.5 }), "12.5%");
+  assert.deepEqual(percentage.series[0].labelLayout({ dataIndex: 1 }), {
+    hideOverlap: true, moveOverlap: "shiftY", rotate: 45,
+  });
+
+  const template = withExportBarValueLabels({
+    ...vertical,
+    series: [{ type: "bar", data: [5], label: { formatter: "{c}%" } }],
+  });
+  assert.equal(template.series[0].label.formatter, "{c}%", "ECharts mantém a interpolação original");
+
+  const coordinates = withExportBarValueLabels({
+    ...horizontal,
+    series: [{ type: "bar", data: [[37, 0], [0, 1]] }],
+  });
+  assert.equal(coordinates.series[0].label.formatter({ dataIndex: 0, value: [37, 0] }), "37");
+  assert.equal(coordinates.series[0].label.formatter({ dataIndex: 1, value: [0, 1] }), "");
+
+  const manySeries = withExportBarValueLabels({
+    ...vertical,
+    series: Array.from({ length: 6 }, (_, seriesIndex) => ({
+      type: "line", name: `Série ${seriesIndex + 1}`,
+      data: Array.from({ length: 12 }, (_, pointIndex) => pointIndex + 1),
+    })),
+  });
+  const visibleLabels = manySeries.series.flatMap((series: { label: { formatter: (params: { dataIndex: number; value: number }) => string } }) =>
+    Array.from({ length: 12 }, (_, dataIndex) => series.label.formatter({ dataIndex, value: dataIndex + 1 }))
+      .filter(Boolean));
+  assert.ok(visibleLabels.length <= 32, "o limite é global, não 32 rótulos por linha");
+  assert.equal(manySeries.series[0].label.formatter({ dataIndex: 11, value: 12 }), "12");
+  assert.equal(formatBarLabelValue(0.001), "0,001", "frações reais não viram zero visual");
+});
+
+test("render SVG real afasta ou oculta rótulos coincidentes em linhas e barras nas duas orientações", () => {
+  for (const kind of ["line", "vertical-bar", "horizontal-bar"] as const) {
+    const horizontalBar = kind === "horizontal-bar";
+    const option = withExportBarValueLabels({
+      xAxis: horizontalBar ? { type: "value" } : { type: "category", data: ["A", "B", "C"] },
+      yAxis: horizontalBar ? { type: "category", data: ["A", "B", "C"] } : { type: "value" },
+      series: Array.from({ length: 2 }, () => ({
+        type: kind === "line" ? "line" : "bar",
+        barGap: "-100%",
+        data: [10, 10, 10],
+        label: { formatter: () => "P 10" },
+      })),
+    });
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 900, height: 400 });
+    try {
+      chart.setOption({ ...option, animation: false });
+      const labels = chart.getZr().storage.getDisplayList().filter((item: { type: string; style?: { text?: string }; ignore?: boolean }) =>
+        item.type === "tspan" && item.style?.text === "P 10" && !item.ignore);
+      assert.ok(labels.length > 0 && labels.length < 6, `${kind}: números coincidentes não podem ficar sobrepostos`);
+      const boxes = labels.map((item: { getBoundingRect: () => { clone: () => { applyTransform: (matrix: unknown) => unknown; intersect: (other: unknown) => boolean } }; getComputedTransform: () => unknown }) => {
+        const bounds = item.getBoundingRect().clone();
+        bounds.applyTransform(item.getComputedTransform());
+        return bounds;
+      });
+      boxes.forEach((left: { intersect: (right: unknown) => boolean }, index: number) =>
+        boxes.slice(index + 1).forEach((right: unknown) => assert.equal(left.intersect(right), false, kind)));
+    } finally {
+      chart.dispose();
+    }
+  }
 });
 
 function loadModule(relativePath: string, extraExports: string[] = []): Record<string, import("./helpers/module-loader.mts").RuntimeFixture> {

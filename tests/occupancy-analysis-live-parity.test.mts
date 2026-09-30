@@ -133,6 +133,7 @@ test("cat\u00e1logo herdado do Ao Vivo tem IDs \u00fanicos e n\u00e3o duplica eq
     layoutText,
     {
       analysis: true,
+      OCCUPANCY_ANNUAL_MONTH_SOURCE_ID: "occupancy_report_annual_months",
       chartsPending: false,
       COMPACT_METRIC_LAYOUT_DEFAULTS: {},
       customMetricCards: [],

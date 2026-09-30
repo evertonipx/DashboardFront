@@ -1064,6 +1064,55 @@ test("duração acumulada usa summary do período inteiro sem carregar sessions"
   }
 });
 
+test("exportação da permanência respeita a paleta da visão e oculta rótulos sobrepostos", () => {
+  const widgets = loadLoiteringWidgets();
+  const model = {
+    areas: [],
+    scenarios: [{
+      areas: [],
+      label: "Entrada",
+      scenarioId: "scenario-a",
+      totals: {
+        avgDurationSeconds: 24.5,
+        maxDurationSeconds: 44,
+        minDurationSeconds: 5,
+        sessionCount: 14,
+      },
+    }],
+    totals: {
+      avgDurationSeconds: 24.5,
+      maxDurationSeconds: 44,
+      minDurationSeconds: 5,
+      sessionCount: 14,
+    },
+  };
+  const colors = ["#123456", "#654321", "#345678", "#876543"];
+  const average = widgets.buildOccupancyLoiteringSummaryMetricReport(
+    model,
+    "período",
+    "average",
+    undefined,
+    colors,
+  ) as RuntimeFixture;
+  const minimum = widgets.buildOccupancyLoiteringSummaryMetricReport(
+    model,
+    "período",
+    "minimum",
+    undefined,
+    colors,
+  ) as RuntimeFixture;
+  const range = widgets.buildOccupancyLoiteringRangeReport(
+    model,
+    "período",
+    undefined,
+    colors,
+  ) as RuntimeFixture;
+  assert.equal(average.option.series[0].itemStyle.color, colors[0]);
+  assert.equal(minimum.option.series[0].itemStyle.color, colors[1]);
+  assert.equal(range.option.series[1].itemStyle.color, colors[0]);
+  assert.equal(average.option.series[0].labelLayout.hideOverlap, true);
+});
+
 test("áreas da mesma câmera reutilizam o único summary tenant-wide", async () => {
   const fixture = createLoiteringHookFixture({
     preferences: [
@@ -2514,10 +2563,10 @@ test("exportação individual preserva uma linha e um ponto por sessão real", (
     reportsSource,
     /<ReportExportActions[\s\S]*?getPayload=\{getOccupancyReportPayload\}/,
   );
-  assert.doesNotMatch(
+  assert.match(
     liveSource,
-    /<ReportExportActions/,
-    "Ao Vivo usa o payload certificado para IA, mas não deve expor exportação direta",
+    /<ReportExportActions[\s\S]*?getPayload=\{getOccupancyReportPayload\}/,
+    "Ao Vivo deve usar o mesmo payload certificado da IA para a exportação sob demanda",
   );
 
   const serialized = JSON.stringify(chart);

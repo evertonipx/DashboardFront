@@ -21,6 +21,7 @@ import {
 import { toast } from "sonner";
 
 import { AiAnalysisAction } from "@/components/app/deferred-ai-analysis-action";
+import { ReportExportActions } from "@/components/app/report-export-actions";
 import { CardLayout, ReorderModeButton } from "@/components/app/card-layout";
 import {
   COMPACT_METRIC_LAYOUT_DEFAULTS,
@@ -75,6 +76,7 @@ import {
   resolveOccupancyChartPaletteFromColors,
   type OccupancyChartPalette,
 } from "@/components/app/occupancy-chart-palette";
+import { OCCUPANCY_COLOR_PALETTES } from "@/lib/occupancy-color-palettes";
 import { useTheme } from "@/components/app/theme-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -2548,6 +2550,10 @@ export function OccupancyScenarioDashboard() {
       occupancyLoitering.cards,
     ],
   );
+  const visibleOccupancyCardIds = React.useMemo(
+    () => orderByCardPreferences(occupancyLayoutCards, occupancyPreferences).map((card) => card.id),
+    [occupancyLayoutCards, occupancyPreferences],
+  );
   const occupancyViewScopes = React.useMemo(
     () =>
       visibleScenarios.map((scenario) => ({
@@ -2567,10 +2573,112 @@ export function OccupancyScenarioDashboard() {
   );
 
   async function getOccupancyReportPayload(signal?: AbortSignal) {
-    const visibleCardIds = orderByCardPreferences(
-      occupancyLayoutCards,
-      occupancyPreferences,
-    ).map((card) => card.id);
+    if (!occupancyPreferencesReady) {
+      throw new Error("Aguarde a configuração da visão de ocupação carregar.");
+    }
+    if (!selectedScenario || !companyScopeId) {
+      throw new Error("Selecione um cenário de ocupação para exportar a visão.");
+    }
+    requireCertifiedOccupancyCompanyTimeZone(
+      certifiedCompanyTimeZoneResolution,
+    );
+    const visibleCardIds = visibleOccupancyCardIds;
+    if (!visibleCardIds.length) {
+      throw new Error("Ative ao menos um widget para exportar a visão de ocupação.");
+    }
+    const visibleCardIdSet = new Set(visibleCardIds);
+    const visibleTrendGranularities = new Set(
+      customWidgets.flatMap((widget) =>
+        widget.kind === "trend" &&
+        visibleCardIdSet.has(`occupancy_custom_${widget.id}`)
+          ? [widget.granularity]
+          : [],
+      ),
+    );
+    const visibleChartDefinitions = chartDefinitions.filter(
+      (definition) =>
+        visibleCardIdSet.has(definition.id) ||
+        visibleTrendGranularities.has(definition.granularity),
+    );
+    const viewPaletteId = occupancyPreferences.find(
+      (preference) => preference.viewPaletteId,
+    )?.viewPaletteId;
+    const viewPaletteColors =
+      OCCUPANCY_COLOR_PALETTES.find(
+        (candidate) => candidate.id === viewPaletteId,
+      )?.colors ?? null;
+    const requestSignal = signal ?? new AbortController().signal;
+    const loadExportChartState = async (
+      definition: OccupancyChartDefinition,
+    ): Promise<OccupancyChartState> => {
+      const requestedAt = new Date();
+      const buckets = listBucketStarts(definition);
+      const fetchResponse = (path: string) =>
+        fetchSharedOccupancyQuery<OccupancyScenarioAggregateResponse>({
+          companyScopeId,
+          path,
+          priority: "foreground",
+          scenarioId: selectedScenario.id,
+          signal: requestSignal,
+          timeZone: companyTimeZone,
+        });
+      try {
+        const response =
+          definition.granularity === "minute" ||
+          definition.granularity === "hour"
+            ? await fetchResponse(
+                occupancyScenarioAggregatePath(selectedScenario.id, definition),
+              )
+            : await fetchOccupancyCivilAggregate({
+                capabilities: civilAggregateCapabilities,
+                companyScopeId,
+                fetchResponse,
+                from: definition.from,
+                granularity: definition.granularity,
+                openBucket: buckets.at(-1),
+                requestedAt,
+                scenarioId: selectedScenario.id,
+                signal: requestSignal,
+                timeZone: companyTimeZone,
+                to: definition.to,
+                unitCache: civilAggregateUnitCacheRef.current,
+                useResponseReceiptTime: true,
+              });
+        requestSignal.throwIfAborted();
+        const rows = requireOccupancyAggregateRows(
+          response,
+          definition.granularity,
+          selectedScenario.id,
+          companyTimeZone,
+          {
+            allowDocumentedAggregateResponse: true,
+            allowVerifiedCivilAggregateResponse:
+              definition.granularity !== "minute" &&
+              definition.granularity !== "hour",
+            openBucket: buckets.at(-1),
+            requestedAt,
+            receivedAt: new Date(),
+            requireCertification: true,
+          },
+        );
+        return buildOccupancyChartState(
+          definition,
+          rows,
+          joinOccupancyWarnings(
+            occupancyAggregateMetadataWarning(
+              response,
+              definition.granularity,
+            ),
+            certifiedCompanyTimeZoneResolution.warning,
+          ),
+        );
+      } catch (error) {
+        if (isAbortError(error) || requestSignal.aborted) throw error;
+        throw new Error(
+          `Não foi possível exportar o gráfico “${definition.label}”: ${occupancyDashboardErrorMessage(error, "Série indisponível.")}`,
+        );
+      }
+    };
     const titleByCardId = new Map(
       occupancyPreferences.flatMap((preference) =>
         preference.title ? ([[preference.id, preference.title]] as const) : [],
@@ -2593,10 +2701,31 @@ export function OccupancyScenarioDashboard() {
       occupancyComparisonReportAssets,
       occupancyLoiteringReportAssets,
       occupancyDurationReportSnapshot,
+      exportedChartData,
     ] = await Promise.all([
       loadOccupancyComparisonReportAssets(signal),
       occupancyLoitering.loadReportAssets(signal),
       loadOccupancyDurationReportSnapshot(signal),
+      Promise.all(
+        visibleChartDefinitions.map(async (definition) => {
+          const existing = certifiedChartData[definition.id];
+          const expectedBuckets = listBucketStarts(definition);
+          const matchesCurrentWindow =
+            existing?.points.length === expectedBuckets.length &&
+            existing.points[0]?.bucket === expectedBuckets[0]?.toISOString() &&
+            existing.points.at(-1)?.bucket === expectedBuckets.at(-1)?.toISOString();
+          if (
+            existing &&
+            !existing.error &&
+            matchesCurrentWindow &&
+            occupancyDataPlan.granularities.includes(definition.granularity)
+          ) {
+            return [definition.id, existing] as const;
+          }
+          const state = await loadExportChartState(definition);
+          return [definition.id, state] as const;
+        }),
+      ).then((entries) => Object.fromEntries(entries) as Record<string, OccupancyChartState>),
     ]);
     signal?.throwIfAborted();
 
@@ -2604,7 +2733,7 @@ export function OccupancyScenarioDashboard() {
       activeAreas,
       alerts: certifiedAlerts,
       alertsError: certifiedAlertsError,
-      chartData: certifiedChartData,
+      chartData: exportedChartData,
       chartDefinitions,
       chartTypeByCardId,
       colorByCardId,
@@ -2634,6 +2763,7 @@ export function OccupancyScenarioDashboard() {
       // tema da tela. Uma paleta clara evita linhas escuras/brancas incoerentes
       // no PDF/PNG quando o dashboard está no modo escuro.
       palette: getOccupancyChartPalette("light"),
+      viewPaletteColors,
       scenario: selectedScenario,
       timeZone: companyTimeZone,
       titleByCardId,
@@ -2749,6 +2879,18 @@ export function OccupancyScenarioDashboard() {
                       className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1 [&_[data-monitor-mode-trigger]]:shrink-0 [&_[data-premium-control]]:shrink-0"
                       role="group"
                     >
+                      <ReportExportActions
+                        compact
+                        disabled={
+                          initialLoading ||
+                          !occupancyPreferencesReady ||
+                          !visibleOccupancyCardIds.length ||
+                          !companyTimeZoneCertified ||
+                          !selectedScenario ||
+                          Boolean(metadataError)
+                        }
+                        getPayload={getOccupancyReportPayload}
+                      />
                       <AiAnalysisAction
                         disabled={
                           initialLoading ||
@@ -3014,8 +3156,10 @@ function OccupancyChartCard({
   const points = state?.points ?? buildEmptyOccupancyPoints(definition);
   const { effectiveTheme } = useTheme();
   const chartType = useWidgetChartType();
-  const widgetColor = useWidgetColor();
   const viewPalette = useWidgetPalette();
+  const widgetColor = useWidgetColor(
+    viewPalette?.[0] ?? getOccupancyChartPalette(effectiveTheme).current,
+  );
   const resolvedTitle = useWidgetTitle(definition.label);
   const palette = React.useMemo(() => {
     const basePalette = viewPalette?.length
@@ -4754,6 +4898,7 @@ function buildOccupancyDashboardReport({
   todayMetric,
   utilization,
   visibleCardIds,
+  viewPaletteColors,
 }: {
   activeAreas: number | null;
   alerts: OccupancyAlertRow[];
@@ -4810,6 +4955,7 @@ function buildOccupancyDashboardReport({
   };
   utilization: number | null;
   visibleCardIds: string[];
+  viewPaletteColors: readonly string[] | null;
 }): ReportPayload {
   const resolveTitle = (cardId: string, fallback: string) =>
     titleByCardId.get(cardId) ?? fallback;
@@ -4910,7 +5056,13 @@ function buildOccupancyDashboardReport({
           color: colorByCardId.get(definition.id),
           definition,
           metricVisibility,
-          palette,
+          palette: viewPaletteColors?.length
+            ? resolveOccupancyChartPaletteFromColors(
+                "light",
+                viewPaletteColors,
+                colorByCardId.get(definition.id) ?? viewPaletteColors[0],
+              )
+            : palette,
           points: state.points,
           scenario,
           title: resolveTitle(definition.id, definition.label),
@@ -4935,7 +5087,13 @@ function buildOccupancyDashboardReport({
           color: colorByCardId.get(cardId),
           definition: { ...sourceDefinition, id: cardId, label: widget.title },
           metricVisibility: widget.series,
-          palette,
+          palette: viewPaletteColors?.length
+            ? resolveOccupancyChartPaletteFromColors(
+                "light",
+                viewPaletteColors,
+                colorByCardId.get(cardId) ?? viewPaletteColors[0],
+              )
+            : palette,
           points: state.points,
           scenario,
           title: resolveTitle(cardId, widget.title),
@@ -5032,7 +5190,6 @@ function buildOccupancyDashboardReport({
       return chart ? [chart] : [];
     }),
     context: [
-      scenario ? `Cenário: ${scenario.name}` : "Nenhum cenário selecionado",
       "Ordem, visibilidade, títulos, cores e tipo dos gráficos seguem a tela configurada.",
       ...occupancyDurationReportContext,
       ...(occupancyDurationInsightReportAssets.length
@@ -5060,10 +5217,10 @@ function buildOccupancyDashboardReport({
       const metric = metricByCardId.get(cardId);
       return metric ? [metric] : [];
     }),
-    subtitle: "Ocupação do cenário e suas séries históricas.",
+    subtitle: "Ocupação e permanência observadas na visão ao vivo.",
     tables,
     timeZone,
-    title: scenario ? `Ocupação - ${scenario.name}` : "Ocupação",
+    title: "Relatório IPXData - Ocupação",
   };
 }
 

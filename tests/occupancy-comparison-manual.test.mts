@@ -300,7 +300,7 @@ test("faixa histórica vazia legítima não bloqueia certificação/exportação
   );
 });
 
-test("snapshot one-shot certifica os próprios dados e falha fechado", () => {
+test("snapshot one-shot certifica somente cobertura integral e distingue falha de lacuna", () => {
   const aggregate = load("lib/occupancy-aggregate-validation.ts");
   const period = {
     contextLabel: "15 de setembro de 2026",
@@ -366,6 +366,16 @@ test("snapshot one-shot certifica os próprios dados e falha fechado", () => {
     }),
     null,
   );
+  const missingBucketDataset = {
+    ...base.dataset,
+    hourlySeries: [{ metrics: new Map(), name: "Entrada", scenarioId: "a" }],
+  };
+  assert.equal(widgets.occupancyHistoricalComparisonDataCompleteUntil({
+    ...base,
+    dataset: missingBucketDataset,
+  }), null);
+  assert.equal(widgets.occupancyHistoricalComparisonSourceError(missingBucketDataset, plan, "hour"), undefined,
+    "bucket ausente não é interpretado como falha de consulta");
   assert.equal(
     widgets.occupancyHistoricalComparisonDataCompleteUntil({
       ...base,
@@ -377,10 +387,56 @@ test("snapshot one-shot certifica os próprios dados e falha fechado", () => {
     }),
     undefined,
   );
-  assert.match(
-    source,
-    /const reportDataCompleteUntil =\s*occupancyHistoricalComparisonDataCompleteUntil\([\s\S]*?if \(reportDataCompleteUntil === null\) \{\s*throw new Error/,
+  assert.match(source, /dataCompleteUntil: reportDataCompleteUntil/,
+    "uma lacuna legítima permanece visível no arquivo, sem data de corte falsa");
+  assert.doesNotMatch(source, /if \(reportDataCompleteUntil === null\) \{\s*throw new Error/);
+  assert.equal(widgets.occupancyHistoricalComparisonSourceError(base.dataset, plan, "hour"), undefined);
+  const failedDataset = {
+    ...base.dataset,
+    hourlySeries: [{
+      error: "Falha na origem",
+      metrics: new Map(),
+      name: "Entrada",
+      scenarioId: "a",
+    }],
+  };
+  assert.equal(
+    widgets.occupancyHistoricalComparisonSourceError(failedDataset, plan, "hour"),
+    "Falha na origem",
+    "falha real da fonte consultada continua bloqueando o arquivo",
   );
+  assert.equal(
+    widgets.occupancyHistoricalComparisonSourceError(failedDataset, {
+      ...plan,
+      hourlyScenarioIds: [],
+      needsHourlyAggregate: false,
+    }, "hour"),
+    undefined,
+    "fonte não solicitada não bloqueia exportação de outros widgets",
+  );
+  assert.equal(
+    widgets.occupancyHistoricalComparisonSourceError({
+      ...base.dataset,
+      snapshots: [{ error: "Falha no fechamento", scenarioId: "a", total: null }],
+    }, {
+      ...plan,
+      needsSnapshots: true,
+      snapshotScenarioIds: ["a"],
+    }, "hour"),
+    undefined,
+    "falha isolada do fechamento não impede a exportação dos agregados válidos",
+  );
+  const affected = widgets.annotateUnavailableComparisonSnapshots([
+    { cardId: "occupancy_scenario_half_donut", chart: { description: "Comparativo", table: { description: "Dados", rows: [] } } },
+    { cardId: "occupancy_scenario_max_hour", chart: { description: "Máximos", table: { description: "Dados", rows: [] } } },
+  ], {
+    assetsByCard: new Map([["occupancy_scenario_half_donut", ["a"]]]),
+    hexScenarioIds: [],
+    snapshots: [{ error: "Falha no fechamento", scenarioId: "a", total: null }],
+  });
+  assert.match(affected[0].chart.description, /Leitura final indisponível/);
+  assert.match(affected[0].chart.table.description, /valores ausentes não foram estimados/);
+  assert.equal(affected[1].chart.description, "Máximos", "agregado válido não recebe alerta alheio");
 });
 
 test("máximos exigem cobertura somente desde o mês civil de criação do cenário", () => {
@@ -512,6 +568,40 @@ test("assets carregados usam os mesmos IDs com linguagem histórica", () => {
   );
 });
 
+test("exportação dos comparativos preserva a cor individual do card", () => {
+  const build = (cardPreferences: Array<{ id: string; color: string }>) =>
+    widgets.buildOccupancyComparisonReportAssets({
+      aggregateBuckets: [],
+      aggregateSeries: [],
+      cardPreferences,
+      currentHourBucket: null,
+      currentHourSeries: [],
+      heatmapScenarioId: "scenario-a",
+      hexSnapshots: [],
+      hourlyMaximumBuckets: [],
+      hourlyMaximumSeries: [],
+      maximumTrendRanges: null,
+      maximumTrendSeries: [],
+      scenarioHourHeatmapDateKey: "",
+      scenarios: [{ id: "scenario-a", name: "Entrada" }],
+      selectedScenarioIds: ["scenario-a"],
+      settings: settings.DEFAULT_OCCUPANCY_WIDGET_SETTINGS,
+      snapshots: [{ name: "Entrada", occupied: true, scenarioId: "scenario-a", total: 7 }],
+      timeZone,
+      viewPaletteId: "ocean",
+    });
+  const colorOf = (assets: RuntimeFixture[]) => JSON.stringify(assets.find(
+    (asset) => asset.cardId === "occupancy_day_hour_heatmap",
+  )?.chart.option.visualMap);
+  const defaultColor = colorOf(build([]));
+  const configuredColor = colorOf(build([
+    { id: "occupancy_day_hour_heatmap", color: "#D12345" },
+  ]));
+  assert.equal(typeof defaultColor, "string");
+  assert.equal(typeof configuredColor, "string");
+  assert.notEqual(configuredColor, defaultColor);
+});
+
 test("hook publica contrato completo da análise histórica", () => {
   const returnBlock = source.slice(
     source.indexOf("  return {\n    cards,", source.indexOf("export function useOccupancyComparisonCards")),
@@ -535,7 +625,7 @@ function load(path: string): RuntimeFixture {
   let moduleSource = readFileSync(resolve(path), "utf8");
   if (path.endsWith("occupancy-comparison-widgets.tsx")) {
     moduleSource +=
-      "\nexport { buildMaximumLineSeries, buildOccupancyComparisonReportAssets, occupancyHistoricalAggregateIsComplete, occupancyHistoricalComparisonDataCompleteUntil, occupancyHistoricalSnapshotScenarioIds, occupancyLatestCompanyDayBuckets };";
+      "\nexport { annotateUnavailableComparisonSnapshots, buildMaximumLineSeries, buildOccupancyComparisonReportAssets, occupancyHistoricalAggregateIsComplete, occupancyHistoricalComparisonDataCompleteUntil, occupancyHistoricalComparisonSourceError, occupancyHistoricalSnapshotScenarioIds, occupancyLatestCompanyDayBuckets };";
   }
   const loaded: { exports: RuntimeFixture } = { exports: {} };
   modules.set(path, loaded);

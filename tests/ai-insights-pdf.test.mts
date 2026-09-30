@@ -244,6 +244,32 @@ test("renderizador gera A4 retrato multipágina com conteúdo extremo", async ()
   assert.equal(filename, "ia-advisor-2026-08-27.pdf");
 });
 
+test("títulos longos de oportunidades permanecem junto do identificador na mesma página", async () => {
+  const report = validReport();
+  report.insights.findings = Array.from({ length: 24 }, (_, index) => ({
+    confidence: "alta" as const,
+    evidence: `Sinal operacional ${"verificado em dias comparáveis ".repeat(24)}`,
+    interpretation: "Priorizar uma ação específica no próximo ciclo.",
+    title: `INICIO${index} ${"título de oportunidade com leitura ampliada ".repeat(9)} FIM${index}`,
+    widget: "Fluxo por hora",
+  }));
+
+  const { doc } = await pdf.createAiInsightsPdfDocument(report);
+  const pages = (doc.internal.pages as unknown as string[][])
+    .slice(1)
+    .map((commands) => commands.join("\n"));
+  assert.ok(pages.length > 2);
+
+  for (let index = 0; index < report.insights.findings.length; index += 1) {
+    const eyebrowPage = pages.findIndex((page) =>
+      page.includes(`ALAVANCA ${index + 1}`),
+    );
+    assert.ok(eyebrowPage >= 0, `identificador da alavanca ${index + 1} ausente`);
+    assert.ok(pages[eyebrowPage].includes(`INICIO${index}`));
+    assert.ok(pages[eyebrowPage].includes(`FIM${index}`));
+  }
+});
+
 test("exportador não depende de screenshots, captura do DOM ou impressão", () => {
   const source = readFileSync(
     resolve(projectRoot, "lib/ai-insights-pdf.ts"),

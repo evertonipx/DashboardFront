@@ -40,6 +40,7 @@ import {
   EChart,
   type EnterpriseChartOption,
 } from "@/components/app/counting-palette-chart";
+import { ReportExportActions } from "@/components/app/report-export-actions";
 import { applyChartTypePreference } from "@/lib/chart-type-preference";
 import { applyCountingViewPalette } from "@/lib/counting-view-palette";
 import { OCCUPANCY_COLOR_PALETTES } from "@/lib/occupancy-color-palettes";
@@ -3966,6 +3967,7 @@ export function RealtimeDashboard({
     loadAnnualHistory,
   ]);
   function buildLiveReportAssets() {
+  const visibleLiveCardIdSet = new Set(visibleLiveCardIds);
   const reportWidgetModelCache = new Map<string, RealtimeWidgetModel>();
   const resolveLiveWidgetModelForCard = (cardId: string) => {
     const selection = liveScenarioSelectionByCardId.get(cardId) ?? {
@@ -4082,27 +4084,29 @@ export function RealtimeDashboard({
   const liveChartEntries: Array<
     readonly [string, ReportPayload["charts"][number]]
   > = [];
-  const minuteDayReportModel = resolveLiveWidgetModelForCard(
-    LIVE_DAY_MINUTES_ID,
-  );
-  const hourlyReportModel = resolveLiveWidgetModelForCard("live_chart_hour");
-  const trendReportModel = resolveLiveWidgetModelForCard(
-    "live_moving_average_trend",
-  );
-  const monthComparisonReportModel = resolveLiveWidgetModelForCard(
-    "live_operational_month_comparison",
-  );
-  const monthCumulativeReportModel = resolveLiveWidgetModelForCard(
-    "live_operational_month_cumulative",
-  );
-  const annualMonthlyReportModel = resolveLiveWidgetModelForCard(
-    "live_current_year_monthly",
-  );
-  const annualAccumulatedReportModel = resolveLiveWidgetModelForCard(
-    "live_current_year_accumulated",
-  );
+  const minuteDayReportModel = visibleLiveCardIdSet.has(LIVE_DAY_MINUTES_ID)
+    ? resolveLiveWidgetModelForCard(LIVE_DAY_MINUTES_ID)
+    : null;
+  const hourlyReportModel = visibleLiveCardIdSet.has("live_chart_hour")
+    ? resolveLiveWidgetModelForCard("live_chart_hour")
+    : null;
+  const trendReportModel = visibleLiveCardIdSet.has("live_moving_average_trend")
+    ? resolveLiveWidgetModelForCard("live_moving_average_trend")
+    : null;
+  const monthComparisonReportModel = visibleLiveCardIdSet.has("live_operational_month_comparison")
+    ? resolveLiveWidgetModelForCard("live_operational_month_comparison")
+    : null;
+  const monthCumulativeReportModel = visibleLiveCardIdSet.has("live_operational_month_cumulative")
+    ? resolveLiveWidgetModelForCard("live_operational_month_cumulative")
+    : null;
+  const annualMonthlyReportModel = visibleLiveCardIdSet.has("live_current_year_monthly")
+    ? resolveLiveWidgetModelForCard("live_current_year_monthly")
+    : null;
+  const annualAccumulatedReportModel = visibleLiveCardIdSet.has("live_current_year_accumulated")
+    ? resolveLiveWidgetModelForCard("live_current_year_accumulated")
+    : null;
   if (hourlyDefinition) {
-    if (minuteDayReportModel.scope) {
+    if (minuteDayReportModel?.scope) {
       liveChartEntries.push([
         LIVE_DAY_MINUTES_ID,
         buildMinuteDayReportChart({
@@ -4115,7 +4119,7 @@ export function RealtimeDashboard({
         }),
       ]);
     }
-    if (hourlyReportModel.scope) {
+    if (hourlyReportModel?.scope) {
       liveChartEntries.push([
         "live_chart_hour",
         buildOperationalHourlyReportChart({
@@ -4135,7 +4139,7 @@ export function RealtimeDashboard({
         }),
       ]);
     }
-    liveChartEntries.push([
+    if (visibleLiveCardIdSet.has("live_month_hour_heatmap")) liveChartEntries.push([
       "live_month_hour_heatmap",
       buildOperationalHeatmapReportChart({
         month: clock,
@@ -4148,7 +4152,7 @@ export function RealtimeDashboard({
         widgetColor: liveColorByCardId.get("live_month_hour_heatmap"),
       }),
     ]);
-    liveChartEntries.push([
+    if (monthComparisonReportModel) liveChartEntries.push([
       "live_operational_month_comparison",
       buildOperationalMonthReportChart({
         accumulated: false,
@@ -4162,7 +4166,7 @@ export function RealtimeDashboard({
         ),
       }),
     ]);
-    liveChartEntries.push([
+    if (monthCumulativeReportModel) liveChartEntries.push([
       "live_operational_month_cumulative",
       buildOperationalMonthReportChart({
         accumulated: true,
@@ -4176,7 +4180,7 @@ export function RealtimeDashboard({
         ),
       }),
     ]);
-    liveChartEntries.push([
+    if (trendReportModel) liveChartEntries.push([
       "live_moving_average_trend",
       buildOperationalTrendReportChart(
         trendReportModel.operationalTrendPoints,
@@ -4185,7 +4189,7 @@ export function RealtimeDashboard({
         liveColorByCardId.get("live_moving_average_trend"),
       ),
     ]);
-    if (annualMonthlyReportModel.liveAnnualComparisonModel) {
+    if (annualMonthlyReportModel?.liveAnnualComparisonModel) {
       const annualAssets = buildCountingIntelligenceReportAssets(
         annualMonthlyReportModel.liveAnnualComparisonModel,
         {
@@ -4201,7 +4205,7 @@ export function RealtimeDashboard({
         liveChartEntries.push(["live_current_year_monthly", monthly.value]);
       }
     }
-    if (annualAccumulatedReportModel.liveAnnualComparisonModel) {
+    if (annualAccumulatedReportModel?.liveAnnualComparisonModel) {
       const annualAssets = buildCountingIntelligenceReportAssets(
         annualAccumulatedReportModel.liveAnnualComparisonModel,
         {
@@ -4222,7 +4226,7 @@ export function RealtimeDashboard({
       }
     }
   }
-  liveChartEntries.push([
+  if (visibleLiveCardIdSet.has("live_hourly_occupancy")) liveChartEntries.push([
     "live_hourly_occupancy",
     buildHourlyOccupancyReportChart({
       entryScenarios: getOccupancyEntryScenarios(),
@@ -4232,21 +4236,21 @@ export function RealtimeDashboard({
       widgetColor: liveColorByCardId.get("live_hourly_occupancy"),
     }),
   ]);
-  liveChartEntries.push([
+  if (visibleLiveCardIdSet.has("live_scenario_cumulative")) liveChartEntries.push([
     "live_scenario_cumulative",
     buildScenarioCumulativeTotalsReportChart(
       getCumulativeScenarioPoints(),
       liveColorByCardId.get("live_scenario_cumulative"),
     ),
   ]);
-  liveChartEntries.push([
+  if (visibleLiveCardIdSet.has("live_month_access_ranking")) liveChartEntries.push([
     "live_month_access_ranking",
     buildMonthlyAccessRankingReportChart(
       getMonthlyAccessRankingPoints(),
       liveColorByCardId.get("live_month_access_ranking"),
     ),
   ]);
-  liveChartEntries.push([
+  if (visibleLiveCardIdSet.has("live_scenario_rose")) liveChartEntries.push([
     "live_scenario_rose",
     buildScenarioRoseReportChart(
       getRoseScenarioPoints(),
@@ -4262,7 +4266,7 @@ export function RealtimeDashboard({
       ),
     ),
   ]);
-  liveChartEntries.push([
+  if (visibleLiveCardIdSet.has("live_month_peak_days")) liveChartEntries.push([
     "live_month_peak_days",
     buildPeakDaysRankingReportChart(
       getPeakDayPoints(),
@@ -4274,7 +4278,7 @@ export function RealtimeDashboard({
       liveColorByCardId.get("live_month_peak_days"),
     ),
   ]);
-  liveChartEntries.push(
+  if (visibleLiveCardIdSet.has("live_today_scenario_comparison")) liveChartEntries.push(
     [
       "live_today_scenario_comparison",
       buildTodayComparisonReportChart(
@@ -4296,6 +4300,8 @@ export function RealtimeDashboard({
         liveColorByCardId.get("live_today_scenario_comparison"),
       ),
     ],
+  );
+  if (visibleLiveCardIdSet.has("live_today_location_comparison")) liveChartEntries.push(
     [
       "live_today_location_comparison",
       buildTodayComparisonReportChart(
@@ -4317,6 +4323,8 @@ export function RealtimeDashboard({
         liveColorByCardId.get("live_today_location_comparison"),
       ),
     ],
+  );
+  if (visibleLiveCardIdSet.has("live_today_sub_location_comparison")) liveChartEntries.push(
     [
       "live_today_sub_location_comparison",
       buildTodayComparisonReportChart(
@@ -4342,7 +4350,9 @@ export function RealtimeDashboard({
 
   customWidgets
     .filter(
-      (widget): widget is RealtimeScopeCustomWidget => widget.kind === "scope",
+      (widget): widget is RealtimeScopeCustomWidget =>
+        widget.kind === "scope" &&
+        visibleLiveCardIdSet.has(`live_custom_${widget.id}`),
     )
     .forEach((widget) => {
       const scope = getScopeOptionsForMode(widget.scopeMode).find(
@@ -4371,7 +4381,8 @@ export function RealtimeDashboard({
   customWidgets
     .filter(
       (widget): widget is RealtimeScenarioCustomWidget =>
-        widget.kind === "scenario_widget",
+        widget.kind === "scenario_widget" &&
+        visibleLiveCardIdSet.has(`live_custom_${widget.id}`),
     )
     .forEach((widget) => {
       const cardId = `live_custom_${widget.id}`;
@@ -4564,18 +4575,13 @@ export function RealtimeDashboard({
       liveWidgetScenarioContexts,
     } = reportAssets;
     return {
-      title: selectedScope
-        ? `Ao Vivo - ${selectedScope.name}`
-        : "Ao Vivo - Contagem",
-      subtitle: "Leitura operacional atualizada a cada 5 segundos.",
+      title: "Relatório IPXData - Contagem",
+      subtitle: "Fluxo do dia observado na visão ao vivo.",
       filename: `ipxdata-ao-vivo-${realtimeReportDateSlug(lastUpdated ?? clock)}`,
       generatedAt: lastUpdated ?? clock,
       dataCompleteUntil: lastUpdated ?? clock,
       timeZone: companyTimeZone,
       context: [
-        selectedScope
-          ? `${scopeModeLabel(selectedScope.mode)}: ${selectedScope.name}`
-          : "",
         `Comparação intradiária: ${intradayComparisonSeriesLabel(
           operationalSettings.intradayComparison,
         )}`,
@@ -4692,6 +4698,23 @@ export function RealtimeDashboard({
     );
     signal?.throwIfAborted();
 
+    const missingCardId = visibleLiveCardIds.find(
+      (cardId) =>
+        !chartByCardId.has(cardId) &&
+        !reportAssets.liveMetricByCardId.has(cardId) &&
+        !reportAssets.liveTableByCardId.has(cardId),
+    );
+    if (missingCardId) {
+      const title = resolveLiveTitle(
+        missingCardId,
+        liveLayoutCards.find((card) => card.id === missingCardId)?.label ??
+          "Widget",
+      );
+      throw new Error(
+        `O widget “${title}” ainda não está pronto para exportação. Aguarde a carga dos dados ou atualize a visão.`,
+      );
+    }
+
     return composeLiveReportPayload(
       visibleLiveCardIds
         .map((id) => chartByCardId.get(id))
@@ -4700,6 +4723,13 @@ export function RealtimeDashboard({
         ),
       reportAssets,
     );
+  }
+
+  async function buildLiveExportPayload(signal?: AbortSignal) {
+    const payload = await buildConfiguredLiveReportPayload(signal);
+    // A hora da última consulta é útil à IA para situar a leitura, mas não é
+    // um corte de dados certificado pela API para imprimir no rodapé do PDF.
+    return { ...payload, dataCompleteUntil: null };
   }
 
   async function buildAiLiveReportPayload(signal?: AbortSignal) {
@@ -4937,6 +4967,17 @@ export function RealtimeDashboard({
                   >
                     <RefreshCw className={cn("h-4 w-4", loadingCharts && "animate-spin")} />
                   </Button>
+                  <ReportExportActions
+                    compact
+                    disabled={
+                      initialLoading ||
+                      !visibleLiveCardIds.length ||
+                      !selectedScope ||
+                      Boolean(companyScopeCertificationError) ||
+                      Boolean(metadataError)
+                    }
+                    getPayload={buildLiveExportPayload}
+                  />
                   <AiAnalysisAction
                     disabled={
                       initialLoading ||

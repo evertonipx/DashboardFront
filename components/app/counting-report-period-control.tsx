@@ -18,7 +18,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  COUNTING_REPORT_HISTORY_YEARS,
   countingReportPeriodForPreset,
   countingReportPeriodMonthCount,
   detectCountingReportPeriodPreset,
@@ -51,8 +50,8 @@ const PERIOD_PRESETS: Array<{
   value: Exclude<CountingReportPeriodPreset, "custom">;
 }> = [
   {
-    description: "Visão histórica recomendada",
-    label: `Últimos ${COUNTING_REPORT_HISTORY_YEARS} anos`,
+    description: "Desde o início do histórico disponível",
+    label: "Todos os anos",
     value: "history",
   },
   {

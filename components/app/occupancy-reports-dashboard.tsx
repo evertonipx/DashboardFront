@@ -32,6 +32,10 @@ import {
   type OccupancyComparisonReportSnapshot,
 } from "@/components/app/occupancy-comparison-widgets";
 import {
+  buildOccupancyAnnualReportAssets,
+  buildOccupancyAnnualWidgetCards,
+} from "@/components/app/occupancy-annual-report-widgets";
+import {
   useOccupancyDurationCards,
   type OccupancyDurationReportSnapshot,
 } from "@/components/app/occupancy-duration-widgets";
@@ -92,9 +96,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiFetch } from "@/lib/api";
 import { hasVisualAdminAccess } from "@/lib/access";
 import { AI_INSIGHTS_LIMITS } from "@/lib/ai-insights-limits";
+import { COUNTING_HISTORY_START_YEAR } from "@/lib/counting-intelligence";
 import {
   aggregateQueryIso,
   endOfAggregateBucket,
+  parseAggregateBucket,
   startOfAggregateBucket,
 } from "@/lib/aggregate-time";
 import {
@@ -174,7 +180,10 @@ import {
   type OccupancyCustomWidget,
   type OccupancyTrendCustomWidget,
 } from "@/lib/occupancy-custom-widgets";
-import { getOccupancyColorPalette } from "@/lib/occupancy-color-palettes";
+import {
+  getOccupancyColorPalette,
+  OCCUPANCY_COLOR_PALETTES,
+} from "@/lib/occupancy-color-palettes";
 import {
   buildFixedOccupancyHourlyPoints,
   occupancyFixedHourLabelInterval,
@@ -204,11 +213,13 @@ import {
   occupancyPresetStorageValue,
 } from "@/lib/occupancy-live-analysis-import";
 import { buildOccupancyDurationInsightAnalysisPeriod } from "@/lib/occupancy-duration-insights";
+import { buildOccupancyAnnualReport } from "@/lib/occupancy-annual-report";
 import { occupancyComparisonBucketStarts } from "@/lib/occupancy-report-comparison";
 import {
   buildOccupancyReportResourcePlan,
   createOccupancyQueryScheduler,
   loadOccupancyReportDefinitionStates,
+  OCCUPANCY_ANNUAL_MONTH_SOURCE_ID,
   occupancyLiveSnapshotQuery,
   type OccupancyQueryScheduler,
 } from "@/lib/occupancy-dashboard-query";
@@ -298,6 +309,7 @@ type OccupancyReportsDashboardProps = {
 type OccupancyReportPoint = {
   bucket: string;
   label: string;
+  complete?: boolean;
   average: number | null;
   current: number | null;
   minimum: number | null;
@@ -449,6 +461,7 @@ export function OccupancyReportsDashboard({
     React.useState<CertifiedCurrentSnapshot | null>(null);
   const [currentSnapshotError, setCurrentSnapshotError] = React.useState("");
   const [clock, setClock] = React.useState(() => new Date());
+  const reportYear = companyCalendarDate(clock, companyTimeZone, "year").getFullYear();
   const [durationAnalysisCutoff, setDurationAnalysisCutoff] = React.useState(
     () => new Date(),
   );
@@ -1026,7 +1039,7 @@ export function OccupancyReportsDashboard({
     showPreviousPeriod: false,
     startDateInput: analysisRangeInput.startInput,
     timeZone: companyTimeZone,
-  })}|primary:${requestedDefinitionIdsKey}|snapshot:${
+  })}|year:${reportYear}|primary:${requestedDefinitionIdsKey}|snapshot:${
     currentSnapshotRequested ? "1" : "0"
   }|user:${userId ?? ""}`;
   const primaryChartWindowKey = occupancyReportDefinitionsWindowKey(
@@ -1050,7 +1063,7 @@ export function OccupancyReportsDashboard({
           showPreviousPeriod,
           startDateInput: analysisRangeInput.startInput,
           timeZone: companyTimeZone,
-        })}|plan:${requestPlanKey}`,
+        })}|year:${reportYear}|plan:${requestPlanKey}`,
     [
       analysis,
       analysisRangeInput.endInput,
@@ -1059,6 +1072,7 @@ export function OccupancyReportsDashboard({
       companyTimeZone,
       intradayComparison,
       requestPlanKey,
+      reportYear,
       selectedScope?.id,
       showPreviousPeriod,
     ],
@@ -1081,6 +1095,26 @@ export function OccupancyReportsDashboard({
   const visibleChartData = chartDataIsCurrent
     ? chartData
     : EMPTY_OCCUPANCY_REPORT_DATA;
+  const annualHistoryState = !analysis
+    ? visibleChartData[OCCUPANCY_ANNUAL_MONTH_SOURCE_ID]
+    : undefined;
+  const annualReport = React.useMemo(() => buildOccupancyAnnualReport({
+    currentAt: clock,
+    monthlyPoints: (annualHistoryState?.points ?? []).map((point) => {
+      const bucket = new Date(point.bucket);
+      return {
+        average: point.average,
+        minimum: point.minimum,
+        month: bucket.getMonth() + 1,
+        peak: point.peak,
+        complete: point.complete,
+        year: bucket.getFullYear(),
+      };
+    }),
+    selectedYear: reportYear,
+    startYear: Math.min(COUNTING_HISTORY_START_YEAR, reportYear),
+    timeZone: companyTimeZone,
+  }), [annualHistoryState?.points, clock, companyTimeZone, reportYear]);
   const visibleCurrentSnapshot = chartDataIsCurrent ? currentSnapshot : null;
   const visibleCurrentSnapshotError = chartDataIsCurrent
     ? currentSnapshotError
@@ -1115,10 +1149,25 @@ export function OccupancyReportsDashboard({
     (currentSnapshotRequested && visibleCurrentSnapshotError) ||
       queriedDefinitions.some((definition) => {
         const state = visibleChartData[definition.id];
+        if (definition.id === OCCUPANCY_ANNUAL_MONTH_SOURCE_ID) {
+          return Boolean(state?.error);
+        }
         const previous = showPreviousPeriod && comparisonDataIsCurrent && comparisonDefinitionIdSet.has(definition.id)
           ? visibleChartData[previousId(definition.id)] : undefined;
         return state?.error || state?.incomplete || previous?.error || previous?.incomplete;
       }),
+  );
+  // An open day/month is a valid, explicitly labelled report period. Missing
+  // buckets remain empty in the charts and tables; neither case should hide
+  // export. A failed closing snapshot is shown as unavailable in its own
+  // metric/detail card and cannot block the valid aggregate charts.
+  const hasBlockingOccupancyExportError = Boolean(
+    queriedDefinitions.some((definition) => {
+      const state = visibleChartData[definition.id];
+      const previous = showPreviousPeriod && comparisonDataIsCurrent && comparisonDefinitionIdSet.has(definition.id)
+        ? visibleChartData[previousId(definition.id)] : undefined;
+      return state?.error || previous?.error;
+    }),
   );
 
   const loadScopes = React.useCallback(async (force = false) => {
@@ -1258,7 +1307,7 @@ export function OccupancyReportsDashboard({
           showPreviousPeriod,
           startDateInput: analysisRangeInput.startInput,
           timeZone: companyTimeZone,
-        })}|plan:${requestPlanKey}`;
+        })}|year:${reportYear}|plan:${requestPlanKey}`;
       if (requestScopeKey !== requestedChartScopeKeyRef.current) return;
 
       if (
@@ -1554,6 +1603,7 @@ export function OccupancyReportsDashboard({
       intradayComparison,
       primaryChartScopeKey,
       requestPlanKey,
+      reportYear,
       requestedDefinitionIdsKey,
       showPreviousPeriod,
     ],
@@ -1661,7 +1711,10 @@ export function OccupancyReportsDashboard({
       ? { endInput: previousDayInput, startInput: previousDayInput }
       : storedRange;
     setAnalysisRangeInput(initialRange);
-    setReportRequested(analysis);
+    // Both historical surfaces open with data: Análises loads the previous
+    // closed day and Relatórios loads the selected, visible report widgets.
+    // The selected scope and hydrated layout still gate the actual requests.
+    setReportRequested(true);
     setConfigurationReadyKey(configurationScopeKey);
   }, [
     analysis,
@@ -1750,8 +1803,8 @@ export function OccupancyReportsDashboard({
     }
 
     if (!layoutPreferencesReady) return;
-    // Analysis always opens with the latest fully closed day. Reports remain
-    // explicitly requested, and picker edits wait for Apply.
+    // Análises opens with the latest fully closed day; Relatórios opens with
+    // its visible widgets. Later picker edits still wait for Apply.
     if (!reportRequested) return;
     loadCharts(selectedScope);
   }, [
@@ -2069,6 +2122,14 @@ export function OccupancyReportsDashboard({
     }];
   });
   const occupancyReportLayoutCards = [
+    ...(!analysis ? buildOccupancyAnnualWidgetCards({
+      colorPaletteId: analysisWidgetSettings.colorPaletteId,
+      error: annualHistoryState?.error,
+      idle: !reportRequested,
+      loading: chartsPending,
+      model: annualReport,
+      scopeName: selectedScope?.name,
+    }) : []),
     ...metricCards.map((card) => ({
       colorEditable: true,
       ...COMPACT_METRIC_LAYOUT_DEFAULTS,
@@ -2108,7 +2169,9 @@ export function OccupancyReportsDashboard({
           },
         ]
       : []),
-    ...definitions.map((definition) => ({
+    ...definitions.filter((definition) =>
+      definition.id !== OCCUPANCY_ANNUAL_MONTH_SOURCE_ID,
+    ).map((definition) => ({
       chartTypeEnabled: true,
       colorEditable: true,
       defaultHeight: "standard" as const,
@@ -2354,6 +2417,12 @@ export function OccupancyReportsDashboard({
   const reportPreferenceById = new Map(
     layoutPreferences.map((preference) => [preference.id, preference]),
   );
+  const configuredViewPaletteId = layoutPreferences.find(
+    (preference) => preference.viewPaletteId,
+  )?.viewPaletteId;
+  const configuredViewPalette = OCCUPANCY_COLOR_PALETTES.find(
+    (palette) => palette.id === configuredViewPaletteId,
+  );
   const orderedVisibleReportCardIds = layoutPreferences.length
     ? [
         ...layoutPreferences
@@ -2383,6 +2452,7 @@ export function OccupancyReportsDashboard({
         ]
       : []),
     ...queriedDefinitions.flatMap((definition) => {
+      if (definition.id === OCCUPANCY_ANNUAL_MONTH_SOURCE_ID) return [];
       const currentState = visibleChartData[definition.id];
       const sources = [
         currentState ?? {
@@ -2456,23 +2526,30 @@ export function OccupancyReportsDashboard({
       cardId: string,
     ) => {
       const preference = reportPreferenceById.get(cardId);
-      const exportPalette = resolveOccupancyChartPalette(
-        "light",
-        analysisWidgetSettings.colorPaletteId,
-        preference?.color,
-      );
+      const exportPalette = configuredViewPalette
+        ? resolveOccupancyChartPaletteFromColors(
+            "light",
+            configuredViewPalette.colors,
+            preference?.color ?? configuredViewPalette.colors[0],
+          )
+        : resolveOccupancyChartPalette(
+            "light",
+            analysisWidgetSettings.colorPaletteId,
+            preference?.color,
+          );
       const chartType: CardChartType =
         preference?.chartType === "line" ? "line" : "bar";
       const points =
         visibleChartData[sourceDefinition.id]?.points ??
         buildEmptyPoints(sourceDefinition);
-      const previousPoints =
-        comparisonDataIsCurrent
-          ? visibleChartData[previousId(sourceDefinition.id)]?.points ?? []
-          : [];
+      const previousState = comparisonDataIsCurrent
+        ? visibleChartData[previousId(sourceDefinition.id)]
+        : undefined;
+      const previousPoints = previousState?.points ?? [];
       const tableIncludesPrevious =
         showPreviousPeriod &&
         (visibility.average || visibility.minimum || visibility.peak) &&
+        Boolean(previousState && !previousState.error && !previousState.incomplete) &&
         previousPoints.length > 0;
       const table: ReportTable = {
         columns: [
@@ -2538,7 +2615,9 @@ export function OccupancyReportsDashboard({
       };
     };
     const exportChartByCardId = new Map(
-      definitions.map((definition) => [
+      definitions.filter((definition) =>
+        definition.id !== OCCUPANCY_ANNUAL_MONTH_SOURCE_ID,
+      ).map((definition) => [
         definition.id,
         buildExportChart(
           definition,
@@ -2580,6 +2659,17 @@ export function OccupancyReportsDashboard({
       });
       supplementalChartsByCardId.set(cardId, charts);
     };
+    if (!analysis && annualReport.summaries.some((summary) => summary.observedMonthCount > 0)) {
+      const colorsByCardId = new Map(
+        layoutPreferences.map((preference) => [preference.id, preference.color ?? null] as const),
+      );
+      buildOccupancyAnnualReportAssets({
+        colorByCardId: colorsByCardId,
+        colorPaletteId:
+          configuredViewPalette?.id ?? analysisWidgetSettings.colorPaletteId,
+        model: annualReport,
+      }).forEach(({ cardId, chart }) => registerSupplementalChart(cardId, chart));
+    }
     comparisonReportSnapshot.reportAssets.forEach(({ cardId, chart }) => {
       registerSupplementalChart(cardId, chart);
     });
@@ -2601,8 +2691,7 @@ export function OccupancyReportsDashboard({
     const supplementalTables: ReportTable[] = [];
     if (
       orderedVisibleReportCardIds.includes("occupancy_scenario_detail") &&
-      selectedScope?.scenario &&
-      visibleCurrentSnapshot
+      selectedScope?.scenario
     ) {
       const areaNameByIdentity = new Map(
         selectedScope.scenario.areas.map((area) => [
@@ -2616,8 +2705,10 @@ export function OccupancyReportsDashboard({
           { key: "occupancy", label: "Ocupação", numeric: true, width: 18 },
           { key: "status", label: "Estado", width: 20 },
         ],
-        description: `Leitura final certificada em ${formatDateTime(visibleCurrentSnapshot.asOf, companyTimeZone)}.`,
-        rows: visibleCurrentSnapshot.areas.length
+        description: visibleCurrentSnapshot
+          ? `Leitura final certificada em ${formatDateTime(visibleCurrentSnapshot.asOf, companyTimeZone)}.`
+          : "Leitura final indisponível neste período.",
+        rows: visibleCurrentSnapshot?.areas.length
           ? visibleCurrentSnapshot.areas.map((area, index) => ({
               area:
                 areaNameByIdentity.get(
@@ -2627,9 +2718,11 @@ export function OccupancyReportsDashboard({
               status: area.value > 0 ? "Ocupada" : "Desocupada",
             }))
           : [{
-              area: "Total do cenário",
-              occupancy: visibleCurrentSnapshot.total,
-              status: "Detalhes por área não informados",
+              area: visibleCurrentSnapshot ? "Total do cenário" : "Leitura final",
+              occupancy: visibleCurrentSnapshot?.total ?? null,
+              status: visibleCurrentSnapshot
+                ? "Detalhes por área não informados"
+                : "Indisponível neste período",
             }],
         title: `Dados - ${resolveReportCardTitle("occupancy_scenario_detail", "Cenário de ocupação")}`,
       });
@@ -2653,26 +2746,7 @@ export function OccupancyReportsDashboard({
         const chart = exportChartByCardId.get(id);
         return chart ? [chart] : [];
       }),
-      context: [
-        selectedScope
-          ? `${scopeModeLabel(selectedScope.mode)}: ${selectedScope.name}`
-          : "",
-        analysis
-          ? `Período: ${formatOccupancyAnalysisRangeLabel(analysisRangeInput)}`
-          : `Dia analisado: ${companyTodayInput}`,
-        showPreviousPeriod
-          ? `Comparativo: ${intradayComparison === "last_week" ? "semana passada" : "ontem"}`
-          : "Sem período anterior",
-        occupancyDurationInsights.reportAssets.length &&
-        occupancyDurationAnalysisPeriod
-          ? `Tempo ocupado detalhado: ${occupancyDurationAnalysisPeriod.contextLabel}.`
-          : "",
-        ...durationReportSnapshot.reportContext,
-        ...durationReportSnapshot.reportWarnings,
-        loiteringReportAssets.length && occupancyLoiteringPeriod
-          ? `Permanência: ${occupancyLoiteringPeriod.contextLabel}; registros concluídos e estatísticas de duração por área.`
-          : "",
-      ].filter(Boolean),
+      context: [],
       dataCompleteUntil: payloadDataCompleteUntil,
       filename: `ipxdata-ocupacao-${analysis ? "analise" : "relatorio"}-${occupancyReportDateSlug(
         payloadDataCompleteUntil ?? clock,
@@ -2681,22 +2755,23 @@ export function OccupancyReportsDashboard({
       metrics: orderedVisibleReportCardIds
         .map((id) => exportMetricByCardId.get(id))
         .filter((metric): metric is ReportMetric => Boolean(metric)),
-      subtitle: analysis
-        ? `Intervalo ${formatOccupancyAnalysisRangeLabel(analysisRangeInput)}`
-        : "Séries históricas e leitura atual da visão selecionada.",
+      subtitle: `Período analisado: ${
+        analysis
+          ? formatOccupancyAnalysisRangeLabel(analysisRangeInput)
+          : `${annualReport.years.at(-1)}–${reportYear} (mês atual parcial)`
+      }`,
       tables: supplementalTables,
       timeZone: companyTimeZone,
-      title: selectedScope
-        ? `${analysis ? "Análise" : "Relatório"} de Ocupação - ${selectedScope.name}`
-        : analysis
-          ? "Análise de Ocupação"
-          : "Relatório de Ocupação",
+      title: "Relatório IPXData - Ocupação",
     };
   }
 
   async function getOccupancyReportPayload(
     signal?: AbortSignal,
   ): Promise<ReportPayload> {
+    if (!orderedVisibleReportCardIds.length) {
+      throw new Error("Ative ao menos um widget para exportar a visão de ocupação.");
+    }
     // Permanência é carregada somente sob demanda nesta tela. Uma falha da
     // fonte não pode virar silenciosamente um PDF/Excel sem os cards visíveis.
     // Quando nenhum card de permanência foi solicitado, o hook retorna [] sem
@@ -2893,9 +2968,10 @@ export function OccupancyReportsDashboard({
         disabled={
           chartsPending ||
           comparisonPending ||
+          !orderedVisibleReportCardIds.length ||
           !selectedScope ||
           Boolean(occupancyCertificationError) ||
-          hasPartialOccupancyCoverage || !reportRequested
+          hasBlockingOccupancyExportError || !reportRequested
         }
         getPayload={getOccupancyReportPayload}
       />
@@ -4038,6 +4114,13 @@ function buildOccupancyReportDefinitions(
     : dayEnd;
   const currentWeekStart = startOfWeek(calendarToday);
   const currentMonthStart = startOfMonth(calendarToday);
+  const annualHistoryStart = new Date(
+    Math.min(COUNTING_HISTORY_START_YEAR, calendarToday.getFullYear()), 0, 1,
+  );
+  const annualHistoryEnd = addMonths(currentMonthStart, 1);
+  const annualHistoryQuerySegments = buildOccupancyAnnualHistoryQuerySegments(
+    annualHistoryStart, currentMonthStart, companyTimeZone,
+  );
   const rangeFrom = analysisRange?.from ?? calendarToday;
   const rangeTo = analysisRange?.to ?? addDays(calendarToday, 1);
   const analysisResolutionPlan = analysisRange
@@ -4148,6 +4231,18 @@ function buildOccupancyReportDefinitions(
           from: addMonths(currentMonthStart, -11),
           to: addMonths(currentMonthStart, 1),
         }),
+    analysisRange
+      ? null
+      : {
+          id: OCCUPANCY_ANNUAL_MONTH_SOURCE_ID,
+          label: "Histórico mensal por ano",
+          description: `${annualHistoryStart.getFullYear()}–${calendarToday.getFullYear()}; mês atual parcial.`,
+          granularity: "month",
+          from: annualHistoryStart,
+          querySegments: annualHistoryQuerySegments,
+          timeZone: companyTimeZone,
+          to: annualHistoryEnd,
+        },
   ];
 
   // A API aceita minute/hour/day/week/month. Cards sem nenhum bucket civil
@@ -4156,6 +4251,34 @@ function buildOccupancyReportDefinitions(
     (definition): definition is OccupancyReportDefinition =>
       definition !== null,
   );
+}
+
+function buildOccupancyAnnualHistoryQuerySegments(
+  historyStart: Date,
+  currentMonthStart: Date,
+  timeZone: string,
+): OccupancyReportQuerySegment[] {
+  const segments: OccupancyReportQuerySegment[] = [];
+  for (let from = new Date(historyStart); from < currentMonthStart;) {
+    // The civil aggregate adapter and API reject a request longer than four
+    // years. Keep each closed range cacheable and fetch the open month alone.
+    const to = new Date(Math.min(addYears(from, 4).getTime(), currentMonthStart.getTime()));
+    segments.push({
+      bucketStarts: listWindowBucketStarts(from, to, "month", timeZone),
+      from,
+      granularity: "month",
+      to,
+    });
+    from = to;
+  }
+  segments.push({
+    bucketStarts: [new Date(currentMonthStart)],
+    from: new Date(currentMonthStart),
+    granularity: "month",
+    openBucket: new Date(currentMonthStart),
+    to: addMonths(currentMonthStart, 1),
+  });
+  return segments;
 }
 
 function occupancyReportDefinitionsWindowKey(
@@ -4434,6 +4557,11 @@ function buildScenarioPoints(
   const hasPartialBucket = rows.some(
     (row) => row.complete === false || row.status === "partial",
   );
+  const partialBucketKeys = new Set(rows.flatMap((row) => {
+    if (row.complete !== false && row.status !== "partial") return [];
+    const bucket = parseAggregateBucket(row.bucket, definition.granularity);
+    return bucket ? [occupancyAggregateBucketKey(bucket, definition.granularity)] : [];
+  }));
   const partialBucketWarning = hasPartialBucket
     ? definition.granularity === "minute" || definition.granularity === "hour"
       ? "Dados recentes em atualização: os valores mais recentes ainda podem mudar."
@@ -4458,6 +4586,8 @@ function buildScenarioPoints(
 
     return {
       bucket: bucketStart.toISOString(),
+      complete: partialBucketKeys.has(occupancyAggregateBucketKey(bucketStart, definition.granularity))
+        ? false : undefined,
       label: bucketLabel(bucketStart, definition.granularity, definition.timeZone),
       ...metric,
     };

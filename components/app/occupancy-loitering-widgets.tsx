@@ -493,7 +493,10 @@ export function OccupancyLoiteringSummaryMetricCard({
 }) {
   const { effectiveTheme } = useTheme();
   const configuration = loiteringMetricConfiguration(metric);
-  const widgetColor = useWidgetColor(configuration.color);
+  const viewColors = useWidgetPalette();
+  const widgetColor = useWidgetColor(
+    viewColors?.[loiteringMetricPaletteIndex(metric)] ?? configuration.color,
+  );
   const entries = React.useMemo(
     () => occupancyLoiteringChartEntries(model),
     [model],
@@ -573,7 +576,8 @@ export function OccupancyLoiteringRangeCard({
   monitorMode,
 }: OccupancyLoiteringSummaryCardProps) {
   const { effectiveTheme } = useTheme();
-  const widgetColor = useWidgetColor("#1267C4");
+  const viewColors = useWidgetPalette();
+  const widgetColor = useWidgetColor(viewColors?.[0] ?? "#1267C4");
   const entries = React.useMemo(
     () => occupancyLoiteringChartEntries(model),
     [model],
@@ -1274,7 +1278,7 @@ export function buildOccupancyLoiteringSummaryMetricChartOption(
           position: "right",
           show: true,
         },
-        labelLayout: { hideOverlap: false },
+        labelLayout: { hideOverlap: !interactive },
         name: configuration.seriesName,
         type: "bar",
       },
@@ -1427,6 +1431,7 @@ export function buildOccupancyLoiteringSummaryMetricReport(
   contextLabel: string,
   metric: OccupancyLoiteringSummaryMetric,
   widgetColor?: string,
+  viewColors?: readonly string[] | null,
 ): ReportChart | null {
   const entries = occupancyLoiteringChartEntries(model);
   if (!entries.length) return null;
@@ -1476,7 +1481,7 @@ export function buildOccupancyLoiteringSummaryMetricReport(
       entries,
       "light",
       metric,
-      widgetColor,
+      widgetColor ?? viewColors?.[loiteringMetricPaletteIndex(metric)],
       false,
     ),
     table,
@@ -1488,6 +1493,7 @@ export function buildOccupancyLoiteringRangeReport(
   model: OccupancyLoiteringSummaryModel,
   contextLabel: string,
   widgetColor?: string,
+  viewColors?: readonly string[] | null,
 ): ReportChart | null {
   const entries = occupancyLoiteringChartEntries(model);
   if (!entries.length) return null;
@@ -1518,10 +1524,26 @@ export function buildOccupancyLoiteringRangeReport(
   };
   return {
     description,
-    option: buildOccupancyLoiteringChartOption(entries, "light", widgetColor),
+    option: buildOccupancyLoiteringChartOption(
+      entries,
+      "light",
+      widgetColor ?? viewColors?.[0],
+    ),
     table,
     title: "Faixa de permanência por área",
   };
+}
+
+function loiteringMetricPaletteIndex(
+  metric: OccupancyLoiteringSummaryMetric,
+): number {
+  return {
+    average: 0,
+    minimum: 1,
+    maximum: 2,
+    accumulated: 3,
+    sessions: 4,
+  }[metric];
 }
 
 function loiteringMetricConfiguration(

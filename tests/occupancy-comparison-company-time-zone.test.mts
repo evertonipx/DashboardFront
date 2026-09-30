@@ -258,7 +258,41 @@ test("callbacks passam explicitamente o fuso aos intervalos, exportação e redu
   assert.doesNotMatch(source, /requireRuntimeCompanyTimeZone/);
   assert.match(source, /buildOccupancyHourlyRange\(\s*requestedAt,\s*hourlyAggregateDayCount,\s*timeZone/);
   assert.match(source, /buildOccupancyMaximumTrendRanges\(requestedAt, timeZone\)/);
-  assert.match(source, /buildOccupancyComparisonReportAssets\(\{\s*viewPaletteId:[^\n]*\n\s*timeZone,/);
+  const ast = ts.createSourceFile(
+    "occupancy-comparison-widgets.tsx",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const reportCalls: import("typescript").CallExpression[] = [];
+  const visit = (node: import("typescript").Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.getText(ast) === "buildOccupancyComparisonReportAssets"
+    ) {
+      reportCalls.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(reportCalls.length, 3, "todas as rotas de exportação devem ser verificadas");
+  for (const call of reportCalls) {
+    const argument = call.arguments[0];
+    assert.ok(argument && ts.isObjectLiteralExpression(argument));
+    const properties = new Map(
+      argument.properties.flatMap((property) =>
+        ts.isPropertyAssignment(property)
+          ? [[property.name.getText(ast), property.initializer.getText(ast)] as const]
+          : ts.isShorthandPropertyAssignment(property)
+            ? [[property.name.getText(ast), property.name.getText(ast)] as const]
+            : [],
+      ),
+    );
+    assert.equal(properties.get("timeZone"), "timeZone");
+    assert.equal(properties.get("cardPreferences"), "reportPreferences");
+    assert.match(properties.get("viewPaletteId") ?? "", /reportPreferences\.find/);
+  }
   assert.match(source, /fetchOccupancyCivilAggregate\(\{[\s\S]*?granularity: "month"[\s\S]*?fetchResponse: \(path\) => scheduleQuery/);
   assert.match(source, /const nextMonthlyBoundary = occupancyCalendarBoundaryInstant\(ranges.monthlySource.to, timeZone\)/);
   assert.doesNotMatch(source, /scheduleNext\(ranges.monthlySource.to\)/);

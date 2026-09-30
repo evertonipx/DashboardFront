@@ -199,6 +199,7 @@ export function buildOccupancyReportResourcePlan({
   // disabled, loading its aggregate cannot change the chart or its tooltip.
   const comparisonVisible =
     metricVisibility.average || metricVisibility.minimum || metricVisibility.peak;
+  const annualHistoryRequested = OCCUPANCY_ANNUAL_REPORT_CARD_IDS.some(visible);
   return {
     comparisonDefinitionIds: comparisonVisible
       ? definitionIds.filter(visible).sort().join("|")
@@ -209,9 +210,17 @@ export function buildOccupancyReportResourcePlan({
         visible("occupancy_active_areas") ||
         visible("occupancy_scenario_detail")),
     definitionIds: definitionIds.filter((id) => visible(id) ||
-      (id === "occupancy_report_day" && needsDailyMetrics)).sort().join("|"),
+      (id === "occupancy_report_day" && needsDailyMetrics) ||
+      (id === OCCUPANCY_ANNUAL_MONTH_SOURCE_ID && annualHistoryRequested)).sort().join("|"),
   };
 }
+
+export const OCCUPANCY_ANNUAL_MONTH_SOURCE_ID = "occupancy_report_annual_months";
+export const OCCUPANCY_ANNUAL_REPORT_CARD_IDS = [
+  "occupancy_annual_monthly_comparison",
+  "occupancy_annual_month_heatmap",
+  "occupancy_annual_year_summary",
+] as const;
 
 /** Reuse the certified applied-period response when only its comparison changes. */
 export async function loadOccupancyReportDefinitionStates<

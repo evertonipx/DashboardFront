@@ -1211,6 +1211,7 @@ export function useOccupancyLoitering({
           summaryDataContextLabel,
           metric,
           cardPreference?.color,
+          viewColors,
         );
         if (chart) {
           assets.push({ cardId: id, chart, titleSuffix: summaryTitleSuffix });
@@ -1228,6 +1229,7 @@ export function useOccupancyLoitering({
           model,
           summaryDataContextLabel,
           rangePreference?.color,
+          viewColors,
         );
         if (chart) {
           assets.push({

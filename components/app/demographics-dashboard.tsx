@@ -40,6 +40,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { hasVisualAdminAccess } from "@/lib/access";
 import { ApiError, apiFetch } from "@/lib/api";
 import {
@@ -58,14 +65,17 @@ import {
 import {
   countDemographicsDateRangeDays,
   demographicsDateRangeStorageKey,
+  demographicsReportYearRange,
+  demographicsReportYears,
   loadDemographicsDateRange,
   MAX_DEMOGRAPHICS_DATE_RANGE_DAYS,
   saveDemographicsDateRange,
+  selectedDemographicsReportYear,
 } from "@/lib/demographics-date-range";
 import { buildDemographicDistributionOption, fitDemographicCompositionOption } from "@/lib/demographics-chart-options";
 import { buildDemographicCrossingOption, demographicHeatmapColors } from "@/lib/demographics-crossing-options";
 import { buildDemographicComparisonWindow } from "@/lib/demographics-comparison-window";
-import { buildDemographicTemporalModel } from "@/lib/demographics-temporal-chart-options";
+import { buildDemographicTemporalModel, fitDemographicTemporalOption } from "@/lib/demographics-temporal-chart-options";
 import { demographicComparisonColors } from "@/lib/demographics-comparison-colors";
 import { loadDemographicComparisonAggregation, type DemographicComparisonQueryCache } from "@/lib/demographics-comparison-query";
 import { demographicRefreshDelay, nextDemographicRetry, shouldAdvanceDemographicClock, type DemographicRetryState } from "@/lib/demographics-refresh-policy";
@@ -93,6 +103,7 @@ import {
 import type { OccupancyAnalysisDateRangeInput } from "@/lib/occupancy-analysis-window";
 import {
   type ReportChart,
+  type ReportMetric,
   type ReportPayload,
   type ReportTable,
 } from "@/lib/report-export";
@@ -103,6 +114,7 @@ import { userFacingErrorMessage } from "@/lib/user-facing-error";
 import { cn, formatNumber } from "@/lib/utils";
 import {
   loadScopedCardPreferences,
+  orderByCardPreferences,
   saveCardPreferences,
   type CardMenuKey,
   type CardPreference,
@@ -124,6 +136,14 @@ export const DEMOGRAPHICS_CARD_IDS = [
   "demographics_age_gender_pyramid",
   "demographics_age_emotion_heatmap",
   ...DEMOGRAPHICS_TEMPORAL_WIDGET_IDS,
+] as const;
+
+const DEMOGRAPHICS_STATIC_CHART_IDS = [
+  "demographics_gender_mix",
+  "demographics_age_distribution",
+  "demographics_emotion_distribution",
+  "demographics_age_gender_pyramid",
+  "demographics_age_emotion_heatmap",
 ] as const;
 
 const DEMOGRAPHICS_MENU_KEY = "demographics" as CardMenuKey;
@@ -167,7 +187,6 @@ type PendingLiveAggregation = {
 };
 
 export function DemographicsDashboard({
-  manager = false,
   surface,
 }: DemographicsDashboardProps) {
   const { user } = useAuth();
@@ -757,21 +776,66 @@ export function DemographicsDashboard({
     surface === "live" ? todayInput : appliedRange.startInput,
     surface === "live" ? todayInput : appliedRange.endInput,
   );
+  const reportYearOptions = surface === "reports" ? demographicsReportYears(todayInput) : [];
+  const selectedReportYear = surface === "reports"
+    ? selectedDemographicsReportYear(appliedRange, todayInput)
+    : null;
+  const reportIncludesCurrentMonth = surface === "reports" &&
+    appliedRange.endInput.slice(0, 7) === todayInput.slice(0, 7);
   function buildDemographicsReportPayload() {
+    const orderedCardIds = orderByCardPreferences(
+      DEMOGRAPHICS_CARD_IDS.map((id) => ({ id })),
+      preferences,
+    ).map(({ id }) => id);
+    const titleByCardId = new Map(
+      preferences.flatMap((preference) =>
+        preference.title?.trim()
+          ? [[preference.id, preference.title.trim()] as const]
+          : [],
+      ),
+    );
     const report = buildDemographicsReport({
-      audience: manager ? "Visão gerencial" : "Visão operacional",
+      orderedCardIds,
       rangeLabel,
       summary,
       surface,
       timeZone,
       presentations: widgetPresentations,
+      titleByCardId,
+      partialCurrentPeriod: reportIncludesCurrentMonth,
+      partialCurrentYear: selectedReportYear === Number(todayInput.slice(0, 4)),
     });
-    const temporalCharts = DEMOGRAPHICS_TEMPORAL_WIDGET_IDS.filter((id) => preferences.some((preference) => preference.id === id && preference.visible !== false))
-      .map((id) => buildDemographicTemporalModel({ id, summary, comparisonSummary, comparisonLabel: comparisonWindow?.label,
-        settings: temporalSettings[id], ...temporalBounds, timeZone, now: requestWindow.to, theme: "light" }))
-      .filter((model) => model.hasData)
-      .map((model) => ({ title: model.title, description: model.description, option: model.option, table: model.table }));
-    return { ...report, charts: [...(report.charts ?? []), ...temporalCharts] };
+    const chartByCardId = new Map<string, ReportChart>();
+    const visibleStaticChartIds = orderedCardIds.filter((id) =>
+      DEMOGRAPHICS_STATIC_CHART_IDS.some((staticId) => staticId === id),
+    );
+    report.charts.forEach((chart, index) => {
+      const cardId = visibleStaticChartIds[index];
+      if (cardId) chartByCardId.set(cardId, chart);
+    });
+    orderedCardIds.filter(isDemographicTemporalWidgetId)
+      .forEach((id) => {
+        const model = buildDemographicTemporalModel({ id, summary, comparisonSummary, comparisonLabel: comparisonWindow?.label,
+          settings: temporalSettings[id], ...temporalBounds, timeZone, now: requestWindow.to, theme: "light" });
+        if (!model.hasData) return;
+        const title = titleByCardId.get(id) ?? model.title;
+        chartByCardId.set(id, {
+          title,
+          description: model.description,
+          option: model.option,
+          fitOption: (option, size) => fitDemographicTemporalOption({ ...model, option }, size),
+          table: title === model.title
+            ? model.table
+            : { ...model.table, title: `Dados - ${title}` },
+        });
+      });
+    return {
+      ...report,
+      charts: orderedCardIds.flatMap((id) => {
+        const chart = chartByCardId.get(id);
+        return chart ? [chart] : [];
+      }),
+    };
   }
   const cards = React.useMemo<LayoutCard[]>(
     () => [
@@ -1015,6 +1079,13 @@ export function DemographicsDashboard({
       persisted.startInput === appliedRange.startInput && persisted.endInput === appliedRange.endInput);
   }
 
+  function applyReportYear(value: string) {
+    if (surface !== "reports" || value === "custom") return;
+    const year = Number(value);
+    if (!reportYearOptions.includes(year)) return;
+    applyRange(demographicsReportYearRange(year, todayInput));
+  }
+
   function forceRefresh() {
     if (!companyTimeZoneReady) return;
     requestFreshData(new Date());
@@ -1074,6 +1145,29 @@ export function DemographicsDashboard({
           role="group"
         >
           <div data-toolbar-filters>
+            {surface === "reports" ? (
+              <Select
+                disabled={!companyTimeZoneReady || loading || refreshing}
+                onValueChange={applyReportYear}
+                value={selectedReportYear === null ? "custom" : String(selectedReportYear)}
+              >
+                <SelectTrigger
+                  aria-label="Ano do relatório demográfico"
+                  className="h-8 min-h-8 w-[156px] shrink-0 px-2 py-1 text-xs"
+                  title="Consultar um ano por vez"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem disabled value="custom">Período personalizado</SelectItem>
+                  {reportYearOptions.map((year) => (
+                    <SelectItem key={year} value={String(year)}>
+                      {year === Number(todayInput.slice(0, 4)) ? `${year} · em andamento` : String(year)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : null}
             <div className="w-full min-w-0 max-w-[300px]">
               {surface === "live" ? (
                 <div
@@ -1100,6 +1194,11 @@ export function DemographicsDashboard({
           </div>
 
           <div data-toolbar-status className="flex min-w-0 items-center justify-end">
+            {reportIncludesCurrentMonth && !loading && !refreshing ? (
+              <span className="mr-2 text-[11px] text-muted-foreground" title="O mês atual inclui somente dados recebidos até a última consulta.">
+                Mês atual · parcial
+              </span>
+            ) : null}
             {(loading || refreshing) &&
               loadProgress &&
               loadProgress.total > 4 ? (
@@ -1132,13 +1231,17 @@ export function DemographicsDashboard({
             data-toolbar-actions
             role="group"
           >
-            {surface !== "live" ? (
-              <ReportExportActions
-                compact
-                disabled={!companyTimeZoneReady || loading || comparisonLoading || !summary.hasData}
-                getPayload={buildDemographicsReportPayload}
-              />
-            ) : null}
+            <ReportExportActions
+              compact
+              disabled={
+                !companyTimeZoneReady ||
+                !preferencesReady ||
+                !hasVisibleWidgets ||
+                !summary.hasData ||
+                (surface !== "live" && (loading || comparisonLoading))
+              }
+              getPayload={buildDemographicsReportPayload}
+            />
             {/* AiAnalysisAction será incluído quando AiInsightModule aceitar
                 explicitamente `demographics`; não mascaramos o módulo como counting. */}
             {canEditVisual ? (
@@ -2201,19 +2304,25 @@ function leadingDistributionItem<Key extends string>(
 }
 
 function buildDemographicsReport({
-  audience,
+  orderedCardIds,
   rangeLabel,
   summary,
   surface,
   timeZone,
   presentations,
+  titleByCardId,
+  partialCurrentPeriod = false,
+  partialCurrentYear = false,
 }: {
-  audience: string;
+  orderedCardIds?: readonly string[];
   rangeLabel: string;
   summary: DemographicAggregation;
   surface: DemographicsDashboardProps["surface"];
   timeZone: string;
   presentations?: Partial<Record<string, DemographicPresentation>>;
+  titleByCardId?: ReadonlyMap<string, string>;
+  partialCurrentPeriod?: boolean;
+  partialCurrentYear?: boolean;
 }): ReportPayload {
   const visibleGender = visibleDemographicDistribution(summary.gender, "gender");
   const genderLeader = leadingDistributionItem(visibleGender);
@@ -2231,68 +2340,90 @@ function buildDemographicsReport({
   const emotion = presentationFor("demographics_emotion_distribution");
   const ageGender = presentationFor("demographics_age_gender_pyramid");
   const ageEmotion = presentationFor("demographics_age_emotion_heatmap");
-  const charts: ReportChart[] = [
-    {
+  const cardIds = orderedCardIds ?? DEMOGRAPHICS_CARD_IDS;
+  const titleFor = (id: string, fallback: string) =>
+    titleByCardId?.get(id)?.trim() || fallback;
+  const chartFactories: Record<string, () => ReportChart> = {
+    demographics_gender_mix: () => ({
       description: "Participação entre gêneros identificados: Mulher e Homem.",
       option: buildDemographicDistributionOption(summary.gender, gender, { dimension: "gender", showLegend: true }),
       fitOption: fitDemographicCompositionOption,
-      table: distributionReportTable("Gênero · entre gêneros identificados", visibleGender),
-      title: "Composição por gênero",
-    },
-    {
+      table: distributionReportTable("Gênero · entre gêneros identificados", orderedDemographicItems(visibleGender, gender.order)),
+      title: titleFor("demographics_gender_mix", "Composição por gênero"),
+    }),
+    demographics_age_distribution: () => ({
       description: "Participação por faixa etária no total classificado.",
       option: buildDemographicDistributionOption(summary.age, age, { dimension: "age", showLegend: true }),
       fitOption: fitDemographicCompositionOption,
-      table: distributionReportTable("Faixas etárias", summary.age),
-      title: "Distribuição por faixa etária",
-    },
-    {
+      table: distributionReportTable("Faixas etárias", orderedDemographicItems(summary.age, age.order)),
+      title: titleFor("demographics_age_distribution", "Distribuição por faixa etária"),
+    }),
+    demographics_emotion_distribution: () => ({
       description: "Ranking das emoções classificadas.",
       option: buildDemographicDistributionOption(summary.emotion, emotion, { dimension: "emotion", showLegend: true }),
       fitOption: fitDemographicCompositionOption,
-      table: distributionReportTable("Emoções", summary.emotion),
-      title: "Ranking de emoções",
-    },
-    {
+      table: distributionReportTable("Emoções", orderedDemographicItems(summary.emotion, emotion.order)),
+      title: titleFor("demographics_emotion_distribution", "Ranking de emoções"),
+    }),
+    demographics_age_gender_pyramid: () => ({
       description: "Cruzamento entre faixa etária e gênero; percentuais entre gêneros identificados.",
       option: buildDemographicCrossingOption(summary, ageGender, "age-gender", "light"),
-      table: ageGenderReportTable(summary),
-      title: "Faixa etária por gênero",
-    },
-    {
+      table: ageGenderReportTable(summary, ageGender.order),
+      title: titleFor("demographics_age_gender_pyramid", "Faixa etária por gênero"),
+    }),
+    demographics_age_emotion_heatmap: () => ({
       description: "Cruzamento entre faixa etária e emoção.",
       option: buildDemographicCrossingOption(summary, ageEmotion, "age-emotion", "light"),
-      table: ageEmotionReportTable(summary),
-      title: "Faixa etária × emoção",
+      table: ageEmotionReportTable(summary, ageEmotion.order),
+      title: titleFor("demographics_age_emotion_heatmap", "Faixa etária × emoção"),
+    }),
+  };
+  const charts = cardIds.flatMap((id) => {
+    const buildChart = chartFactories[id];
+    if (!buildChart) return [];
+    const chart = buildChart();
+    const configuredTitle = titleByCardId?.get(id)?.trim();
+    return [{
+      ...chart,
+      table: configuredTitle
+        ? { ...chart.table, title: `Dados - ${configuredTitle}` }
+        : chart.table,
+    }];
+  });
+  const metricByCardId: Record<string, ReportMetric> = {
+    demographics_total: {
+      description: "Total de classificações recebidas no período; não representa pessoas únicas.",
+      label: titleFor("demographics_total", "Detecções classificadas"),
+      value: summary.hasData ? summary.total : "Sem dados",
     },
-  ];
+    demographics_gender_leader: {
+      ...leaderReportMetric(titleFor("demographics_gender_leader", "Gênero predominante"), genderLeader),
+      description: genderLeader
+        ? `${formatNumber(genderLeader.count)} detecções · percentual entre gêneros identificados`
+        : "Sem gênero identificado no intervalo",
+    },
+    demographics_age_leader: leaderReportMetric(
+      titleFor("demographics_age_leader", "Faixa etária predominante"), ageLeader,
+    ),
+    demographics_emotion_leader: leaderReportMetric(
+      titleFor("demographics_emotion_leader", "Emoção predominante"), emotionLeader,
+    ),
+  };
   return {
     charts,
     context: [
-      `Período analisado: ${rangeLabel}`,
-      audience,
-      `${formatNumber(summary.cameraIds.length)} câmera(s) analisada(s)`,
-      "Resultados recentes podem continuar em processamento.",
-      "Detecções classificadas não equivalem a visitantes únicos.",
+      "Percentuais sobre detecções classificadas; não representam visitantes únicos.",
     ],
     dataCompleteUntil: null,
     filename: `ipxdata-demographics-${surface}-${fileDateKey(new Date())}`,
     generatedAt: new Date(),
-    metrics: [
-      {
-        description:
-          "Total de classificações recebidas no período; não representa pessoas únicas.",
-        label: "Detecções classificadas",
-        value: summary.hasData ? summary.total : "Sem dados",
-      },
-      { ...leaderReportMetric("Gênero predominante", genderLeader),
-        description: genderLeader ? `${formatNumber(genderLeader.count)} detecções · percentual entre gêneros identificados` : "Sem gênero identificado no intervalo" },
-      leaderReportMetric("Faixa etária predominante", ageLeader),
-      leaderReportMetric("Emoção predominante", emotionLeader),
-    ],
-    subtitle: `${rangeLabel} · percentuais sobre detecções classificadas`,
+    metrics: cardIds.flatMap((id) => {
+      const metric = metricByCardId[id];
+      return metric ? [metric] : [];
+    }),
+    subtitle: `Período analisado: ${rangeLabel}${partialCurrentYear ? " · ano em andamento" : ""}${partialCurrentPeriod ? " · mês atual parcial" : ""}`,
     timeZone,
-    title: `Demographics · ${surfaceLabel(surface)}`,
+    title: "Relatório IPXData - Demografia",
   };
 }
 
@@ -2315,7 +2446,7 @@ function distributionReportTable<Key extends string>(
   };
 }
 
-function ageGenderReportTable(summary: DemographicAggregation): ReportTable {
+function ageGenderReportTable(summary: DemographicAggregation, order: DemographicPresentation["order"] = "default"): ReportTable {
   const crossing = visibleDemographicCrossing(summary.crossings.ageByGender, "age-gender");
   return {
     columns: [
@@ -2324,7 +2455,7 @@ function ageGenderReportTable(summary: DemographicAggregation): ReportTable {
       { key: "Man", label: "Homem", numeric: true, width: 16 },
       { key: "total", label: "Total identificado", numeric: true, width: 20 },
     ],
-    rows: crossing.rows.map((row) => ({
+    rows: orderedDemographicItems(crossing.rows, order).map((row) => ({
       age: row.label,
       Man: row.cells.find((cell) => cell.columnKey === "Man")?.count ?? 0,
       Woman: row.cells.find((cell) => cell.columnKey === "Woman")?.count ?? 0,
@@ -2334,7 +2465,7 @@ function ageGenderReportTable(summary: DemographicAggregation): ReportTable {
   };
 }
 
-function ageEmotionReportTable(summary: DemographicAggregation): ReportTable {
+function ageEmotionReportTable(summary: DemographicAggregation, order: DemographicPresentation["order"] = "default"): ReportTable {
   return {
     columns: [
       { key: "age", label: "Faixa etária", width: 18 },
@@ -2342,7 +2473,7 @@ function ageEmotionReportTable(summary: DemographicAggregation): ReportTable {
       { key: "count", label: "Detecções", numeric: true, width: 16 },
       { key: "percentage", label: "% do total", width: 16 },
     ],
-    rows: summary.crossings.ageByEmotion.rows.flatMap((row) =>
+    rows: orderedDemographicItems(summary.crossings.ageByEmotion.rows, order).flatMap((row) =>
       row.cells.map((cell) => ({
         age: row.label,
         count: cell.count,

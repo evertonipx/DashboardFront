@@ -39,7 +39,7 @@ export const COUNTING_HISTORY_START_YEAR =
   Number.isInteger(configuredHistoryStartYear) &&
   configuredHistoryStartYear >= 2000
     ? configuredHistoryStartYear
-    : 2020;
+    : 2019;
 
 export const COUNTING_MONTH_LABELS = [
   "Jan",
@@ -181,6 +181,7 @@ export type CountingIntelligenceModel = {
   currentMonthDelta: number | null;
   currentMonthValue: number;
   currentYear: number;
+  openMonth?: { month: number; year: number };
   dayMonthHeatmapCells: CountingDayMonthHeatmapCell[];
   dayMonthHeatmapFrom: Date;
   dayMonthHeatmapTo: Date;
@@ -396,6 +397,17 @@ export function buildCountingIntelligenceModel({
             timeZone,
           ),
     );
+    const currentKey = monthKey(
+      openMonthStart.getFullYear(),
+      openMonthStart.getMonth(),
+    );
+    selectedMonthTotals.set(
+      currentKey,
+      Math.max(
+        selectedMonthTotals.get(currentKey) ?? 0,
+        comparableCurrentMonthTotals.get(currentKey) ?? 0,
+      ),
+    );
   }
   const firstYear = periodFrom.getFullYear();
   const yearRows: CountingYearRow[] = Array.from(
@@ -572,6 +584,9 @@ export function buildCountingIntelligenceModel({
     ),
     currentMonthValue,
     currentYear,
+    openMonth: hasOpenMonth
+      ? { month: openMonthStart.getMonth(), year: openMonthStart.getFullYear() }
+      : undefined,
     dayMonthHeatmapCells,
     dayMonthHeatmapFrom,
     dayMonthHeatmapTo,
@@ -1190,6 +1205,11 @@ export function buildCountingMonthYearHeatmapChartOption(
         const [month, yearIndex, value] = tuple;
         const heading = `${COUNTING_MONTH_LABELS[month] ?? "-"}/${
           years[yearIndex] ?? "-"
+        }${
+          model.openMonth?.year === years[yearIndex] &&
+          model.openMonth.month === month
+            ? " · parcial"
+            : ""
         }`;
         return value < 0
           ? `<strong>${heading}</strong><br />Fora do período selecionado`
@@ -1255,7 +1275,9 @@ export function buildCountingMonthYearHeatmapChartOption(
         lineStyle: { color: theme === "dark" ? "#475569" : "#D8E3F2" },
       },
       axisTick: { show: false },
-      data: years.map(String),
+      data: years.map((year) =>
+        year === model.openMonth?.year ? `${year} · parcial` : String(year),
+      ),
       inverse: true,
       splitArea: { show: false },
       splitLine: { show: false },
@@ -1633,7 +1655,11 @@ function annualComparisonRows(model: CountingIntelligenceModel) {
     average: row.average,
     baselineOnly: row.baselineOnly,
     months: row.months,
-    name: row.baselineOnly ? `${row.year} (base comparável)` : String(row.year),
+    name: row.baselineOnly
+      ? `${row.year} (base comparável)`
+      : row.year === model.openMonth?.year
+        ? `${row.year} (parcial)`
+        : String(row.year),
     year: row.year,
   }));
 
@@ -2298,7 +2324,11 @@ function buildMonthYearHeatmapReportTable(
     description: `${formatCountingIntelligencePeriod(model)}. Zeros certificados são preservados; meses fora do período permanecem indisponíveis.`,
     rows: rows.flatMap((row) =>
       row.months.map((total, month) => ({
-        coverage: total === null ? "Fora do período" : "Mês certificado",
+        coverage: total === null
+          ? "Fora do período"
+          : row.year === model.openMonth?.year && month === model.openMonth.month
+            ? "Mês em andamento"
+            : "Mês certificado",
         month: COUNTING_MONTH_LABELS[month],
         total: total === null ? "" : Math.round(total),
         year: row.year,
@@ -2311,7 +2341,6 @@ function buildMonthYearHeatmapReportTable(
 function countingMonthYearHeatmapRows(model: CountingIntelligenceModel) {
   return [...model.yearRows]
     .sort((left, right) => right.year - left.year)
-    .slice(0, 4)
     .map((row) => ({
       months: [...row.months],
       year: row.year,
@@ -2341,7 +2370,11 @@ function buildMonthlyComparisonReportTable(
   const rows: ReportTable["rows"] = comparison.rows.map((row) => ({
     accumulated: Math.round(row.accumulated),
     average: Math.round(row.average),
-    year: row.baselineOnly ? `${row.year} (base)` : String(row.year),
+    year: row.baselineOnly
+      ? `${row.year} (base)`
+      : row.year === model.openMonth?.year
+        ? `${row.year} (parcial)`
+        : String(row.year),
     ...Object.fromEntries(
       row.months.map((value, month) => [
         `month_${month}`,
@@ -2388,13 +2421,10 @@ function buildAnnualAccumulatedReportTable(
 
   return {
     columns: [
+      { key: "year", label: "Ano", width: 24 },
       { key: "month", label: "Mês", width: 14 },
-      ...rows.map((row) => ({
-        key: `year_${row.year}${row.baselineOnly ? "_baseline" : ""}`,
-        label: row.name,
-        numeric: true,
-        width: 18,
-      })),
+      { key: "accumulated", label: "Acumulado", numeric: true, width: 20 },
+      { key: "coverage", label: "Cobertura", width: 22 },
       {
         key: "variation",
         label: `Var. ${model.currentYear}/${model.currentYear - 1}`,
@@ -2403,29 +2433,32 @@ function buildAnnualAccumulatedReportTable(
     ],
     description: `Soma progressiva dos meses incluídos em ${formatCountingIntelligencePeriod(
       model,
-    )}. A variação compara o acumulado do ano mais recente com o anterior.`,
-    rows: COUNTING_MONTH_LABELS.map((month, monthIndex) => {
-      const currentValue =
-        comparableAccumulatedMonths.current[monthIndex] ?? null;
-      const previousValue =
-        comparableAccumulatedMonths.previous[monthIndex] ?? null;
-
-      return {
-        month,
-        variation:
-          currentValue === null || previousValue === null
-            ? "-"
-            : formatDelta(percentageDelta(currentValue, previousValue)),
-        ...Object.fromEntries(
-          rows.map((row) => [
-            `year_${row.year}${row.baselineOnly ? "_baseline" : ""}`,
-            row.accumulatedMonths[monthIndex] === null
-              ? ""
-              : Math.round(row.accumulatedMonths[monthIndex] ?? 0),
-          ]),
-        ),
-      };
-    }),
+    )}. Um ano por grupo de 12 meses, para paginação legível. A variação compara apenas meses equivalentes do ano mais recente com o anterior.`,
+    rows: rows.flatMap((row) =>
+      COUNTING_MONTH_LABELS.map((month, monthIndex) => {
+        const accumulated = row.accumulatedMonths[monthIndex];
+        const isLatestYear = row.year === model.currentYear && !row.baselineOnly;
+        const currentValue = comparableAccumulatedMonths.current[monthIndex];
+        const previousValue = comparableAccumulatedMonths.previous[monthIndex];
+        return {
+          accumulated: accumulated === null ? "" : Math.round(accumulated),
+          coverage: accumulated === null
+            ? "Fora do período"
+            : row.baselineOnly
+              ? "Base comparável"
+              : row.year === model.openMonth?.year &&
+                  monthIndex === model.openMonth.month
+                ? "Mês em andamento"
+                : "Mês fechado",
+          month,
+          variation:
+            isLatestYear && currentValue !== null && previousValue !== null
+              ? formatDelta(percentageDelta(currentValue, previousValue))
+              : "-",
+          year: row.name,
+        };
+      }),
+    ),
     title: "Dados - Comparativo acumulado por ano",
   };
 }

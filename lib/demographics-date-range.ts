@@ -10,6 +10,14 @@ export const DEMOGRAPHICS_DATE_RANGE_STORAGE_KEY =
 // civil day; the dashboard retains compact hourly summaries, not raw rows.
 export const MAX_DEMOGRAPHICS_DATE_RANGE_DAYS = 366;
 
+const configuredHistoryStartYear = Number(
+  process.env.NEXT_PUBLIC_REPORT_HISTORY_START_YEAR,
+);
+export const DEMOGRAPHICS_REPORT_HISTORY_START_YEAR =
+  Number.isInteger(configuredHistoryStartYear) && configuredHistoryStartYear >= 2000
+    ? configuredHistoryStartYear
+    : 2019;
+
 export type DemographicsDateRange = {
   endInput: string;
   startInput: string;
@@ -118,6 +126,47 @@ export function countDemographicsDateRangeDays(range: DemographicsDateRange) {
     throw new RangeError("O período demográfico é inválido.");
   }
   return Math.round((end - start) / 86_400_000) + 1;
+}
+
+/** Historical demographic buckets are minute-level, so each report year is
+ * requested only when selected rather than backfilling every year at once. */
+export function demographicsReportYears(todayInput: string): number[] {
+  const today = requireDateInput(todayInput, "data atual");
+  const currentYear = Number(today.slice(0, 4));
+  const firstYear = Math.min(currentYear, DEMOGRAPHICS_REPORT_HISTORY_START_YEAR);
+  return Array.from(
+    { length: currentYear - firstYear + 1 },
+    (_, index) => currentYear - index,
+  );
+}
+
+export function demographicsReportYearRange(
+  year: number,
+  todayInput: string,
+): DemographicsDateRange {
+  const years = demographicsReportYears(todayInput);
+  if (!years.includes(year)) {
+    throw new RangeError("O ano do relatório demográfico está fora do histórico configurado.");
+  }
+  const yearEnd = `${year}-12-31`;
+  return {
+    startInput: `${year}-01-01`,
+    endInput: yearEnd > todayInput ? todayInput : yearEnd,
+  };
+}
+
+export function selectedDemographicsReportYear(
+  range: DemographicsDateRange,
+  todayInput: string,
+): number | null {
+  const year = Number(range.startInput.slice(0, 4));
+  if (!Number.isInteger(year) || !demographicsReportYears(todayInput).includes(year)) {
+    return null;
+  }
+  const expected = demographicsReportYearRange(year, todayInput);
+  return range.startInput === expected.startInput && range.endInput === expected.endInput
+    ? year
+    : null;
 }
 
 function normalizeFallback(

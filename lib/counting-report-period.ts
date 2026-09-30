@@ -18,7 +18,11 @@ export type CountingReportPeriodPreset =
   | "last_12_months"
   | "custom";
 
-export const COUNTING_REPORT_HISTORY_YEARS = 4;
+type StoredCountingReportPeriod = Partial<CountingReportPeriod> & {
+  preset?: CountingReportPeriodPreset;
+};
+
+const LEGACY_COUNTING_REPORT_HISTORY_YEARS = 4;
 
 const STORAGE_KEY = "ipxdata.counting-report-period.v1";
 const MONTH_PATTERN = /^(\d{4})-(0[1-9]|1[0-2])$/;
@@ -128,8 +132,16 @@ export function loadCountingReportPeriod(
       scope.viewId,
     );
     if (!stored?.value) return defaultCountingReportPeriod(now, timeZone);
+    const saved = JSON.parse(stored.value) as StoredCountingReportPeriod;
+    if (saved.preset === "history") {
+      return defaultCountingReportPeriod(now, timeZone);
+    }
     return normalizeCountingReportPeriod(
-      JSON.parse(stored.value) as Partial<CountingReportPeriod>,
+      migrateLegacyCountingReportHistoryPeriod(
+        saved,
+        now,
+        timeZone,
+      ),
       now,
       timeZone,
     );
@@ -147,9 +159,13 @@ export function saveCountingReportPeriod(
 ) {
   const normalized = normalizeCountingReportPeriod(period, now, timeZone);
   if (typeof window !== "undefined") {
+    const preset = detectCountingReportPeriodPreset(normalized, now, timeZone);
     writeUserGridPreference(
       storageKey(companyId, scope),
-      JSON.stringify(normalized),
+      JSON.stringify({
+        ...normalized,
+        ...(preset === "history" ? { preset } : {}),
+      } satisfies StoredCountingReportPeriod),
     );
   }
   return normalized;
@@ -210,13 +226,28 @@ export function minimumCountingReportMonth(now = new Date(), timeZone?: string) 
 
 export function countingReportHistoryFrom(now = new Date(), timeZone?: string) {
   const currentYear = referenceCalendarDate(now, timeZone).getFullYear();
-  const rangeStartYear = currentYear - (COUNTING_REPORT_HISTORY_YEARS - 1);
-  const minimumYear = Math.min(
-    currentYear,
-    Math.max(COUNTING_HISTORY_START_YEAR, rangeStartYear),
-  );
+  return new Date(Math.min(currentYear, COUNTING_HISTORY_START_YEAR), 0, 1);
+}
 
-  return new Date(minimumYear, 0, 1);
+export function migrateLegacyCountingReportHistoryPeriod(
+  period: Partial<CountingReportPeriod>,
+  now = new Date(),
+  timeZone?: string,
+): Partial<CountingReportPeriod> {
+  const calendarNow = referenceCalendarDate(now, timeZone);
+  const savedEndYear = Number(period.to?.slice(0, 4));
+  if (!Number.isInteger(savedEndYear)) return period;
+  const oldDefaultFrom = `${savedEndYear - (LEGACY_COUNTING_REPORT_HISTORY_YEARS - 1)}-01`;
+  const latestMonth = monthInputValue(calendarNow);
+  const oldestMigratableMonth = monthInputValue(
+    new Date(calendarNow.getFullYear() - 1, calendarNow.getMonth(), 1),
+  );
+  return period.from === oldDefaultFrom &&
+    period.to !== undefined &&
+    period.to >= oldestMigratableMonth &&
+    period.to <= latestMonth
+    ? defaultCountingReportPeriod(now, timeZone)
+    : period;
 }
 
 export function maximumCountingReportMonth(now = new Date(), timeZone?: string) {

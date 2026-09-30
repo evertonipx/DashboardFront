@@ -155,7 +155,12 @@ export function buildCountingIntelligenceWidgetCards({
             icon={CalendarRange}
             label={monthLabel + "/" + resolvedModel.currentYear}
             loading={loading}
-            period="Mês final do período"
+            period={
+              resolvedModel.openMonth?.year === resolvedModel.currentYear &&
+              resolvedModel.openMonth.month === resolvedModel.currentMonth
+                ? "Mês em andamento · parcial"
+                : "Mês final do período"
+            }
             trend={resolvedModel.currentMonthDelta}
             value={formatNumber(resolvedModel.currentMonthValue)}
           />
@@ -398,7 +403,7 @@ function AnnualComparisonCard({
     <ExecutiveChartCard
       badge={period}
       chartClassName="h-full min-h-0 w-full flex-1 self-stretch"
-      description={`Anos lado a lado. Linha tracejada: média mensal de ${
+      description={`Anos lado a lado; o mês atual é parcial quando incluído. Linha tracejada: média mensal de ${
         model.currentYear - 1
       } como média-base, quando houver dados.`}
       loading={loading}
@@ -428,7 +433,7 @@ function AnnualAccumulatedComparisonCard({
     <ExecutiveChartCard
       badge={period}
       chartClassName="h-full min-h-0 w-full flex-1 self-stretch"
-      description="Soma progressiva mês a mês para comparar a trajetória acumulada de cada ano e identificar avanço ou atraso."
+      description="Soma progressiva mês a mês; o ano em andamento inclui o mês atual parcial, quando selecionado."
       loading={loading}
       option={option}
       primarySeriesIndex={null}
@@ -498,7 +503,7 @@ function MonthYearHeatmapCard({
   return (
     <ExecutiveChartCard
       badge={formatCountingIntelligencePeriod(model)}
-      description="Intensidade mensal entre os anos selecionados; cada linha representa um ano do período."
+      description="Intensidade mensal entre todos os anos selecionados; o mês atual é identificado como parcial."
       empty={!hasCertifiedCoverage}
       emptyText="Não há meses disponíveis no período selecionado."
       loading={loading}
@@ -825,6 +830,7 @@ function YearOverYearMatrixCard({
                   average={row.average}
                   baselineOnly={row.baselineOnly}
                   current={row.year === comparison.latestYear}
+                  partial={row.year === model.openMonth?.year && !row.baselineOnly}
                   key={`${row.year}:${
                     row.baselineOnly
                       ? "comparison-baseline"
@@ -870,6 +876,7 @@ function YearComparisonValueRow({
   average,
   baselineOnly,
   current = false,
+  partial = false,
   label,
   values,
 }: {
@@ -877,6 +884,7 @@ function YearComparisonValueRow({
   average: number | null;
   baselineOnly: boolean;
   current?: boolean;
+  partial?: boolean;
   label: string;
   values: Array<number | null>;
 }) {
@@ -889,6 +897,11 @@ function YearComparisonValueRow({
         )}
       >
         {label}
+        {partial ? (
+          <span className="ml-1 text-[10px] font-normal text-muted-foreground">
+            parcial
+          </span>
+        ) : null}
         {baselineOnly ? (
           <span className="ml-1 text-[10px] font-normal text-muted-foreground">
             base

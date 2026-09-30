@@ -646,9 +646,18 @@ export function fitDemographicTemporalOption(
   const cellWidth = (width - (narrow ? 88 : 108)) / Math.max(1, model.pointCount);
   const cellHeight = (height - (compact ? 52 : 76)) / Math.max(1, model.categoryCount);
   const showHeatLabels = cellWidth >= maxCharacters * 5.6 + 3 && cellHeight >= 13;
+  const preparedTop = typeof grid.top === "number" ? grid.top : 0;
+  const preparedBottom = typeof grid.bottom === "number" ? grid.bottom : 0;
+  const preparedRight = typeof grid.right === "number" ? grid.right : 0;
   return {
     ...model.option,
-    grid: { ...grid, left: 4, right: heatmap ? 6 : 16, top: heatmap ? 6 : compact ? 32 : 42, bottom: heatmap ? compact ? 12 : 40 : 8 },
+    grid: {
+      ...grid,
+      left: 4,
+      right: Math.max(preparedRight, heatmap ? 6 : 16),
+      top: Math.max(preparedTop, heatmap ? 6 : compact ? 32 : 42),
+      bottom: Math.max(preparedBottom, heatmap ? compact ? 12 : 40 : 8),
+    },
     xAxis: {
       ...xAxis,
       axisLabel: {

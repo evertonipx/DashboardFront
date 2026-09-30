@@ -543,7 +543,23 @@ function drawItemHeading(
   eyebrow: string,
   title: string,
 ) {
-  ensureSpace(state, 58);
+  const titleLines = wrapPdfText(
+    state.doc,
+    contentOrFallback(title, "Não informado."),
+    state.contentWidth,
+    13,
+    true,
+  );
+  const hasDivider = state.y > state.bodyTop + 12;
+  const headingHeight = (hasDivider ? 18 : 0) + 16 + titleLines.length * 17 + 8;
+  const minimumHeight =
+    (hasDivider ? 18 : 0) + 16 + Math.min(2, titleLines.length) * 17 + 8;
+  ensureSpace(
+    state,
+    headingHeight <= state.bodyBottom - state.bodyTop
+      ? headingHeight
+      : minimumHeight,
+  );
   if (state.y > state.bodyTop + 12) {
     state.doc.setDrawColor(`#${COLORS.border}`);
     state.doc.line(state.x, state.y, state.x + state.contentWidth, state.y);
@@ -559,7 +575,7 @@ function drawItemHeading(
     true,
   );
   state.y += 16;
-  drawFlowText(state, cleanPdfText(title), state.x, state.contentWidth, {
+  drawFlowLines(state, titleLines, state.x, {
     bold: true,
     color: COLORS.dark,
     fontSize: 13,

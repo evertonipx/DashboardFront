@@ -574,6 +574,35 @@ test("média, pico e mínimo reutilizam uma fonte diária; ocultos não pedem re
   assert.deepEqual(hidden, { definitionIds: "", comparisonDefinitionIds: "", currentSnapshot: false });
 });
 
+test("widgets macro compartilham uma única série mensal de quatro anos", () => {
+  const annualSource = query.OCCUPANCY_ANNUAL_MONTH_SOURCE_ID;
+  for (const cardId of query.OCCUPANCY_ANNUAL_REPORT_CARD_IDS) {
+    const plan = query.buildOccupancyReportResourcePlan({
+      definitionIds: [...definitionIds, annualSource],
+      hasScenario: true,
+      metricVisibility,
+      preferences: query.OCCUPANCY_ANNUAL_REPORT_CARD_IDS.map((id) => ({
+        id,
+        visible: id === cardId,
+      })),
+    });
+    assert.deepEqual(plan, {
+      comparisonDefinitionIds: "",
+      currentSnapshot: false,
+      definitionIds: annualSource,
+    });
+  }
+  assert.deepEqual(query.buildOccupancyReportResourcePlan({
+    definitionIds: [...definitionIds, annualSource],
+    hasScenario: true,
+    metricVisibility,
+    preferences: query.OCCUPANCY_ANNUAL_REPORT_CARD_IDS.map((id) => ({
+      id,
+      visible: false,
+    })),
+  }).definitionIds, "", "widgets ocultos não ativam a série histórica");
+});
+
 test("plano histórico falha fechado com preferências ausentes ou parciais", () => {
   const emptyPlan = {
     comparisonDefinitionIds: "",

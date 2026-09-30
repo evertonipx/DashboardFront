@@ -4678,6 +4678,7 @@ export function useOccupancyComparisonCards({
   const getReportAssets = React.useCallback(
     () =>
       buildOccupancyComparisonReportAssets({
+        cardPreferences: reportPreferences,
         viewPaletteId: reportPreferences.find((preference) => preference.viewPaletteId)?.viewPaletteId,
         timeZone,
         aggregateBuckets: certifiedAggregate.buckets,
@@ -4863,9 +4864,18 @@ export function useOccupancyComparisonCards({
             scenarios: scopedScenarios,
             timeZone,
           });
-        if (reportDataCompleteUntil === null) {
+        // A ausência de buckets ou de uma leitura de fechamento não é uma
+        // falha de transporte: o gráfico pode representar essa lacuna, mas o
+        // relatório não deve declarar um corte de dados certificado. Erros
+        // reais dos recursos solicitados continuam interrompendo a exportação.
+        const reportSourceError = occupancyHistoricalComparisonSourceError(
+          dataset,
+          reportPlan,
+          reportSettings.scenarioHeatmapGranularity,
+        );
+        if (reportSourceError) {
           throw new Error(
-            "Não foi possível certificar todos os dados comparativos visíveis para a exportação.",
+            `Não foi possível exportar os comparativos de ocupação: ${reportSourceError}`,
           );
         }
         const scenarioDateKeys =
@@ -4892,7 +4902,8 @@ export function useOccupancyComparisonCards({
 
         return {
           dataCompleteUntil: reportDataCompleteUntil,
-          reportAssets: buildOccupancyComparisonReportAssets({
+          reportAssets: annotateUnavailableComparisonSnapshots(buildOccupancyComparisonReportAssets({
+            cardPreferences: reportPreferences,
             viewPaletteId: reportPreferences.find((preference) => preference.viewPaletteId)?.viewPaletteId,
             aggregateBuckets: dataset.hourlyRange?.buckets ?? [],
             aggregateSeries: dataset.hourlySeries,
@@ -4919,7 +4930,11 @@ export function useOccupancyComparisonCards({
             settings: reportSettings,
             snapshots: dataset.snapshots,
             timeZone,
-          }).filter((asset) => visibleReportCardIds.has(asset.cardId)),
+          }).filter((asset) => visibleReportCardIds.has(asset.cardId)), {
+            assetsByCard: reportSelectionPlan.byCard,
+            hexScenarioIds: reportHexScenarioIds,
+            snapshots: dataset.snapshots,
+          }),
         };
       }
       const hourlyRange = needsHourlyAggregate
@@ -5092,6 +5107,7 @@ export function useOccupancyComparisonCards({
       return {
         dataCompleteUntil: undefined,
         reportAssets: buildOccupancyComparisonReportAssets({
+          cardPreferences: reportPreferences,
           viewPaletteId: reportPreferences.find((preference) => preference.viewPaletteId)?.viewPaletteId,
           timeZone,
           aggregateBuckets: hourlyRange?.buckets ?? EMPTY_OCCUPANCY_BUCKETS,
@@ -5170,6 +5186,7 @@ export function useOccupancyComparisonCards({
 }
 
 function buildOccupancyComparisonReportAssets({
+  cardPreferences = [],
   viewPaletteId,
   timeZone = "UTC",
   aggregateBuckets,
@@ -5193,6 +5210,7 @@ function buildOccupancyComparisonReportAssets({
   settings,
   snapshots,
 }: {
+  cardPreferences?: ReadonlyArray<CardPreference>;
   viewPaletteId?: string;
   aggregateBuckets: Date[];
   aggregateSeries: OccupancyScenarioHourlySeries[];
@@ -5220,8 +5238,13 @@ function buildOccupancyComparisonReportAssets({
   const comparisonPalette = getOccupancyColorPalette(
     viewPaletteId ?? settings.colorPaletteId,
   );
-  const hexColorPalette = comparisonPalette;
-  const widgetColor = comparisonPalette.colors[0];
+  const colorByCardId = new Map(
+    cardPreferences.flatMap((preference) =>
+      preference.color ? [[preference.id, preference.color] as const] : [],
+    ),
+  );
+  const cardColor = (cardId: string) =>
+    colorByCardId.get(cardId) ?? comparisonPalette.colors[0];
   const filterForCard = <T extends { scenarioId: string }>(cardId: string, rows: readonly T[]) =>
     filterOccupancyComparisonRows(rows, selectionsByCard?.get(cardId) ?? selectedScenarioIds);
   const currentSnapshots = filterForCard("occupancy_scenario_half_donut", snapshots);
@@ -5256,7 +5279,7 @@ function buildOccupancyComparisonReportAssets({
       ? buildCurrentComparisonBarOption(
           comparisonBarEntries,
           settings.comparisonMode,
-          widgetColor,
+          cardColor("occupancy_scenario_half_donut"),
           comparisonPalette.colors,
           comparisonStatusColors,
           theme,
@@ -5267,7 +5290,7 @@ function buildOccupancyComparisonReportAssets({
         ? buildCurrentComparisonVerticalBarOption(
             comparisonBarEntries,
             settings.comparisonMode,
-            widgetColor,
+            cardColor("occupancy_scenario_half_donut"),
             comparisonPalette.colors,
             comparisonStatusColors,
             theme,
@@ -5277,7 +5300,7 @@ function buildOccupancyComparisonReportAssets({
         : buildHalfDonutOption(
             comparisonEntries,
             settings.comparisonMode,
-            widgetColor,
+            cardColor("occupancy_scenario_half_donut"),
             comparisonPalette.colors,
             comparisonStatusColors,
             theme,
@@ -5387,7 +5410,7 @@ function buildOccupancyComparisonReportAssets({
   const hexSemanticLabel = "Paleta da visão";
   const hexPalette = getOccupancyHexPalette(
     theme,
-    hexColorPalette.colors[0],
+    cardColor("occupancy_hex_layout"),
     comparisonStatusColors,
   );
 
@@ -5507,7 +5530,7 @@ function buildOccupancyComparisonReportAssets({
           : "Ranking ao vivo da ocupação atual; empates preservam a ordem configurada e leituras ausentes ficam sem valor.",
         option: buildLiveBarRaceOption(
           raceEntries,
-          widgetColor,
+          cardColor("occupancy_scenario_bar_race"),
           comparisonPalette.colors,
           Math.min(10, Math.max(1, raceEntries.length)),
           theme,
@@ -5553,7 +5576,7 @@ function buildOccupancyComparisonReportAssets({
       granularity: "hour",
       labels: OCCUPANCY_FIXED_HOUR_LABELS,
       series: hourlyMaximum,
-      widgetColor,
+      widgetColor: cardColor("occupancy_scenario_max_hour"),
       historicalContextLabel,
     }),
     buildMaximumReportAsset({
@@ -5562,7 +5585,7 @@ function buildOccupancyComparisonReportAssets({
       granularity: "month",
       labels: occupancyMaximumTrendBucketLabels(monthlyBuckets, "month"),
       series: monthlyMaximum,
-      widgetColor,
+      widgetColor: cardColor("occupancy_scenario_max_month"),
       historicalContextLabel,
     }),
     buildMaximumReportAsset({
@@ -5571,7 +5594,7 @@ function buildOccupancyComparisonReportAssets({
       granularity: "year",
       labels: occupancyMaximumTrendBucketLabels(annualBuckets, "year"),
       series: annualMaximum,
-      widgetColor,
+      widgetColor: cardColor("occupancy_scenario_max_year"),
       historicalContextLabel,
     }),
     {
@@ -5643,7 +5666,7 @@ function buildOccupancyComparisonReportAssets({
           maximum: sharedHeatmapMaximum(dayHourSeries ? [dayHourSeries] : [], settings.metric),
           metric: settings.metric,
           theme,
-          widgetColor,
+          widgetColor: cardColor("occupancy_day_hour_heatmap"),
           xLabels: OCCUPANCY_FIXED_HOUR_LABELS,
           yLabels: dayHourLabels,
         }),
@@ -5689,7 +5712,7 @@ function buildOccupancyComparisonReportAssets({
           metric: settings.metric,
           scenarioHeatmap: true,
           theme,
-          widgetColor,
+          widgetColor: cardColor("occupancy_scenario_hour_heatmap"),
           xLabels: scenarioPeriodMatrix.labels,
           yLabels: scenarioPeriodMatrix.scenarioNames,
         }),
@@ -6066,6 +6089,68 @@ function occupancyHistoricalComparisonDataCompleteUntil({
     return null;
   }
   return new Date(period.referenceAt);
+}
+
+function occupancyHistoricalComparisonSourceError(
+  dataset: OccupancyHistoricalComparisonDataset,
+  plan: OccupancyHistoricalComparisonLoadPlan,
+  scenarioHeatmapGranularity: AggregateGranularity,
+): string | undefined {
+  const selectedError = <T extends { error?: string; scenarioId: string }>(
+    rows: readonly T[],
+    scenarioIds: readonly string[],
+  ) => {
+    const requested = new Set(scenarioIds);
+    return rows.find((row) => requested.has(row.scenarioId) && row.error)?.error;
+  };
+  return (
+    (plan.needsHourlyAggregate
+      ? selectedError(dataset.hourlySeries, plan.hourlyScenarioIds)
+      : undefined) ||
+    (plan.needsMaximumTrend
+      ? selectedError(dataset.maximumTrendSeries, plan.maximumTrendScenarioIds)
+      : undefined) ||
+    (plan.needsScenarioHeatmap && scenarioHeatmapGranularity !== "hour"
+      ? selectedError(dataset.scenarioHeatmapSeries, plan.scenarioHeatmapScenarioIds)
+      : undefined)
+  );
+}
+
+function annotateUnavailableComparisonSnapshots(
+  assets: OccupancyComparisonReportAsset[],
+  {
+    assetsByCard,
+    hexScenarioIds,
+    snapshots,
+  }: {
+    assetsByCard: ReadonlyMap<string, readonly string[]>;
+    hexScenarioIds: readonly string[];
+    snapshots: readonly OccupancyScenarioSnapshot[];
+  },
+): OccupancyComparisonReportAsset[] {
+  const failedScenarioIds = new Set(
+    snapshots.flatMap((snapshot) => snapshot.error ? [snapshot.scenarioId] : []),
+  );
+  if (!failedScenarioIds.size) return assets;
+  const notice = "Leitura final indisponível para um ou mais cenários neste período; valores ausentes não foram estimados.";
+  return assets.map((asset) => {
+    if (!OCCUPANCY_HISTORICAL_SNAPSHOT_CARD_IDS.has(asset.cardId)) return asset;
+    const scenarioIds = asset.cardId === "occupancy_hex_layout"
+      ? hexScenarioIds
+      : assetsByCard.get(asset.cardId) ?? [];
+    if (!scenarioIds.some((id) => failedScenarioIds.has(id))) return asset;
+    return {
+      ...asset,
+      chart: {
+        ...asset.chart,
+        description: joinMessages(asset.chart.description, notice),
+        table: {
+          ...asset.chart.table,
+          description: joinMessages(asset.chart.table.description, notice),
+        },
+      },
+    };
+  });
 }
 
 function occupancyComparisonHistoryPath(scenarioId: string, at: Date) {

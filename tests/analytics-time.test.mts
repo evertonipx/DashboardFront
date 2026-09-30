@@ -3843,10 +3843,10 @@ test("paleta dos comparativos da visão fica centralizada em Configurar widgets"
     />Contexto<|>Estado<|Sincronização desta visão|dashboardSettings\.liveRefreshSeconds\}s|>Alertas<|>Aparência<|>Ações</,
     "a barra compacta não deve reintroduzir as segmentações removidas",
   );
-  assert.doesNotMatch(
+  assert.match(
     compactToolbarSource,
-    /<ReportExportActions/,
-    "Ao Vivo de Ocupação não deve exibir exportação direta quando a ação não é suportada",
+    /<ReportExportActions[\s\S]*?compact[\s\S]*?getPayload=\{getOccupancyReportPayload\}/,
+    "Ao Vivo de Ocupação deve exportar sob demanda os dados da visão atual",
   );
   assert.match(
     compactToolbarSource,
@@ -3947,10 +3947,15 @@ test("Contagem usa barras compactas e o mesmo seletor profissional de período d
     liveToolbar,
     /data-toolbar-actions/,
   );
-  assert.doesNotMatch(
+  assert.match(
     liveToolbar,
-    /<ReportExportActions/,
-    "Ao Vivo de Contagem não deve exibir exportação direta quando a ação não é suportada",
+    /<ReportExportActions[\s\S]*?compact[\s\S]*?getPayload=\{buildLiveExportPayload\}/,
+    "Ao Vivo de Contagem deve exportar sob demanda os dados da visão atual",
+  );
+  assert.match(
+    liveSource,
+    /async function buildLiveExportPayload\(signal\?: AbortSignal\)[\s\S]*?buildConfiguredLiveReportPayload\(signal\)[\s\S]*?dataCompleteUntil: null/,
+    "a exportação não deve apresentar o horário da consulta como corte certificado dos dados",
   );
   assert.match(liveToolbar, /<MonitorModeButton[\s\S]*?compact/);
   assert.match(
@@ -4428,6 +4433,7 @@ test("Relatórios de Ocupação mantém filtros e ações na régua compacta", (
       .length,
     2,
   );
+  assert.doesNotMatch(reportControls, /Ano de referência do relatório de Ocupação/);
   assert.match(
     reportControls,
     /aria-label="Ações dos relatórios de Ocupação"\s+className="ml-auto flex min-w-0 max-w-full flex-wrap/,
@@ -4467,7 +4473,34 @@ test("Relatórios de Contagem não duplica o controle do mês aberto", () => {
   );
 });
 
-test("Relatórios de Contagem limita consultas e preferências antigas a quatro anos civis", () => {
+test("exportação de Contagem resolve comparativos visíveis sem depender da rolagem", () => {
+  const source = readFileSync(
+    resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
+    "utf8",
+  );
+  const exportBuilder = source.slice(
+    source.indexOf("  async function resolveConfiguredScenarioReportPayload("),
+    source.indexOf("  return (", source.indexOf("  async function resolveConfiguredScenarioReportPayload(")),
+  );
+  const exportAction = source.slice(
+    source.indexOf("                    <ReportExportActions"),
+    source.indexOf("                    <AiAnalysisAction", source.indexOf("                    <ReportExportActions")),
+  );
+  assert.match(source, /const visibleComparisonCardIds = React\.useMemo\([\s\S]*?visibleReportCardIds\.filter/);
+  assert.match(source, /const reportContextKey = `\$\{companyScopeId\}\|\$\{selectedScope\?\.id \?\? ""\}\|\$\{companyTimeZone\}\|\$\{effectivePeriodFromTime\}\|\$\{reportCoverageToTime\}\|\$\{comparisonRefreshRevision\}`/);
+  assert.match(source, /latestReportContextKeyRef\.current !== requestContextKey/);
+  assert.match(exportBuilder, /visibleComparisonCardIds\s*\.map\(async \(cardId\) =>/);
+  assert.match(exportBuilder, /loadScenarioComparisonSettings\([\s\S]*?fetchScenarioComparisonRows\([\s\S]*?signal\.throwIfAborted\(\)/);
+  assert.match(exportBuilder, /reportScenarioComparisonStorageKey\(customWidget\.id\)/);
+  assert.match(exportBuilder, /aggregateSource: reportComparisonAggregateSource, signal/);
+  assert.match(exportBuilder, /configuredComparisonCharts\.map/);
+  assert.doesNotMatch(exportBuilder, /comparisonReportCharts/);
+  assert.doesNotMatch(exportAction, /comparisonChartsReady/);
+  assert.match(exportAction, /visibleComparisonCardIds\.length > 0 &&\s*reportComparisonAggregateSourcePending/);
+  assert.match(exportAction, /getPayload=\{\(signal\) =>[\s\S]*?resolveScenarioReportPayloadForContext/);
+});
+
+test("Relatórios de Contagem usa todo o histórico disponível e migra o antigo padrão de quatro anos", () => {
   const now = new Date(2026, 8, 3, 10, 30);
   const periodSource = readFileSync(
     resolve(projectRoot, "components/app/counting-report-period-control.tsx"),
@@ -4478,14 +4511,14 @@ test("Relatórios de Contagem limita consultas e preferências antigas a quatro 
     "utf8",
   );
 
-  assert.equal(countingReportPeriod.COUNTING_REPORT_HISTORY_YEARS, 4);
-  assert.equal(countingReportPeriod.minimumCountingReportMonth(now), "2023-01");
+  const historyStart = `${countingIntelligence.COUNTING_HISTORY_START_YEAR}-01`;
+  assert.equal(countingReportPeriod.minimumCountingReportMonth(now), historyStart);
   assert.deepEqual(
     localDateParts(countingReportPeriod.countingReportHistoryFrom(now)),
-    [2023, 1, 1],
+    [countingIntelligence.COUNTING_HISTORY_START_YEAR, 1, 1],
   );
   assert.deepEqual(countingReportPeriod.defaultCountingReportPeriod(now), {
-    from: "2023-01",
+    from: historyStart,
     to: "2026-09",
   });
   assert.deepEqual(
@@ -4493,15 +4526,38 @@ test("Relatórios de Contagem limita consultas e preferências antigas a quatro 
       { from: "2020-01", to: "2026-09" },
       now,
     ),
-    { from: "2023-01", to: "2026-09" },
+    { from: "2020-01", to: "2026-09" },
+  );
+  assert.deepEqual(
+    countingReportPeriod.migrateLegacyCountingReportHistoryPeriod(
+      { from: "2023-01", to: "2026-09" },
+      now,
+    ),
+    { from: historyStart, to: "2026-09" },
+  );
+  assert.deepEqual(
+    countingReportPeriod.migrateLegacyCountingReportHistoryPeriod(
+      { from: "2023-01", to: "2026-08" },
+      now,
+    ),
+    { from: historyStart, to: "2026-09" },
+    "o antigo preset histórico deve avançar para o mês atual após a virada",
+  );
+  assert.deepEqual(
+    countingReportPeriod.migrateLegacyCountingReportHistoryPeriod(
+      { from: "2023-02", to: "2026-09" },
+      now,
+    ),
+    { from: "2023-02", to: "2026-09" },
+    "intervalos personalizados permanecem intactos",
   );
   assert.match(
     periodSource,
-    /Últimos \$\{COUNTING_REPORT_HISTORY_YEARS\} anos/,
+    /label: "Todos os anos"/,
   );
   assert.match(
     reportsSource,
-    /from: addYears\(currentYearStart, -\(COUNTING_REPORT_HISTORY_YEARS - 1\)\)/,
+    /from: countingReportHistoryFrom\(now, timeZone\)/,
   );
   const monthlyHistoryDefinition = reportsSource.slice(
     reportsSource.indexOf("function buildCountingMonthHistoryDefinition"),
@@ -13686,7 +13742,7 @@ test("mês aberto compara somente horas fechadas equivalentes do ano anterior", 
   assert.ok(accumulatedVariationSeries);
   assert.equal(accumulatedVariationSeries.data[6].delta, 0);
   assert.equal(
-    accumulatedReport?.value.table.rows.find(({ month }: DynamicFixture) => month === "Jul")
+    accumulatedReport?.value.table.rows.find(({ month, year }: DynamicFixture) => month === "Jul" && year === "2026 (parcial)")
       ?.variation,
     countingIntelligence.formatDelta(0),
   );
@@ -13738,7 +13794,7 @@ test("comparativo acumulado soma apenas meses cobertos nos dois anos", () => {
   assert.equal(variationSeries.data[0], null);
   assert.equal(variationSeries.data[1].delta, 1);
   assert.equal(
-    accumulatedReport?.value.table.rows.find(({ month }: DynamicFixture) => month === "Fev")
+    accumulatedReport?.value.table.rows.find(({ month, year }: DynamicFixture) => month === "Fev" && year === "2026")
       ?.variation,
     countingIntelligence.formatDelta(1),
   );
@@ -16939,7 +16995,8 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
     "utf8",
   );
   assert.match(exportSource, /CHART_VALUE_LABEL_ANGLE/);
-  assert.match(exportSource, /hideOverlap: !isLine/);
+  assert.match(exportSource, /moveOverlap: isLine \|\| horizontal \? "shiftY" : "shiftX"/);
+  assert.match(exportSource, /hideOverlap: true/);
   assert.match(
     exportSource,
     /numericValue === 0[\s\S]{0,80}return ""/,
@@ -16960,6 +17017,7 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
       ...valueLabelBindings,
       formatBarLabelValue,
       isExportReferenceSeries,
+      ...loadTypeScriptModule("lib/chart-label-value.ts"),
     },
   );
   const exportGridPercentage = loadStandaloneFunction(
@@ -17000,12 +17058,14 @@ test("todos os gráficos exibem valores permanentes inclinados a 45 graus", () =
   );
   assert.equal(exportedLine.label.rotate, 45);
   assert.deepEqual(exportedLine.labelLayout({ dataIndex: 1 }), {
-    hideOverlap: false,
+    hideOverlap: true,
+    moveOverlap: "shiftY",
     rotate: 45,
   });
   assert.equal(exportedVerticalBar.label.rotate, 45);
   assert.deepEqual(exportedVerticalBar.labelLayout({ dataIndex: 1 }), {
     hideOverlap: true,
+    moveOverlap: "shiftX",
     rotate: 45,
   });
   assert.equal(exportedHorizontalBar.label.rotate, 0);
@@ -17105,19 +17165,19 @@ test("exportação executiva separa gráficos e dados sem reduzir tabelas extens
   assert.match(source, /drawPdfPageFooters/);
   assert.match(source, /drawPdfParagraph/);
   assert.match(source, /drawPdfFittedText/);
-  assert.match(source, /fontSize: dense \? 9 : 11/);
+  assert.match(source, /fontSize: dense \? 11 : 12/);
   assert.match(source, /const tableFontSize = 8\.25/);
   assert.match(source, /if \(mode === "charts"\) return \[\]/);
   assert.match(source, /reportTableDataSignature/);
   assert.match(source, /drawPdfExecutiveAppendices/);
-  assert.match(source, /drawPdfContextPages/);
+  assert.doesNotMatch(source, /drawPdfContextPages|GOVERNANÇA DO RELATÓRIO/);
   assert.match(source, /chartExportDensityNote/);
-  assert.match(source, /todos os valores permanecem na tabela de dados/);
+  assert.match(source, /todos os valores constam na exportação completa ou de dados/);
   assert.match(source, /formatReportDateTime/);
   assert.match(source, /certifiedReportTimeZone/);
   assert.match(source, /width - 42,[\s\S]{0,120}"right"/);
-  assert.match(source, /payload\.context\?\.forEach/);
-  assert.match(source, /Contexto completo na próxima página/);
+  assert.match(source, /reportPeriodLabel/);
+  assert.doesNotMatch(source, /Contexto completo na próxima página/);
 
   const formatDateTime = loadStandaloneFunction(
     "lib/report-export.ts",
@@ -18272,7 +18332,7 @@ test("heatmap dias x meses preserva grade civil, zero e escopo do cenário", () 
   );
 });
 
-test("heatmap meses x anos limita quatro anos e exporta cobertura legível", () => {
+test("heatmap meses x anos inclui todos os anos e exporta cobertura legível", () => {
   const entryScenario = scenario("entry", "Entrada", "line-entry", 1);
   const model = countingIntelligence.buildCountingIntelligenceModel({
     dailyRows: [],
@@ -18303,9 +18363,9 @@ test("heatmap meses x anos limita quatro anos e exporta cobertura legível", () 
     (series: DynamicFixture) => series.name === "Fluxo mensal certificado",
   );
 
-  assert.deepEqual(option.yAxis.data, ["2026", "2025", "2024", "2023"]);
+  assert.deepEqual(option.yAxis.data, ["2026", "2025", "2024", "2023", "2022"]);
   assert.equal(option.yAxis.inverse, true);
-  assert.equal(option.yAxis.data.length, 4);
+  assert.equal(option.yAxis.data.length, 5);
   assert.equal(unavailableSeries.itemStyle.borderWidth, 1);
   assert.equal(certifiedSeries.itemStyle.borderWidth, 1);
   assert.equal(certifiedSeries.emphasis.itemStyle.borderWidth, 1);
@@ -18339,10 +18399,11 @@ test("heatmap meses x anos limita quatro anos e exporta cobertura legível", () 
     true,
   );
   assert.equal(
-    [...certifiedSeries.data, ...unavailableSeries.data].some(
-      ([, yearIndex]) => yearIndex > 3,
+    certifiedSeries.data.some(
+      ([month, yearIndex, total]: DynamicFixture) =>
+        month === 0 && yearIndex === 4 && total === 22,
     ),
-    false,
+    true,
   );
 
   const assets =
@@ -18366,7 +18427,7 @@ test("heatmap meses x anos limita quatro anos e exporta cobertura legível", () 
     dayMonth.value.table.rows.some(({ date }: DynamicFixture) => date === "-"),
     false,
   );
-  assert.equal(monthYear.value.table.rows.length, 4 * 12);
+  assert.equal(monthYear.value.table.rows.length, 5 * 12);
   assert.deepEqual(
     monthYear.value.table.rows.slice(0, 2).map(({ year, month, total, coverage }: DynamicFixture) => ({
       coverage,
@@ -18389,6 +18450,64 @@ test("heatmap meses x anos limita quatro anos e exporta cobertura legível", () 
       total: "",
       year: 2026,
     },
+  );
+});
+
+test("Relatórios de Contagem mostram mês e ano abertos como parciais e comparam só janelas equivalentes", () => {
+  const entry = scenario("entry", "Entrada", "line-entry", 1);
+  const model = countingIntelligence.buildCountingIntelligenceModel({
+    comparableDailyRows: [
+      aggregateRow("2025-09-18", "line-entry", 60),
+      aggregateRow("2026-09-18", "line-entry", 120),
+    ],
+    comparableHourlyRows: [],
+    hourlyRows: [],
+    includeOpenPeriod: true,
+    monthlyRows: [
+      aggregateRow("2025-09-01", "line-entry", 200),
+      aggregateRow("2026-09-01", "line-entry", 100),
+    ],
+    now: new Date(2026, 8, 19, 10),
+    period: { from: new Date(2025, 0, 1), to: new Date(2026, 9, 1) },
+    scenarios: [entry],
+    scope: { cameraIds: [], name: "Entrada", scenario: entry },
+  });
+  const current = model.yearRows.find((row: DynamicFixture) => row.year === 2026);
+  assert.equal(model.currentMonthValue, 120);
+  assert.equal(current?.months[8], 120);
+  assert.deepEqual(model.openMonth, { month: 8, year: 2026 });
+  assert.equal(model.currentMonthDelta, 1, "YoY deve usar 120 vs. 60, e não 120 vs. mês fechado de 200");
+
+  const comparison = countingIntelligence.buildAnnualComparisonChartOption(model);
+  const currentSeries = comparison.series.find(
+    (series: DynamicFixture) => series.name === "2026 (parcial)",
+  );
+  assert.equal(currentSeries?.data[8], 120);
+  assert.deepEqual(comparison.xAxis.data, countingIntelligence.COUNTING_MONTH_LABELS);
+
+  const heatmap = countingIntelligence.buildCountingMonthYearHeatmapChartOption(model);
+  assert.equal(heatmap.yAxis.data[0], "2026 · parcial");
+  const exported = countingIntelligence.buildCountingIntelligenceReportAssets(model);
+  const monthYear = exported.charts.find(
+    ({ cardId }: DynamicFixture) =>
+      cardId === countingIntelligence.COUNTING_INTELLIGENCE_CARD_IDS.monthYearHeatmap,
+  );
+  assert.equal(
+    monthYear?.value.table?.rows.find(
+      ({ year, month }: DynamicFixture) => year === 2026 && month === "Set",
+    )?.coverage,
+    "Mês em andamento",
+  );
+  const accumulated = exported.charts.find(
+    ({ cardId }: DynamicFixture) =>
+      cardId === countingIntelligence.COUNTING_INTELLIGENCE_CARD_IDS.annualAccumulatedComparison,
+  );
+  assert.ok(accumulated?.value.table?.columns.length <= 5);
+  assert.equal(
+    accumulated?.value.table?.rows.find(
+      ({ year, month }: DynamicFixture) => year === "2026 (parcial)" && month === "Set",
+    )?.coverage,
+    "Mês em andamento",
   );
 });
 
@@ -18630,7 +18749,7 @@ test("Análises iniciam ontem uma vez e históricos preservam deduplicação", (
   assert.match(
     countingReports,
     /setSettingsReadyScopeKey\(reportSettingsScopeKey\);[\s\S]{0,360}?setReportRequested\(true\)/,
-    "Relatórios de Contagem deve consultar automaticamente o período restaurado, que usa quatro anos na primeira visita",
+    "Relatórios de Contagem deve consultar automaticamente o período restaurado, que usa todo o histórico na primeira visita",
   );
   assert.match(
     countingReports,
@@ -18679,8 +18798,8 @@ test("Análises iniciam ontem uma vez e históricos preservam deduplicação", (
   assert.match(occupancyHistorical, /if \(!reportRequested\) return;[\s\S]*?loadCharts\(selectedScope\)/);
   assert.match(
     occupancyHistorical,
-    /const previousDayInput = shiftOccupancyAnalysisDateInput\([\s\S]*?companyTodayInput,[\s\S]*?-1,[\s\S]*?\);[\s\S]*?setAnalysisRangeInput\(initialRange\);[\s\S]*?setReportRequested\(analysis\);/,
-    "Ocupação deve consultar automaticamente somente na superfície Análises",
+    /const previousDayInput = shiftOccupancyAnalysisDateInput\([\s\S]*?companyTodayInput,[\s\S]*?-1,[\s\S]*?\);[\s\S]*?setAnalysisRangeInput\(initialRange\);[\s\S]*?setReportRequested\(true\);/,
+    "Ocupação deve consultar automaticamente Análises e Relatórios depois de restaurar o escopo",
   );
   assert.match(
     occupancyHistorical,

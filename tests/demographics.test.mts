@@ -643,6 +643,29 @@ test("normaliza período demográfico inclusivo, futuro e limite de 366 dias", (
   );
 });
 
+test("relatórios demográficos disponibilizam todos os anos configurados e incluem o mês corrente parcial", () => {
+  const years = demographicsDateRange.demographicsReportYears("2026-09-29");
+  assert.equal(years[0], 2026);
+  assert.equal(years.at(-1), demographicsDateRange.DEMOGRAPHICS_REPORT_HISTORY_START_YEAR);
+  assert.deepEqual(demographicsDateRange.demographicsReportYearRange(2026, "2026-09-29"), {
+    startInput: "2026-01-01",
+    endInput: "2026-09-29",
+  });
+  assert.deepEqual(demographicsDateRange.demographicsReportYearRange(2025, "2026-09-29"), {
+    startInput: "2025-01-01",
+    endInput: "2025-12-31",
+  });
+  assert.equal(demographicsDateRange.selectedDemographicsReportYear({
+    startInput: "2026-01-01",
+    endInput: "2026-09-29",
+  }, "2026-09-29"), 2026);
+  assert.equal(demographicsDateRange.selectedDemographicsReportYear({
+    startInput: "2026-09-01",
+    endInput: "2026-09-29",
+  }, "2026-09-29"), null);
+  assert.throws(() => demographicsDateRange.demographicsReportYearRange(1999, "2026-09-29"), /histórico configurado/);
+});
+
 test("salva e carrega período por empresa, usuário e superfície via user-grid", () => {
   const previousWindow = fixtureGlobals.window;
   fixtureGlobals.window = {};
@@ -952,7 +975,8 @@ test("dashboard preserva os nove widgets originais e integra cinco widgets tempo
   assert.match(dashboard, /menuKey=\{DEMOGRAPHICS_MENU_KEY\}/);
   assert.match(dashboard, /const preferenceScopeId = `demographics-\$\{surface\}`/);
   assert.match(dashboard, /preferenceScopeId=\{preferenceScopeId\}/);
-  assert.match(dashboard, /\{surface !== "live" \? \([\s\S]*?<ReportExportActions/);
+  assert.match(dashboard, /<ReportExportActions[\s\S]*?getPayload=\{buildDemographicsReportPayload\}/);
+  assert.doesNotMatch(dashboard, /\{surface !== "live" \? \(\s*<ReportExportActions/);
   assert.match(dashboard, /valueLabels="always"/);
   assert.match(dashboard, /buildDemographicDistributionOption\(summary\.gender/);
   assert.match(chartOptions, /max: 100/);
@@ -964,7 +988,7 @@ test("dashboard preserva os nove widgets originais e integra cinco widgets tempo
   );
 });
 
-test("Relatórios consulta somente parâmetros aplicados e reutiliza o comparativo carregado", () => {
+test("Relatórios consulta somente parâmetros aplicados e recompõe comparativos na exportação", () => {
   const reports = readFileSync(
     resolve(projectRoot, "components/app/scenario-reports-dashboard.tsx"),
     "utf8",
@@ -1004,7 +1028,9 @@ test("Relatórios consulta somente parâmetros aplicados e reutiliza o comparati
     /\.\.\.\(visibleReportCardIdSet\.size[\s\S]*?buildCountingHourHistoryDefinition/,
   );
   assert.match(reports, /onApply=\{applyCountingPeriod\}/);
-  assert.match(reports, /onReportChartChange=\{updateComparisonReportChart\}/);
+  assert.match(reports, /const configuredComparisonCharts = await Promise\.all\(\s*visibleComparisonCardIds\s*\.map\(async \(cardId\) =>/);
+  assert.match(reports, /loadScenarioComparisonSettings\([\s\S]*?fetchScenarioComparisonRows\(/);
+  assert.doesNotMatch(reports, /onReportChartChange=\{updateComparisonReportChart\}/);
   const exportActionStart = reports.indexOf("<ReportExportActions");
   const exportActions = reports.slice(
     exportActionStart,
@@ -1018,7 +1044,6 @@ test("Relatórios consulta somente parâmetros aplicados e reutiliza o comparati
     "a composição do relatório deve ocorrer somente ao solicitar a exportação",
   );
   assert.match(comparison, /deferSettingsApply[\s\S]*?setDraftSettings/);
-  assert.match(comparison, /onReportChartChange\(reportChartKey, loadedReportChart\)/);
 });
 
 test("Demographics Ao Vivo compartilha a requisição semântica no replay do Strict Mode", () => {
